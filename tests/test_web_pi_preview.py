@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 from manage.web import threads
 from manage.web import state
 from assist.pi_runtime import PiRuntimeError, PiRuntimeResult
+from assist.pi_conversation import PiMessage
 from assist.pi_trace import PiTraceEvent
 from assist.thread_engine import read_thread_engine
 from assist.web_main_prompt import (WebMainPromptError, WebMainPromptUnavailable,
@@ -96,7 +98,9 @@ def test_pi_run_passes_the_host_rendered_prompt_to_the_runtime(
     class Runtime:
         def run(self, **kwargs):
             received.update(kwargs)
-            return PiRuntimeResult("Done", 1)
+            result = PiRuntimeResult("Done", 1)
+            kwargs["commit"](result)
+            return result
 
     monkeypatch.setattr(threads, "PI_PREVIEW", _Preview(True))
     monkeypatch.setattr(threads, "THREAD_QUEUE", _Queue())
@@ -108,6 +112,50 @@ def test_pi_run_passes_the_host_rendered_prompt_to_the_runtime(
     assert received["system_prompt"] == render_pi_web_main_prompt().text
     assert received["prompt"] == "Inspect this workspace"
     assert received["history"] == []
+    assert threads._PI_CONVERSATIONS.get_messages(threads.MANAGER.thread_dir("pi-source")) == [
+        PiMessage(run.id, "user", "Inspect this workspace"), PiMessage(run.id, "assistant", "Done"),
+    ]
+
+
+def test_completed_pi_transcript_recovers_an_interrupted_run_without_restarting(
+    pi_threads_root, monkeypatch,
+) -> None:
+    threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
+    threads._create_empty_pi_workspace("pi-source")
+    pending = threads._create_run("pi-source", "Render my notes")
+    running = threads._runs().claim("pi-source", pending.id)
+    thread_dir = Path(threads.MANAGER.thread_dir("pi-source"))
+    threads._PI_CONVERSATIONS.append(thread_dir, running.id, "user", running.text)
+    threads._PI_CONVERSATIONS.complete(thread_dir, running.id, "Done", (), ())
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *_args: None)
+
+    threads._execute_pi_run(running, user_priority=False)
+
+    recovered = threads._runs().get("pi-source", running.id)
+    assert recovered.status == "success"
+    assert recovered.result == "Done"
+
+
+def test_corrupt_pi_transcript_marks_the_claimed_run_error_and_dispatches_followers(
+    pi_threads_root, monkeypatch,
+) -> None:
+    threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
+    threads._create_empty_pi_workspace("pi-source")
+    run = threads._create_run("pi-source", "Inspect this workspace")
+    successor = threads._create_run("pi-source", "Try again")
+    thread_dir = Path(threads.MANAGER.thread_dir("pi-source"))
+    (thread_dir / "pi-conversation.jsonl").write_text("not json\n")
+    dispatched = []
+
+    monkeypatch.setattr(threads, "PI_PREVIEW", _Preview(True))
+    monkeypatch.setattr(threads, "THREAD_QUEUE", _Queue())
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *args: dispatched.append(args))
+
+    threads._execute_pi_run(run, user_priority=False)
+
+    assert threads._runs().get("pi-source", run.id).status == "error"
+    assert threads._runs().get("pi-source", successor.id).status == "pending"
+    assert dispatched == [("pi-source", run.id)]
 
 
 def test_pi_prompt_render_failure_does_not_start_the_runtime(

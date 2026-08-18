@@ -9,6 +9,13 @@ export type SkillManifest = {
   declaredTools: string[];
 };
 
+export type RetainedSkill = {
+  name: string;
+  body: string;
+  bodySha256: string;
+  declaredTools: string[];
+};
+
 /** Register the host-brokered Pi skill loader for one worker. */
 export function skillLoaderExtension(capability: string, catalog: SkillManifest[]): ExtensionFactory {
   const byName = new Map(catalog.map((skill) => [skill.name, skill]));

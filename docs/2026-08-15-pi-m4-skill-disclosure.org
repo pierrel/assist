@@ -334,6 +334,158 @@ wrong load, in the loader response, and only after the verified continuation.
   current read-only map lookup; later host-effect tools must retain their
   existing approval owner.
 
+* Session-scoped loaded skills amendment (M5)
+
+M4 proved the safe *first* load boundary, but it deliberately discarded the
+loaded body and its disclosed tool at the end of every worker.  That made a
+matching request in the next turn load the same skill again.  The preview is
+now useful enough that this is the wrong session model.
+
+The new unit of state is a host-owned =PiLoadedSkill= record:
+
+- the validated catalog name;
+- its exact bounded, sanitized body as returned by the trusted host;
+- its exact allowed-tool declaration; and
+- its SHA-256 body digest; and
+- the visible Run identity that completed its load.
+
+These are one record, not separate caches.  A record is durable only after the
+relay has accepted the precise loader continuation and the worker has produced
+a successful result.  At the next turn the fresh worker receives the body as a
+hidden SDK session-context message, rather than as system-prompt text, and its
+initial provider menu contains precisely the record's declared tools.  The
+broker and relay receive the same records as their initial authority.  Fresh
+per-turn broker/provider/result capabilities and the disposable container
+remain unchanged.
+
+The record is deliberately host-owned.  A worker cannot create one by writing
+a tool-result-shaped frame, choose a schema, or retain a tool without the
+matching body.  The existing observed-loader -> broker result -> exact
+continuation state machine remains the only way to create or refresh a record.
+An explicit later =load_skill(name)= replaces that name's record after the
+same transition; it is the deliberate refresh mechanism.
+
+** Context and compaction
+
+The Pi transcript remains the source of truth and stays invisible to the
+worker except for the bounded context it prepares.  It gains a private
+skill-record event alongside user and assistant events.  Completing a Run
+writes its assistant reply and newly committed records in one atomic transcript
+replacement, so a crash cannot leave durable authority without the completed
+turn that earned it.
+
+Pi currently uses the most recent 32 visible transcript messages rather than
+SDK compaction.  That existing bounded-context cut is the first M5 compaction
+boundary: a record is eligible only when both visible messages of its load Run
+occur in that exact history slice.  An interrupted earlier user message remains
+visible, as it did before M5, but cannot retain an authority record.  The runtime
+then constructs the actual JSON request and applies one total 512 KiB request
+budget, removing the oldest remaining Run identity and its records together;
+when only records remain to make the exact request fit, it evicts whole oldest
+records.  It never truncates a message or skill body.  The successful
+completion atomically removes every evicted record from the transcript, so an
+evicted tool cannot reappear merely because a later prompt is shorter.  A
+summary never preserves only “render is loaded”; it either retains the complete
+record or none of it.  A later full Pi compactor must preserve this exact
+paired-record rule before it replaces the current boundary.
+
+This selection uses one request-builder implementation, after the current
+system prompt and catalog are known, rather than independent byte guesses in
+the web path and worker.  If the current prompt plus fixed host prompt/catalog
+cannot fit the existing request limit even with no history or records, the turn
+fails before the worker starts.  Otherwise the user sees ordinary successful
+work; a future matching request can reload an evicted skill from the still
+visible catalog.
+
+Eviction identifies an immutable record by name, load Run, and body digest.
+Completion first removes exactly those old identities, then applies this Run's
+newly promoted records by name.  Thus a constrained turn may evict
+=render@A=, explicitly reload current =render@B=, and retain B without leaving
+A or deleting B.
+
+The current catalog is still regenerated every turn and remains visible as
+trigger metadata.  M5 intentionally does *not* compare a retained body with a
+new catalog version, inject a changed replacement, or maintain a change-to-
+prompt mapping.  A prior body is truthful history.  A user may ask to reload a
+skill when they want new instructions; a newly added skill merely becomes
+discoverable and can be loaded when relevant.  This avoids surprising context
+rewrites while preserving hot-reload for new work.
+
+** User flow
+
+1. On the first matching request, Pi calls =load_skill(render)= alone.  The
+   verified completion writes the render record with =map_data=.
+2. On the next ordinary turn, the worker has the render body in its session
+   context and =map_data= in both the provider menu and broker authority.  It
+   works directly rather than loading render again.
+3. If the current 32-message context boundary has passed that load, the host
+   drops the whole record.  The catalog still advertises render; Pi can reload
+   it when the work requires it.
+4. A user asking to refresh render causes an ordinary verified load, replacing
+   the retained record with the current trusted catalog winner.  No automatic
+   update occurs merely because another thread edited the skill.
+
+** Implementation plan
+
+1. Extend =assist.pi_conversation= with a strictly validated private loaded-
+   skill event and one atomic complete-Run write.  It validates name, static
+   declared-tool profile, bounded UTF-8 body, SHA-256 body digest, duplicate
+   names, and the load Run identity; corruption fails the whole snapshot.  It
+   returns visible messages plus only records whose load Run is in the exact
+   candidate history slice.  Test old transcripts, corruption, idempotency,
+   refresh replacement, failed-refresh preservation, and coupled eviction.
+2. Give =PiSkillAuthority= an initial trusted record set and a committed-record
+   snapshot.  It seeds provider/broker authority from retained declarations and
+   exposes newly promoted records only after the existing exact continuation.
+   Its initial active set is the union of every retained declaration, recomputed
+   after refresh/eviction.  =PiRuntimeResult= carries this host-only promoted
+   record snapshot after successful worker exit; it never comes from the worker
+   result socket.  Test that a record body/tool mismatch, a failed worker, and
+   an unverified load cannot persist authority.
+3. Pass the snapshot through =PiRuntimeManager= and its strictly typed request.
+   The worker appends each retained body as an SDK custom session-context
+   message before creating its otherwise in-memory session, and initializes
+   disclosure from the same declarations.  Each injected message identifies the
+   exact retained skill name; the host prompt names the bounded retained-name
+   list and says to use it directly, loading only a non-retained match or an
+   explicit user-requested refresh.  The current catalog remains a separate
+   trigger-only manifest.  One request builder serializes candidate history,
+   retained records, prompt, and catalog under the existing total cap and
+   reports its evicted names.  Type-check the worker and test the exact
+   request/initial schema contract with a non-default context and maximum-size
+   multi-record snapshot.
+4. Change the Pi web worker to take one context snapshot before starting the
+   disposable container and atomically commit reply plus promoted records only
+   after a successful Run.  =PiRuntimeManager= calls that bounded completion
+   commit before it releases its active turn lease, so deletion cannot race the
+   post-worker write.  The completed transcript event is a recovery witness:
+   on restart, a still-running/interrupted Pi Run with that exact event is
+   finalized successfully rather than retried or marked error; a Run without it
+   cannot seed records.  It stays off the FastAPI event loop.  Add the
+   end-to-end deterministic two-turn regression: load render in turn one,
+   then direct =map_data= use in turn two; assert expiration after the bounded
+   history crosses the record, budget-evict then same-turn reload of one name,
+   result-paused deletion, and restart at the transcript/Run-status boundary.
+   The completion callback rechecks Pi admission immediately before its atomic
+   write, so a preview gate that closes after worker result but before commit
+   persists neither reply nor authority; test that race explicitly.
+5. Run the focused deterministic suites, the TypeScript check, and the normal
+   local/cross-review/deploy/PR loop.  The behavioral prompt surface changes
+   only to tell Pi that retained loaded skills are already available, so survey
+   Pi's matching file/render capability rows before any real-model trial.
+
+** Rejected alternatives
+
+- Persist Pi's mutable JSONL session in the worker: it would move durable model
+  context and authority into the disposable sandbox boundary, make hot reload
+  harder to audit, and duplicate the host's durable Run/transcript ownership.
+- Put retained bodies in the system prompt: bodies are procedural loaded
+  context, not global policy, and tool authority would still need a separate
+  lifetime.
+- Automatically invalidate or replace bodies on catalog changes: that creates
+  surprising historical rewrites and needs an ever-growing change-to-prompt
+  policy.  Explicit reload is simpler and honest.
+
 * Acceptance evidence
 
 - Existing Deep Agents P2b unit/eval coverage is unchanged and green.

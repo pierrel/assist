@@ -67,7 +67,7 @@ from assist.sandbox_manager import SandboxManager
 from assist.thread import Thread
 from assist.thread_manager import InvalidThreadId
 from assist.thread_engine import ThreadEngineError, read_thread_engine
-from assist.pi_conversation import PiConversationStore
+from assist.pi_conversation import PI_HISTORY_LIMIT, PiConversationError, PiConversationStore
 from assist.pi_runtime import PiRuntimeError, PiRuntimeManager
 from assist.pi_trace import PiTraceError, PiTraceStore
 from assist.web_main_prompt import (WebMainPromptError, WebMainPromptUnavailable,
@@ -1982,6 +1982,7 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
 
 def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
     """Execute one manual visible Pi turn without constructing a Deep graph."""
+    tid = run.thread_id
     if (run.mode != "turn" or run.assistant_id != "general-agent" or run.origin is not None
             or run.sender is not None or run.resume or run.resume_decision is not None
             or not isinstance(run.text, str) or not run.text):
@@ -1996,6 +1997,25 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
         return
     if run.status != "pending":
         if run.status in {"running", "interrupted"}:
+            try:
+                completed = _PI_CONVERSATIONS.completed_reply(MANAGER.thread_dir(run.thread_id), run.id)
+            except PiConversationError as error:
+                with _RUN_ADMISSION_LOCK:
+                    current = _runs().get(tid, run.id)
+                    if current.status in {"running", "interrupted"}:
+                        _runs().transition(tid, run.id, "error", error=str(error))
+                _set_status(tid, "error", error=str(error), pending_message=run.text)
+                _dispatch_pending_after(tid, run.id)
+                return
+            if completed is not None:
+                with _RUN_ADMISSION_LOCK:
+                    current = _runs().get(run.thread_id, run.id)
+                    if current.status in {"running", "interrupted"}:
+                        _runs().transition(run.thread_id, run.id, "success", result=completed.text)
+                _set_status(run.thread_id, "ready")
+                MANAGER.touch(run.thread_id)
+                _dispatch_pending_after(run.thread_id, run.id)
+                return
             with _RUN_ADMISSION_LOCK:
                 current = _runs().get(run.thread_id, run.id)
                 if current.status in {"running", "interrupted"}:
@@ -2003,7 +2023,6 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
             _set_status(run.thread_id, "error", error="Pi turn was interrupted; send the message again")
             _dispatch_pending_after(run.thread_id, run.id)
         return
-    tid = run.thread_id
     try:
         with THREAD_QUEUE.acquire(tid, user_priority=user_priority):
             # The selector's earlier check only permits reservation. This
@@ -2026,24 +2045,30 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
             _set_status(tid, "starting_sandbox", pending_message=run.text, started_at=_now_ms())
             thread_dir = MANAGER.thread_dir(tid)
             _PI_CONVERSATIONS.append(thread_dir, run.id, "user", run.text)
-            history = [(message.role, message.text)
-                       for message in _PI_CONVERSATIONS.get_messages(thread_dir)[:-1]]
+            context = _PI_CONVERSATIONS.context(
+                thread_dir, max_messages=PI_HISTORY_LIMIT, exclude_run_id=run.id)
+            history = list(context.messages)
+
+            def complete_pi_run(result) -> None:
+                if not PI_PREVIEW.admits("pi"):
+                    raise PiRuntimeError("Pi preview was stopped")
+                _PI_CONVERSATIONS.complete(
+                    thread_dir, run.id, result.reply, result.promoted_skills,
+                    result.evicted_skills)
+
             _set_status(tid, "processing", pending_message=run.text, started_at=_now_ms())
             result = _PI_RUNTIME.run(
                 work_dir=MANAGER.thread_default_working_dir(tid), timezone=(run.rider or {}).get("tz"),
                 prompt=run.text, history=history, system_prompt=_pi_system_prompt(),
+                retained_skills=context.loaded_skills, evicted_skills=context.evicted_skills,
+                skill_run_id=run.id, commit=complete_pi_run,
                 turn_id=tid, admitted=lambda: PI_PREVIEW.admits("pi"),
                 should_yield=_pi_should_yield, trace_dir=thread_dir, trace_run_id=run.id)
-            # A worker can exit in the interval after its last one-second
-            # admission observation. Recheck before making its reply durable.
-            if not PI_PREVIEW.admits("pi"):
-                raise PiRuntimeError("Pi preview was stopped")
-            _PI_CONVERSATIONS.append(thread_dir, run.id, "assistant", result.reply)
             with _RUN_ADMISSION_LOCK:
                 _runs().transition(tid, run.id, "success", result=result.reply)
             _set_status(tid, "ready")
             MANAGER.touch(tid)
-    except (PiRuntimeError, ThreadHoldExpired, QueueWaitTimeout) as error:
+    except (PiConversationError, PiRuntimeError, ThreadHoldExpired, QueueWaitTimeout) as error:
         logging.error("Pi run %s failed", run.id, exc_info=True)
         with _RUN_ADMISSION_LOCK:
             current = _runs().get(tid, run.id)

@@ -1,6 +1,7 @@
 """Pi's catalog is host-owned and its disclosed capability is fail-closed."""
 from __future__ import annotations
 
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -23,7 +24,8 @@ class _Backend:
 
 
 def _catalog() -> PiSkillCatalog:
-    skill = PiSkill("render", "show a file", "render rules", "a" * 64, ("map_data",))
+    body = "render rules"
+    skill = PiSkill("render", "show a file", body, hashlib.sha256(body.encode()).hexdigest(), ("map_data",))
     return PiSkillCatalog((skill,))
 
 
@@ -92,6 +94,32 @@ def test_authority_preflight_does_not_promote_a_pending_capability() -> None:
     assert authority.active_tools == frozenset()
     assert authority.continue_request(continuation)
     assert authority.active_tools == frozenset({"map_data"})
+
+
+def test_authority_returns_only_host_promoted_skill_records() -> None:
+    authority = PiSkillAuthority(_catalog(), load_run_id="run-1")
+    authority.observe_loader("call-1", "load_skill", {"name": "render"})
+    result = authority.load_skill("call-1", "load_skill", {"name": "render"})
+    continuation = {
+        "messages": [
+            {"role": "assistant", "tool_calls": [{"id": "call-1", "function": {
+                "name": "load_skill", "arguments": '{"name":"render"}'}}]},
+            {"role": "tool", "tool_call_id": "call-1", "content": result},
+        ],
+        "tools": [
+            {"type": "function", "function": {"name": name}}
+            for name in ("read", "write", "edit", "bash", "load_skill", "map_data")
+        ],
+    }
+
+    assert authority.continue_request(continuation)
+    retained = authority.committed_skills
+    assert [skill.name for skill in retained] == ["render"]
+    assert retained[0].run_id == "run-1"
+
+    next_turn = PiSkillAuthority(_catalog(), retained=retained)
+    assert next_turn.active_tools == frozenset({"map_data"})
+    next_turn.require("map_data")
 
 
 def test_authority_non_object_preflight_clears_a_pending_capability() -> None:

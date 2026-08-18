@@ -13,6 +13,7 @@ from assist.middleware.output_sanitization import _sanitize
 
 _MAX_CATALOG_BYTES = 128 * 1024
 _MAX_SKILL_BYTES = 96 * 1024
+_MAX_RUN_ID_BYTES = 256
 _PORTABLE = frozenset({"edit-files", "org-format", "pdf", "regexp", "render"})
 _DECLARED_TOOLS = {"render": ("map_data",)}
 _FIXED_PROVIDER_TOOLS = frozenset({"read", "write", "edit", "bash", "load_skill"})
@@ -49,6 +50,45 @@ class PiSkill:
         return {"name": self.name, "description": self.description,
                 "declaredTools": list(self.declared_tools)}
 
+    def loaded(self, run_id: str) -> "PiLoadedSkill":
+        """Bind this trusted catalog winner to the Run that loaded it."""
+        return PiLoadedSkill(
+            self.name, self.body, self.body_sha256, self.declared_tools, run_id)
+
+
+@dataclass(frozen=True)
+class PiLoadedSkill:
+    """One complete host-approved skill record retained across Pi turns."""
+
+    name: str
+    body: str
+    body_sha256: str
+    declared_tools: tuple[str, ...]
+    run_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str):
+            raise PiSkillError("Pi loaded skill is invalid")
+        expected = _DECLARED_TOOLS.get(self.name, ())
+        if (self.name not in _PORTABLE
+                or not isinstance(self.body, str) or not isinstance(self.body_sha256, str)
+                or len(self.body_sha256) != 64 or _sha(self.body) != self.body_sha256
+                or self.declared_tools != expected or not isinstance(self.run_id, str)
+                or not self.run_id):
+            raise PiSkillError("Pi loaded skill is invalid")
+        try:
+            if (len(self.body.encode("utf-8")) > _MAX_SKILL_BYTES
+                    or len(self.run_id.encode("utf-8")) > _MAX_RUN_ID_BYTES):
+                raise PiSkillError("Pi loaded skill exceeds its bound")
+        except UnicodeEncodeError as error:
+            raise PiSkillError("Pi loaded skill is invalid") from error
+
+    def manifest(self) -> dict[str, object]:
+        """Return the worker-safe retained body and its paired tool metadata."""
+        return {"name": self.name, "body": self.body,
+                "bodySha256": self.body_sha256,
+                "declaredTools": list(self.declared_tools)}
+
 
 @dataclass(frozen=True)
 class PiSkillCatalog:
@@ -62,14 +102,21 @@ class PiSkillCatalog:
     def manifest(self) -> list[dict[str, object]]:
         return [skill.manifest() for skill in self.skills]
 
-    def prompt_section(self) -> str:
+    def prompt_section(self, loaded_names: Iterable[str] = ()) -> str:
         """Render only bounded triggers; complete bodies stay host-side."""
         listing = "\n".join(f"- **{skill.name}**: {skill.description}" for skill in self.skills)
+        retained = tuple(sorted(set(loaded_names)))
+        retained_section = (
+            "\n\nAlready loaded for this conversation: " + ", ".join(f"`{name}`" for name in retained)
+            + ". Use their rules and disclosed tools directly. Reload one only when the user asks to refresh it."
+            if retained else "")
         return (
             "\n\n## Skills\n\nAvailable skills:\n"
             f"{listing or '(No skills available.)'}\n\n"
             "Before a matching action, call `load_skill(name=...)` as the only "
-            "tool call in that response. Wait for its result before continuing."
+            "tool call in that response, unless that skill is already loaded above. "
+            "Wait for its result before continuing."
+            f"{retained_section}"
         )
 
 
@@ -146,16 +193,32 @@ class _PendingLoader:
     observed: _ObservedLoader
     result: str
     result_sha256: str
+    skill: PiLoadedSkill | None
     tools: tuple[str, ...]
 
 
 class PiSkillAuthority:
     """Fail-closed host authority shared by the Pi broker and provider relay."""
 
-    def __init__(self, catalog: PiSkillCatalog) -> None:
+    def __init__(self, catalog: PiSkillCatalog, *,
+                 retained: Iterable[PiLoadedSkill] = (), load_run_id: str | None = None) -> None:
         self._catalog = catalog
         self._lock = threading.Lock()
-        self._active_tools: frozenset[str] = frozenset()
+        retained_skills = tuple(retained)
+        if len({skill.name for skill in retained_skills}) != len(retained_skills):
+            raise PiSkillError("Pi loaded skills are not unique")
+        if load_run_id is not None:
+            if not isinstance(load_run_id, str) or not load_run_id:
+                raise PiSkillError("Pi loaded skill Run is invalid")
+            try:
+                if len(load_run_id.encode("utf-8")) > _MAX_RUN_ID_BYTES:
+                    raise PiSkillError("Pi loaded skill Run exceeds its bound")
+            except UnicodeEncodeError as error:
+                raise PiSkillError("Pi loaded skill Run is invalid") from error
+        self._load_run_id = load_run_id
+        self._retained = {skill.name: skill for skill in retained_skills}
+        self._promoted: dict[str, PiLoadedSkill] = {}
+        self._active_tools = self._tool_union()
         self._observed: _ObservedLoader | None = None
         self._pending: _PendingLoader | None = None
 
@@ -163,6 +226,16 @@ class PiSkillAuthority:
     def active_tools(self) -> frozenset[str]:
         with self._lock:
             return self._active_tools
+
+    @property
+    def committed_skills(self) -> tuple[PiLoadedSkill, ...]:
+        """Return this successful Run's host-observed skill refreshes only."""
+        with self._lock:
+            return tuple(self._promoted[name] for name in sorted(self._promoted))
+
+    def _tool_union(self) -> frozenset[str]:
+        return frozenset(tool for skill in self._retained.values()
+                         for tool in skill.declared_tools)
 
     @staticmethod
     def _canonical_args(value: object) -> str | None:
@@ -202,7 +275,9 @@ class PiSkillAuthority:
             disclosure = ("Newly available tools: " + ", ".join(skill.declared_tools) + "."
                           if skill.declared_tools else "No additional tools became available.")
             result = f"{skill.body}\n\n{disclosure}"
-            self._pending = _PendingLoader(observed, result, _sha(result), skill.declared_tools)
+            retained = skill.loaded(self._load_run_id) if self._load_run_id is not None else None
+            self._pending = _PendingLoader(
+                observed, result, _sha(result), retained, skill.declared_tools)
             self._observed = None
             return result
 
@@ -264,7 +339,12 @@ class PiSkillAuthority:
                 return False
             if activate:
                 self._pending = None
-                self._active_tools = frozenset(set(self._active_tools) | set(pending.tools))
+                if pending.skill is not None:
+                    self._retained[pending.skill.name] = pending.skill
+                    self._promoted[pending.skill.name] = pending.skill
+                    self._active_tools = self._tool_union()
+                else:
+                    self._active_tools = frozenset(set(self._active_tools) | set(pending.tools))
             return True
 
     def can_continue_request(self, payload: object) -> bool:
