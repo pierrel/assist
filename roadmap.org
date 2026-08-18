@@ -135,16 +135,30 @@ The dev agent needs significant improvements
 ** TODO Many more evals
 Consider checking out a version of this app to make changes to
 ** TODO Language/project-specific guidance
-** TODO Explore upgrading the local small model to Qwen3.7
-The dev/agent stack now targets Qwen3.6-27B (Q4_K_M gguf) on local
-llama.cpp (see CLAUDE.md "Small-model targeting").  A newer
-Qwen3.7-class release may close the gap to GPT-4-class behavior on the
-failure modes we prompt-engineer around (tool-call composition,
-multi-turn instruction following, elisp/config restatement for the
-emacsos channel).  Explore: stand it up on vLLM, re-run =edd/eval/= at
-the standard N=3/5/10 cadence, and quantify the pass-rate delta vs. the
-current model before committing to a switch (VRAM/throughput cost,
-context window, AWQ availability).  Eval-measured, not intuition.
+** TODO Evaluate and adopt Qwen3.8-27B after the root/home partition migration
+Do not begin until the partition migration has completed, the normal-boot
+checks have passed, and the host-memory cache OOM has a verified bound.  Keep
+the current Qwen3.6-27B Q4_K_M llama.cpp service as the production control and
+build a current llama.cpp separately: Qwen3.8 uses the newer =qwen35=
+architecture and needs a fresh runtime.
+
+Compare the same Qwen3.8 model under identical hardware, context, KV-cache,
+thinking, and single-stream conditions.  Start with
+[[https://huggingface.co/AtomicChat/Qwen3.8-27B-GGUF][AtomicChat's AD-Q4_K_M]]
+and the matching candidate from
+[[https://huggingface.co/unsloth/Qwen3.8-27B-GGUF][Unsloth's GGUF release]].
+AtomicChat reports lower quantization divergence and 92.4% next-token agreement
+for its much smaller AD-IQ3_S; treat that as a lead, not a selection result.
+For the 24 GB 3090, account for Qwen3.8's larger 19 GB Q4_K_M base file, the
+optional vision projector, and the optional MTP module before choosing context
+or enabling extras.
+
+Measure throughput, prompt processing, VRAM/RAM peak, and restart/OOM behavior,
+then run the relevant =edd/eval/= suites at the standard N=3/5/10 cadence against
+the Qwen3.6 control.  Adopt only a quant that improves or preserves real Assist
+task completion without renewed memory instability.  Stage it beside production
+first and retain the Qwen3.6 model and launch configuration as the immediate
+rollback; do not switch the shared endpoint during active production work.
 * Research improvements
 Research is at the heart of what this agent is capable of. It's strictly guided not to use internal knowledge
 ** TODO Create some evals on how you want it to act
