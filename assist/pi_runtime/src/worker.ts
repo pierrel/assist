@@ -137,7 +137,7 @@ function validateRequest(value: unknown): Request {
   }
   let validatedSummary: HistorySummary | null = null;
   if (historySummary !== null) {
-    if (historySummary === null || typeof historySummary !== "object" || Array.isArray(historySummary)
+    if (typeof historySummary !== "object" || Array.isArray(historySummary)
         || Object.keys(historySummary).sort().join(",") !== "body,bodySha256,lastRunId") {
       throw new Error("Pi history summary is invalid");
     }

@@ -448,6 +448,11 @@ class PiConversationStore:
                         or metadata.st_mode & 0o022):
                     raise PiConversationError("Pi history directory is unsafe")
                 entry.unlink()
+            directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
             root.rmdir()
             parent = os.open(root.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
             try:
@@ -459,7 +464,7 @@ class PiConversationStore:
 
     def _recover(self, thread_dir: str | Path) -> None:
         pending = self._path(thread_dir, _PENDING)
-        raw = self._safe_read(pending, 2 * 1024 * 1024, "Pi history receipt", missing=b"")
+        raw = self._safe_read(pending, _MAX_RECEIPT_BYTES, "Pi history receipt", missing=b"")
         if not raw:
             return
         value = self._decode_json(raw, "Pi history receipt")
