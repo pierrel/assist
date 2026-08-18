@@ -73,7 +73,7 @@ def test_pi_adapter_never_promises_deep_only_capabilities():
     ):
         assert unavailable not in prompt
     assert "`load_skill`" in prompt
-    assert "There is no notification, research, or background-task" in prompt
+    assert "There is no notification, research, or\nbackground-task" in prompt
 
 
 def test_pi_adapter_requires_tool_first_workspace_execution():
@@ -82,6 +82,8 @@ def test_pi_adapter_requires_tool_first_workspace_execution():
     assert "make the next necessary tool call\nimmediately" in prompt
     assert "reproducing a\nrequested file's contents in prose" in prompt
     assert "load a matching skill first" in prompt
+    assert "already identified as loaded" in prompt
+    assert "reload it only\nwhen" in prompt
 
 
 def test_missing_or_malformed_template_fails_closed(monkeypatch):

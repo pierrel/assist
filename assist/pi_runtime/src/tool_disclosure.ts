@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { BrokerClient } from "./broker_client.js";
 
-const INITIAL_TOOLS = ["read", "write", "edit", "bash", "load_skill"];
+const KERNEL_TOOLS = ["read", "write", "edit", "bash", "load_skill"];
 
 /** Add only declared tools to Pi's visible set after the loader has succeeded. */
 export function activateDisclosure(pi: ExtensionAPI, names: string[]): void {
@@ -10,8 +10,8 @@ export function activateDisclosure(pi: ExtensionAPI, names: string[]): void {
   pi.setActiveTools([...new Set([...active, ...names])]);
 }
 
-/** Register inactive application tools and own their visibility lifecycle. */
-export function toolDisclosureExtension(capability: string): ExtensionFactory {
+/** Register application tools and own their per-turn visibility lifecycle. */
+export function toolDisclosureExtension(capability: string, retainedTools: string[]): ExtensionFactory {
   const broker = new BrokerClient(capability);
   return (pi) => {
     let initialized = false;
@@ -31,8 +31,9 @@ export function toolDisclosureExtension(capability: string): ExtensionFactory {
     pi.on("before_agent_start", () => {
       if (!initialized) {
         // Resource registration follows session_start in Pi. Set the initial
-        // menu here so registration cannot re-expose map_data before a load.
-        pi.setActiveTools(INITIAL_TOOLS);
+        // kernel plus retained-skill menu here so registration cannot expose
+        // any tool outside the host-approved per-turn authority.
+        pi.setActiveTools([...new Set([...KERNEL_TOOLS, ...retainedTools])]);
         initialized = true;
       }
     });

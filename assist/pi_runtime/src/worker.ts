@@ -5,6 +5,7 @@ import {
   openSync,
   readSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { createConnection } from "node:net";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import {
@@ -16,7 +17,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createBrokerTools } from "./broker_client.js";
 import { promptOwner } from "./prompt_owner.js";
-import { skillLoaderExtension, type SkillManifest } from "./skill_loader.js";
+import { skillLoaderExtension, type RetainedSkill, type SkillManifest } from "./skill_loader.js";
 import { toolDisclosureExtension } from "./tool_disclosure.js";
 
 const REQUEST_PATH = "/run/pi/request.json";
@@ -51,6 +52,7 @@ type Request = {
   resultCapability: string;
   maxTurns: number;
   skillCatalog: SkillManifest[];
+  retainedSkills: RetainedSkill[];
 };
 
 let resultCommitted = false;
@@ -58,6 +60,12 @@ let failurePhase: FailurePhase = "request";
 const modelDiagnostic: ModelDiagnostic = {
   finish: "none", sawText: false, sawThinking: false, completedToolCalls: 0,
 };
+
+function hasDeclaredTools(name: string, value: unknown): value is string[] {
+  return Array.isArray(value) && (name === "render"
+    ? value.length === 1 && value[0] === "map_data"
+    : value.length === 0);
+}
 
 function resetModelDiagnostic(): void {
   modelDiagnostic.finish = "none";
@@ -71,10 +79,10 @@ function validateRequest(value: unknown): Request {
     throw new Error("Pi request must be an object");
   }
   const request = value as Record<string, unknown>;
-  if (Object.keys(request).sort().join(",") !== "brokerCapability,contextWindow,history,maxTurns,model,prompt,providerCapability,resultCapability,skillCatalog,systemPrompt,version") {
+  if (Object.keys(request).sort().join(",") !== "brokerCapability,contextWindow,history,maxTurns,model,prompt,providerCapability,resultCapability,retainedSkills,skillCatalog,systemPrompt,version") {
     throw new Error("Pi request has an invalid shape");
   }
-  const { brokerCapability, contextWindow, history, maxTurns, model, prompt, providerCapability, resultCapability, skillCatalog, systemPrompt, version } = request;
+  const { brokerCapability, contextWindow, history, maxTurns, model, prompt, providerCapability, resultCapability, retainedSkills, skillCatalog, systemPrompt, version } = request;
   if (
     version !== 1
     || typeof prompt !== "string"
@@ -100,6 +108,8 @@ function validateRequest(value: unknown): Request {
     || history.length > MAX_HISTORY_MESSAGES
     || !Array.isArray(skillCatalog)
     || skillCatalog.length > 16
+    || !Array.isArray(retainedSkills)
+    || retainedSkills.length > 16
   ) {
     throw new Error("Pi request has invalid fields");
   }
@@ -134,18 +144,37 @@ function validateRequest(value: unknown): Request {
     if (typeof value.name !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(value.name)
         || names.has(value.name) || typeof value.description !== "string"
         || Buffer.byteLength(value.description, "utf8") > 4096
-        || !Array.isArray(value.declaredTools)
-        || value.declaredTools.some((tool) => tool !== "map_data")) {
+        || !hasDeclaredTools(value.name, value.declaredTools)) {
       throw new Error("Pi skill catalog is invalid");
     }
     names.add(value.name);
     validatedCatalog.push({ name: value.name, description: value.description,
       declaredTools: [...value.declaredTools] as string[] });
   }
+  const retainedNames = new Set<string>();
+  const validatedRetained: RetainedSkill[] = [];
+  for (const skill of retainedSkills) {
+    if (skill === null || typeof skill !== "object" || Array.isArray(skill)
+        || Object.keys(skill).sort().join(",") !== "body,bodySha256,declaredTools,name") {
+      throw new Error("Pi retained skills are invalid");
+    }
+    const value = skill as Record<string, unknown>;
+    if (typeof value.name !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(value.name)
+        || retainedNames.has(value.name) || typeof value.body !== "string"
+        || Buffer.byteLength(value.body, "utf8") > 96 * 1024
+        || typeof value.bodySha256 !== "string" || !/^[0-9a-f]{64}$/.test(value.bodySha256)
+        || createHash("sha256").update(value.body, "utf8").digest("hex") !== value.bodySha256
+        || !hasDeclaredTools(value.name, value.declaredTools)) {
+      throw new Error("Pi retained skills are invalid");
+    }
+    retainedNames.add(value.name);
+    validatedRetained.push({ name: value.name, body: value.body,
+      bodySha256: value.bodySha256, declaredTools: [...value.declaredTools] as string[] });
+  }
   return {
     version, prompt, history: validatedHistory, model, contextWindow, systemPrompt,
     brokerCapability, providerCapability, resultCapability, maxTurns,
-    skillCatalog: validatedCatalog,
+    skillCatalog: validatedCatalog, retainedSkills: validatedRetained,
   };
 }
 
@@ -230,7 +259,8 @@ async function main(): Promise<void> {
     cwd: "/workspace", agentDir: "/agent", settingsManager: settings,
     extensionFactories: [
       promptOwner(request.systemPrompt, request.providerCapability),
-      toolDisclosureExtension(request.brokerCapability),
+      toolDisclosureExtension(request.brokerCapability,
+        request.retainedSkills.flatMap((skill) => skill.declaredTools)),
       skillLoaderExtension(request.brokerCapability, request.skillCatalog),
     ],
     noExtensions: true, noSkills: true,
@@ -242,11 +272,20 @@ async function main(): Promise<void> {
   });
   await loader.reload();
   failurePhase = "session";
+  const sessionManager = SessionManager.inMemory("/workspace");
+  for (const skill of request.retainedSkills) {
+    sessionManager.appendCustomMessageEntry(
+      "assist-loaded-skill",
+      `## Loaded skill: ${skill.name}\n\nThe host retained these complete instructions for this conversation. Use them and their disclosed tools directly.\n\n${skill.body}`,
+      false,
+      { name: skill.name, bodySha256: skill.bodySha256 },
+    );
+  }
   const created = await createAgentSession({
     cwd: "/workspace", agentDir: "/agent", model, modelRuntime: runtime, thinkingLevel: "off",
     noTools: "builtin", tools: ["read", "write", "edit", "bash", "load_skill", "map_data"],
     customTools: createBrokerTools(request.brokerCapability),
-    resourceLoader: loader, sessionManager: SessionManager.inMemory("/workspace"),
+    resourceLoader: loader, sessionManager,
     settingsManager: settings,
   });
   let turns = 0;

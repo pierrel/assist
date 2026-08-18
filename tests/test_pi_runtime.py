@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import socket
 import threading
 from pathlib import Path
@@ -12,11 +13,17 @@ from urllib3.exceptions import ReadTimeoutError
 
 from assist.model_manager import OpenAIConfig
 from assist import pi_runtime
+from assist.pi_conversation import PiConversationError, PiMessage
+from assist.pi_skills import PiLoadedSkill, PiSkillCatalog
 from assist.thread_queue import DEFAULT_HOLD_TIMEOUT_S
 
 
 class _Backend:
     container = object()
+
+
+def _loaded(name: str, run_id: str, body: str, tools: tuple[str, ...] = ()) -> PiLoadedSkill:
+    return PiLoadedSkill(name, body, hashlib.sha256(body.encode()).hexdigest(), tools, run_id)
 
 
 def test_worker_wait_keeps_running_on_dockers_wrapped_read_timeout() -> None:
@@ -36,6 +43,35 @@ def test_runtime_uses_the_shared_visible_thread_hold_bound() -> None:
     assert pi_runtime._WALL_TIMEOUT_SECONDS == DEFAULT_HOLD_TIMEOUT_S
 
 
+def test_request_context_evicts_whole_runs_and_records_before_crossing_its_wire_bound() -> None:
+    records = (
+        _loaded("edit-files", "run-1", "a" * (96 * 1024)),
+        _loaded("org-format", "run-2", "b" * (96 * 1024)),
+        _loaded("pdf", "run-3", "c" * (96 * 1024)),
+        _loaded("regexp", "run-4", "d" * (96 * 1024)),
+        _loaded("render", "run-5", "e" * (96 * 1024), ("map_data",)),
+    )
+    history = [PiMessage(f"run-{number}", role, "x" * (32 * 1024))
+               for number in range(1, 17) for role in ("user", "assistant")]
+    fixed = {
+        "version": 1, "prompt": "current", "model": "qwen", "contextWindow": 32768,
+        "brokerCapability": "a" * 43, "providerCapability": "b" * 43,
+        "resultCapability": "c" * 43, "maxTurns": 12,
+    }
+
+    selected_history, selected_skills, evicted, prompt = pi_runtime.PiRuntimeManager._request_context(
+        fixed, "system", PiSkillCatalog(()), history, records, ())
+    serialized = json.dumps({**fixed, "history": selected_history, "systemPrompt": prompt,
+                             "skillCatalog": [],
+                             "retainedSkills": [skill.manifest() for skill in selected_skills]},
+                            ensure_ascii=False, separators=(",", ":")).encode()
+
+    assert len(serialized) <= 512 * 1024
+    assert {message["role"] for message in selected_history} <= {"user", "assistant"}
+    assert {message["text"] for message in selected_history} == {"x" * (32 * 1024)}
+    assert evicted
+
+
 class _Worker:
     def __init__(self, control_dir: Path, events: list[str]) -> None:
         self._control_dir = control_dir
@@ -47,6 +83,8 @@ class _Worker:
         return {"StatusCode": 0}
 
 class _Containers:
+    request: dict[str, object] | None = None
+
     def __init__(self, events: list[str]) -> None:
         self._events = events
 
@@ -61,7 +99,8 @@ class _Containers:
         assert isinstance(volumes, dict)
         assert next(iter(volumes.values()))["mode"] == "ro"
         control = Path(next(iter(volumes)))
-        assert json.loads((control / "request.json").read_text())["contextWindow"] == 32768
+        type(self).request = json.loads((control / "request.json").read_text())
+        assert type(self).request["contextWindow"] == 32768
         return _Worker(control, self._events)
 
 
@@ -162,6 +201,29 @@ def test_runtime_starts_only_host_authorities_and_reaps_them(
         "relay.close", "result.close",
     ]
     assert not list(work_dir.parent.glob(".pi-turn-*"))
+
+
+def test_runtime_writes_retained_skill_body_and_loaded_name_to_the_worker_request(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    work_dir = tmp_path / "thread" / "workspace"
+    work_dir.mkdir(parents=True)
+    _SandboxManager.events = []
+    _Containers.request = None
+    monkeypatch.setattr(pi_runtime, "current_model_config", lambda: OpenAIConfig(
+        "http://localhost:8000/v1", "qwen", "secret", 32768))
+    monkeypatch.setattr(pi_runtime, "PiToolBroker", _Broker)
+    monkeypatch.setattr(pi_runtime, "PiProviderRelay", _Relay)
+    monkeypatch.setattr(pi_runtime, "PiResultSink", _ResultSink)
+    retained = _loaded("render", "run-1", "render rules", ("map_data",))
+
+    pi_runtime.PiRuntimeManager(_SandboxManager).run(
+        work_dir=str(work_dir), timezone="America/Los_Angeles", prompt="continue",
+        history=[PiMessage("run-1", "user", "map it"), PiMessage("run-1", "assistant", "done")],
+        system_prompt="be useful", retained_skills=(retained,))
+
+    assert _Containers.request is not None
+    assert _Containers.request["retainedSkills"] == [retained.manifest()]
+    assert "Already loaded for this conversation: `render`" in _Containers.request["systemPrompt"]
 
 
 def test_result_sink_accepts_only_a_capability_authenticated_result(tmp_path: Path) -> None:
@@ -481,6 +543,95 @@ def test_teardown_attempts_every_authority_after_a_cleanup_failure(
     assert not list(work_dir.parent.glob(".pi-turn-*"))
 
 
+def test_teardown_failure_does_not_mask_the_primary_worker_failure(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    work_dir = tmp_path / "thread" / "workspace"
+    work_dir.mkdir(parents=True)
+    _SandboxManager.events = []
+    monkeypatch.setattr(pi_runtime, "current_model_config", lambda: OpenAIConfig(
+        "http://localhost:8000/v1", "qwen", "secret", 32768))
+    monkeypatch.setattr(pi_runtime, "PiToolBroker", _Broker)
+    monkeypatch.setattr(pi_runtime, "PiProviderRelay", _Relay)
+    monkeypatch.setattr(pi_runtime, "PiResultSink", _ResultSink)
+
+    def broken_cleanup(cls: type[_SandboxManager], work_dir: str,
+                       expected_container: object) -> None:
+        cls.events.append("sandbox.cleanup")
+        raise RuntimeError("cleanup failed")
+
+    class BadWorker(_Worker):
+        def wait(self, *, timeout: int) -> dict[str, int]:
+            self._events.append("worker.wait")
+            return {"StatusCode": 1}
+
+    class BadContainers(_Containers):
+        def run(self, _image: str, **kwargs: object) -> BadWorker:
+            self._events.append("worker.start")
+            return BadWorker(Path(next(iter(kwargs["volumes"]))), self._events)  # type: ignore[index]
+
+    class BadDocker:
+        def __init__(self) -> None:
+            self.containers = BadContainers(_SandboxManager.events)
+
+    monkeypatch.setattr(_SandboxManager, "cleanup", classmethod(broken_cleanup))
+    monkeypatch.setattr(_SandboxManager, "_get_docker_client", classmethod(
+        lambda cls: BadDocker()))
+
+    with pytest.raises(pi_runtime.PiRuntimeError, match="exited unsuccessfully"):
+        pi_runtime.PiRuntimeManager(_SandboxManager).run(
+            work_dir=str(work_dir), timezone="America/Los_Angeles", prompt="hello",
+            history=[], system_prompt="be useful")
+
+    assert "cleanup failed" in caplog.text
+
+
+def test_committed_result_stays_successful_when_later_teardown_fails(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    work_dir = tmp_path / "thread" / "workspace"
+    work_dir.mkdir(parents=True)
+    _SandboxManager.events = []
+    monkeypatch.setattr(pi_runtime, "current_model_config", lambda: OpenAIConfig(
+        "http://localhost:8000/v1", "qwen", "secret", 32768))
+    monkeypatch.setattr(pi_runtime, "PiToolBroker", _Broker)
+    monkeypatch.setattr(pi_runtime, "PiProviderRelay", _Relay)
+    monkeypatch.setattr(pi_runtime, "PiResultSink", _ResultSink)
+
+    def broken_cleanup(cls: type[_SandboxManager], work_dir: str,
+                       expected_container: object) -> None:
+        cls.events.append("sandbox.cleanup")
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(_SandboxManager, "cleanup", classmethod(broken_cleanup))
+    committed: list[pi_runtime.PiRuntimeResult] = []
+    result = pi_runtime.PiRuntimeManager(_SandboxManager).run(
+        work_dir=str(work_dir), timezone="America/Los_Angeles", prompt="hello",
+        history=[], system_prompt="be useful", commit=committed.append)
+
+    assert result == pi_runtime.PiRuntimeResult("done", 1)
+    assert committed == [result]
+    assert "cleanup failed" in caplog.text
+
+
+def test_runtime_preserves_a_controlled_transcript_commit_failure(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    work_dir = tmp_path / "thread" / "workspace"
+    work_dir.mkdir(parents=True)
+    _SandboxManager.events = []
+    monkeypatch.setattr(pi_runtime, "current_model_config", lambda: OpenAIConfig(
+        "http://localhost:8000/v1", "qwen", "secret", 32768))
+    monkeypatch.setattr(pi_runtime, "PiToolBroker", _Broker)
+    monkeypatch.setattr(pi_runtime, "PiProviderRelay", _Relay)
+    monkeypatch.setattr(pi_runtime, "PiResultSink", _ResultSink)
+
+    def reject_completion(_: pi_runtime.PiRuntimeResult) -> None:
+        raise PiConversationError("Pi transcript is malformed")
+
+    with pytest.raises(PiConversationError, match="transcript is malformed"):
+        pi_runtime.PiRuntimeManager(_SandboxManager).run(
+            work_dir=str(work_dir), timezone="America/Los_Angeles", prompt="hello",
+            history=[], system_prompt="be useful", commit=reject_completion)
+
+
 def test_runtime_reaps_a_timed_out_worker_with_term_then_kill(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     work_dir = tmp_path / "thread" / "workspace"
@@ -567,7 +718,7 @@ def test_runtime_does_not_cross_cleanup_boundary_when_worker_cannot_be_reaped(
     monkeypatch.setattr(_SandboxManager, "_get_docker_client", classmethod(
         lambda cls: UnreapedDocker()))
 
-    with pytest.raises(pi_runtime.PiRuntimeError, match="teardown failed"):
+    with pytest.raises(pi_runtime.PiRuntimeError, match="could not complete"):
         pi_runtime.PiRuntimeManager(_SandboxManager).run(
             work_dir=str(work_dir), timezone="America/Los_Angeles", prompt="hello",
             history=[], system_prompt="be useful",

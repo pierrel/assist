@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import shutil
@@ -19,8 +20,9 @@ from urllib3.exceptions import ReadTimeoutError
 
 from assist.model_manager import OpenAIConfig, current_model_config
 from assist.pi_broker import PiToolBroker
-from assist.pi_skills import (PiSkillAuthority, PiSkillError, build_pi_skill_catalog,
-                              empty_pi_skill_catalog)
+from assist.pi_skills import (PiLoadedSkill, PiSkillAuthority, PiSkillError,
+                              build_pi_skill_catalog, empty_pi_skill_catalog)
+from assist.pi_conversation import PI_HISTORY_LIMIT, PiConversationError, PiMessage
 from assist.pi_trace import PiTraceRecorder, PiTraceStore
 from assist.pi_provider_relay import PiProviderRelay
 from assist.sandbox import DockerSandboxBackend
@@ -33,7 +35,8 @@ from assist.thread_queue import DEFAULT_HOLD_TIMEOUT_S
 
 _IMAGE = "assist-pi-runtime"
 _MAX_RESULT_BYTES = 96 * 1024
-_MAX_HISTORY_MESSAGES = 32
+_MAX_REQUEST_BYTES = 512 * 1024
+_MAX_HISTORY_MESSAGES = PI_HISTORY_LIMIT
 _MAX_MESSAGE_BYTES = 32 * 1024
 _MAX_TURNS = 12
 # Pi uses the visible-thread queue's default two-hour backstop. Its worker wall
@@ -72,6 +75,8 @@ class PiRuntimeResult:
 
     reply: str
     turns: int
+    promoted_skills: tuple[PiLoadedSkill, ...] = ()
+    evicted_skills: tuple[PiLoadedSkill, ...] = ()
 
 
 @dataclass
@@ -235,7 +240,7 @@ class PiRuntimeManager:
     @staticmethod
     def _write_request(control_dir: Path, value: dict[str, object]) -> None:
         raw = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        if len(raw) > 512 * 1024:
+        if len(raw) > _MAX_REQUEST_BYTES:
             raise PiRuntimeError("Pi request exceeds its bound")
         target = control_dir / "request.json"
         descriptor, temporary = tempfile.mkstemp(prefix=".request-", dir=control_dir)
@@ -281,16 +286,72 @@ class PiRuntimeManager:
         return urllib.parse.urlunsplit((parsed.scheme, host + port, parsed.path, "", ""))
 
     @staticmethod
-    def _history(messages: Iterable[tuple[str, str]]) -> list[dict[str, str]]:
+    def _history(messages: Iterable[PiMessage | tuple[str, str]]) -> list[PiMessage]:
         history = list(messages)[-_MAX_HISTORY_MESSAGES:]
-        result: list[dict[str, str]] = []
-        for role, text in history:
-            if role not in {"user", "assistant"} or not isinstance(text, str):
+        result: list[PiMessage] = []
+        for item in history:
+            if isinstance(item, PiMessage):
+                role, text = item.role, item.text
+                run_id = item.run_id
+            elif (isinstance(item, tuple) and len(item) == 2
+                  and isinstance(item[0], str) and isinstance(item[1], str)):
+                role, text = item
+                run_id = ""
+            else:
                 raise PiRuntimeError("Pi transcript is invalid")
-            if len(text.encode("utf-8")) > _MAX_MESSAGE_BYTES:
-                raise PiRuntimeError("Pi transcript exceeds its bound")
-            result.append({"role": role, "text": text})
+            if role not in {"user", "assistant"}:
+                raise PiRuntimeError("Pi transcript is invalid")
+            try:
+                if len(text.encode("utf-8")) > _MAX_MESSAGE_BYTES:
+                    raise PiRuntimeError("Pi transcript exceeds its bound")
+            except UnicodeEncodeError as error:
+                raise PiRuntimeError("Pi transcript is invalid") from error
+            result.append(PiMessage(run_id, role, text))
         return result
+
+    @staticmethod
+    def _request_context(request_fixed: dict[str, object], system_prompt: str, catalog: object,
+                         history: Iterable[PiMessage | tuple[str, str]],
+                         retained: Iterable[PiLoadedSkill],
+                         evicted: Iterable[PiLoadedSkill]) -> tuple[list[dict[str, str]], tuple[PiLoadedSkill, ...], tuple[PiLoadedSkill, ...], str]:
+        """Fit complete visible Runs and complete skill records in one request bound."""
+        if not hasattr(catalog, "manifest") or not hasattr(catalog, "prompt_section"):
+            raise PiRuntimeError("Pi skill catalog is invalid")
+        selected_history = PiRuntimeManager._history(history)
+        selected_skills = list(retained)
+        evicted_skills = list(evicted)
+        if len({skill.name for skill in selected_skills}) != len(selected_skills):
+            raise PiRuntimeError("Pi retained skills are not unique")
+        while True:
+            loaded_names = tuple(skill.name for skill in selected_skills)
+            prompt_with_catalog = system_prompt + catalog.prompt_section(loaded_names)
+            payload = {
+                **request_fixed,
+                "history": [{"role": item.role, "text": item.text} for item in selected_history],
+                "systemPrompt": prompt_with_catalog,
+                "skillCatalog": catalog.manifest(),
+                "retainedSkills": [skill.manifest() for skill in selected_skills],
+            }
+            try:
+                raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise PiRuntimeError("Pi request is invalid") from error
+            if len(raw) <= _MAX_REQUEST_BYTES:
+                return payload["history"], tuple(selected_skills), tuple(evicted_skills), prompt_with_catalog
+            if selected_history:
+                oldest_run = selected_history[0].run_id
+                if oldest_run:
+                    selected_history = [item for item in selected_history if item.run_id != oldest_run]
+                    retained_names = {item.name for item in selected_skills if item.run_id == oldest_run}
+                    evicted_skills.extend(item for item in selected_skills if item.name in retained_names)
+                    selected_skills = [item for item in selected_skills if item.name not in retained_names]
+                else:
+                    selected_history.pop(0)
+                continue
+            if selected_skills:
+                evicted_skills.append(selected_skills.pop(0))
+                continue
+            raise PiRuntimeError("Pi prompt exceeds its request bound")
 
     @staticmethod
     def _reap_worker(worker: object) -> None:
@@ -327,7 +388,11 @@ class PiRuntimeManager:
             errors.append(error)
 
     def run(self, *, work_dir: str, timezone: str | None, prompt: str,
-            history: Iterable[tuple[str, str]], system_prompt: str,
+            history: Iterable[PiMessage | tuple[str, str]], system_prompt: str,
+            retained_skills: Iterable[PiLoadedSkill] = (),
+            evicted_skills: Iterable[PiLoadedSkill] = (),
+            skill_run_id: str | None = None,
+            commit: Callable[[PiRuntimeResult], None] | None = None,
             max_turns: int = _MAX_TURNS, turn_id: str | None = None,
             admitted: Callable[[], bool] | None = None,
             should_yield: Callable[[], bool] | None = None,
@@ -352,6 +417,8 @@ class PiRuntimeManager:
         result_sink: PiResultSink | None = None
         worker = None
         worker_exited = False
+        completion_committed = False
+        primary_error: BaseException | None = None
         try:
             broker_capability = secrets.token_urlsafe(32)
             provider_capability = secrets.token_urlsafe(32)
@@ -372,15 +439,21 @@ class PiRuntimeManager:
                     raise PiRuntimeError("Pi skill catalog is unavailable") from error
             else:  # Narrow test-double seam; every deployed sandbox is Docker-backed.
                 catalog = empty_pi_skill_catalog()
-            authority = PiSkillAuthority(catalog)
+            request_fixed = {
+                "version": 1, "prompt": prompt, "model": config.model,
+                "contextWindow": config.context_len, "brokerCapability": broker_capability,
+                "providerCapability": provider_capability, "resultCapability": result_capability,
+                "maxTurns": max_turns,
+            }
+            request_history, request_skills, request_evicted, prompt_with_catalog = self._request_context(
+                request_fixed, system_prompt, catalog, history, retained_skills, evicted_skills)
+            authority = PiSkillAuthority(
+                catalog, retained=request_skills, load_run_id=skill_run_id)
             self._write_request(control_dir, {
-                "version": 1, "prompt": prompt, "history": self._history(history),
-                "model": config.model, "contextWindow": config.context_len,
-                "systemPrompt": system_prompt + catalog.prompt_section(),
-                "brokerCapability": broker_capability,
-                "providerCapability": provider_capability,
-                "resultCapability": result_capability, "maxTurns": max_turns,
+                **request_fixed, "history": request_history,
+                "systemPrompt": prompt_with_catalog,
                 "skillCatalog": catalog.manifest(),
+                "retainedSkills": [skill.manifest() for skill in request_skills],
             })
             if recorder is None:
                 broker = PiToolBroker(sandbox, control_dir, broker_capability)
@@ -428,11 +501,22 @@ class PiRuntimeManager:
             result = result_sink.receive()
             if not isinstance(status, dict) or status.get("StatusCode") != 0:
                 raise PiRuntimeError("Pi worker exited unsuccessfully")
-            return result
-        except PiRuntimeError:
+            completed = PiRuntimeResult(
+                result.reply, result.turns, authority.committed_skills, request_evicted)
+            if active is not None and active.stopped.is_set():
+                raise PiRuntimeError("Pi preview was stopped")
+            if admitted is not None and not admitted():
+                raise PiRuntimeError("Pi preview was stopped")
+            if commit is not None:
+                commit(completed)
+                completion_committed = True
+            return completed
+        except (PiConversationError, PiRuntimeError) as error:
+            primary_error = error
             raise
         except Exception as error:
-            raise PiRuntimeError("Pi worker could not complete") from error
+            primary_error = PiRuntimeError("Pi worker could not complete")
+            raise primary_error from error
         finally:
             teardown_errors: list[Exception] = []
             if broker is not None:
@@ -461,6 +545,11 @@ class PiRuntimeManager:
                 self._attempt(teardown_errors, lambda: shutil.rmtree(control_dir))
             try:
                 if teardown_errors:
-                    raise PiRuntimeError("Pi worker teardown failed") from teardown_errors[0]
+                    if completion_committed or primary_error is not None:
+                        error = teardown_errors[0]
+                        logging.error("Pi worker teardown failed after the primary outcome",
+                                      exc_info=(type(error), error, error.__traceback__))
+                    else:
+                        raise PiRuntimeError("Pi worker teardown failed") from teardown_errors[0]
             finally:
                 self._finish(turn_id, active)
