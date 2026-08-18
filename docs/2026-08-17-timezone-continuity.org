@@ -1,6 +1,6 @@
 #+TITLE: Timezone continuity across wakes and triggered turns
 #+DATE: <2026-08-17>
-#+STATUS: IMPLEMENTING
+#+STATUS: TESTING
 
 * Problem
 
@@ -52,7 +52,7 @@ second thread-metadata store.
   no explicit zone.
 - =tests/test_async_subagent_runs.py=: pin parent-to-wake timezone propagation,
   no location propagation, and missing-parent/zone behavior.
-- =tests/test_web_process_message_e2e.py=: pin triggered-dispatch fallback,
+- =tests/test_async_subagent_runs.py=: pin triggered-dispatch fallback,
   explicit schedule-zone precedence, durable/restart lookup, and no rider when
   no user timezone exists.
 - =roadmap.org=: mark the two completed scheduling/context-rider entries only
@@ -67,3 +67,15 @@ an explicit schedule timezone wins. Controls prove no default timezone or
 location transfer. Then survey the affected scheduling/context behavioral rows
 and compare baseline/candidate at the repository's N=3/N=5/N=10 cadence before
 merge.
+
+* Results so far
+
+| Coverage | Baseline N=3 | Candidate N=3 | Result |
+|-
+| Deterministic child completion → saved weekly schedule | missing rider | 3/3 | saved =America/Los_Angeles=; no location fields |
+| Natural recurring-schedule outcome | 3/3 | 3/3 | no schedule-routing regression |
+| Context-completion wake journey | 3/3 | 3/3 | no lifecycle regression |
+
+The two model rows are regression controls. The deterministic lifecycle test is
+the direct proof of the new Run-to-wake timezone contract; it drives the saved
+schedule through the same time-only rider consumed by =create_schedule=.

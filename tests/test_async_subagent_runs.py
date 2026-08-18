@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from manage.web import threads
 import manage.web as web
 import assist.async_subagents as async_tasks
-from assist.context_rider import ContextRider
+from assist.context_rider import CONTEXT_RIDER_KEY, ContextRider
 from assist.schedule import tools as schedule_tools_mod
 from assist.schedule.store import ScheduleStore
 from assist.async_subagents import (
@@ -38,23 +38,10 @@ def _root(monkeypatch, tmp_path):
     return submitted
 
 
-def _parent_and_metadata(monkeypatch, tmp_path):
+def _parent_and_metadata(monkeypatch, tmp_path, rider=None):
     submitted = _root(monkeypatch, tmp_path)
     threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
-    metadata = {
-        "parent_thread_id": "parent",
-        "parent_run_id": parent.id,
-        "dispatch_key": f"{parent.work_id}:tool-1",
-    }
-    SERVICE.create_thread("sub-stable", metadata)
-    return submitted, parent, metadata
-
-
-def _parent_with_rider(monkeypatch, tmp_path, rider):
-    submitted = _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "set this up", rider=rider)
+    parent = threads._create_run("parent", "question", rider=rider)
     metadata = {
         "parent_thread_id": "parent",
         "parent_run_id": parent.id,
@@ -244,7 +231,7 @@ def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
 def test_context_completion_carries_only_parent_timezone_to_schedule(
         monkeypatch, tmp_path):
     """The original browser zone reaches the later schedule, never its location."""
-    _, _, metadata = _parent_with_rider(
+    _, _, metadata = _parent_and_metadata(
         monkeypatch, tmp_path,
         ContextRider(tz="America/Los_Angeles", lat=37.77, lon=-122.42))
     child = SERVICE.create_run(
@@ -263,7 +250,7 @@ def test_context_completion_carries_only_parent_timezone_to_schedule(
         schedule_tools_mod, "get_config",
         lambda: {"configurable": {
             "thread_id": "parent",
-            "context_rider": threads._rider_from_fields(wake.rider),
+            CONTEXT_RIDER_KEY: threads._rider_from_fields(wake.rider),
         }})
     create_schedule = next(
         tool for tool in schedule_tools_mod.schedule_tools(store)

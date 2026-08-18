@@ -403,7 +403,7 @@ emitted alongside the prose, WITHOUT over-mapping non-spatial replies (a
 regression spot-check on plain Q&A).
 
 * Scheduling
-** TODO Preserve the user's timezone through asynchronous task completion
+** DONE Preserve the user's timezone through asynchronous task completion
 When a schedule setup first needs local context, the main agent creates the
 schedule on the context task's completion wake rather than the original user
 turn.  The schedule tool reads its timezone only from that run's rider, but the
@@ -411,9 +411,9 @@ current completion wake has none.  In thread =20260816090612-d1519e70= this
 made =create_schedule= reject an otherwise complete weekly setup with "I don't
 know your timezone for this message."  Carry the originating user run's
 timezone, and only that timezone, into the completion wake (do not reintroduce
-location context).  Pin the real sequence in an integration test: a
-timezone-bearing user turn starts context work, the completion wake creates a
-weekly schedule, and the saved schedule uses that timezone.
+location context).  Shipped 2026-08-17: the exact parent Run supplies a
+time-only wake rider; integration coverage pins context child → completion wake
+→ weekly schedule persistence in that original timezone.
 ** TODO Day-of-month schedules (e.g. "run on the 25th of each month")
 Thread schedules (#161) support interval + weekday recurrence but not
 day-of-month.  Add it so a user can say "set a schedule to run on the 25th of
@@ -472,12 +472,13 @@ visible agent can deliberately call =get_location= and pass =CURRENT_LOCATION= t
 travel/directions tools; coordinates and inferred places never enter the model context.
 The record has a 24h freshness cap. Inbound-SMS triage and child agents never receive
 it. See =docs/2026-08-15-location-context-tool.org=.
-** TODO Retain TIMEZONE for scheduled/triggered turns
+** DONE Retain TIMEZONE for scheduled/triggered turns
 The rider carries the message TIME (#153) but the agent should also always know the user's
-current TIMEZONE — for relative-date reasoning without guessing. The client already sends it
-interactively (the sandbox-TZ seam); for scheduled/triggered turns, retain the last-seen tz.
-Location deliberately follows the separate private =get_location= contract above rather than
-entering model context.
+current TIMEZONE — for relative-date reasoning without guessing. Shipped
+2026-08-17: triggers without an explicit zone use the latest valid visible-user
+Run timezone, durably recovered from the Run ledger; a schedule's persisted
+timezone still wins. Location deliberately follows the separate private
+=get_location= contract above rather than entering model context.
 
 * Notifications
 ** DONE Notify/urgent evals + firm up the guidance on WHEN to flag urgent
