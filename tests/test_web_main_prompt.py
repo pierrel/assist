@@ -76,6 +76,14 @@ def test_pi_adapter_never_promises_deep_only_capabilities():
     assert "There is no notification, research, or background-task" in prompt
 
 
+def test_pi_adapter_requires_tool_first_workspace_execution():
+    prompt = web_main_prompt.render_pi_web_main_prompt().text
+
+    assert "make the next necessary tool call\nimmediately" in prompt
+    assert "reproducing a\nrequested file's contents in prose" in prompt
+    assert "load a matching skill first" in prompt
+
+
 def test_missing_or_malformed_template_fails_closed(monkeypatch):
     monkeypatch.setattr(web_main_prompt, "base_prompt_for", lambda *_args, **_kwargs: "")
 
