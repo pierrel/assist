@@ -9,20 +9,22 @@ import socket
 import socketserver
 import stat
 import threading
-import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Callable
 
+from assist.env import env_float
 from assist.pi_skills import PiSkillAuthority
 
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_MODEL_CALLS = 12
-_MAX_TOKENS = 2048
+_MAX_MODEL_CONTEXT_TOKENS = 1_000_000
 _SOCKET_TIMEOUT_SECONDS = 5
-_MODEL_RESPONSE_TIMEOUT_SECONDS = 75
+# Match Deep Agents' read timeout. This is an idle-byte limit, not a cap on
+# the total duration of a healthy streamed completion.
+_MODEL_RESPONSE_IDLE_TIMEOUT_SECONDS = env_float("ASSIST_LLM_READ_TIMEOUT_S", 600.0)
 _CAPABILITY_HEADER = "x-assist-pi-capability"
 _PATH = "/v1/chat/completions"
 _QWEN_TEMPLATE_OPTIONS = {"enable_thinking": False}
@@ -41,6 +43,7 @@ class PiProviderRelay:
 
     def __init__(self, control_dir: str | Path, upstream_url: str,
                  api_key: str, model: str, capability: str,
+                 context_len: int = 131072,
                  trace_start: Callable[[], object] | None = None,
                  trace_settle: Callable[[object, bool], None] | None = None) -> None:
         self._control_dir = Path(control_dir)
@@ -49,6 +52,10 @@ class PiProviderRelay:
         self._api_key = api_key
         self._model = model
         self._capability = capability
+        if (not isinstance(context_len, int) or isinstance(context_len, bool)
+                or not 1 <= context_len <= _MAX_MODEL_CONTEXT_TOKENS):
+            raise PiProviderRelayError("Pi model context length is invalid")
+        self._context_len = context_len
         self._trace_start = trace_start
         self._trace_settle = trace_settle
         self._validate_control_dir()
@@ -176,9 +183,16 @@ class PiProviderRelay:
                     or "n" in payload and payload["n"] != 1
                     or "stream" in payload and payload["stream"] is not True):
                 raise PiProviderRelayError("Pi model request changes its generation policy")
+            requested_max_tokens = payload.get("max_tokens", self._context_len)
+            if (not isinstance(requested_max_tokens, int) or isinstance(requested_max_tokens, bool)
+                    or not 1 <= requested_max_tokens <= self._context_len):
+                raise PiProviderRelayError("Pi model request changes its generation policy")
             normalized = dict(payload)
             normalized["model"] = self._model
-            normalized["max_tokens"] = _MAX_TOKENS
+            # Pi's SDK computes the remaining-context maximum from this turn's
+            # host-provided model context. Preserve that value rather than
+            # imposing the former Pi-only 2,048-token completion cap.
+            normalized["max_tokens"] = requested_max_tokens
             normalized["n"] = 1
             normalized["temperature"] = 0.1
             # Qwen otherwise spends the entire bounded completion on hidden reasoning
@@ -216,21 +230,10 @@ class PiProviderRelay:
         completed = False
         connection_type = (http.client.HTTPSConnection
                            if self._upstream.scheme == "https" else http.client.HTTPConnection)
-        deadline = time.monotonic() + _MODEL_RESPONSE_TIMEOUT_SECONDS
         connection = connection_type(
             self._upstream.hostname, self._upstream.port,
-            timeout=min(_SOCKET_TIMEOUT_SECONDS, self._remaining_timeout(deadline)),
+            timeout=_SOCKET_TIMEOUT_SECONDS,
         )
-        sockets: list[socket.socket] = []
-
-        def expire() -> None:
-            for socket_ in sockets:
-                try:
-                    socket_.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-
-        expiry: threading.Timer | None = None
         with self._state_lock:
             if self._stopping:
                 if self._skill_authority is not None:
@@ -253,13 +256,9 @@ class PiProviderRelay:
         try:
             if connection.sock is None:
                 raise PiProviderRelayError("Pi model connection is unavailable")
-            sockets.append(connection.sock)
-            expiry = threading.Timer(self._remaining_timeout(deadline), expire)
-            expiry.daemon = True
-            expiry.start()
-            connection.sock.settimeout(self._remaining_timeout(deadline))
+            connection.sock.settimeout(_MODEL_RESPONSE_IDLE_TIMEOUT_SECONDS)
             response = connection.getresponse()
-            chunks = self._read_response(response, deadline)
+            chunks = self._read_response(response)
             completed = 200 <= response.status < 300
             if completed and self._skill_authority is not None:
                 try:
@@ -285,52 +284,41 @@ class PiProviderRelay:
             with self._state_lock:
                 self._connections.discard(connection)
             connection.close()
-            if expiry is not None:
-                expiry.cancel()
             self.settle_trace(trace_operation, completed)
 
-    @staticmethod
-    def _remaining_timeout(deadline: float) -> float:
-        """Return the remaining absolute budget for one model response."""
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise PiProviderRelayError("Pi model response timed out")
-        return remaining
-
     @classmethod
-    def _set_response_timeout(cls, response: http.client.HTTPResponse, deadline: float) -> None:
+    def _set_response_timeout(cls, response: http.client.HTTPResponse) -> None:
+        """Apply Deep Agents' idle-byte model timeout before every read."""
         raw = getattr(response.fp, "raw", None)
         socket_ = getattr(raw, "_sock", None)
         if socket_ is not None:
-            socket_.settimeout(cls._remaining_timeout(deadline))
+            socket_.settimeout(_MODEL_RESPONSE_IDLE_TIMEOUT_SECONDS)
 
     @classmethod
-    def _read_response(cls, response: http.client.HTTPResponse, deadline: float) -> list[bytes]:
+    def _read_response(cls, response: http.client.HTTPResponse) -> list[bytes]:
         if 200 <= response.status < 300:
             if not _is_sse(response):
                 raise PiProviderRelayError("Pi model response is not streamed")
-            return cls._read_complete_sse(response, deadline)
-        return cls._read_bounded_response(response, deadline)
+            return cls._read_complete_sse(response)
+        return cls._read_bounded_response(response)
 
     @classmethod
-    def _read_bounded_response(cls, response: http.client.HTTPResponse,
-                               deadline: float) -> list[bytes]:
+    def _read_bounded_response(cls, response: http.client.HTTPResponse) -> list[bytes]:
         chunks: list[bytes] = []
         total = 0
         while True:
-            cls._set_response_timeout(response, deadline)
+            cls._set_response_timeout(response)
             chunk = response.read(65536)
             if not chunk:
                 return chunks
             total = _append_response_chunk(chunks, total, chunk)
 
     @classmethod
-    def _read_complete_sse(cls, response: http.client.HTTPResponse,
-                           deadline: float) -> list[bytes]:
+    def _read_complete_sse(cls, response: http.client.HTTPResponse) -> list[bytes]:
         chunks: list[bytes] = []
         total = 0
         while True:
-            cls._set_response_timeout(response, deadline)
+            cls._set_response_timeout(response)
             line = response.readline(_MAX_RESPONSE_BYTES + 1)
             if not line:
                 raise PiProviderRelayError("Pi model stream ended before completion")

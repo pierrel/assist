@@ -27,9 +27,16 @@ const MAX_RESULT_BYTES = 96 * 1024;
 const MAX_HISTORY_MESSAGES = 32;
 const MAX_MESSAGE_BYTES = 32 * 1024;
 const MAX_TURNS = 12;
+const MAX_CONTEXT_WINDOW = 1_000_000;
 
 type FailureCode = "turn-bound-exceeded" | "worker-failed";
 type FailurePhase = "request" | "runtime" | "session" | "prompt" | "reply";
+type ModelDiagnostic = {
+  finish: "none" | "stop" | "length" | "toolUse" | "aborted" | "error";
+  sawText: boolean;
+  sawThinking: boolean;
+  completedToolCalls: number;
+};
 
 type HistoryMessage = { role: "user" | "assistant"; text: string };
 type Request = {
@@ -37,6 +44,7 @@ type Request = {
   prompt: string;
   history: HistoryMessage[];
   model: string;
+  contextWindow: number;
   systemPrompt: string;
   brokerCapability: string;
   providerCapability: string;
@@ -47,21 +55,35 @@ type Request = {
 
 let resultCommitted = false;
 let failurePhase: FailurePhase = "request";
+const modelDiagnostic: ModelDiagnostic = {
+  finish: "none", sawText: false, sawThinking: false, completedToolCalls: 0,
+};
+
+function resetModelDiagnostic(): void {
+  modelDiagnostic.finish = "none";
+  modelDiagnostic.sawText = false;
+  modelDiagnostic.sawThinking = false;
+  modelDiagnostic.completedToolCalls = 0;
+}
 
 function validateRequest(value: unknown): Request {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Pi request must be an object");
   }
   const request = value as Record<string, unknown>;
-  if (Object.keys(request).sort().join(",") !== "brokerCapability,history,maxTurns,model,prompt,providerCapability,resultCapability,skillCatalog,systemPrompt,version") {
+  if (Object.keys(request).sort().join(",") !== "brokerCapability,contextWindow,history,maxTurns,model,prompt,providerCapability,resultCapability,skillCatalog,systemPrompt,version") {
     throw new Error("Pi request has an invalid shape");
   }
-  const { brokerCapability, history, maxTurns, model, prompt, providerCapability, resultCapability, skillCatalog, systemPrompt, version } = request;
+  const { brokerCapability, contextWindow, history, maxTurns, model, prompt, providerCapability, resultCapability, skillCatalog, systemPrompt, version } = request;
   if (
     version !== 1
     || typeof prompt !== "string"
     || typeof model !== "string"
     || !model
+    || typeof contextWindow !== "number"
+    || !Number.isSafeInteger(contextWindow)
+    || contextWindow < 1
+    || contextWindow > MAX_CONTEXT_WINDOW
     || typeof systemPrompt !== "string"
     || !systemPrompt.trim()
     || typeof brokerCapability !== "string"
@@ -121,7 +143,7 @@ function validateRequest(value: unknown): Request {
       declaredTools: [...value.declaredTools] as string[] });
   }
   return {
-    version, prompt, history: validatedHistory, model, systemPrompt,
+    version, prompt, history: validatedHistory, model, contextWindow, systemPrompt,
     brokerCapability, providerCapability, resultCapability, maxTurns,
     skillCatalog: validatedCatalog,
   };
@@ -193,8 +215,8 @@ async function main(): Promise<void> {
     name: "Assist Pi", api: "openai-completions", apiKey: "local", authHeader: false,
     models: [{
       id: request.model, name: request.model, reasoning: true, input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 131072,
-      maxTokens: 2048, baseUrl: PROVIDER_URL,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: request.contextWindow,
+      maxTokens: request.contextWindow, baseUrl: PROVIDER_URL,
       compat: { supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false,
         supportsUsageInStreaming: true, supportsStrictMode: false, maxTokensField: "max_tokens",
         thinkingFormat: "qwen-chat-template" },
@@ -233,6 +255,18 @@ async function main(): Promise<void> {
       turns += 1;
       if (turns > request.maxTurns) void created.session.abort();
     }
+    if (event.type === "message_update") {
+      const modelEvent = event.assistantMessageEvent;
+      if (modelEvent.type === "start") resetModelDiagnostic();
+      if (modelEvent.type === "text_delta" && modelEvent.delta) modelDiagnostic.sawText = true;
+      if (modelEvent.type === "thinking_delta" && modelEvent.delta) modelDiagnostic.sawThinking = true;
+      if (modelEvent.type === "toolcall_end") {
+        modelDiagnostic.completedToolCalls = Math.min(64, modelDiagnostic.completedToolCalls + 1);
+      }
+      if (modelEvent.type === "done" || modelEvent.type === "error") {
+        modelDiagnostic.finish = modelEvent.reason;
+      }
+    }
   });
   try {
     failurePhase = "prompt";
@@ -256,6 +290,7 @@ main().catch(async (error: unknown) => {
       const request = validateRequest(JSON.parse(readRequestBytes().toString("utf8")));
       await writeResult(request.resultCapability, {
         status: "failed", code: failureCode(error), phase: failurePhase,
+        model: modelDiagnostic,
       });
     } catch {
       // The trusted host turns a missing result into an honest failed Run.

@@ -277,12 +277,12 @@ def test_provider_relay_forwards_only_its_model_and_capability(tmp_path: Path) -
     _Upstream.requests = []
     relay = PiProviderRelay(
         control, f"http://127.0.0.1:{upstream.server_port}/v1",
-        "secret", "qwen", "a" * 43,
+        "secret", "qwen", "a" * 43, context_len=32768,
     )
     relay.start()
     try:
         accepted = _request(relay.socket_path, "a" * 43, extra={
-            "max_tokens": 999999, "chat_template_kwargs": {"enable_thinking": True},
+            "max_tokens": 4096, "chat_template_kwargs": {"enable_thinking": True},
         })
         denied = _request(relay.socket_path, "b" * 43)
         wrong_model = _request(relay.socket_path, "a" * 43, model="other")
@@ -299,7 +299,7 @@ def test_provider_relay_forwards_only_its_model_and_capability(tmp_path: Path) -
     assert path == "/v1/chat/completions"
     assert headers["Authorization"] == "Bearer secret"
     assert payload["model"] == "qwen"
-    assert payload["max_tokens"] == 2048
+    assert payload["max_tokens"] == 4096
     assert payload["n"] == 1
     assert payload["temperature"] == 0.1
     assert payload["stream"] is True
@@ -568,7 +568,7 @@ def test_provider_relay_does_not_forward_an_upstream_error_header(tmp_path: Path
     assert b"X-Upstream-Injected" not in response
 
 
-def test_provider_relay_deadline_interrupts_an_unterminated_sse_line(
+def test_provider_relay_idle_timeout_interrupts_an_unterminated_sse_line(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _SlowLineSSEUpstream)
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
@@ -577,7 +577,7 @@ def test_provider_relay_deadline_interrupts_an_unterminated_sse_line(
     control.mkdir(mode=0o700)
     _SlowLineSSEUpstream.started.clear()
     _SlowLineSSEUpstream.release.clear()
-    monkeypatch.setattr(pi_provider_relay, "_MODEL_RESPONSE_TIMEOUT_SECONDS", 0.25)
+    monkeypatch.setattr(pi_provider_relay, "_MODEL_RESPONSE_IDLE_TIMEOUT_SECONDS", 0.25)
     relay = PiProviderRelay(
         control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
     )
@@ -596,7 +596,7 @@ def test_provider_relay_deadline_interrupts_an_unterminated_sse_line(
         upstream.shutdown()
         upstream.server_close()
 
-    assert b" 403 " in response[0]
+    assert b" 502 " in response[0]
 
 
 def test_provider_relay_rejects_generation_policy_override(tmp_path: Path) -> None:

@@ -35,10 +35,34 @@ that complete response.  Since Pi itself requests streaming, a successful
 non-stream response is rejected; bounded non-success responses remain useful
 provider errors.
 
-Pi is an interactive bounded preview, so one model call is capped at 2,048
-tokens and 75 seconds; the worker, adapter, and host relay use that same
-per-call bound, and the whole turn is capped at three minutes.  These are Pi
-product limits, not changes to Deep Agents.
+** Regression correction: completion-policy alignment
+
+The 2,048-token and 75-second Pi-only limits made ordinary side-by-side use
+misleading.  On 2026-08-17, the request “Write a file and put a bunch of emojis
+in it. Like a lot. And then render it for me.” exhausted Pi's 2,048 generated
+tokens at about 54 seconds without a completed reply, while the same local Qwen
+request through Deep Agents continued beyond four minutes.  That is shared
+model behavior made into a Pi-only failure, not useful migration evidence.
+
+Pi now uses the serving model's discovered context ceiling (131,072 tokens on
+the current server), the same natural completion ceiling Deep Agents has when
+it omits =max_tokens=.  The host passes that one value to the Pi SDK and relay;
+the SDK calculates the remaining-context maximum for the actual prompt and the
+relay preserves it.  Its relay uses the established
+=ASSIST_LLM_READ_TIMEOUT_S= (default 600 seconds) as an *idle-byte* timeout,
+not a total-stream deadline; the private adapter adds no shorter deadline.  Pi
+uses the queue's same default two-hour backstop, although Pi measures one
+uninterrupted worker wall time while the queue measures cumulative active hold.
+These are shared operational defaults, not Pi-only completion limits.  The
+existing M4 maximum of twelve agent turns remains a distinct preview workflow
+boundary.
+
+On a worker failure, the host now preserves only fixed, content-free response
+facts in the durable Run error: terminal reason (=stop=, =length=, =toolUse=,
+=aborted=, =error=, or none), whether text or thinking deltas occurred, and a
+bounded completed-tool-call count.  It retains no generated token text.  This
+makes a future completion failure diagnosable without widening the worker-to-
+host trust boundary or logging model content.
 
 Portable skill files remain shared and unmodified.  Pi wraps each loaded body
 with its host-owned vocabulary mapping both before and after the shared text,
