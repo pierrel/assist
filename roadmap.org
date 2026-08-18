@@ -2,7 +2,20 @@
 ** TODO Add sub-agent tracing to web conversation
 Make it expandable from the main web ui. Not always expanded.
 * Basics
-** TODO Fix cli
+** TODO Build the CLI superuser interface
+Turn =assist= into the plain-terminal superuser interface described in
+[[http://10.0.0.1:9001/p/assist-cli-superuser-prd-v1][CLI superuser mode PRD v1]]
+(review pad). The default local-directory mode bind-mounts the current directory
+into one process-lifetime sandbox, maps durable private state to
+=~/.assist/<canonical-directory>/agent=, and discards container =/tmp= at exit.
+Keep its conversation process-local and never silently fall back to an unsandboxed
+host agent. Add =assist --threads= for the web-ordered, read-only durable-thread
+list and =assist --thread <id>= as an authenticated terminal client of the web
+Run worker, never a second direct SQLite/model worker. Preserve the dumb terminal:
+one prompt, streamed response text, and bounded, clearly prefixed tool/skill
+activity. Resume from the pad's reviewed answers before implementation; its open
+questions cover remote authentication, transcript persistence, directory identity,
+Docker failure posture, thread tool surface, terminal timezone, and render output.
 * Vision
 ** TODO Test a single vision experiment
 ** TODO Enable the vision model behind a vision-specific subagent
