@@ -61,6 +61,12 @@ const modelDiagnostic: ModelDiagnostic = {
   finish: "none", sawText: false, sawThinking: false, completedToolCalls: 0,
 };
 
+function hasDeclaredTools(name: string, value: unknown): value is string[] {
+  return Array.isArray(value) && (name === "render"
+    ? value.length === 1 && value[0] === "map_data"
+    : value.length === 0);
+}
+
 function resetModelDiagnostic(): void {
   modelDiagnostic.finish = "none";
   modelDiagnostic.sawText = false;
@@ -138,9 +144,7 @@ function validateRequest(value: unknown): Request {
     if (typeof value.name !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(value.name)
         || names.has(value.name) || typeof value.description !== "string"
         || Buffer.byteLength(value.description, "utf8") > 4096
-        || !Array.isArray(value.declaredTools)
-        || !(value.declaredTools.length === 0
-          || value.declaredTools.length === 1 && value.declaredTools[0] === "map_data")) {
+        || !hasDeclaredTools(value.name, value.declaredTools)) {
       throw new Error("Pi skill catalog is invalid");
     }
     names.add(value.name);
@@ -160,9 +164,7 @@ function validateRequest(value: unknown): Request {
         || Buffer.byteLength(value.body, "utf8") > 96 * 1024
         || typeof value.bodySha256 !== "string" || !/^[0-9a-f]{64}$/.test(value.bodySha256)
         || createHash("sha256").update(value.body, "utf8").digest("hex") !== value.bodySha256
-        || !Array.isArray(value.declaredTools)
-        || !(value.declaredTools.length === 0
-          || value.declaredTools.length === 1 && value.declaredTools[0] === "map_data")) {
+        || !hasDeclaredTools(value.name, value.declaredTools)) {
       throw new Error("Pi retained skills are invalid");
     }
     retainedNames.add(value.name);

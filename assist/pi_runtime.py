@@ -547,7 +547,7 @@ class PiRuntimeManager:
                 if teardown_errors:
                     if completion_committed or primary_error is not None:
                         error = teardown_errors[0]
-                        logging.error("Pi worker teardown failed after the primary result",
+                        logging.error("Pi worker teardown failed after the primary outcome",
                                       exc_info=(type(error), error, error.__traceback__))
                     else:
                         raise PiRuntimeError("Pi worker teardown failed") from teardown_errors[0]
