@@ -12,6 +12,7 @@ from urllib3.exceptions import ReadTimeoutError
 
 from assist.model_manager import OpenAIConfig
 from assist import pi_runtime
+from assist.thread_queue import DEFAULT_HOLD_TIMEOUT_S
 
 
 class _Backend:
@@ -29,6 +30,10 @@ def test_worker_wait_keeps_running_on_dockers_wrapped_read_timeout() -> None:
                 raise RequestsConnectionError("docker wait timed out")
 
     assert pi_runtime.PiRuntimeManager._wait_worker_once(_TimedWorker()) is None
+
+
+def test_runtime_uses_the_shared_visible_thread_hold_bound() -> None:
+    assert pi_runtime._WALL_TIMEOUT_SECONDS == DEFAULT_HOLD_TIMEOUT_S
 
 
 class _Worker:
@@ -56,6 +61,7 @@ class _Containers:
         assert isinstance(volumes, dict)
         assert next(iter(volumes.values()))["mode"] == "ro"
         control = Path(next(iter(volumes)))
+        assert json.loads((control / "request.json").read_text())["contextWindow"] == 32768
         return _Worker(control, self._events)
 
 
@@ -102,11 +108,12 @@ class _Broker:
 
 class _Relay:
     def __init__(self, control_dir: Path, upstream: str, api_key: str,
-                 model: str, capability: str) -> None:
+                 model: str, capability: str, context_len: int) -> None:
         assert upstream == "http://127.0.0.1:8000/v1"
         assert api_key == "secret"
         assert model == "qwen"
         assert len(capability) == 43
+        assert context_len == 32768
         self.events = _SandboxManager.events
 
     def start(self) -> None:
@@ -195,10 +202,15 @@ def test_result_sink_exposes_only_allowlisted_worker_failure_codes(tmp_path: Pat
         client.connect(str(control / "result.sock"))
         client.sendall(json.dumps({
             "capability": "a" * 43, "status": "failed", "code": "turn-bound-exceeded",
+            "phase": "prompt", "model": {
+                "finish": "length", "sawText": True, "sawThinking": False,
+                "completedToolCalls": 0,
+            },
         }).encode())
         client.shutdown(socket.SHUT_WR)
     try:
-        with pytest.raises(pi_runtime.PiRuntimeError, match="turn-bound-exceeded"):
+        with pytest.raises(pi_runtime.PiRuntimeError,
+                           match=r"turn-bound-exceeded.*model=length,text=yes"):
             sink.receive()
     finally:
         sink.close()
@@ -208,6 +220,10 @@ def test_result_sink_exposes_only_allowlisted_worker_failure_codes(tmp_path: Pat
         client.connect(str(control / "result.sock"))
         client.sendall(json.dumps({
             "capability": "a" * 43, "status": "failed", "code": "host-path:/secret",
+            "phase": "prompt", "model": {
+                "finish": "none", "sawText": False, "sawThinking": False,
+                "completedToolCalls": 0,
+            },
         }).encode())
         client.shutdown(socket.SHUT_WR)
     try:
@@ -215,6 +231,27 @@ def test_result_sink_exposes_only_allowlisted_worker_failure_codes(tmp_path: Pat
             rejected.receive()
     finally:
         rejected.close()
+
+
+def test_result_sink_rejects_untrusted_model_diagnostics(tmp_path: Path) -> None:
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    sink = pi_runtime.PiResultSink(control, "a" * 43)
+    with socket.socket(socket.AF_UNIX) as client:
+        client.connect(str(control / "result.sock"))
+        client.sendall(json.dumps({
+            "capability": "a" * 43, "status": "failed", "code": "worker-failed",
+            "phase": "reply", "model": {
+                "finish": "length", "sawText": "yes", "sawThinking": False,
+                "completedToolCalls": 0,
+            },
+        }).encode())
+        client.shutdown(socket.SHUT_WR)
+    try:
+        with pytest.raises(pi_runtime.PiRuntimeError, match="malformed"):
+            sink.receive()
+    finally:
+        sink.close()
 
 
 def test_runtime_rejects_a_nonzero_worker_status(

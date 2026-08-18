@@ -14,7 +14,6 @@ _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_HEADERS_BYTES = 32 * 1024
 _REQUEST_TIMEOUT_SECONDS = 5
-_RESPONSE_TIMEOUT_SECONDS = 650
 
 
 class _WorkerExited(RuntimeError):
@@ -95,7 +94,9 @@ def _relay(client: socket.socket, child: int | None = None) -> None:
         upstream.connect(_SOCKET_PATH)
         upstream.sendall(request)
         transferred = 0
-        while chunk := _receive(upstream, child, _RESPONSE_TIMEOUT_SECONDS):
+        # The host relay enforces the same idle-byte timeout as Deep Agents.
+        # Do not add a shorter adapter-wide deadline around a healthy stream.
+        while chunk := _receive(upstream, child, None):
             transferred += len(chunk)
             if transferred > _MAX_HEADERS_BYTES + _MAX_RESPONSE_BYTES:
                 raise RuntimeError("Pi provider response exceeds its bound")

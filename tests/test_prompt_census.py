@@ -478,7 +478,8 @@ def test_web_main_engine_profiles_record_shared_and_engine_specific_identity(cen
     assert deep["provider_system_prompt_sha256"] != pi["host_system_prompt_sha256"]
     assert pi["host_system_prompt_sha256"] == pi["static_prompt_sha256"]
     assert re.fullmatch(r"[0-9a-f]{64}", pi["worker_source_sha256"])
-    assert pi["worker_declared_tool_names"] == ["read", "write", "edit", "bash"]
+    assert pi["worker_declared_tool_names"] == [
+        "read", "write", "edit", "bash", "load_skill", "map_data"]
     assert pi["worker_provider_declaration"] == {
         "provider": "assist-pi",
         "transport": "openai-completions",

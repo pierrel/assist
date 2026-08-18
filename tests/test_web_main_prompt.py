@@ -67,12 +67,21 @@ def test_pi_adapter_never_promises_deep_only_capabilities():
     for available in ("`read`", "`write`", "`edit`", "`bash`"):
         assert available in prompt
     for unavailable in (
-        "`notify`", "`grounding`", "`research`", "`load_skill`",
+        "`notify`", "`grounding`", "`research`",
         "`start_async_task`", "`research-agent`", "`complex-request`",
         "`orchestrate-repeated-work`",
     ):
         assert unavailable not in prompt
-    assert "no skill loader, notification, research,\nor background-task capability" in prompt
+    assert "`load_skill`" in prompt
+    assert "There is no notification, research, or background-task" in prompt
+
+
+def test_pi_adapter_requires_tool_first_workspace_execution():
+    prompt = web_main_prompt.render_pi_web_main_prompt().text
+
+    assert "make the next necessary tool call\nimmediately" in prompt
+    assert "reproducing a\nrequested file's contents in prose" in prompt
+    assert "load a matching skill first" in prompt
 
 
 def test_missing_or_malformed_template_fails_closed(monkeypatch):

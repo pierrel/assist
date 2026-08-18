@@ -1,0 +1,349 @@
+#+title: Pi M4: skill catalog and progressive tool disclosure
+#+date: <2026-08-15>
+
+* State
+
+Implemented, reviewed, and deployed from this feature branch.  The deployed
+runtime at =117f0ed= passed a plain Pi greeting smoke and a =render= →
+=map_data= smoke; the branch CI passed at =2d499fc2=.  M3 established one
+host-owned web-main product-policy source for Deep Agents and Pi.  M4 is the
+next convergence slice: it gives Pi the current web-main skill contract and
+proves one non-kernel application tool family can be hidden, loaded, and
+executed through the same declared ownership boundary.  It starts from the
+merged M3 mainline (=8360821=), not the stale Pi M2 prompt.
+
+M4 deliberately does not call the resulting engine “feature complete.”  The
+current Pi preview has only four brokered coding tools.  Deep-only lifecycle,
+research, memory, schedule, subscription, email, travel, and map capabilities
+remain absent until their own typed Pi extensions and trusted host handlers
+exist.  A Pi catalog must never advertise a skill whose required capability is
+not present.
+
+** Regression correction: bounded streamed turns
+
+A live =render= request exposed a Pi-only transport bug: the relay correctly
+forced OpenAI streaming, but then waited for the upstream HTTP connection to
+close.  llama.cpp can legally send =data: [DONE]= and keep that HTTP/1.1
+connection alive.  The worker consequently held the thread until its old
+15-minute wall limit, even though the model had finished its response.
+
+The relay now recognizes only a complete, exact SSE =data: [DONE]= line as a
+successful stream termination.  It byte-bounds every response, rejects malformed
+data frames and EOF before the marker, and clears a pending skill continuation
+on any such failure.  A successful skill continuation is promoted only after
+that complete response.  Since Pi itself requests streaming, a successful
+non-stream response is rejected; bounded non-success responses remain useful
+provider errors.
+
+** Regression correction: completion-policy alignment
+
+The 2,048-token and 75-second Pi-only limits made ordinary side-by-side use
+misleading.  On 2026-08-17, the request “Write a file and put a bunch of emojis
+in it. Like a lot. And then render it for me.” exhausted Pi's 2,048 generated
+tokens at about 54 seconds without a completed reply, while the same local Qwen
+request through Deep Agents continued beyond four minutes.  That is shared
+model behavior made into a Pi-only failure, not useful migration evidence.
+
+Pi now uses the serving model's discovered context ceiling (131,072 tokens on
+the current server), the same natural completion ceiling Deep Agents has when
+it omits =max_tokens=.  The host passes that one value to the Pi SDK and relay;
+the SDK calculates the remaining-context maximum for the actual prompt and the
+relay preserves it.  Its relay uses the established
+=ASSIST_LLM_READ_TIMEOUT_S= (default 600 seconds) as an *idle-byte* timeout,
+not a total-stream deadline; the private adapter adds no shorter deadline.  Pi
+uses the queue's same default two-hour backstop, although Pi measures one
+uninterrupted worker wall time while the queue measures cumulative active hold.
+These are shared operational defaults, not Pi-only completion limits.  The
+existing M4 maximum of twelve agent turns remains a distinct preview workflow
+boundary.
+
+On a worker failure, the host now preserves only fixed, content-free response
+facts in the durable Run error: terminal reason (=stop=, =length=, =toolUse=,
+=aborted=, =error=, or none), whether text or thinking deltas occurred, and a
+bounded completed-tool-call count.  It retains no generated token text.  This
+makes a future completion failure diagnosable without widening the worker-to-
+host trust boundary or logging model content.
+
+Portable skill files remain shared and unmodified.  Pi wraps each loaded body
+with its host-owned vocabulary mapping both before and after the shared text,
+so examples using Deep Agents names such as =write_file= and =execute= map to
+Pi's actual =write= and =bash= tool schemas.  Broker enforcement remains the
+authority regardless of prompt wording.
+
+* Goal
+
+Give an ordinary Pi web turn the same skill-selection mechanics as current
+web-main Deep Agents without copying the catalog, paths, precedence logic, or
+tool authorization policy into TypeScript:
+
+1. The trusted Python host produces one bounded, exact-winner catalog from the
+   same mounted skill sources and precedence semantics that Deep Agents uses.
+2. Pi sees only name/description triggers and an always-active =load_skill=
+   tool.  It receives a full skill only after naming a current catalog winner.
+3. A successful =load_skill= changes Pi's provider-visible active set only for
+   tools declared by that exact winner.  The next model response, never the
+   loader response, may call them.
+4. The Python broker independently rejects an unavailable operation.  Changing
+   a schema or a TypeScript active set cannot manufacture host authority.
+5. The first real gated capability is =map_data=, declared by the existing
+   =render= skill.  It uses the current trusted =assist.tools.map_data= function
+   through the private per-turn socket and remains absent until =render= loads.
+
+The first portable catalog includes only reviewed filesystem-oriented skills
+whose current bodies can be carried honestly by the existing Pi coding tools:
+=edit-files=, =org-format=, =pdf=, =regexp=, and =render=.  Their full bodies
+are not rewritten.  A mandatory, tested Pi tool-vocabulary rider maps their
+established file-operation language (including =read_file=, =write_file=,
+=edit_file=, =execute=, =ls=, =glob=, and =grep=) onto Pi's actual =read=,
+=write=, =edit=, and =bash= tools.  Do not list =calculate= or =author-skill=:
+their current bodies truthfully require absent research/task or merge/push
+behavior.  Do not list =dev=, =git-sync=, =git-history=, =elisp=, =time=,
+orchestration skills, or any external/domain skill merely because it has a
+valid =SKILL.md=: their current procedures assume unavailable specialists,
+host policy, or unreviewed tool surfaces.  Adding one later is a manifest
+decision plus a capability test, not an accidental discovery side effect.
+
+* Architecture
+
+** Host catalog resource
+
+=assist.pi_skills= owns the serializable =PiSkillCatalog= and is the only Pi
+catalog producer.  It extends the current =SmallModelSkillsMiddleware=
+snapshot seam so one bounded source read returns metadata, raw bytes, sanitized
+body, per-body digest, source identity, and the exact last-source-wins winner.
+Deep continues to retain only metadata/fingerprint in graph state; Pi consumes
+the same one-read record instead of downloading its winning file a second time.
+No old-metadata/new-body mixture is possible.
+
+The one web-main composition factory supplies the exact current Deep source
+order: =main-guidance < main-only < discovered domain < shared bundled <
+web-only AgentSpec sources=, where the rightmost winner wins.  The domain
+source is intentionally before bundled skills and cannot shadow a bundled
+safety skill.  M4 then admits only the named Assist-owned winners above; a
+domain or extra-source winner with the same name does not enter the Pi profile.
+This is a deliberate first-profile trust boundary, not an alternative source
+precedence rule.  The fresh Pi worker makes this catalog on each turn, so a
+skill edit is picked up by the next turn without a service restart; no
+in-flight worker changes its catalog.
+
+No skill path, backend object, source diagnostic, directory listing, or source
+priority reaches the worker.  A malformed, unavailable, oversized, or
+policy-incompatible body fails the turn before the worker starts; a valid edit
+becomes the next worker's immutable winner. There is no fallback to ambient Pi
+discovery.
+
+** Closed worker manifest and lifecycle
+
+=PiRuntimeManager.run= remains the single synchronous owner of Pi runtime
+preparation.  After it creates the per-turn Pi sandbox and before it starts the
+worker, it calls an injected =build_pi_catalog(sandbox_backend,
+web_composition)= factory.  That factory uses the same sandbox-backed source
+composition as Deep web-main and returns either the immutable catalog or a
+bounded startup error.  It does not construct =ThreadManager.get()= or a Deep
+graph.  Thus Pi and Deep see the same mounted source universe, while catalog
+construction stays inside the existing post-queue, background Pi path rather
+than the FastAPI request/render path.
+
+=PiRuntimeManager.run= gives the broker and relay the resulting full immutable
+snapshot before the worker starts.  The versioned worker request
+contains only bounded name/description/declared-tool entries;
+the full sanitized body stays host-side until an exact load.  The TypeScript
+validator rejects unknown keys, duplicate names, excess entries, invalid names,
+overlong text, or a declared tool outside the worker's fixed registered set.
+The worker does not read the workspace, =.pi=, environment, or an Agent Skills
+directory.
+
+The relay also pins the local Qwen request to
+=chat_template_kwargs.enable_thinking=false=, matching the established Deep
+Agents request.  Otherwise this reasoning model can spend its bounded
+completion on hidden reasoning and produce no visible assistant reply; the
+worker cannot override this host-owned generation policy.
+
+** Three Pi extensions, one small shared state
+
+The worker adds a small immutable manifest shared only by these first-party
+extension factories.  Tool disclosure owns the active-tool calculation.  It is
+not a general plugin registry.
+
+1. =assist-kernel= continues to own the host system prompt and provider
+   capability header.  Its prompt gains only generic skills mechanics and the
+   rendered trigger catalog; M3's shared product-policy fragments remain
+   unchanged.
+2. =assist-skills= registers =load_skill=.  It calls the closed broker
+   =load_skill= operation with an exact manifest name; only the host returns
+   the already validated body and fixed disclosure result.  A catalog load is
+   sequential and idempotent.
+3. =assist-tool-disclosure= owns =setActiveTools=.  The initial set is the
+   existing four Pi coding tools plus =load_skill=.  On the successful
+   =load_skill= result it adds only that winner's declared tool names.  A
+   Pi inactive tool is absent from the provider schema, including in the loader
+   response; the relay independently rejects a wrong schema and the broker
+   independently rejects a premature call.  It establishes the initial
+   inactive set in =before_agent_start=, after Pi has registered extension
+   tools; the loader invokes only its narrow
+   disclosure function, never a generic plugin API.
+
+The current Pi coding tools remain kernel tools, matching Deep Agents P2b's
+framework-file-tool treatment.  =map_data= is the sole M4 declared tool.  Its
+custom definition is always registered but inactive; the =render= skill's
+existing =allowed-tools: map_data= declaration becomes the source of truth for
+its activation.  The native Pi default prompt is disabled, so only the M3
+prompt plus this closed skills kernel describes it.
+
+** Broker enforcement
+
+=PiToolBroker= is the Resource Access boundary, not an extension.  It and
+=PiProviderRelay= share a lock-protected, per-turn =PiSkillAuthority= with an
+=active_tools= set and an optional loader phase: absent, =observed_loader=, or
+=pending_continuation=.  These are not mutually exclusive capabilities: after
+=render= activates =map_data=, a later portable skill load does not remove it.
+The relay parses the buffered OpenAI/SSE provider completion strictly.  It
+records =observed_loader= only for a completion containing exactly one tool
+call: an exact =load_skill= name, canonical valid exact-name arguments, and no
+sibling tool call (including another loader).  That record binds the provider
+tool-call ID and exact name/arguments, but grants nothing.
+
+Only then can the worker execute the broker =load_skill= operation.  Its
+versioned broker request must carry the SDK tool-call ID, name, and arguments.
+The broker atomically matches them to =observed_loader=, validates the exact
+manifest winner, and returns a host-issued bounded disclosure result.  It
+records the digest of that exact *tool result* and changes its loader phase to
+=pending_continuation=; a raw or synthetic broker load without the
+relay-observed call fails closed.  A loader ID is accepted at most once; wrong
+or replayed IDs fail and clear the loader phase without changing =active_tools=.
+This ordering reflects the real lifecycle: provider completion, worker tool
+execution, then the following provider request.
+
+On the immediate next provider request, the relay requires the matching
+assistant tool call and the matching tool result before it admits anything.
+It also requires that the request's tool names equal the expected set:
+kernel tools, =load_skill=, already active declarations, and this winner's new
+declaration if any.  Any malformed SSE/JSON, mismatched ID/name/arguments/
+result digest, intervening request, duplicate loader, upstream failure, timeout,
+cancellation, or teardown clears the loader phase while leaving prior
+=active_tools= unchanged.  The relay forwards the prevalidated continuation
+without granting a tool, then promotes this winner's declaration only after a
+successful upstream response.  This is intentionally a
+per-turn capability grant: a verified successful load authorizes its declared
+tool for the rest of that Pi turn, not only a particular provider-returned
+tool-call ID.  The next request must expose the tool to the provider, and the
+independent broker remains the authority for every invocation.  This narrow
+policy matches a loaded skill's ordinary session semantics without inventing a
+fragile per-call grant.
+
+Thus a raw broker =map_data= call before the verified continuation fails, as
+does a same-response sibling call.  A worker cannot manufacture a load by
+writing a tool-result-shaped socket frame: the relay anchors promotion to the
+model response it relayed and the precise host result it issued.  A compromised
+worker that already holds the existing per-turn broker capability remains
+within the present broker trust boundary; M4 does not claim to solve arbitrary
+execution inside that pinned worker.
+
+The broker adds one bounded =map_data= operation.  It validates exact request
+shape, capability, operation, UTF-8 byte limits, active authority, at most
+eight places and four routes, and a 4 KiB limit for each input before calling
+the existing read-only host lookup.  =map_data= can make host geocoder/routing
+HTTP requests, so this semantic fan-out bound is a security and service-load
+limit, not merely output hygiene.  It preserves the function's returned
+unavailable/unplaceable results.  The worker map tool cannot use a URL,
+environment, filesystem mount, subprocess, or another listener.  Existing
+read/write/edit/bash behavior is unchanged.
+
+The model-visible and broker-visible active sets are produced from the same
+manifest declaration but checked in two processes.  The TypeScript guard stops
+ordinary model calls immediately; the relay/broker state machine is the
+independent host authority.  Tests use raw socket attempts before load, after a
+wrong load, in the loader response, and only after the verified continuation.
+
+* User flow
+
+1. Pierre creates a Pi thread as today.  Its first request lists the small
+   compatible skill catalog and the coding tools, but not =map_data=.
+2. “Show my notes file” selects =render=.  Pi calls only =load_skill(render)=;
+   the activity trace shows host-observed =load skill= activity after the page
+   refreshes.
+3. The following model request sees the render rules and =map_data=.  File
+   render blocks work without a host tool; a real-place/map request can call
+   =map_data= and emits the existing safe render block.
+4. A malformed load, hidden-tool call, or host-tool failure becomes an ordinary
+   bounded tool result.  The web thread retains its current error/status and
+   activity behavior; no selector, history, approval, Run, or queue semantics
+   change.
+
+* Security and failure model
+
+| Surface | Containment |
+|-
+| Domain/skill content | Python reads through the existing backend, selects a final winner before Pi sees it, sanitizes and byte-bounds it, and never exposes paths or source diagnostics. |
+| Model-supplied skill name | Exact-name lookup against a fixed manifest; no path construction, glob, or ambient discovery. |
+| Same-response load + effect | Pi active set changes only after the loader result; the relay promotes broker authority only after it verifies the immediate following provider/tool continuation, then grants that declared tool for the rest of the turn. |
+| Model-supplied map parameters | Private socket capability, exact JSON shapes, <=8 places, <=4 routes, 4 KiB per input, one serialized broker request, and the existing =map_data= fail-loud-but-returned contract. |
+| Worker compromise | Read-only networkless container, no workspace mount, no host credentials, fixed custom tools, per-turn random socket capability, and independent Python activity enforcement. |
+| Resource exhaustion | Maximum manifest entries/body/catalog bytes, existing request/socket/frame/turn/time limits, and no retry or extension discovery loop. |
+| Hot reload/version mix | Fresh workers receive one immutable catalog; edits affect the next turn only.  A worker cannot reload a manifest. |
+
+* Implementation plan
+
+1. Extract a narrow, tested one-read catalog snapshot and one web-main source
+   composition factory from =assist.middleware.skills_middleware= and
+   =assist.agent= without changing Deep Agents output, precedence, or execution
+   filtering.  Add =assist.pi_skills= and fixtures for source collisions,
+   Assist-owned portability filtering, body/digest identity, hot-next-turn
+   behavior, and failure before worker start.
+2. Have =PiRuntimeManager= build that catalog after its synchronous runtime
+   sandbox creation, never from a FastAPI request/render path and never by
+   constructing a Deep =Thread=.  Pass the same snapshot to =PiToolBroker= and
+   =PiProviderRelay=.  Extend the request schema and all
+   Python/TypeScript validators with tight size and exact-key checks.
+3. Add =assist-skills= and =assist-tool-disclosure= factories beside
+   =prompt_owner.ts=.  Register broker-backed =load_skill= and inactive
+   =map_data= with strict TypeScript/TypeBox schemas.  Exercise the pinned SDK
+   through its type check; deterministic host tests prove the first provider
+   menu has no =map_data=, a loader response cannot execute it, and only the
+   verified following request may reach the broker.  Confirm the actual Pi SDK
+   menu in the deployed smoke before widening the profile.
+4. Extend the private broker and provider relay with the one =map_data=
+   operation and their shared pending/active authority.  Add raw-wire tests
+   before load, after a wrong skill, in the loader response, after the verified
+   continuation, with malformed or multiple SSE loader calls, replayed or wrong
+   IDs/names/results, an intervening request, upstream failure, map fan-out
+   excess, and after shutdown.  Parser failure must leave pending inactive.
+   Add fixed host trace labels for =load skill= and =map data=.  Preserve all
+   existing coding-operation tests.
+5. Add deterministic coverage for exact catalog ownership, absence-before-load,
+   disclosure-after-load, and execution rejection. Confirm the actual SDK menu
+   through one deployed Pi smoke, then use the normal web preview for practical
+   file, org, and map work. A future prompt-census extension may record dynamic
+   catalog and active-tool digests after it has a stable Pi
+   provider-observation seam; it is not a condition for this usable first
+   profile.
+
+* Non-goals and follow-ons
+
+- Do not make the Deep and Pi final schema menus byte-identical.
+- Do not import Pi's ambient Agent Skills loader or permit project-discovered
+  extension code.
+- Do not add TODOs, memory writes, async tasks, subagents, schedules,
+  subscriptions, email, travel/directions, egress control, or phone/voice
+  capabilities.  Each needs a separately named extension and trusted host
+  boundary.
+- Do not alter existing Deep Agents prompts, middleware behavior, skill source
+  precedence, or the active location-context PR.  Rebase M4 onto that PR only
+  after it merges, then rerun its shared-core/provenance tests.
+- Do not treat the M4 map tool as approval or egress policy.  It reuses the
+  current read-only map lookup; later host-effect tools must retain their
+  existing approval owner.
+
+* Acceptance evidence
+
+- Existing Deep Agents P2b unit/eval coverage is unchanged and green.
+- A deterministic Pi suite proves catalog precedence, catalog/body provenance,
+  exact loader behavior, model-visible active tools, broker enforcement, and
+  rejected malformed/cross-turn calls.  The deployed Pi smoke is the SDK/menu
+  integration check for this first profile.
+- The worker's TypeScript check passes with no unchecked wire value.
+- One deployed Pi smoke confirms the actual provider tool menu and the
+  =load_skill(render)= → =map_data= path. Ordinary web-preview use is the
+  practical follow-up, not a campaign-style qualification gate.
+- A deployed Pi thread can load =render=, show a workspace file, and render a
+  map without exposing a Deep-only tool or capability.

@@ -19,10 +19,16 @@ from urllib3.exceptions import ReadTimeoutError
 
 from assist.model_manager import OpenAIConfig, current_model_config
 from assist.pi_broker import PiToolBroker
+from assist.pi_skills import (PiSkillAuthority, PiSkillError, build_pi_skill_catalog,
+                              empty_pi_skill_catalog)
 from assist.pi_trace import PiTraceRecorder, PiTraceStore
 from assist.pi_provider_relay import PiProviderRelay
 from assist.sandbox import DockerSandboxBackend
 from assist.sandbox_manager import SandboxManager
+from assist.agent import web_main_skill_composition
+from assist.backends import DOMAIN_SKILLS_PATH
+from assist.thread_manager import web_main_skill_sources
+from assist.thread_queue import DEFAULT_HOLD_TIMEOUT_S
 
 
 _IMAGE = "assist-pi-runtime"
@@ -30,12 +36,34 @@ _MAX_RESULT_BYTES = 96 * 1024
 _MAX_HISTORY_MESSAGES = 32
 _MAX_MESSAGE_BYTES = 32 * 1024
 _MAX_TURNS = 12
-_WALL_TIMEOUT_SECONDS = 900
+# Pi uses the visible-thread queue's default two-hour backstop. Its worker wall
+# clock is distinct from the queue's cumulative-active accounting.
+_WALL_TIMEOUT_SECONDS = DEFAULT_HOLD_TIMEOUT_S
 _WORKER_FAILURE_CODES = {"turn-bound-exceeded", "worker-failed"}
+_WORKER_FAILURE_PHASES = {"request", "runtime", "session", "prompt", "reply"}
+_MODEL_STOP_REASONS = {"none", "stop", "length", "toolUse", "aborted", "error"}
 
 
 class PiRuntimeError(RuntimeError):
     """A bounded Pi turn could not safely complete."""
+
+
+def _model_diagnostic(value: object) -> str:
+    """Validate and render fixed worker response facts without retaining content."""
+    expected = {"finish", "sawText", "sawThinking", "completedToolCalls"}
+    if not isinstance(value, dict) or set(value) != expected:
+        raise PiRuntimeError("Pi worker result is malformed")
+    finish = value["finish"]
+    saw_text = value["sawText"]
+    saw_thinking = value["sawThinking"]
+    tool_calls = value["completedToolCalls"]
+    if (not isinstance(finish, str) or finish not in _MODEL_STOP_REASONS
+            or not isinstance(saw_text, bool) or not isinstance(saw_thinking, bool)
+            or not isinstance(tool_calls, int) or isinstance(tool_calls, bool)
+            or not 0 <= tool_calls <= 64):
+        raise PiRuntimeError("Pi worker result is malformed")
+    return (f"model={finish},text={'yes' if saw_text else 'no'},"
+            f"thinking={'yes' if saw_thinking else 'no'},tool_calls={tool_calls}")
 
 
 @dataclass(frozen=True)
@@ -111,12 +139,13 @@ class PiResultSink:
         if not isinstance(capability, str) or not secrets.compare_digest(capability, self._capability):
             raise PiRuntimeError("Pi worker result is unauthorized")
         if value.get("status") == "failed":
-            if set(value) != {"capability", "status", "code"}:
+            if set(value) != {"capability", "status", "code", "phase", "model"}:
                 raise PiRuntimeError("Pi worker result is malformed")
-            code = value["code"]
-            if not isinstance(code, str) or code not in _WORKER_FAILURE_CODES:
+            code, phase, diagnostic = value["code"], value["phase"], value["model"]
+            if (not isinstance(code, str) or code not in _WORKER_FAILURE_CODES
+                    or not isinstance(phase, str) or phase not in _WORKER_FAILURE_PHASES):
                 raise PiRuntimeError("Pi worker result is malformed")
-            raise PiRuntimeError(f"Pi worker failed: {code}")
+            raise PiRuntimeError(f"Pi worker failed: {code} ({phase}; {_model_diagnostic(diagnostic)})")
         if value.get("status") != "completed" or set(value) != {
                 "capability", "status", "reply", "turns"}:
             raise PiRuntimeError("Pi worker result is malformed")
@@ -328,21 +357,36 @@ class PiRuntimeManager:
             provider_capability = secrets.token_urlsafe(32)
             result_capability = secrets.token_urlsafe(32)
             result_sink = PiResultSink(control_dir, result_capability)
-            self._write_request(control_dir, {
-                "version": 1, "prompt": prompt, "history": self._history(history),
-                "model": config.model, "systemPrompt": system_prompt,
-                "brokerCapability": broker_capability,
-                "providerCapability": provider_capability,
-                "resultCapability": result_capability, "maxTurns": max_turns,
-            })
             sandbox = self._sandbox_manager.get_pi_sandbox_backend(work_dir, timezone)
             if sandbox is None:
                 raise PiRuntimeError("Pi workspace sandbox is unavailable")
+            if isinstance(sandbox, DockerSandboxBackend):
+                try:
+                    skill_backend, skill_sources = web_main_skill_composition(
+                        sandbox, web_main_skill_sources())
+                    catalog = build_pi_skill_catalog(
+                        skill_backend, skill_sources,
+                        trusted_sources=(source for source in skill_sources
+                                         if source != DOMAIN_SKILLS_PATH))
+                except PiSkillError as error:
+                    raise PiRuntimeError("Pi skill catalog is unavailable") from error
+            else:  # Narrow test-double seam; every deployed sandbox is Docker-backed.
+                catalog = empty_pi_skill_catalog()
+            authority = PiSkillAuthority(catalog)
+            self._write_request(control_dir, {
+                "version": 1, "prompt": prompt, "history": self._history(history),
+                "model": config.model, "contextWindow": config.context_len,
+                "systemPrompt": system_prompt + catalog.prompt_section(),
+                "brokerCapability": broker_capability,
+                "providerCapability": provider_capability,
+                "resultCapability": result_capability, "maxTurns": max_turns,
+                "skillCatalog": catalog.manifest(),
+            })
             if recorder is None:
                 broker = PiToolBroker(sandbox, control_dir, broker_capability)
                 relay = PiProviderRelay(
                     control_dir, self._relay_url(config), config.api_key,
-                    config.model, provider_capability)
+                    config.model, provider_capability, config.context_len)
             else:
                 broker = PiToolBroker(
                     sandbox, control_dir, broker_capability,
@@ -350,9 +394,12 @@ class PiRuntimeManager:
                     trace_settle=recorder.settle)
                 relay = PiProviderRelay(
                     control_dir, self._relay_url(config), config.api_key,
-                    config.model, provider_capability,
+                    config.model, provider_capability, config.context_len,
                     trace_start=lambda: recorder.start("model", "model request"),
                     trace_settle=recorder.settle)
+            if isinstance(sandbox, DockerSandboxBackend):
+                broker.configure_skills(authority)
+                relay.configure_skills(authority)
             broker.start()
             relay.start()
             client = self._sandbox_manager._get_docker_client()

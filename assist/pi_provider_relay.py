@@ -14,14 +14,20 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Callable
 
+from assist.env import env_float
+from assist.pi_skills import PiSkillAuthority
 
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_MODEL_CALLS = 12
-_MAX_TOKENS = 8192
+_MAX_MODEL_CONTEXT_TOKENS = 1_000_000
 _SOCKET_TIMEOUT_SECONDS = 5
+# Match Deep Agents' read timeout. This is an idle-byte limit, not a cap on
+# the total duration of a healthy streamed completion.
+_MODEL_RESPONSE_IDLE_TIMEOUT_SECONDS = env_float("ASSIST_LLM_READ_TIMEOUT_S", 600.0)
 _CAPABILITY_HEADER = "x-assist-pi-capability"
 _PATH = "/v1/chat/completions"
+_QWEN_TEMPLATE_OPTIONS = {"enable_thinking": False}
 
 
 class PiProviderRelayError(ValueError):
@@ -37,6 +43,7 @@ class PiProviderRelay:
 
     def __init__(self, control_dir: str | Path, upstream_url: str,
                  api_key: str, model: str, capability: str,
+                 context_len: int = 131072,
                  trace_start: Callable[[], object] | None = None,
                  trace_settle: Callable[[object, bool], None] | None = None) -> None:
         self._control_dir = Path(control_dir)
@@ -45,6 +52,10 @@ class PiProviderRelay:
         self._api_key = api_key
         self._model = model
         self._capability = capability
+        if (not isinstance(context_len, int) or isinstance(context_len, bool)
+                or not 1 <= context_len <= _MAX_MODEL_CONTEXT_TOKENS):
+            raise PiProviderRelayError("Pi model context length is invalid")
+        self._context_len = context_len
         self._trace_start = trace_start
         self._trace_settle = trace_settle
         self._validate_control_dir()
@@ -61,6 +72,7 @@ class PiProviderRelay:
         self._stopping = False
         self._connections: set[http.client.HTTPConnection] = set()
         self._clients: set[socket.socket] = set()
+        self._skill_authority: PiSkillAuthority | None = None
 
     @property
     def socket_path(self) -> Path:
@@ -73,6 +85,12 @@ class PiProviderRelay:
             raise RuntimeError("Pi provider relay is already running")
         self._started = True
         self._thread.start()
+
+    def configure_skills(self, authority: PiSkillAuthority) -> None:
+        """Attach the broker-shared authority before any provider admission."""
+        if self._started or self._skill_authority is not None:
+            raise RuntimeError("Pi provider relay skill authority is already configured")
+        self._skill_authority = authority
 
     def close(self) -> None:
         """Stop model admission and close any forwarding connection in progress."""
@@ -140,9 +158,10 @@ class PiProviderRelay:
     def validate_request(self, method: str, path: str, headers: object,
                          body: bytes) -> bytes:
         """Validate an inbound request before it can consume model authority."""
-        if method != "POST" or path != _PATH or len(body) > _MAX_REQUEST_BYTES:
-            raise PiProviderRelayError("Pi model request is invalid")
         if not hasattr(headers, "get"):
+            raise PiProviderRelayError("Pi model request is invalid")
+        if method != "POST" or path != _PATH or len(body) > _MAX_REQUEST_BYTES:
+            self.clear_loader_for_capability(headers)
             raise PiProviderRelayError("Pi model request is invalid")
         content_type = headers.get("Content-Type")
         capability = headers.get(_CAPABILITY_HEADER)
@@ -151,41 +170,74 @@ class PiProviderRelay:
                 or not hmac.compare_digest(capability, self._capability)):
             raise PiProviderRelayError("Pi model request is unauthorized")
         try:
-            payload = json.loads(body)
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise PiProviderRelayError("Pi model request is malformed") from error
-        if not isinstance(payload, dict) or payload.get("model") != self._model:
-            raise PiProviderRelayError("Pi model request uses an invalid model")
-        if ("max_completion_tokens" in payload
-                or "n" in payload and payload["n"] != 1
-                or "stream" in payload and payload["stream"] is not True):
-            raise PiProviderRelayError("Pi model request changes its generation policy")
-        normalized = dict(payload)
-        normalized["model"] = self._model
-        normalized["max_tokens"] = _MAX_TOKENS
-        normalized["n"] = 1
-        normalized["temperature"] = 0.1
-        # Pi's provider adapter expects the OpenAI stream shape. The relay
-        # bounds and buffers that response before handing it back to the worker,
-        # so the worker cannot choose a non-streaming or unbounded mode.
-        normalized["stream"] = True
-        canonical = json.dumps(normalized, separators=(",", ":")).encode("utf-8")
-        if len(canonical) > _MAX_REQUEST_BYTES:
-            raise PiProviderRelayError("Pi model request exceeds its bound")
-        with self._state_lock:
-            if self._stopping or self._calls >= _MAX_MODEL_CALLS:
+            try:
+                payload = json.loads(body)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise PiProviderRelayError("Pi model request is malformed") from error
+            if not isinstance(payload, dict) or payload.get("model") != self._model:
+                raise PiProviderRelayError("Pi model request uses an invalid model")
+            if (self._skill_authority is not None
+                    and not self._skill_authority.can_continue_request(payload)):
+                raise PiProviderRelayError("Pi model request does not continue skill loading")
+            if ("max_completion_tokens" in payload
+                    or "n" in payload and payload["n"] != 1
+                    or "stream" in payload and payload["stream"] is not True):
+                raise PiProviderRelayError("Pi model request changes its generation policy")
+            requested_max_tokens = payload.get("max_tokens", self._context_len)
+            if (not isinstance(requested_max_tokens, int) or isinstance(requested_max_tokens, bool)
+                    or not 1 <= requested_max_tokens <= self._context_len):
+                raise PiProviderRelayError("Pi model request changes its generation policy")
+            normalized = dict(payload)
+            normalized["model"] = self._model
+            # Pi's SDK computes the remaining-context maximum from this turn's
+            # host-provided model context. Preserve that value rather than
+            # imposing the former Pi-only 2,048-token completion cap.
+            normalized["max_tokens"] = requested_max_tokens
+            normalized["n"] = 1
+            normalized["temperature"] = 0.1
+            # Qwen otherwise spends the entire bounded completion on hidden reasoning
+            # and returns no visible reply. Match the established Deep Agents request.
+            normalized["chat_template_kwargs"] = _QWEN_TEMPLATE_OPTIONS
+            # Pi's provider adapter expects the OpenAI stream shape. The relay
+            # bounds and buffers that response before handing it back to the worker,
+            # so the worker cannot choose a non-streaming or unbounded mode.
+            normalized["stream"] = True
+            canonical = json.dumps(normalized, separators=(",", ":")).encode("utf-8")
+            if len(canonical) > _MAX_REQUEST_BYTES:
+                raise PiProviderRelayError("Pi model request exceeds its bound")
+            with self._state_lock:
+                limited = self._stopping or self._calls >= _MAX_MODEL_CALLS
+                if not limited:
+                    self._calls += 1
+            if limited:
                 raise PiProviderRelayError("Pi model turn bound exceeded")
-            self._calls += 1
-        return canonical
+            return canonical
+        except PiProviderRelayError:
+            if self._skill_authority is not None:
+                self._skill_authority.clear_loader()
+            raise
+
+    def clear_loader_for_capability(self, headers: object) -> None:
+        """Clear a pending continuation only for this relay's authenticated worker."""
+        if self._skill_authority is None or not hasattr(headers, "get"):
+            return
+        capability = headers.get(_CAPABILITY_HEADER)
+        if isinstance(capability, str) and hmac.compare_digest(capability, self._capability):
+            self._skill_authority.clear_loader()
 
     def forward(self, body: bytes, trace_operation: object | None = None) -> tuple[int, str, list[bytes]]:
         """Forward one already-authorized request without forwarding its headers."""
         completed = False
         connection_type = (http.client.HTTPSConnection
                            if self._upstream.scheme == "https" else http.client.HTTPConnection)
-        connection = connection_type(self._upstream.hostname, self._upstream.port, timeout=_SOCKET_TIMEOUT_SECONDS)
+        connection = connection_type(
+            self._upstream.hostname, self._upstream.port,
+            timeout=_SOCKET_TIMEOUT_SECONDS,
+        )
         with self._state_lock:
             if self._stopping:
+                if self._skill_authority is not None:
+                    self._skill_authority.clear_loader()
                 raise PiProviderRelayError("Pi provider relay is stopped")
             self._connections.add(connection)
             # Holding the short connection/send operation under this gate means
@@ -198,25 +250,86 @@ class PiProviderRelay:
             except BaseException:
                 self._connections.discard(connection)
                 connection.close()
+                if self._skill_authority is not None:
+                    self._skill_authority.clear_loader()
                 raise
         try:
-            if connection.sock is not None:
-                connection.sock.settimeout(650)
+            if connection.sock is None:
+                raise PiProviderRelayError("Pi model connection is unavailable")
+            connection.sock.settimeout(_MODEL_RESPONSE_IDLE_TIMEOUT_SECONDS)
             response = connection.getresponse()
-            chunks: list[bytes] = []
-            total = 0
-            while chunk := response.read(65536):
-                total += len(chunk)
-                if total > _MAX_RESPONSE_BYTES:
-                    raise PiProviderRelayError("Pi model response exceeds its bound")
-                chunks.append(chunk)
+            chunks = self._read_response(response)
             completed = 200 <= response.status < 300
-            return response.status, "application/json", chunks
+            if completed and self._skill_authority is not None:
+                try:
+                    payload = json.loads(body)
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise PiProviderRelayError("Pi model request is malformed") from error
+                response_valid, observed = _loader_completion(b"".join(chunks))
+                if not response_valid:
+                    raise PiProviderRelayError("Pi model response is malformed")
+                if not self._skill_authority.continue_request(payload):
+                    raise PiProviderRelayError("Pi model request does not continue skill loading")
+                if observed is not None:
+                    self._skill_authority.observe_loader(*observed)
+            elif self._skill_authority is not None:
+                self._skill_authority.clear_loader()
+            content_type = "text/event-stream" if completed else "application/json"
+            return response.status, content_type, chunks
+        except BaseException:
+            if self._skill_authority is not None:
+                self._skill_authority.clear_loader()
+            raise
         finally:
             with self._state_lock:
                 self._connections.discard(connection)
             connection.close()
             self.settle_trace(trace_operation, completed)
+
+    @classmethod
+    def _set_response_timeout(cls, response: http.client.HTTPResponse) -> None:
+        """Apply Deep Agents' idle-byte model timeout before every read."""
+        raw = getattr(response.fp, "raw", None)
+        socket_ = getattr(raw, "_sock", None)
+        if socket_ is not None:
+            socket_.settimeout(_MODEL_RESPONSE_IDLE_TIMEOUT_SECONDS)
+
+    @classmethod
+    def _read_response(cls, response: http.client.HTTPResponse) -> list[bytes]:
+        if 200 <= response.status < 300:
+            if not _is_sse(response):
+                raise PiProviderRelayError("Pi model response is not streamed")
+            return cls._read_complete_sse(response)
+        return cls._read_bounded_response(response)
+
+    @classmethod
+    def _read_bounded_response(cls, response: http.client.HTTPResponse) -> list[bytes]:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            cls._set_response_timeout(response)
+            chunk = response.read(65536)
+            if not chunk:
+                return chunks
+            total = _append_response_chunk(chunks, total, chunk)
+
+    @classmethod
+    def _read_complete_sse(cls, response: http.client.HTTPResponse) -> list[bytes]:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            cls._set_response_timeout(response)
+            line = response.readline(_MAX_RESPONSE_BYTES + 1)
+            if not line:
+                raise PiProviderRelayError("Pi model stream ended before completion")
+            total = _append_response_chunk(chunks, total, line)
+            value = _sse_data_value(line)
+            if value is None:
+                continue
+            if value == b"[DONE]":
+                return chunks
+            if not _is_openai_stream_frame(value):
+                raise PiProviderRelayError("Pi model stream is malformed")
 
     def start_trace(self) -> object | None:
         """Keep optional activity recording from changing model admission."""
@@ -237,6 +350,183 @@ class PiProviderRelay:
             pass
 
 
+def _choice_container(value: object) -> dict[str, object] | None:
+    """Return the sole well-formed OpenAI message or delta container."""
+    if not isinstance(value, dict):
+        return None
+    choices = value.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+        return None
+    choice = choices[0]
+    has_message = "message" in choice
+    has_delta = "delta" in choice
+    if has_message == has_delta:
+        return None
+    container = choice["message"] if has_message else choice["delta"]
+    return container if isinstance(container, dict) else None
+
+
+def _usage_only_stream_frame(value: object) -> bool:
+    """Accept OpenAI's terminal usage record, which has no completion choice."""
+    if not isinstance(value, dict) or value.get("choices") != []:
+        return False
+    usage = value.get("usage")
+    return isinstance(usage, dict)
+
+
+def _loader_completion(raw: bytes) -> tuple[bool, tuple[str, str, object] | None]:
+    """Validate one model response and return its sole complete loader, if any."""
+    values: list[object] = []
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return False, None
+    if _contains_sse_data(raw):
+        for line in decoded.splitlines():
+            if not line.startswith("data:"):
+                continue
+            item = line[5:].strip()
+            if item == "[DONE]":
+                continue
+            try:
+                values.append(json.loads(item))
+            except json.JSONDecodeError:
+                return False, None
+    else:
+        try:
+            values.append(json.loads(decoded))
+        except json.JSONDecodeError:
+            return False, None
+    if not values:
+        return False, None
+    calls: dict[int, dict[str, object]] = {}
+    saw_unindexed_call = False
+    saw_completion = False
+    for value in values:
+        if _usage_only_stream_frame(value):
+            continue
+        container = _choice_container(value)
+        if container is None:
+            return False, None
+        saw_completion = True
+        if "tool_calls" not in container:
+            continue
+        tool_calls = container["tool_calls"]
+        if not isinstance(tool_calls, list):
+            return False, None
+        frame_indexes: set[int] = set()
+        for item in tool_calls:
+            if not isinstance(item, dict):
+                return False, None
+            if "index" in item:
+                index = item["index"]
+                if (saw_unindexed_call or not isinstance(index, int)
+                        or isinstance(index, bool) or index < 0):
+                    return False, None
+            else:
+                # A non-streamed response may omit index for its one call.
+                # More than one unindexed call is ambiguous, never a loader.
+                if calls:
+                    return False, None
+                saw_unindexed_call = True
+                index = 0
+            if index in frame_indexes:
+                return False, None
+            frame_indexes.add(index)
+            prior = calls.setdefault(index, {"arguments": ""})
+            if "id" in item:
+                call_id = item["id"]
+                if not isinstance(call_id, str):
+                    return False, None
+                if "id" in prior and prior["id"] != call_id:
+                    return False, None
+                prior["id"] = call_id
+            if "function" in item:
+                function = item["function"]
+                if not isinstance(function, dict):
+                    return False, None
+                if "name" in function:
+                    name = function["name"]
+                    if not isinstance(name, str):
+                        return False, None
+                    if "name" in prior and prior["name"] != name:
+                        return False, None
+                    prior["name"] = name
+                if "arguments" in function:
+                    arguments = function["arguments"]
+                    if not isinstance(arguments, str):
+                        return False, None
+                    prior["arguments"] = str(prior["arguments"]) + arguments
+    if not saw_completion:
+        return False, None
+    parsed_arguments: dict[int, object] = {}
+    for index, call in calls.items():
+        call_id = call.get("id")
+        name = call.get("name")
+        arguments = call.get("arguments")
+        if (not isinstance(call_id, str) or not call_id or not isinstance(name, str)
+                or not name or not isinstance(arguments, str)):
+            return False, None
+        try:
+            parsed_arguments[index] = json.loads(arguments)
+        except json.JSONDecodeError:
+            return False, None
+    if len(calls) != 1:
+        return True, None
+    index, call = next(iter(calls.items()))
+    if call["name"] != "load_skill":
+        return True, None
+    return True, (call["id"], "load_skill", parsed_arguments[index])
+
+
+def _sole_loader_completion(raw: bytes) -> tuple[str, str, object] | None:
+    """Return the sole loader only if the model response is structurally valid."""
+    _valid, loader = _loader_completion(raw)
+    return loader
+
+
+def _append_response_chunk(chunks: list[bytes], total: int, chunk: bytes) -> int:
+    total += len(chunk)
+    if total > _MAX_RESPONSE_BYTES:
+        raise PiProviderRelayError("Pi model response exceeds its bound")
+    chunks.append(chunk)
+    return total
+
+
+def _is_sse(response: http.client.HTTPResponse) -> bool:
+    content_type = response.getheader("Content-Type", "")
+    return content_type.lower().split(";", 1)[0].strip() == "text/event-stream"
+
+
+def _sse_data_value(line: bytes) -> bytes | None:
+    """Return an exact complete SSE data line, if this is one."""
+    if not line.endswith(b"\n"):
+        raise PiProviderRelayError("Pi model stream is malformed")
+    content = line[:-1]
+    if content.endswith(b"\r"):
+        content = content[:-1]
+    if not content.startswith(b"data:"):
+        return None
+    return content[5:].lstrip(b" \t")
+
+
+def _contains_sse_data(raw: bytes) -> bool:
+    return any(line.startswith(b"data:") for line in raw.splitlines())
+
+
+def _is_openai_stream_frame(value: bytes) -> bool:
+    try:
+        parsed = json.loads(value.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if _usage_only_stream_frame(parsed):
+        return True
+    container = _choice_container(parsed)
+    return container is not None and (
+        "tool_calls" not in container or isinstance(container["tool_calls"], list))
+
+
+
 class _ProviderHandler(BaseHTTPRequestHandler):
     """Tiny HTTP boundary used only behind a private Unix socket."""
 
@@ -246,6 +536,12 @@ class _ProviderHandler(BaseHTTPRequestHandler):
     def setup(self) -> None:
         self.request.settimeout(_SOCKET_TIMEOUT_SECONDS)
         super().setup()
+
+    def send_error(self, code: int, message: str | None = None,
+                   explain: str | None = None) -> None:
+        """Make any authenticated rejected request invalidate its continuation."""
+        self.relay.clear_loader_for_capability(getattr(self, "headers", None))
+        super().send_error(code, message, explain)
 
     def do_POST(self) -> None:
         registered = False

@@ -1,8 +1,9 @@
 """Authenticated, bounded Pi-to-workspace tool broker.
 
-The Pi worker has no workspace mount or shell.  Its four coding tools make one
-request per Unix-socket connection to this Resource Access object, which alone
-holds the selected turn's ``DockerSandboxBackend``.
+The Pi worker has no workspace mount or shell. Its coding tools, skill loader,
+and the one M4 map lookup make one request per Unix-socket connection to this
+Resource Access object, which alone holds the selected turn's
+``DockerSandboxBackend``.
 """
 from __future__ import annotations
 
@@ -19,7 +20,9 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Literal, TypedDict
 
+from assist.pi_skills import PiSkillAuthority, PiSkillError
 from assist.sandbox import DockerSandboxBackend
+from assist.tools import map_data
 
 
 _VERSION = 1
@@ -40,17 +43,22 @@ class _BrokerRequest(TypedDict, total=False):
     version: int
     id: int
     capability: str
-    operation: Literal["access", "bash", "mkdir", "read", "write"]
+    operation: Literal["access", "bash", "mkdir", "read", "write", "load_skill", "map_data"]
     path: str
     mode: Literal["read", "write"]
     content: str
     command: str
     cwd: str
     timeout: int
+    tool_call_id: str
+    name: str
+    arguments: dict[str, object]
+    places: str
+    routes: str
 
 
 class PiToolBroker:
-    """Serve Pi coding-tool requests against exactly one Docker sandbox."""
+    """Serve Pi coding, skill, and map requests against one Docker sandbox."""
 
     def __init__(self, backend: DockerSandboxBackend, control_dir: str | Path,
                  capability: str,
@@ -69,6 +77,13 @@ class PiToolBroker:
         self._active_requests = 0
         self._request_gate = threading.Condition()
         self._request_slot = threading.BoundedSemaphore(1)
+        self._skill_authority: PiSkillAuthority | None = None
+
+    def configure_skills(self, authority: PiSkillAuthority) -> None:
+        """Attach the manager-created per-turn skill authority before start."""
+        if self._listener is not None or self._skill_authority is not None:
+            raise RuntimeError("Pi broker skill authority is already configured")
+        self._skill_authority = authority
 
     @property
     def socket_path(self) -> Path:
@@ -177,7 +192,8 @@ class PiToolBroker:
         if operation == "access":
             mode = request.get("mode")
             return "read" if mode == "read" else "write" if mode == "write" else None
-        return {"mkdir": "write", "read": "read", "write": "write", "bash": "bash"}[operation]
+        return {"mkdir": "write", "read": "read", "write": "write", "bash": "bash",
+                "load_skill": "load skill", "map_data": "map data"}[operation]
 
     def _start_trace(self, name: str) -> object | None:
         """Keep optional observability from changing a permitted tool operation."""
@@ -244,7 +260,8 @@ class PiToolBroker:
                 or not 0 < request["id"] <= 2**31
                 or not isinstance(request.get("capability"), str)
                 or not hmac.compare_digest(request["capability"], self._capability)
-                or request.get("operation") not in {"access", "bash", "mkdir", "read", "write"}):
+                or request.get("operation") not in {"access", "bash", "mkdir", "read", "write",
+                                                    "load_skill", "map_data"}):
             raise PiBrokerError("Pi tool request is invalid")
         expected = {
             "access": {"version", "id", "capability", "operation", "path", "mode"},
@@ -252,6 +269,8 @@ class PiToolBroker:
             "mkdir": {"version", "id", "capability", "operation", "path"},
             "read": {"version", "id", "capability", "operation", "path"},
             "write": {"version", "id", "capability", "operation", "path", "content"},
+            "load_skill": {"version", "id", "capability", "operation", "tool_call_id", "name", "arguments"},
+            "map_data": {"version", "id", "capability", "operation", "places", "routes"},
         }[request["operation"]]
         if set(request) != expected:
             raise PiBrokerError("Pi tool request has an invalid shape")
@@ -310,7 +329,41 @@ class PiToolBroker:
             return None
         if operation == "bash":
             return self._bash(request)
+        if operation == "load_skill":
+            if self._skill_authority is None:
+                raise PiBrokerError("Pi skill loading is unavailable")
+            try:
+                arguments = request.get("arguments")
+                if arguments != {"name": request.get("name")}:
+                    raise PiBrokerError("Pi skill loading is invalid")
+                return self._skill_authority.load_skill(
+                    request.get("tool_call_id"), "load_skill", arguments)
+            except PiSkillError as error:
+                raise PiBrokerError("Pi skill loading failed") from error
+        if operation == "map_data":
+            return self._map_data(request)
         raise PiBrokerError("Pi tool operation is invalid")
+
+    def _map_data(self, request: _BrokerRequest) -> str:
+        if self._skill_authority is None:
+            raise PiBrokerError("Pi map data is unavailable")
+        places, routes = request.get("places"), request.get("routes")
+        if not isinstance(places, str) or not isinstance(routes, str):
+            raise PiBrokerError("Pi map data is invalid")
+        try:
+            if len(places.encode("utf-8")) > 4096 or len(routes.encode("utf-8")) > 4096:
+                raise PiBrokerError("Pi map data exceeds its bound")
+        except UnicodeEncodeError as error:
+            raise PiBrokerError("Pi map data is invalid") from error
+        place_items = [item.strip() for item in (places.split(";") if ";" in places else places.split(",")) if item.strip()]
+        route_items = [item.strip() for item in routes.split(";") if item.strip()]
+        if len(place_items) > 8 or len(route_items) > 4:
+            raise PiBrokerError("Pi map data fan-out exceeds its bound")
+        try:
+            self._skill_authority.require("map_data")
+        except PiSkillError as error:
+            raise PiBrokerError("Pi map data is unavailable") from error
+        return map_data(places, routes)
 
     def _bash(self, request: _BrokerRequest) -> dict[str, object]:
         command = request.get("command")
