@@ -8,6 +8,9 @@ from fastapi.testclient import TestClient
 from manage.web import threads
 import manage.web as web
 import assist.async_subagents as async_tasks
+from assist.context_rider import ContextRider
+from assist.schedule import tools as schedule_tools_mod
+from assist.schedule.store import ScheduleStore
 from assist.async_subagents import (
     AsyncTaskContext, async_task_context, async_task_tools,
     configure_async_subagent_app,
@@ -39,6 +42,19 @@ def _parent_and_metadata(monkeypatch, tmp_path):
     submitted = _root(monkeypatch, tmp_path)
     threads.MANAGER.reserve("parent")
     parent = threads._create_run("parent", "question")
+    metadata = {
+        "parent_thread_id": "parent",
+        "parent_run_id": parent.id,
+        "dispatch_key": f"{parent.work_id}:tool-1",
+    }
+    SERVICE.create_thread("sub-stable", metadata)
+    return submitted, parent, metadata
+
+
+def _parent_with_rider(monkeypatch, tmp_path, rider):
+    submitted = _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    parent = threads._create_run("parent", "set this up", rider=rider)
     metadata = {
         "parent_thread_id": "parent",
         "parent_run_id": parent.id,
@@ -223,6 +239,103 @@ def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
     assert task["status"] == "success"
     assert task["result"] == "child result"
     assert (wakes[0].id, "parent", {}) in submitted
+
+
+def test_context_completion_carries_only_parent_timezone_to_schedule(
+        monkeypatch, tmp_path):
+    """The original browser zone reaches the later schedule, never its location."""
+    _, _, metadata = _parent_with_rider(
+        monkeypatch, tmp_path,
+        ContextRider(tz="America/Los_Angeles", lat=37.77, lon=-122.42))
+    child = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect files", metadata=metadata)
+    threads._runs().claim(child.thread_id, child.id)
+    child = threads._runs().transition(
+        child.thread_id, child.id, "success", result="context complete")
+
+    wake = threads._complete_child_handoff(child)
+
+    assert wake is not None
+    assert wake.rider == {"sent_at": None, "tz": "America/Los_Angeles",
+                          "lat": None, "lon": None}
+    store = ScheduleStore(str(tmp_path))
+    monkeypatch.setattr(
+        schedule_tools_mod, "get_config",
+        lambda: {"configurable": {
+            "thread_id": "parent",
+            "context_rider": threads._rider_from_fields(wake.rider),
+        }})
+    create_schedule = next(
+        tool for tool in schedule_tools_mod.schedule_tools(store)
+        if tool.__name__ == "create_schedule")
+
+    assert create_schedule("weekly review", hour=9, weekdays=[0]).startswith("Scheduled.")
+    assert store.for_thread("parent")[0].tz == "America/Los_Angeles"
+
+
+def test_context_completion_never_substitutes_a_later_thread_timezone(
+        monkeypatch, tmp_path):
+    """A completion wake inherits only its exact causal parent Run."""
+    _, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    threads._create_run(
+        "parent", "a later user message", rider=ContextRider(tz="Europe/Paris"))
+    child = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect files", metadata=metadata)
+    threads._runs().claim(child.thread_id, child.id)
+    child = threads._runs().transition(
+        child.thread_id, child.id, "success", result="context complete")
+
+    wake = threads._complete_child_handoff(child)
+
+    assert parent.rider is None
+    assert wake is not None and wake.rider is None
+
+
+@pytest.mark.parametrize(
+    ("explicit_tz", "expected_tz"),
+    [(None, "America/Los_Angeles"), ("Europe/Paris", "Europe/Paris")],
+)
+def test_triggered_dispatch_uses_last_visible_timezone_unless_explicit(
+        monkeypatch, tmp_path, explicit_tz, expected_tz):
+    _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    threads._create_run(
+        "parent", "set up a reminder",
+        rider=ContextRider(tz="America/Los_Angeles"))
+    # A later system run must not replace the user's remembered timezone.
+    threads._create_run(
+        "parent", "system work", rider=ContextRider(tz="UTC"), origin="system")
+    threads._create_run(
+        "parent", "an inbound message", rider=ContextRider(tz="Asia/Tokyo"),
+        sender="+15551234567")
+    # The resolver must use persisted Run history, not a process-local cache.
+    threads._RUN_SERVICES_BY_ROOT.pop(str(tmp_path))
+    captured = []
+    monkeypatch.setattr(threads, "_require_deep_thread", lambda tid: None)
+    monkeypatch.setattr(
+        threads, "_execute_run", lambda run_id, tid: captured.append(
+            threads._runs().get(tid, run_id)))
+
+    threads._scheduled_dispatch("parent", "do the work", explicit_tz)
+
+    assert len(captured) == 1
+    rider = threads._rider_from_fields(captured[0].rider)
+    assert rider is not None and rider.tz == expected_tz
+    assert rider.lat is None and rider.lon is None
+
+
+def test_triggered_dispatch_without_a_known_timezone_keeps_no_rider(monkeypatch, tmp_path):
+    _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    captured = []
+    monkeypatch.setattr(threads, "_require_deep_thread", lambda tid: None)
+    monkeypatch.setattr(
+        threads, "_execute_run", lambda run_id, tid: captured.append(
+            threads._runs().get(tid, run_id)))
+
+    threads._scheduled_dispatch("parent", "do the work", None)
+
+    assert captured[0].rider is None
 
 
 def test_parent_thread_lists_its_tasks(monkeypatch, tmp_path):
