@@ -544,7 +544,7 @@ def test_teardown_attempts_every_authority_after_a_cleanup_failure(
 
 
 def test_committed_result_stays_successful_when_later_teardown_fails(
-        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     work_dir = tmp_path / "thread" / "workspace"
     work_dir.mkdir(parents=True)
     _SandboxManager.events = []
@@ -567,6 +567,7 @@ def test_committed_result_stays_successful_when_later_teardown_fails(
 
     assert result == pi_runtime.PiRuntimeResult("done", 1)
     assert committed == [result]
+    assert "cleanup failed" in caplog.text
 
 
 def test_runtime_reaps_a_timed_out_worker_with_term_then_kill(
