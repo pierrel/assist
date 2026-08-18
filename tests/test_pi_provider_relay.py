@@ -33,7 +33,7 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
         length = int(self.headers["Content-Length"])
         payload = json.loads(self.rfile.read(length))
         type(self).requests.append((self.path, dict(self.headers), payload))
-        body = b'data: {"id":"test","choices":[{}]}\n\ndata: [DONE]\n\n'
+        body = b'data: {"id":"test","choices":[{"delta":{}}]}\n\ndata: [DONE]\n\n'
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(body)))
@@ -79,7 +79,7 @@ class _KeepAliveSSEUpstream(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
-        for part in (b': ping\n\ndata: {"choices":[{}]}\n\ndata: [DO', b'NE]\n\n'):
+        for part in (b': ping\n\ndata: {"choices":[{"delta":{}}]}\n\ndata: [DO', b'NE]\n\n'):
             self.wfile.write(f"{len(part):X}\r\n".encode() + part + b"\r\n")
         self.wfile.flush()
         type(self).sent_done.set()
@@ -114,6 +114,48 @@ class _MalformedSSEUpstream(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self.rfile.read(int(self.headers["Content-Length"]))
         body = b"data: not-json\n\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+class _MalformedShapeSSEUpstream(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers["Content-Length"]))
+        body = b'data: {"choices":[{}]}\n\ndata: [DONE]\n\n'
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+class _EmptySSEUpstream(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers["Content-Length"]))
+        body = b"data: [DONE]\n\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+class _IncompleteToolSSEUpstream(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers["Content-Length"]))
+        body = b'data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}\n\ndata: [DONE]\n\n'
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(body)))
@@ -175,7 +217,7 @@ class _SlowLineSSEUpstream(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
-        part = b'data: {"choices":[{}]}'
+        part = b'data: {"choices":[{"delta":{}}]}'
         self.wfile.write(f"{len(part):X}\r\n".encode() + part + b"\r\n")
         self.wfile.flush()
         type(self).started.set()
@@ -390,6 +432,75 @@ def test_incomplete_sse_does_not_promote_a_pending_skill(tmp_path: Path) -> None
 
 def test_malformed_sse_does_not_promote_a_pending_skill(tmp_path: Path) -> None:
     upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _MalformedSSEUpstream)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    authority, result = _pending_render_authority()
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
+    )
+    relay.configure_skills(authority)
+    relay.start()
+    try:
+        rejected = _request(relay.socket_path, "a" * 43, extra=_render_continuation(result))
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert b" 403 " in rejected
+    assert authority.active_tools == frozenset()
+
+
+def test_malformed_sse_shape_does_not_promote_a_pending_skill(tmp_path: Path) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _MalformedShapeSSEUpstream)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    authority, result = _pending_render_authority()
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
+    )
+    relay.configure_skills(authority)
+    relay.start()
+    try:
+        rejected = _request(relay.socket_path, "a" * 43, extra=_render_continuation(result))
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert b" 403 " in rejected
+    assert authority.active_tools == frozenset()
+
+
+def test_empty_sse_does_not_promote_a_pending_skill(tmp_path: Path) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _EmptySSEUpstream)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    authority, result = _pending_render_authority()
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
+    )
+    relay.configure_skills(authority)
+    relay.start()
+    try:
+        rejected = _request(relay.socket_path, "a" * 43, extra=_render_continuation(result))
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert b" 403 " in rejected
+    assert authority.active_tools == frozenset()
+
+
+def test_incomplete_sse_tool_call_does_not_promote_a_pending_skill(tmp_path: Path) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _IncompleteToolSSEUpstream)
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     upstream_thread.start()
     control = tmp_path / "control"
@@ -706,10 +817,89 @@ def test_loader_completion_requires_exactly_one_complete_loader_call() -> None:
         {"id": "call-1", "function": {"name": "load_skill", "arguments": '{"name":"render"}'}},
         {"id": "call-2", "function": {"name": "map_data", "arguments": "{}"}},
     ]}}]}).encode()
+    ambiguous = json.dumps({"id": "response-1", "choices": [{"message": {"tool_calls": [
+        {"id": "call-1", "function": {"name": "load_skill", "arguments": '{"name":"render"}'}},
+        {"id": "call-2", "function": {"name": "load_skill", "arguments": '{"name":"render"}'}},
+    ]}}]}).encode()
+    duplicate_index = json.dumps({"id": "response-1", "choices": [{"message": {"tool_calls": [
+        {"index": 0, "id": "call-1", "function": {
+            "name": "load_skill", "arguments": '{"name":"render"}'}},
+        {"index": 0, "id": "call-2", "function": {
+            "name": "load_skill", "arguments": '{"name":"render"}'}},
+    ]}}]}).encode()
+    first_fragment = json.dumps({"choices": [{"delta": {"tool_calls": [{
+        "index": 0, "id": "call-1", "function": {"name": "load_skill", "arguments": '{"name":'},
+    }]}}]}).encode()
+    final_fragment = json.dumps({"choices": [{"delta": {"tool_calls": [{
+        "index": 0, "id": "call-1", "function": {"name": "load_skill", "arguments": '"render"}'},
+    }]}}]}).encode()
+    conflicting_fragment = json.dumps({"choices": [{"delta": {"tool_calls": [{
+        "index": 0, "id": "call-2", "function": {"name": "load_skill", "arguments": '"render"}'},
+    }]}}]}).encode()
+    invalid_id_fragment = json.dumps({"choices": [{"delta": {"tool_calls": [{
+        "index": 0, "id": False,
+    }]}}]}).encode()
+    invalid_name_fragment = json.dumps({"choices": [{"delta": {"tool_calls": [{
+        "index": 0, "function": {"name": False},
+    }]}}]}).encode()
+    invalid_function_fragment = json.dumps({"choices": [{"delta": {"tool_calls": [{
+        "index": 0, "function": None,
+    }]}}]}).encode()
+    invalid_arguments_fragment = json.dumps({"choices": [{"delta": {"tool_calls": [{
+        "index": 0, "function": {"arguments": None},
+    }]}}]}).encode()
+    invalid_tool_calls = json.dumps({"choices": [{"delta": {"tool_calls": None}}]}).encode()
+    incomplete_call = json.dumps({"choices": [{"delta": {"tool_calls": [{
+        "index": 0,
+    }]}}]}).encode()
+    invalid_call_arguments = json.dumps({"choices": [{"delta": {"tool_calls": [{
+        "index": 0, "id": "call-1", "function": {
+            "name": "load_skill", "arguments": "not-json"},
+    }]}}]}).encode()
+    invalid_message_container = json.dumps({"choices": [{
+        "message": None,
+        "delta": {"tool_calls": [{"index": 0, "id": "call-1", "function": {
+            "name": "load_skill", "arguments": '{"name":"render"}'}}]},
+    }]}).encode()
+    invalid_delta_container = json.dumps({"choices": [{
+        "message": {"tool_calls": [{"index": 0, "id": "call-1", "function": {
+            "name": "load_skill", "arguments": '{"name":"render"}'}}]},
+        "delta": None,
+    }]}).encode()
+    alternate_choices = json.dumps({"choices": [
+        {"delta": {"tool_calls": [{
+            "index": 0, "id": "call-1", "function": {
+                "name": "load_skill", "arguments": '{"name":'}}]}},
+        {"delta": {"tool_calls": [{
+            "index": 0, "id": "call-1", "function": {
+                "name": "load_skill", "arguments": '"render"}'}}]}},
+    ]}).encode()
 
     stream = b": ping\n\ndata: " + one + b"\n\ndata: [DONE]\n\n"
+    fragmented_stream = b"data: " + first_fragment + b"\n\ndata: " + final_fragment + b"\n\n"
+    conflicting_stream = b"data: " + first_fragment + b"\n\ndata: " + conflicting_fragment + b"\n\n"
+    invalid_id_stream = b"data: " + first_fragment + b"\n\ndata: " + final_fragment + b"\n\ndata: " + invalid_id_fragment + b"\n\n"
+    invalid_name_stream = b"data: " + first_fragment + b"\n\ndata: " + final_fragment + b"\n\ndata: " + invalid_name_fragment + b"\n\n"
+    invalid_function_stream = b"data: " + first_fragment + b"\n\ndata: " + final_fragment + b"\n\ndata: " + invalid_function_fragment + b"\n\n"
+    invalid_arguments_stream = b"data: " + first_fragment + b"\n\ndata: " + final_fragment + b"\n\ndata: " + invalid_arguments_fragment + b"\n\n"
     assert _sole_loader_completion(stream) == ("call-1", "load_skill", {"name": "render"})
+    assert _sole_loader_completion(fragmented_stream) == (
+        "call-1", "load_skill", {"name": "render"})
     assert _sole_loader_completion(multiple) is None
+    assert _sole_loader_completion(ambiguous) is None
+    assert _sole_loader_completion(duplicate_index) is None
+    assert _sole_loader_completion(conflicting_stream) is None
+    assert _sole_loader_completion(invalid_id_stream) is None
+    assert _sole_loader_completion(invalid_name_stream) is None
+    assert _sole_loader_completion(invalid_function_stream) is None
+    assert _sole_loader_completion(invalid_arguments_stream) is None
+    assert _sole_loader_completion(invalid_tool_calls) is None
+    assert pi_provider_relay._loader_completion(incomplete_call) == (False, None)
+    assert pi_provider_relay._loader_completion(invalid_call_arguments) == (False, None)
+    assert _sole_loader_completion(invalid_message_container) is None
+    assert _sole_loader_completion(invalid_delta_container) is None
+    assert _sole_loader_completion(alternate_choices) is None
+    assert not pi_provider_relay._is_openai_stream_frame(alternate_choices)
 
 
 def test_provider_relay_close_interrupts_a_stalled_model_response(tmp_path: Path) -> None:

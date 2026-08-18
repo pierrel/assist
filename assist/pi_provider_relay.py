@@ -266,12 +266,12 @@ class PiProviderRelay:
                     payload = json.loads(body)
                 except (UnicodeDecodeError, json.JSONDecodeError) as error:
                     raise PiProviderRelayError("Pi model request is malformed") from error
+                response_valid, observed = _loader_completion(b"".join(chunks))
+                if not response_valid:
+                    raise PiProviderRelayError("Pi model response is malformed")
                 if not self._skill_authority.continue_request(payload):
                     raise PiProviderRelayError("Pi model request does not continue skill loading")
-                observed = _sole_loader_completion(b"".join(chunks))
-                if observed is None:
-                    self._skill_authority.clear_loader()
-                else:
+                if observed is not None:
                     self._skill_authority.observe_loader(*observed)
             elif self._skill_authority is not None:
                 self._skill_authority.clear_loader()
@@ -362,13 +362,29 @@ class PiProviderRelay:
             pass
 
 
-def _sole_loader_completion(raw: bytes) -> tuple[str, str, object] | None:
-    """Extract one complete OpenAI loader call from JSON or bounded SSE bytes."""
+def _choice_container(value: object) -> dict[str, object] | None:
+    """Return the sole well-formed OpenAI message or delta container."""
+    if not isinstance(value, dict):
+        return None
+    choices = value.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+        return None
+    choice = choices[0]
+    has_message = "message" in choice
+    has_delta = "delta" in choice
+    if has_message == has_delta:
+        return None
+    container = choice["message"] if has_message else choice["delta"]
+    return container if isinstance(container, dict) else None
+
+
+def _loader_completion(raw: bytes) -> tuple[bool, tuple[str, str, object] | None]:
+    """Validate one model response and return its sole complete loader, if any."""
     values: list[object] = []
     try:
         decoded = raw.decode("utf-8")
     except UnicodeDecodeError:
-        return None
+        return False, None
     if _contains_sse_data(raw):
         for line in decoded.splitlines():
             if not line.startswith("data:"):
@@ -379,62 +395,92 @@ def _sole_loader_completion(raw: bytes) -> tuple[str, str, object] | None:
             try:
                 values.append(json.loads(item))
             except json.JSONDecodeError:
-                return None
+                return False, None
     else:
         try:
             values.append(json.loads(decoded))
         except json.JSONDecodeError:
-            return None
+            return False, None
+    if not values:
+        return False, None
     calls: dict[int, dict[str, object]] = {}
+    saw_unindexed_call = False
     for value in values:
-        if not isinstance(value, dict):
-            return None
-        choices = value.get("choices")
-        if not isinstance(choices, list):
+        container = _choice_container(value)
+        if container is None:
+            return False, None
+        if "tool_calls" not in container:
             continue
-        for choice in choices:
-            if not isinstance(choice, dict):
-                return None
-            message = choice.get("message")
-            delta = choice.get("delta")
-            container = message if isinstance(message, dict) else delta
-            if not isinstance(container, dict):
-                continue
-            tool_calls = container.get("tool_calls")
-            if tool_calls is None:
-                continue
-            if not isinstance(tool_calls, list):
-                return None
-            for item in tool_calls:
-                if not isinstance(item, dict):
-                    return None
-                index = item.get("index", 0)
-                if not isinstance(index, int) or isinstance(index, bool) or index < 0:
-                    return None
-                prior = calls.setdefault(index, {"arguments": ""})
-                if isinstance(item.get("id"), str):
-                    prior["id"] = item["id"]
-                function = item.get("function")
-                if function is not None:
-                    if not isinstance(function, dict):
-                        return None
-                    if isinstance(function.get("name"), str):
-                        prior["name"] = function["name"]
-                    arguments = function.get("arguments")
-                    if isinstance(arguments, str):
-                        prior["arguments"] = str(prior["arguments"]) + arguments
-                    elif arguments is not None:
-                        return None
+        tool_calls = container["tool_calls"]
+        if not isinstance(tool_calls, list):
+            return False, None
+        frame_indexes: set[int] = set()
+        for item in tool_calls:
+            if not isinstance(item, dict):
+                return False, None
+            if "index" in item:
+                index = item["index"]
+                if (saw_unindexed_call or not isinstance(index, int)
+                        or isinstance(index, bool) or index < 0):
+                    return False, None
+            else:
+                # A non-streamed response may omit index for its one call.
+                # More than one unindexed call is ambiguous, never a loader.
+                if calls:
+                    return False, None
+                saw_unindexed_call = True
+                index = 0
+            if index in frame_indexes:
+                return False, None
+            frame_indexes.add(index)
+            prior = calls.setdefault(index, {"arguments": ""})
+            if "id" in item:
+                call_id = item["id"]
+                if not isinstance(call_id, str):
+                    return False, None
+                if "id" in prior and prior["id"] != call_id:
+                    return False, None
+                prior["id"] = call_id
+            if "function" in item:
+                function = item["function"]
+                if not isinstance(function, dict):
+                    return False, None
+                if "name" in function:
+                    name = function["name"]
+                    if not isinstance(name, str):
+                        return False, None
+                    if "name" in prior and prior["name"] != name:
+                        return False, None
+                    prior["name"] = name
+                if "arguments" in function:
+                    arguments = function["arguments"]
+                    if not isinstance(arguments, str):
+                        return False, None
+                    prior["arguments"] = str(prior["arguments"]) + arguments
+    parsed_arguments: dict[int, object] = {}
+    for index, call in calls.items():
+        call_id = call.get("id")
+        name = call.get("name")
+        arguments = call.get("arguments")
+        if (not isinstance(call_id, str) or not call_id or not isinstance(name, str)
+                or not name or not isinstance(arguments, str)):
+            return False, None
+        try:
+            parsed_arguments[index] = json.loads(arguments)
+        except json.JSONDecodeError:
+            return False, None
     if len(calls) != 1:
-        return None
-    call = next(iter(calls.values()))
-    if not isinstance(call.get("id"), str) or call.get("name") != "load_skill":
-        return None
-    try:
-        arguments = json.loads(str(call.get("arguments", "")))
-    except json.JSONDecodeError:
-        return None
-    return call["id"], "load_skill", arguments
+        return True, None
+    index, call = next(iter(calls.items()))
+    if call["name"] != "load_skill":
+        return True, None
+    return True, (call["id"], "load_skill", parsed_arguments[index])
+
+
+def _sole_loader_completion(raw: bytes) -> tuple[str, str, object] | None:
+    """Return the sole loader only if the model response is structurally valid."""
+    _valid, loader = _loader_completion(raw)
+    return loader
 
 
 def _append_response_chunk(chunks: list[bytes], total: int, chunk: bytes) -> int:
@@ -471,8 +517,9 @@ def _is_openai_stream_frame(value: bytes) -> bool:
         parsed = json.loads(value.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False
-    choices = parsed.get("choices") if isinstance(parsed, dict) else None
-    return isinstance(choices, list) and bool(choices)
+    container = _choice_container(parsed)
+    return container is not None and (
+        "tool_calls" not in container or isinstance(container["tool_calls"], list))
 
 
 
