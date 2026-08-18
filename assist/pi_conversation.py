@@ -228,7 +228,7 @@ class PiConversationStore:
             os.fsync(descriptor)
             os.replace(temporary, path)
             temporary = None
-            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
             try:
                 os.fsync(directory)
             finally:
