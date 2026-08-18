@@ -1,0 +1,81 @@
+#+TITLE: Timezone continuity across wakes and triggered turns
+#+DATE: <2026-08-17>
+#+STATUS: READY FOR DEPLOYMENT
+
+* Problem
+
+An interactive web turn carries its browser IANA timezone in the ephemeral
+~ContextRider~. When that turn starts context work, the later child-completion
+wake currently has no rider, so =create_schedule= correctly refuses to guess a
+timezone. Separately, triggered work needs the thread's latest user timezone
+when its trigger has no schedule-specific zone. Neither path may reintroduce
+browser location into model context.
+
+* Design
+
+Use the durable Run ledger already written at message admission; do not add a
+second thread-metadata store.
+
+1. A *visible user timezone* is the latest Run on the visible thread that is a
+   normal =general-agent= turn with user text, no origin, no sender, and a valid
+   rider timezone. System wakes, task completions, approval resumes, child
+   runs, and inbound-SMS triage never update this value. Looking backward over
+   durable Runs survives restart and leaves a user turn without timezone unable
+   to erase a previously known one.
+2. A terminal child wake obtains its timezone only from the exact parent Run
+   recorded on that child. It creates a time-only rider: =tz= is retained;
+   =sent_at=, coordinates, and labels are absent. This gives schedule tools the
+   original user timezone without treating the completion as a fresh user
+   message or leaking location.
+3. The common triggered-dispatch primitive accepts an optional explicit
+   timezone. A schedule continues to pass its persisted schedule timezone;
+   other triggers without an explicit timezone use the visible-user lookup.
+   The dispatched rider gets the current instant in that selected timezone.
+   If neither source exists, it has no rider and downstream tools retain their
+   existing honest no-timezone failure.
+
+* Boundaries
+
+- Location remains a deliberate =get_location= capability. No completion or
+  triggered rider copies =lat=, =lon=, or a place label.
+- A schedule's stored timezone outranks the latest thread timezone: a schedule
+  must retain its creating cadence across later travel.
+- Child results remain untrusted; only their durable orchestration relationship
+  selects the parent Run whose timezone is copied.
+- This does not choose a server/default timezone for legacy threads.
+
+* Implementation
+
+- =manage/web/threads.py=: add a small Run-ledger timezone resolver; use an
+  exact-parent time-only rider in =_complete_child_handoff=; allow
+  =_scheduled_dispatch= to select the resolver only when its caller supplies
+  no explicit zone.
+- =tests/test_async_subagent_runs.py=: pin parent-to-wake timezone propagation,
+  no location propagation, and missing-parent/zone behavior.
+- =tests/test_async_subagent_runs.py=: pin triggered-dispatch fallback,
+  explicit schedule-zone precedence, durable/restart lookup, and no rider when
+  no user timezone exists.
+- =roadmap.org=: mark the two completed scheduling/context-rider entries only
+  after their deterministic integration coverage passes.
+
+* Validation
+
+Deterministic integration is the primary contract: original browser timezone →
+context child → completion wake → =create_schedule= must save that timezone;
+a trigger with no explicit zone uses the latest valid visible-user timezone;
+an explicit schedule timezone wins. Controls prove no default timezone or
+location transfer. Then survey the affected scheduling/context behavioral rows
+and compare baseline/candidate at the repository's N=3/N=5/N=10 cadence before
+merge.
+
+* Results so far
+
+| Coverage | Baseline N=3 | Candidate N=3 / N=5 / N=10 | Result |
+|-
+| Deterministic child completion → saved weekly schedule | missing rider | 190 relevant deterministic tests | saved =America/Los_Angeles=; no location fields |
+| Natural recurring-schedule outcome | 3/3 | 3/3 / 5/5 / 10/10 | no schedule-routing regression |
+| Context-completion wake journey | 3/3 | 3/3 / 5/5 / 10/10 | no lifecycle regression |
+
+The two model rows are regression controls. The deterministic lifecycle test is
+the direct proof of the new Run-to-wake timezone contract; it drives the saved
+schedule through the same time-only rider consumed by =create_schedule=.
