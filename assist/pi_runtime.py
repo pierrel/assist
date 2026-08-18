@@ -418,6 +418,7 @@ class PiRuntimeManager:
         worker = None
         worker_exited = False
         completion_committed = False
+        primary_error: BaseException | None = None
         try:
             broker_capability = secrets.token_urlsafe(32)
             provider_capability = secrets.token_urlsafe(32)
@@ -510,10 +511,12 @@ class PiRuntimeManager:
                 commit(completed)
                 completion_committed = True
             return completed
-        except PiRuntimeError:
+        except PiRuntimeError as error:
+            primary_error = error
             raise
         except Exception as error:
-            raise PiRuntimeError("Pi worker could not complete") from error
+            primary_error = PiRuntimeError("Pi worker could not complete")
+            raise primary_error from error
         finally:
             teardown_errors: list[Exception] = []
             if broker is not None:
@@ -542,9 +545,9 @@ class PiRuntimeManager:
                 self._attempt(teardown_errors, lambda: shutil.rmtree(control_dir))
             try:
                 if teardown_errors:
-                    if completion_committed:
+                    if completion_committed or primary_error is not None:
                         error = teardown_errors[0]
-                        logging.error("Pi worker teardown failed after its completion was committed",
+                        logging.error("Pi worker teardown failed after the primary result",
                                       exc_info=(type(error), error, error.__traceback__))
                     else:
                         raise PiRuntimeError("Pi worker teardown failed") from teardown_errors[0]

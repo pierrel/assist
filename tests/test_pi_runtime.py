@@ -543,6 +543,48 @@ def test_teardown_attempts_every_authority_after_a_cleanup_failure(
     assert not list(work_dir.parent.glob(".pi-turn-*"))
 
 
+def test_teardown_failure_does_not_mask_the_primary_worker_failure(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    work_dir = tmp_path / "thread" / "workspace"
+    work_dir.mkdir(parents=True)
+    _SandboxManager.events = []
+    monkeypatch.setattr(pi_runtime, "current_model_config", lambda: OpenAIConfig(
+        "http://localhost:8000/v1", "qwen", "secret", 32768))
+    monkeypatch.setattr(pi_runtime, "PiToolBroker", _Broker)
+    monkeypatch.setattr(pi_runtime, "PiProviderRelay", _Relay)
+    monkeypatch.setattr(pi_runtime, "PiResultSink", _ResultSink)
+
+    def broken_cleanup(cls: type[_SandboxManager], work_dir: str,
+                       expected_container: object) -> None:
+        cls.events.append("sandbox.cleanup")
+        raise RuntimeError("cleanup failed")
+
+    class BadWorker(_Worker):
+        def wait(self, *, timeout: int) -> dict[str, int]:
+            self._events.append("worker.wait")
+            return {"StatusCode": 1}
+
+    class BadContainers(_Containers):
+        def run(self, _image: str, **kwargs: object) -> BadWorker:
+            self._events.append("worker.start")
+            return BadWorker(Path(next(iter(kwargs["volumes"]))), self._events)  # type: ignore[index]
+
+    class BadDocker:
+        def __init__(self) -> None:
+            self.containers = BadContainers(_SandboxManager.events)
+
+    monkeypatch.setattr(_SandboxManager, "cleanup", classmethod(broken_cleanup))
+    monkeypatch.setattr(_SandboxManager, "_get_docker_client", classmethod(
+        lambda cls: BadDocker()))
+
+    with pytest.raises(pi_runtime.PiRuntimeError, match="exited unsuccessfully"):
+        pi_runtime.PiRuntimeManager(_SandboxManager).run(
+            work_dir=str(work_dir), timezone="America/Los_Angeles", prompt="hello",
+            history=[], system_prompt="be useful")
+
+    assert "cleanup failed" in caplog.text
+
+
 def test_committed_result_stays_successful_when_later_teardown_fails(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     work_dir = tmp_path / "thread" / "workspace"
@@ -656,7 +698,7 @@ def test_runtime_does_not_cross_cleanup_boundary_when_worker_cannot_be_reaped(
     monkeypatch.setattr(_SandboxManager, "_get_docker_client", classmethod(
         lambda cls: UnreapedDocker()))
 
-    with pytest.raises(pi_runtime.PiRuntimeError, match="teardown failed"):
+    with pytest.raises(pi_runtime.PiRuntimeError, match="could not complete"):
         pi_runtime.PiRuntimeManager(_SandboxManager).run(
             work_dir=str(work_dir), timezone="America/Los_Angeles", prompt="hello",
             history=[], system_prompt="be useful",
