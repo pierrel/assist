@@ -13,7 +13,7 @@ from urllib3.exceptions import ReadTimeoutError
 
 from assist.model_manager import OpenAIConfig
 from assist import pi_runtime
-from assist.pi_conversation import PiMessage
+from assist.pi_conversation import PiConversationError, PiMessage
 from assist.pi_skills import PiLoadedSkill, PiSkillCatalog
 from assist.thread_queue import DEFAULT_HOLD_TIMEOUT_S
 
@@ -610,6 +610,26 @@ def test_committed_result_stays_successful_when_later_teardown_fails(
     assert result == pi_runtime.PiRuntimeResult("done", 1)
     assert committed == [result]
     assert "cleanup failed" in caplog.text
+
+
+def test_runtime_preserves_a_controlled_transcript_commit_failure(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    work_dir = tmp_path / "thread" / "workspace"
+    work_dir.mkdir(parents=True)
+    _SandboxManager.events = []
+    monkeypatch.setattr(pi_runtime, "current_model_config", lambda: OpenAIConfig(
+        "http://localhost:8000/v1", "qwen", "secret", 32768))
+    monkeypatch.setattr(pi_runtime, "PiToolBroker", _Broker)
+    monkeypatch.setattr(pi_runtime, "PiProviderRelay", _Relay)
+    monkeypatch.setattr(pi_runtime, "PiResultSink", _ResultSink)
+
+    def reject_completion(_: pi_runtime.PiRuntimeResult) -> None:
+        raise PiConversationError("Pi transcript is malformed")
+
+    with pytest.raises(PiConversationError, match="transcript is malformed"):
+        pi_runtime.PiRuntimeManager(_SandboxManager).run(
+            work_dir=str(work_dir), timezone="America/Los_Angeles", prompt="hello",
+            history=[], system_prompt="be useful", commit=reject_completion)
 
 
 def test_runtime_reaps_a_timed_out_worker_with_term_then_kill(

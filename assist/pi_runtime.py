@@ -22,7 +22,7 @@ from assist.model_manager import OpenAIConfig, current_model_config
 from assist.pi_broker import PiToolBroker
 from assist.pi_skills import (PiLoadedSkill, PiSkillAuthority, PiSkillError,
                               build_pi_skill_catalog, empty_pi_skill_catalog)
-from assist.pi_conversation import PI_HISTORY_LIMIT, PiMessage
+from assist.pi_conversation import PI_HISTORY_LIMIT, PiConversationError, PiMessage
 from assist.pi_trace import PiTraceRecorder, PiTraceStore
 from assist.pi_provider_relay import PiProviderRelay
 from assist.sandbox import DockerSandboxBackend
@@ -511,7 +511,7 @@ class PiRuntimeManager:
                 commit(completed)
                 completion_committed = True
             return completed
-        except PiRuntimeError as error:
+        except (PiConversationError, PiRuntimeError) as error:
             primary_error = error
             raise
         except Exception as error:
