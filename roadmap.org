@@ -1076,9 +1076,30 @@ needed. Preserve the current memory access model; per-thread memory is already
 part of the P0 baseline.
 See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-3][P3 hypothesis and gate]].
 
-*** TODO P4: Move caller research workflow into a skill
-Keep research discoverable while removing detailed caller procedure from ordinary
-turns; freeze specialist prompts and return contracts. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-4][P4 hypothesis and gate]].
+*** TODO P4: Consolidate the research caller workflow and ordinary main profile
+The ordinary interactive Assist profile is shared by web, CLI, and Assist voice.
+It has already moved its caller research procedure into the =research= skill, but
+the whole-task delegate still carries the old synchronous =task=-specialist
+procedure in =general_instructions.md.j2=. Finish P4 as three small, separately
+evaluated migrations:
+
+1. Make the research skill the common caller workflow for main and delegate.  It
+   chooses and briefs the available research specialist without owning a concrete
+   tool/result shape; the loaded capability's available dispatch interface owns
+   whether the caller uses synchronous =task= or =start_async_task= and how its
+   result is consumed.  Then remove the corresponding delegate procedure.
+2. Make the ordinary interactive main composition the named =AgentSpec= main
+   profile, selected by the same composition root that currently serves web, CLI,
+   and Assist voice.  Restricted or embedded clients without the async lifecycle
+   must select that shape explicitly rather than silently inheriting it.
+3. Rename profile-level =web= terminology to =main=, because this is the default
+   visible Assist profile rather than a browser-only concept.  Keep names for
+   genuinely browser-/web-owned tools and wiring, including render, schedules,
+   subscriptions, and RunService.
+
+Freeze specialist prompts, tool behavior, search/provenance guards, report store,
+budgets, and topology.  The goal is to delete redundant caller guidance, not to
+add a new research mechanism.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-4][P4 hypothesis and gate]].
 
 *** TODO P5: Align research specialist role contracts
 This is an umbrella of prompt-source-sized experiments with routing, tools,
