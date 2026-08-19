@@ -25,6 +25,8 @@ from assist.backends import (
     MAIN_SKILLS_ROUTE,
     MAIN_GUIDANCE_SKILLS_DIR,
     MAIN_GUIDANCE_SKILLS_ROUTE,
+    CALLER_SKILLS_DIR,
+    CALLER_SKILLS_ROUTE,
     SKILLS_ROUTE,
     STATEFUL_PATHS,
     _EmptyFileRecoveryFilesystemBackend,
@@ -127,9 +129,10 @@ def web_main_skill_composition(
         ) -> tuple[BackendProtocol, tuple[str, ...]]:
     """Build the web-main skill universe without constructing a Deep graph.
 
-    Pi calls this after creating its per-turn sandbox.  The order is the
-    current web-main rightmost-winner order: main guidance, main-only, domain,
-    shared bundled, then web-only sources.
+    Pi calls this after creating its per-turn sandbox. The order is the current
+    Pi rightmost-winner order: main guidance, main-only, domain, shared
+    bundled, then web-only sources. Pi deliberately has no research caller
+    capability, so it does not mount the Deep-only caller-guidance source.
     """
     routes = dict(web_skill_sources)
     routes.setdefault(MAIN_GUIDANCE_SKILLS_ROUTE,
@@ -325,10 +328,11 @@ def create_agent(model: BaseChatModel,
     (= ``working_dir``), so the same files are reachable in both local and
     sandbox modes.  It is registered only when present (a gated ``ls``;
     the absent case stays silent). The async main lists its main-only
-    orchestration source first for small-model salience. When selected, the
-    main guidance source precedes it. Last-source-wins collision precedence is
-    ``main guidance < main-only < domain < built-in <
-    embedder-extras``; other roles omit both main-only sources. A same-named
+    orchestration source first for small-model salience. When selected, main
+    guidance precedes it; delegates instead receive caller guidance. Last-
+    source-wins collision precedence is ``main guidance < main-only < domain <
+    built-in < embedder-extras`` for async main and ``caller guidance < domain
+    < built-in < embedder-extras`` for delegates. A same-named
     domain skill does not override a built-in (the safety skills ``dev`` /
     ``git-sync`` are the floor).
     """
@@ -348,6 +352,7 @@ def create_agent(model: BaseChatModel,
             "not both")
     delegate = spec.role == "delegate"
     async_main = not delegate and bool(spec.async_subagent_tools)
+    caller_research_skill = delegate
     thread_memory_enabled = bool(
         getattr(sandbox_backend, "native_agent_dir", False) is True
         if sandbox_backend is not None else agent_dir is not None)
@@ -369,6 +374,10 @@ def create_agent(model: BaseChatModel,
         extra_routes.setdefault(
             MAIN_GUIDANCE_SKILLS_ROUTE,
             create_bundled_skills_backend(MAIN_GUIDANCE_SKILLS_DIR))
+    if caller_research_skill:
+        extra_routes.setdefault(
+            CALLER_SKILLS_ROUTE,
+            create_bundled_skills_backend(CALLER_SKILLS_DIR))
     if async_main:
         extra_routes.setdefault(
             MAIN_SKILLS_ROUTE, create_skills_backend(MAIN_SKILLS_DIR))
@@ -387,11 +396,13 @@ def create_agent(model: BaseChatModel,
                                            extra_routes=extra_routes,
                                            default_backend=spec.default_backend)
 
-    # Put main guidance and the async main's orchestration skills before
-    # broad shared/domain skills. Source order is prompt salience, not an access
-    # guard; delegates never mount either route.
+    # Put caller guidance and the async main's orchestration skills before broad
+    # shared/domain skills. Source order is prompt salience, not an access guard;
+    # main guidance owns the async direct-results workflow, while delegates load
+    # their report-backed caller workflow under the same ``research`` name.
     skill_sources = (
         ([MAIN_GUIDANCE_SKILLS_ROUTE] if spec.main_guidance_skills else [])
+        + ([CALLER_SKILLS_ROUTE] if caller_research_skill else [])
         + ([MAIN_SKILLS_ROUTE] if async_main else [])
         + [SKILLS_ROUTE]
     )
@@ -409,7 +420,8 @@ def create_agent(model: BaseChatModel,
     # actually holds skills, so an absent/empty one adds no useless source.
     # Placed before shared built-ins: the deepagents listing is last-source-wins, so
     # precedence is main guidance < main-only < domain < built-in <
-    # embedder-extras for the async main, and domain < built-in <
+    # embedder-extras for the async main, caller guidance < domain < built-in
+    # < embedder-extras for delegates, and domain < built-in <
     # embedder-extras otherwise. Built-in safety skills (dev, git-sync) are NOT
     # overridable by a same-named domain skill. (An
     # embedder that explicitly routes DOMAIN_SKILLS_PATH via extra_skill_sources
@@ -419,7 +431,8 @@ def create_agent(model: BaseChatModel,
     # Cheap membership check first so the (possibly sandbox-exec'd) `ls` in
     # _has_domain_skills is skipped when an embedder already supplied the path.
     if DOMAIN_SKILLS_PATH not in skill_sources and _has_domain_skills(backend):
-        main_source_count = int(spec.main_guidance_skills) + int(async_main)
+        main_source_count = (int(spec.main_guidance_skills)
+                             + int(caller_research_skill) + int(async_main))
         skill_sources.insert(main_source_count, DOMAIN_SKILLS_PATH)
     agent_tools = []
     registered_tool_names = set()
@@ -447,6 +460,8 @@ def create_agent(model: BaseChatModel,
     if (spec.main_guidance_skills
             and MAIN_GUIDANCE_SKILLS_ROUTE not in spec.skill_sources):
         bundled_skill_sources.add(MAIN_GUIDANCE_SKILLS_ROUTE)
+    if (caller_research_skill and CALLER_SKILLS_ROUTE not in spec.skill_sources):
+        bundled_skill_sources.add(CALLER_SKILLS_ROUTE)
     legacy_skill_composition = any(
         isinstance(route_backend, LegacySkillsBackend)
         for route_backend in extra_routes.values())
@@ -548,6 +563,8 @@ def create_agent(model: BaseChatModel,
             delegation_mode=delegation_mode,
             agent_role=spec.role,
             guidance_skills=spec.main_guidance_skills,
+            caller_research_skill=caller_research_skill,
+            immediate_research_dispatch=delegate,
         )
     agent = create_deep_agent(
         model=model,

@@ -137,6 +137,8 @@ MAIN_SKILLS_DIR = os.path.join(os.path.dirname(__file__), "main_skills")
 MAIN_GUIDANCE_SKILLS_ROUTE = "/main-guidance-skills/"
 MAIN_GUIDANCE_SKILLS_DIR = os.path.join(
     os.path.dirname(__file__), "main_guidance_skills")
+CALLER_SKILLS_ROUTE = "/caller-skills/"
+CALLER_SKILLS_DIR = os.path.join(os.path.dirname(__file__), "caller_skills")
 
 
 class ReadOnlyFilesystemBackend(FilesystemBackend):

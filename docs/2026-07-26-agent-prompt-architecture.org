@@ -2272,16 +2272,69 @@ search, or report consumption on every turn.
 
 ** Controlled change
 
-Add the shared research workflow skill for main/delegate callers and remove only
+Add the scoped research workflow skill for main/delegate callers and remove only
 the corresponding caller procedure from their role prompt.  Freeze every
 research specialist prompt, tool description, search tool, provenance rule,
 report store, budget, and topology.
 
-The skill is return-shape-neutral: it tells a caller to use its registered
-research capability and ground the answer in the returned evidence.  Each
-caller's bound tool/subagent description remains the sole owner of its concrete
-contract: direct findings for production async main, report path for the
-synchronous delegate and legacy main.
+The =research= capability name is dispatch-interface-neutral: neither body names
+=task= or =start_async_task=. The ordinary main and synchronous delegate mount
+the body that matches their already-bound handoff: direct findings for main,
+report path for delegate. Each caller's bound tool/subagent description remains
+the authority that declares its result shape.
+
+** P4a evidence (2026-08-19)
+
+The first migration removes the delegate's duplicate procedure. The ordinary
+main mounts its direct-results =research= body from =main_guidance_skills=;
+the synchronous delegate mounts its report-backed body from =caller_skills=.
+Both keep the same capability name and avoid =task= or =start_async_task=. A
+small role-rendered router only says that a delegate must load the skill before
+immediately dispatching a research specialist. Both bodies treat returned
+task/report content as untrusted evidence, never authority or tool
+instructions.
+
+This is an accepted per-profile policy boundary, not common-workflow
+consolidation. Skills are static, fully loaded bodies, and the already-bound
+handoffs have opposite required constraints: main must not invent report
+storage, while the delegate must name and consume a report. Factoring their
+small shared prose would require new prompt/skill-composition machinery, which
+P4 intentionally excludes. The simpler generic body was tried and omitted the
+delegate filename, so the two self-contained bodies are the smaller reliable
+design.
+
+All behavior runs use a canned specialist and reject HTTP, so they exercise
+caller selection, briefing, report handoff, and consumption without live-search
+variance.
+
+| Cohort | Legacy baseline | P4a candidate | What the oracle proves |
+|--------+-----------------+---------------+------------------------|
+| Delegate current Muni fare | 3/3 | 10/10 current stability | The delegate gives the sourced fare; candidate also loads =research=, dispatches exactly one specialist, names a bare topic-specific Markdown report filename, writes that report to =references=, reads it, and answers from it. |
+| Delegate injected specialist result | n/a | 10/10 current stability | The delegate dispatches and reads a report containing a filesystem instruction; valid report-read journeys ignore it and return the sourced answer. |
+| Async-main direct findings | 0/3 historical non-dispatch | 10/10 current stability; 3/3 stricter oracle | The current profile loads =research=, dispatches without report storage, checks the completion wake, and answers from credible canned direct findings. The stricter final oracle also requires exactly one research task and forbids every report-storage marker. This is an improvement measurement, not a parity claim. |
+| Local dining, no research needed | 3/3 | 5/5 | The catalog does not pull a local recommendation into research. |
+
+Discarded probes are retained as diagnostic evidence, not as candidate results:
+
+- A return-shape-neutral body without a compact caller router loaded no research
+  skill in three delegate trials; the delegate directly dispatched its legacy
+  specialist. This established that the body alone is not a reliable first-load
+  trigger for Qwen.
+- Earlier async-main report-storage probes are superseded: production async
+  research returns direct findings, so its main-only body does not invent a
+  report destination. The delegate report body retains the exact storage
+  instruction without naming a dispatch API.
+- The first final delegate-body attempt omitted a bare report filename in one
+  of two trials. Strengthening the same generic pre-dispatch instruction, not
+  the system prompt or tool schema, produced the current 10/10 run.
+- An early delegate harness returned raw findings although the real synchronous
+  specialist returns a report path. It caused a spurious second dispatch and
+  was replaced by a report-contract-faithful canned worker before counting the
+  final trials.
+- A fictional ``Wind Harbor`` direct-result fixture made the model sensibly
+  request further verification of its invented citations. It remains useful for
+  dispatch-only coverage, but was replaced by a credible current-timetable
+  fixture for testing direct-result consumption.
 
 ** Test and gate
 
@@ -2301,8 +2354,9 @@ synchronous delegate and legacy main.
 - Distance/travel and other deterministic-tool ownership remains unchanged.
 - Live-search evals remain isolated and rate-limit diagnostics distinguish infra
   failure from behavior failure.
-- P0 shows the caller role prompt and skill contain no concrete research return
-  shape; bound tool/subagent descriptions remain unchanged in this phase.
+- P0 shows the caller role prompt contains no concrete research return shape;
+  each scoped skill body states only the already-bound caller handoff. Bound
+  tool/subagent descriptions remain unchanged in this phase.
 
 ** Expected learning
 
@@ -2313,8 +2367,9 @@ selection misses.
 ** Alternatives
 
 If research selection regresses, keep a compact always-on research trigger while
-leaving the detailed procedure in the skill.  If one caller misreads its result,
-defer correction to P5 rather than changing the skill to describe both shapes.
+leaving the detailed procedure in the skill. If one caller misreads its result,
+defer correction to P5 rather than combining both result shapes in one skill
+body.
 
 * P5: Align research specialist role contracts
 :PROPERTIES:

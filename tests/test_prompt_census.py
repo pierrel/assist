@@ -509,6 +509,17 @@ def test_main_guidance_skill_sources_are_closed_to_opted_in_main(census):
     assert {source["scenario"] for source in guidance_sources} == {
         "web-main-core", "web-main-full"}
 
+    caller_sources = [
+        source for source in census["source_manifest"]
+        if source.get("kind") == "skill"
+        and source.get("source") == "/caller-skills/"
+    ]
+    assert {(source["name"], source["path"]) for source in caller_sources} == {
+        ("research", "/caller-skills/research/SKILL.md"),
+    }
+    assert {source["scenario"] for source in caller_sources} == {
+        "web-delegate"}
+
 
 def test_research_worker_prompt_uses_markdown_reports():
     from assist.promptable import base_prompt_for
@@ -1305,7 +1316,7 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(historical_p0_prompt) == 31_279
     # The rewrite moves the stock base ahead of the compact Assist core. The
     # historical rows below deliberately retain their original P0-P2b3 values.
-    assert len(current_prompt) == 24_719
+    assert len(current_prompt) == 24_779
     assert len(schemas) == 17_956
     assert len(census["calls"]) == 30
     assert len(census["tool_nodes"]) == 38

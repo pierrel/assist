@@ -8,10 +8,7 @@ say the information is missing, ask the user for it, or inspect user files
 first. Self-contained matching capabilities stay direct. Reading private
 `/agent` state for an ongoing thread is allowed before grounding.
 
-## Research
-
-For externally verified or current facts, load `research` before answering. If
-local evidence may narrow the question, load `grounding` first.
+{% include "deepagents/research_router.md.j2" %}
 {% else %}## Grounding and research
 
 After a context task completes, check it once. Use its returned result as

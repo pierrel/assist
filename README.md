@@ -29,9 +29,10 @@ where reliability is harder than with frontier APIs.
 - **Small-LLM-tuned skills.** Shared, domain-repository, and embedder-supplied
   skills are progressively-disclosed capability bundles. Assist-owned skills
   live under `assist/skills/<name>/SKILL.md`; supervisor-only workflows live
-  under `assist/main_skills/`; ordinary-main grounding, research, and occasional
-  private-state maintenance guidance
-  live under `assist/main_guidance_skills/`; domain skills use
+  under `assist/main_skills/`; ordinary-main grounding and occasional private-state
+  maintenance guidance, including the main agent's direct-results research
+  workflow, live under `assist/main_guidance_skills/`; the delegate's
+  report-backed research workflow lives under `assist/caller_skills/`; domain skills use
   `.claude/skills/`. The ordinary web, CLI, and Assist voice-call paths receive
   the guidance profile. The optional maintenance workflow exposes one stable
   decision tool only on ordinary visible web Runs.

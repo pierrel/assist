@@ -84,6 +84,7 @@ def render_deep_web_main_prompt(*, guidance_skills: bool) -> WebMainPrompt:
         "deepagents/assist_core.md.j2",
         "deepagents/web_main_adapter.md.j2",
         guidance_skills=guidance_skills,
+        immediate_research_dispatch=False,
     )
 
 
