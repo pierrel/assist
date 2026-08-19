@@ -115,7 +115,43 @@ Always follow these guidelines when writing code:
 20. Simple, emergent design + keep it clean
     — Follows Kent Beck’s four rules (passes tests, no duplication, expresses intent, minimal elements) and the Boy Scout Rule: leave the code cleaner than you found it.
 
-# Steering the small model: prefer guidance over middleware
+# Agent guidance philosophy and architecture
+
+This is the durable philosophy for Assist prompting. The model should see the
+smallest useful instruction at the point where it can act on it. Code and tools
+enforce real boundaries; prompting explains how to make good choices within
+them.
+
+| Layer | Responsibility |
+|---|---|
+| Deterministic tools and guards | Authorization, safety, real effects, and trusted-state boundaries. |
+| System prompt | Short, product-wide invariants: user intent, grounding, evidence, determinism, ownership, and truthful results. |
+| Skill description | When a capability applies. |
+| Loaded skill | How to perform that capability: tools, workers, sequencing, storage, formats, and checks. |
+| Evals | Measure behavior, reveal general patterns, and prevent a fixture from becoming the design. |
+
+Apply this placement rule when changing model-facing behavior:
+
+1. Put only general principles with value across capabilities in the system
+   prompt. Grounding and research may appear there as epistemic requirements,
+   but their procedure remains in their skills. Do not add other skill names,
+   routing chains, worker call sequences, report formats, or one-eval exceptions
+   to the core.
+2. Put *when to load* a capability in its skill description. Put *what to do
+   after it is loaded* in the body. Keep one concept with one owner; do not
+   duplicate a worker's handoff or give two visible paths for the same kind of
+   file or state.
+3. Try general skill-description/body guidance before a system-prompt rider or
+   a guard. Add a core rule only when it expresses a useful principle beyond
+   the failing capability. If no such principle exists, record the failure
+   rather than teaching the prompt a fixture.
+4. Treat failed probes as evidence. Compare a small, representative candidate
+   panel with its matched baseline, preserve adjacent behavior, and scale trial
+   counts only after review. Keep natural outcome acceptance separate from
+   explicit capability probes. Do not stack competing priority instructions to
+   force one eval through.
+
+## Steering the small model: prefer guidance over middleware
 This project runs a small local model (Qwen3.6-27B). We shape its behavior primarily by **instructing it** (skills, prompts), not by wrapping it in deterministic middleware. Middleware guardrails are a last resort, not a first reflex.
 
 1. **Guidance first; middleware only when guidance provably can't.** When the model misbehaves, fix it by changing what we tell it (a skill / prompt) before adding a middleware guard. Reach for middleware only after eval evidence shows guidance can't carry it — and even then, weigh it. A guard that has to re-do the model's task, or inspect state the model already has, is usually the wrong tool.

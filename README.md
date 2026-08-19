@@ -430,6 +430,47 @@ configuration and keeps the in-app urgent behavior without sending SMS.
 
 ---
 
+## Agent guidance philosophy and architecture
+
+This is the philosophy and structure of Assist's prompting. The model should
+see the smallest useful instruction at the point where it can act on it. Code
+and tools enforce real boundaries; prompting explains how to make good choices
+within those boundaries.
+
+| Layer | Responsibility |
+|---|---|
+| Deterministic tools and guards | Authorization, safety, real effects, and trusted-state boundaries. |
+| System prompt | Short, product-wide invariants: user intent, grounding, evidence, determinism, ownership, and truthful results. |
+| Skill description | When a capability applies. |
+| Loaded skill | How to perform that capability: tools, workers, sequencing, storage, formats, and checks. |
+| Evals | Measure behavior, reveal general patterns, and prevent a fixture from becoming the design. |
+
+The system prompt contains principles that help across capabilities. It does
+not accumulate skill names, routing chains, worker call sequences, report
+formats, or one-eval exceptions. Grounding and research may be named there as
+general epistemic requirements, but their procedure remains in their skills.
+
+A skill description is the routing signal. It describes the shape of a user
+request that should load the skill. Its body starts after that decision and
+describes what to do. Keep a concept with one owner: do not repeat a worker's
+handoff in the core prompt when the worker or its loaded skill already owns it,
+and present one visible path for one kind of file or state.
+
+Guidance is the first intervention for model behavior. Before adding a guard or
+putting a capability-specific rule in the system prompt, improve the relevant
+skill description or body and test it on a small, representative panel. A core
+prompt change is justified only when it states a useful principle beyond the
+failing capability. If no such principle exists, record the failure rather than
+teaching the prompt a fixture.
+
+Behavioral evaluation is staged: compare a matched baseline, test a focused
+candidate, and scale confidence only after review. Keep natural outcomes
+separate from explicit capability probes, preserve adjacent behavior, and
+record failures as evidence for later, more holistic work. A failed probe is a
+useful result, not a reason to stack competing priority instructions.
+
+---
+
 ## Skills
 
 The skills system is built on the `SkillsMiddleware` from
@@ -459,10 +500,10 @@ makes the system extensible — a new skill should land without editing
 the outer rings.
 
 1. **System prompt** (`assist/templates/deepagents/general_instructions.md.j2`)
-   — what agents exist, what general process to follow, and the
-   project-wide rules. It references the **Skills** section abstractly and leaves
-   both recognition and procedure to skill metadata and bodies. The async main
-   does not carry special routing text for complex or repeated workloads.
+   — stable, cross-capability product principles. It may state broad grounding,
+   evidence, ownership, and outcome rules, but leaves ordinary skill recognition
+   to metadata and procedure to the loaded body. The async main does not carry
+   special routing text for complex or repeated workloads.
 2. **Skills middleware prompt** (`SMALL_MODEL_SKILLS_PROMPT` in
    `skills_middleware.py`) — how skills work in general: the
    description-then-load contract, the `load_skill` tool, the pre-action
@@ -474,10 +515,10 @@ the outer rings.
    the actual rules the agent applies once it has loaded the skill.
 
 A skill shared by every role is added by creating
-`assist/skills/<name>/SKILL.md` — nothing else needs to change. If you find
-yourself editing layer 1 or layer 2 to make a shared domain skill match, the
-description (layer 3) is wrong. A core orchestration hook needs repeated natural-eval
-evidence and must leave its detailed policy in the skill body.
+`assist/skills/<name>/SKILL.md` — nothing else needs to change. If a shared
+domain skill is not matching, improve its description (layer 3) before changing
+layers 1 or 2. Change the system prompt only for a principle that has value
+beyond that one skill, and leave detailed policy in the skill body.
 
 ### Writing a skill description
 
