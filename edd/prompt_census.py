@@ -515,6 +515,7 @@ _PACKAGED_SKILL_ROOTS = {
     "/skills/": Path("assist/skills"),
     "/main-skills/": Path("assist/main_skills"),
     "/main-guidance-skills/": Path("assist/main_guidance_skills"),
+    "/caller-skills/": Path("assist/caller_skills"),
     "/render-skill/": Path("assist/web_skills"),
 }
 
@@ -1754,6 +1755,7 @@ _TOOL_ORIGINS = {
 
 _DECLARED_TEMPLATE_RENDER_HASHES = {
     "assist/templates/deepagents/assist_core.md.j2": {
+        "18d57020fae23ba1cc93aed0b0cca265a89891e66708619f9f28adfefb257adb",
         "d0bf608e2e7b8c0b5bad52e2dd87fe17b91f357d06bb449742406f08230eb32d",
         "cbc483e291b07adf34e6be71a409f486bee4de7a6f520f0c15994ede69dbf30c",
         "41d234fb460cd2a09f3ff18bef2b243b99f8f0faa5d444763f30c7ee314b0cfe",
@@ -1788,6 +1790,9 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "c8853dc566ad691ea9406fc2c42dcb01298ba24193fd0f81a3b8677205d0afef",
     },
     "assist/templates/deepagents/general_instructions.md.j2": {
+        "31443fdb18ab4d833f55366ce9941cb12e0f688fae6deb25ac1efc03adbc672c",
+        "8dfef02f53d6f89f09ca58447aee89ce6e15dbb3db98430ce93df42c863c1aaa",
+        "fd39922566a9824ea244848cdc21570a498c8e3835fbce118b4c96810b3e87d5",
         "102082e634233200a9b0fc4c0240ac93b6afc7e922fba97ffec254ea7f82eafd",
         "1b8e35f63bf4be8dd8676e477a084171d0ee50e01e812656c4ab594024ba3629",
         "1e9fb38a54b05e59da69f1199c231a8dacba1c6500a609c4603196cc9a51b5e7",
@@ -1799,6 +1804,9 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "5288bb0e5d96033aceeedab00b227264a409f2304531050d4a4b0d88ee468055",
         "7f0ccd414ba75057f468fca97520024c8c991b64adb0ac53039886dc7e76c2e3",
         "85099417c63007d135a6b72eb3a62a162248bdf522be8597e1f0a9ee14163ddd",
+        "459d098737944c94010315b88b17f37e5fb22df871cd94ed2f20b4304f95ec9b",
+        "5e41a2e0e12c8cb62da92ede1db5c8990a6a7d27f8f02736675b0f26d0d8c5f4",
+        "90d3e8f74362feee69e13ac6bcc58b615c739b2df9caf3d77df15ed2e41ec426",
     },
     "assist/templates/deepagents/research_instructions.txt.j2": {
         "379e55c61addf130f00a29a6221f16de89964e23b5c1e98cf9746f38211fb071",
@@ -2149,7 +2157,7 @@ _DECLARED_CAPTURE_TASK_SHA256 = \
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "280b8f416c6c26282d8f71a3f8132a9839269cb665904f09a572b56d42255842"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "098a8f19f001801464e8bcac5b35764e6f1e5e5660288c2f078aa496e670d91e"
+    "783b7a94ec0ff1ee760c47491467d970695c653434824d08682d46bc0683755c"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:

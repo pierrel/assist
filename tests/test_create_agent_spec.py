@@ -189,7 +189,9 @@ class TestSpecWiring(_CreateAgentHarness):
                       web_main=True)
 
     def test_main_guidance_skills_are_closed_to_that_identity(self):
-        from assist.backends import MAIN_GUIDANCE_SKILLS_ROUTE, BundledSkillsBackend
+        from assist.backends import (
+            CALLER_SKILLS_ROUTE, MAIN_GUIDANCE_SKILLS_ROUTE,
+            BundledSkillsBackend)
         from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 
         ordinary = self._build(spec=AgentSpec(
@@ -205,6 +207,9 @@ class TestSpecWiring(_CreateAgentHarness):
         assert MAIN_GUIDANCE_SKILLS_ROUTE not in ordinary_skills.sources
         assert candidate_skills.sources[0] == MAIN_GUIDANCE_SKILLS_ROUTE
         assert isinstance(candidate["backend"].routes[MAIN_GUIDANCE_SKILLS_ROUTE],
+                          BundledSkillsBackend)
+        assert candidate_skills.sources[1] == CALLER_SKILLS_ROUTE
+        assert isinstance(candidate["backend"].routes[CALLER_SKILLS_ROUTE],
                           BundledSkillsBackend)
         assert "# Grounding workflow" in load_skill(candidate_skills, "grounding")
         assert "# Research workflow" in load_skill(candidate_skills, "research")
@@ -272,6 +277,9 @@ class TestSpecWiring(_CreateAgentHarness):
         skills = next(m for m in kwargs["middleware"]
                       if isinstance(m, SmallModelSkillsMiddleware))
         assert "/main-skills/" not in skills.sources
+        assert "/caller-skills/" in skills.sources
+        assert "Use the available research-specialist capability once" in load_skill(
+            skills, "research")
         assert "could not be loaded" in load_skill(skills, "complex-request")
         assert "could not be loaded" in load_skill(
             skills, "orchestrate-repeated-work")
@@ -287,6 +295,10 @@ class TestSpecWiring(_CreateAgentHarness):
         assert task_offload._tools == {"task"}
         assert self._fake_res.call_args.kwargs["trust_human_messages"] is False
         assert "You own one complete task handed to you by the main agent" in kwargs[
+            "system_prompt"]
+        assert "Default behavior: call BOTH in parallel" not in kwargs["system_prompt"]
+        assert "#### Step 2b: External Context" not in kwargs["system_prompt"]
+        assert "The research-agent always saves its outputs" not in kwargs[
             "system_prompt"]
         assert "start_async_task" not in kwargs["system_prompt"]
         assert "Then proceed to Step 1." not in kwargs["system_prompt"]

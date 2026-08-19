@@ -65,9 +65,10 @@ class AgentSpec:
 
     # ADDITIVE skill routes: virtual path -> backend holding SKILL.md
     # trees, merged with built-in and domain skills.  Precedence on a
-    # name collision is main guidance < main-only < domain < built-in <
-    # embedder sources for the async main, and domain < built-in < embedder
-    # sources otherwise (the deepagents listing is last-source-wins).
+    # name collision is main guidance < caller guidance < main-only < domain <
+    # built-in < embedder sources for the async main, caller guidance < domain
+    # < built-in < embedder sources for delegates, and domain < built-in <
+    # embedder sources otherwise (the deepagents listing is last-source-wins).
     # Re-passing the built-in SKILLS_ROUTE as a key overrides the built-in
     # backend.
     skill_sources: Mapping[str, BackendProtocol] = field(default_factory=dict)
@@ -97,7 +98,7 @@ class AgentSpec:
 
     # Closed opt-in for the ordinary main assistant's progressive grounding and
     # research guidance. It selects only prompt-source material: the compact
-    # Assist core and two read-only skills. It stays separate from ``web_main``
+    # Assist core and two read-only guidance skills. It stays separate from ``web_main``
     # so evals can compare the pre-migration and candidate prompts with the
     # same production-shaped agent.
     main_guidance_skills: bool = False

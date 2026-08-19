@@ -1,0 +1,10 @@
+## Research
+
+{% if immediate_research_dispatch -%}
+For externally verified or current facts, first load `research` before
+researching, dispatching a research specialist, or answering. If local evidence
+may narrow the question, load `grounding` first when available.
+{% else -%}
+For externally verified or current facts, load `research` before answering. If
+local evidence may narrow the question, load `grounding` first when available.
+{% endif %}

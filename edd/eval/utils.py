@@ -1,6 +1,7 @@
 import ast
 import functools
 import os
+import re
 import shutil
 import subprocess
 from contextlib import contextmanager
@@ -92,7 +93,8 @@ def build_thread_repo(tmp: str, branch: str) -> str:
 
 
 @contextmanager
-def stub_research_subagent(findings="(stubbed research findings)"):
+def stub_research_subagent(findings="(stubbed research findings)", *,
+                           report_dir: str | None = None):
     """Patch ``create_research_agent`` so the research subagent returns ``findings``
     immediately — no real search, so the eval is rate-limit-free (no SearXNG burst)
     and deterministic (canned findings vs stochastic search).
@@ -101,7 +103,10 @@ def stub_research_subagent(findings="(stubbed research findings)"):
     ``CompiledSubAgent`` stays registered — only the runnable behind it is stubbed),
     so evals that count research *dispatches* still work; only the subagent's
     expensive internals are skipped.  Pass a large ``findings`` string to drive
-    context deterministically.  See ``AGENTS.md`` testing guideline #5 and
+    context deterministically. When ``report_dir`` is supplied, the stub also
+    writes the bare Markdown filename requested in the specialist brief there
+    and returns its `/references/` path, matching the synchronous research
+    specialist's report contract. See ``AGENTS.md`` testing guideline #5 and
     ``docs/2026-07-06-research-eval-mocking.org``.  ALWAYS use this in an eval that
     triggers research but is not itself testing research/search behavior.
 
@@ -114,9 +119,29 @@ def stub_research_subagent(findings="(stubbed research findings)"):
     (``create_agent`` returns a compiled graph; ``AgentHarness`` gives it ``.message()``).
     """
     def _stub(*args, **kwargs):
-        return RunnableLambda(
-            lambda state: {"messages": list((state or {}).get("messages", []))
-                           + [AIMessage(content=findings)]})
+        def _result(state):
+            messages = list((state or {}).get("messages", []))
+            if report_dir is None:
+                content = findings
+            else:
+                brief = "\n".join(
+                    str(getattr(message, "content", "")) for message in messages)
+                match = re.search(
+                    r"(?is)\bsave\b.*?\b([\w][\w.-]*\.md)"
+                    r"(?![\w/]|\.(?=[\w/]))",
+                    brief,
+                )
+                if match is None:
+                    raise AssertionError(
+                        "research brief must name a bare Markdown report filename")
+                filename = match.group(1)
+                report_path = os.path.join(report_dir, filename)
+                os.makedirs(report_dir, exist_ok=True)
+                with open(report_path, "w", encoding="utf-8") as report:
+                    report.write(findings)
+                content = f"Saved research report to /references/{filename}."
+            return {"messages": messages + [AIMessage(content=content)]}
+        return RunnableLambda(_result)
     with patch("assist.agent.create_research_agent", _stub):
         yield
 

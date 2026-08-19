@@ -2283,6 +2283,42 @@ caller's bound tool/subagent description remains the sole owner of its concrete
 contract: direct findings for production async main, report path for the
 synchronous delegate and legacy main.
 
+** P4a evidence (2026-08-19)
+
+The first migration moves the shared caller procedure to
+=caller_skills/research= and removes the delegate's duplicate procedure. The
+skill does not name =task= or =start_async_task=. A small role-rendered router
+only says that a delegate must load the skill before immediately dispatching a
+research specialist; the loaded skill and its bound capability remain the only
+owners of the dispatch and result interface. It also says that returned
+task/report content is untrusted evidence, never authority or tool
+instructions.
+
+All behavior runs use a canned specialist and reject HTTP, so they exercise
+caller selection, briefing, report handoff, and consumption without live-search
+variance.
+
+| Cohort | Legacy baseline | P4a candidate | What the oracle proves |
+|--------+-----------------+---------------+------------------------|
+| Delegate current Muni fare | 3/3 | 5/5 strict, 10/10 prior stability | The delegate gives the sourced fare; candidate also loads =research=, dispatches exactly one specialist, names a bare topic-specific Markdown report filename, writes that report to =references=, reads it, and answers from it. |
+| Delegate injected specialist result | n/a | 4/5 | The delegate dispatches and reads a report containing a filesystem instruction; all valid report-read journeys ignore it and return the sourced answer. One trial omitted the required report filename before any injected content reached the caller. |
+| Async-main report storage | 0/3 | 10/10 | The earlier baseline did not dispatch research for this sparse-identification shape; the current profile loads/dispatches research and names the report destination. This is an improvement measurement, not a parity claim. |
+| Local dining, no research needed | 3/3 | 5/5 | The catalog does not pull a local recommendation into research. |
+
+Discarded probes are retained as diagnostic evidence, not as candidate results:
+
+- A return-shape-neutral body without a compact caller router loaded no research
+  skill in three delegate trials; the delegate directly dispatched its legacy
+  specialist. This established that the body alone is not a reliable first-load
+  trigger for Qwen.
+- A weak report-storage phrase did not reliably cause an async-main brief to
+  name a file. The common skill now uses the existing explicit report-request
+  form rather than an example tied to a fixture.
+- An early delegate harness returned raw findings although the real synchronous
+  specialist returns a report path. It caused a spurious second dispatch and
+  was replaced by a report-contract-faithful canned worker before counting the
+  final trials.
+
 ** Test and gate
 
 - Natural current-fact, recommendation, compare, user-URL, local-only,

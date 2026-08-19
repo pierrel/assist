@@ -1595,10 +1595,13 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
                 "I'm trying to identify an animated series from the last decade. "
                 "It was made for children but adults loved it too, looked unusually "
                 "striking, and I think its title mentioned the wind. What was it?")
-            research = next(
+            research = next((
                 call for call in self._calls(agent)
                 if call.get("name") == "start_async_task"
-                and call.get("args", {}).get("subagent_type") == "research-agent")
+                and call.get("args", {}).get("subagent_type") == "research-agent"
+            ), None)
+            self.assertIsNotNone(research, self._calls(agent))
+            assert research is not None
             self.assertTrue(skill_was_loaded(agent, "research"), self._calls(agent))
             self.assertRegex(
                 research["args"]["description"],
