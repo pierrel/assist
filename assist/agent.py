@@ -328,11 +328,11 @@ def create_agent(model: BaseChatModel,
     (= ``working_dir``), so the same files are reachable in both local and
     sandbox modes.  It is registered only when present (a gated ``ls``;
     the absent case stays silent). The async main lists its main-only
-    orchestration source first for small-model salience. When selected, the
-    main guidance and caller-guidance sources precede it. Last-source-wins
-    collision precedence is ``main guidance < caller guidance < main-only <
-    domain < built-in < embedder-extras``; other roles omit the main-only
-    sources. A same-named
+    orchestration source first for small-model salience. When selected, main
+    guidance precedes it; delegates instead receive caller guidance. Last-
+    source-wins collision precedence is ``main guidance < main-only < domain <
+    built-in < embedder-extras`` for async main and ``caller guidance < domain
+    < built-in < embedder-extras`` for delegates. A same-named
     domain skill does not override a built-in (the safety skills ``dev`` /
     ``git-sync`` are the floor).
     """
@@ -419,9 +419,9 @@ def create_agent(model: BaseChatModel,
     # no route needed — see DOMAIN_SKILLS_PATH).  Registered only when the dir
     # actually holds skills, so an absent/empty one adds no useless source.
     # Placed before shared built-ins: the deepagents listing is last-source-wins, so
-    # precedence is main guidance < caller guidance < main-only < domain <
-    # built-in < embedder-extras for the async main, caller guidance < domain
-    # < built-in < embedder-extras for delegates, and domain < built-in <
+    # precedence is main guidance < main-only < domain < built-in <
+    # embedder-extras for the async main, caller guidance < domain < built-in
+    # < embedder-extras for delegates, and domain < built-in <
     # embedder-extras otherwise. Built-in safety skills (dev, git-sync) are NOT
     # overridable by a same-named domain skill. (An
     # embedder that explicitly routes DOMAIN_SKILLS_PATH via extra_skill_sources

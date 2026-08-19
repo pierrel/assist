@@ -65,9 +65,9 @@ class AgentSpec:
 
     # ADDITIVE skill routes: virtual path -> backend holding SKILL.md
     # trees, merged with built-in and domain skills.  Precedence on a
-    # name collision is main guidance < caller guidance < main-only < domain <
-    # built-in < embedder sources for the async main, caller guidance < domain
-    # < built-in < embedder sources for delegates, and domain < built-in <
+    # name collision is main guidance < main-only < domain < built-in <
+    # embedder sources for the async main, caller guidance < domain < built-in
+    # < embedder sources for delegates, and domain < built-in <
     # embedder sources otherwise (the deepagents listing is last-source-wins).
     # Re-passing the built-in SKILLS_ROUTE as a key overrides the built-in
     # backend.
