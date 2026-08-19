@@ -98,9 +98,9 @@ class AgentSpec:
 
     # Closed opt-in for the ordinary main assistant's progressive grounding and
     # research guidance. It selects only prompt-source material: the compact
-    # Assist core, two read-only main-guidance skills, and the shared read-only
-    # research-caller skill. It stays separate from ``web_main`` so evals can
-    # compare the pre-migration and candidate prompts with the same
+    # Assist core and three read-only main-guidance skills, including the
+    # direct-results research workflow. It stays separate from ``web_main`` so
+    # evals can compare the pre-migration and candidate prompts with the same
     # production-shaped agent.
     main_guidance_skills: bool = False
 
