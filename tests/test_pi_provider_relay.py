@@ -48,6 +48,31 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
         return
 
 
+class _SummaryUpstream(http.server.BaseHTTPRequestHandler):
+    requests: list[tuple[str, dict[str, object]]] = []
+    input_tokens = 120
+
+    def do_POST(self) -> None:
+        payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        type(self).requests.append((self.path, payload))
+        if self.path == "/v1/chat/completions/input_tokens":
+            body = json.dumps({"input_tokens": type(self).input_tokens}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+        else:
+            body = (b'data: {"choices":[{"delta":{"content":"compact "}}]}\n\n'
+                    b'data: {"choices":[{"delta":{"content":"history"}}]}\n\n'
+                    b'data: [DONE]\n\n')
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
 class _StalledUpstream(http.server.BaseHTTPRequestHandler):
     started = threading.Event()
     release = threading.Event()
@@ -308,6 +333,55 @@ def test_provider_relay_forwards_only_its_model_and_capability(tmp_path: Path) -
     assert payload["temperature"] == 0.1
     assert payload["stream"] is True
     assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_host_only_summary_counts_exact_request_before_one_no_tool_completion(tmp_path: Path) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _SummaryUpstream)
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    _SummaryUpstream.requests = []
+    relay = PiProviderRelay(control, f"http://127.0.0.1:{upstream.server_port}/v1",
+                            "secret", "qwen", "a" * 43, context_len=32768)
+    try:
+        assert relay.summarize("old complete runs") == "compact history"
+        with pytest.raises(PiProviderRelayError, match="unavailable"):
+            relay.summarize("another candidate")
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert [path for path, _payload in _SummaryUpstream.requests] == [
+        "/v1/chat/completions/input_tokens", "/v1/chat/completions"]
+    count, completion = [payload for _path, payload in _SummaryUpstream.requests]
+    assert count == completion
+    assert "tools" not in completion
+    assert completion["max_tokens"] == 2048
+
+
+def test_host_only_summary_never_generates_when_the_count_exceeds_context(tmp_path: Path) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _SummaryUpstream)
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    _SummaryUpstream.requests = []
+    _SummaryUpstream.input_tokens = 30721
+    relay = PiProviderRelay(control, f"http://127.0.0.1:{upstream.server_port}/v1",
+                            "secret", "qwen", "a" * 43, context_len=32768)
+    try:
+        with pytest.raises(PiProviderRelayError, match="model context"):
+            relay.summarize("old complete runs")
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+        _SummaryUpstream.input_tokens = 120
+
+    assert [path for path, _payload in _SummaryUpstream.requests] == [
+        "/v1/chat/completions/input_tokens"]
 
 
 def test_provider_relay_traces_only_an_admitted_request(tmp_path: Path) -> None:
