@@ -1582,38 +1582,46 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
 
         get.assert_not_called()
 
-    def test_research_brief_names_report_destination(self):
-        """A research worker receives a bare Markdown report filename in its brief."""
+    def test_uses_direct_research_findings_for_current_train_time(self):
+        """Current timetable → checked direct findings → grounded answer.
+
+        Prompt: ``What time does the northbound Coast Starlight currently leave
+        Los Angeles?`` The candidate must load ``research``, dispatch one
+        research task without a report-storage instruction, check its completion
+        wake, and answer from the credible canned direct findings.
+        """
         with patch.dict(os.environ,
                         {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1"},
                         clear=False), \
              patch("assist.tools.requests.get",
-                   side_effect=AssertionError("research eval must not fetch")) as get, \
-             stub_research_subagent(_VAGUE_ANIMATION_RESEARCH_RESULT):
+                   side_effect=AssertionError("research eval must not fetch")) as get:
             agent = self._agent()
-            agent.message(
-                "I'm trying to identify an animated series from the last decade. "
-                "It was made for children but adults loved it too, looked unusually "
-                "striking, and I think its title mentioned the wind. What was it?")
-            research = next((
+            initial_reply = agent.message(
+                "What time does the northbound Coast Starlight currently leave Los Angeles?")
+            research_tasks = [
                 call for call in self._calls(agent)
                 if call.get("name") == "start_async_task"
                 and call.get("args", {}).get("subagent_type") == "research-agent"
-            ), None)
-            self.assertIsNotNone(research, self._calls(agent))
-            assert research is not None
+            ]
+            self.assertEqual(len(research_tasks), 1, self._calls(agent))
+            research = research_tasks[0]
             self.assertTrue(skill_was_loaded(agent, "research"), self._calls(agent))
-            self.assertRegex(
+            self.assertNotRegex(initial_reply, r"(?i)\b9:51\b")
+            self.assertNotRegex(
                 research["args"]["description"],
-                r"(?is)\bsave\b.*(?<![/\w])[\w][\w.-]*\.md"
-                r"(?=$|[\s,;:!?]|\.(?:\s|$))",
+                r"(?is)\b(?:save|store|report|references?)\b|\.md\b",
             )
-            self.assertIn(
-                "references workspace",
-                research["args"]["description"].lower(),
-            )
+            task_id = _task_id_for_call(research)
+            _TASK_RESULTS[task_id] = _COAST_RESEARCH_RESULT
+            before_wake = len(self._calls(agent))
+            reply = agent.message(_completion_wake(task_id, "success"))
 
         get.assert_not_called()
+        self.assertTrue(any(
+            call.get("name") == "check_async_task"
+            and call.get("args", {}).get("task_id") == task_id
+            for call in self._calls(agent)[before_wake:]), self._calls(agent))
+        self.assertRegex(reply, r"(?i)Coast Starlight.*9:51")
 
     def test_local_dining_help_does_not_research(self):
         """A local dining preference is not an external-fact research request."""

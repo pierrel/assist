@@ -352,7 +352,7 @@ def create_agent(model: BaseChatModel,
             "not both")
     delegate = spec.role == "delegate"
     async_main = not delegate and bool(spec.async_subagent_tools)
-    caller_research_skill = spec.main_guidance_skills or delegate
+    caller_research_skill = delegate
     thread_memory_enabled = bool(
         getattr(sandbox_backend, "native_agent_dir", False) is True
         if sandbox_backend is not None else agent_dir is not None)
@@ -398,7 +398,8 @@ def create_agent(model: BaseChatModel,
 
     # Put caller guidance and the async main's orchestration skills before broad
     # shared/domain skills. Source order is prompt salience, not an access guard;
-    # delegates receive only the return-shape-neutral research caller skill.
+    # main guidance owns the async direct-results workflow, while delegates load
+    # their report-backed caller workflow under the same ``research`` name.
     skill_sources = (
         ([MAIN_GUIDANCE_SKILLS_ROUTE] if spec.main_guidance_skills else [])
         + ([CALLER_SKILLS_ROUTE] if caller_research_skill else [])

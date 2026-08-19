@@ -208,11 +208,14 @@ class TestSpecWiring(_CreateAgentHarness):
         assert candidate_skills.sources[0] == MAIN_GUIDANCE_SKILLS_ROUTE
         assert isinstance(candidate["backend"].routes[MAIN_GUIDANCE_SKILLS_ROUTE],
                           BundledSkillsBackend)
-        assert candidate_skills.sources[1] == CALLER_SKILLS_ROUTE
-        assert isinstance(candidate["backend"].routes[CALLER_SKILLS_ROUTE],
-                          BundledSkillsBackend)
+        assert CALLER_SKILLS_ROUTE not in candidate_skills.sources
+        assert CALLER_SKILLS_ROUTE not in candidate["backend"].routes
         assert "# Grounding workflow" in load_skill(candidate_skills, "grounding")
-        assert "# Research workflow" in load_skill(candidate_skills, "research")
+        research = load_skill(candidate_skills, "research")
+        assert "# Research workflow" in research
+        normalized_research = " ".join(research.split())
+        assert "returns direct grounded findings" in normalized_research
+        assert "Save the final Markdown report" not in normalized_research
 
     def test_explicit_empty_async_tools_disable_all_delegation(self):
         kwargs = self._build(spec=AgentSpec(async_subagent_tools=()))
@@ -278,8 +281,11 @@ class TestSpecWiring(_CreateAgentHarness):
                       if isinstance(m, SmallModelSkillsMiddleware))
         assert "/main-skills/" not in skills.sources
         assert "/caller-skills/" in skills.sources
-        assert "Use the available research-specialist capability once" in load_skill(
-            skills, "research")
+        research = load_skill(skills, "research")
+        assert "Use the available research-specialist capability once" in research
+        normalized_research = " ".join(research.split())
+        assert "Save the final Markdown report" in normalized_research
+        assert "returns direct grounded findings" not in normalized_research
         assert "could not be loaded" in load_skill(skills, "complex-request")
         assert "could not be loaded" in load_skill(
             skills, "orchestrate-repeated-work")

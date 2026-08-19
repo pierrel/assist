@@ -504,6 +504,7 @@ def test_main_guidance_skill_sources_are_closed_to_opted_in_main(census):
         ("grounding", "/main-guidance-skills/grounding/SKILL.md"),
         ("maintain-thread-state",
          "/main-guidance-skills/maintain-thread-state/SKILL.md"),
+        ("research", "/main-guidance-skills/research/SKILL.md"),
     }
     assert {source["scenario"] for source in guidance_sources} == {
         "web-main-core", "web-main-full"}
@@ -517,7 +518,7 @@ def test_main_guidance_skill_sources_are_closed_to_opted_in_main(census):
         ("research", "/caller-skills/research/SKILL.md"),
     }
     assert {source["scenario"] for source in caller_sources} == {
-        "web-main-core", "web-main-full", "web-delegate"}
+        "web-delegate"}
 
 
 def test_research_worker_prompt_uses_markdown_reports():
