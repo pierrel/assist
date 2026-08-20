@@ -11,8 +11,8 @@ from assist import promptable
 
 
 @pytest.mark.parametrize(("guidance_skills", "expected_sha256"), [
-    (False, "65f9bc92c77a2cdf712deab70a80b581f8699306f750da792402525b29ca1465"),
-    (True, "2db99898d0a4c8381aea5f965aaefcd7f0708e6750a28bc429f5ae445e539efc"),
+    (False, "e00ed6c5c45309f0fc16546b64785357262bf60f2a21265cf097df9f792be0a6"),
+    (True, "dd90b1c652fb111d1c7ef80f22754f45079b86f04df028341bfa7ed8c88edbb3"),
 ])
 def test_deep_web_main_prompt_preserves_the_merged_rewrite(
     guidance_skills, expected_sha256,
@@ -33,6 +33,15 @@ def test_both_engines_include_the_same_shared_policy_once():
     for fragment in deep.shared_fragments:
         assert deep.text.count(fragment) == 1
         assert pi.text.count(fragment) == 1
+
+
+def test_deep_web_main_maps_legacy_completion_wakes_to_terminal_results():
+    prompt = web_main_prompt.render_deep_web_main_prompt(
+        guidance_skills=False).text
+
+    assert "older completion wake that says `check_async_task`" in prompt.replace(
+        "\n", " ")
+    assert "`get_async_task_result` instead" in prompt
 
 
 def test_shared_prompt_sources_auto_reload_for_later_turns(tmp_path, monkeypatch):
