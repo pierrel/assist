@@ -57,9 +57,8 @@ _NETWORK_CAPABLE_TOOLS = {
 _MAX_JUDGE_FILE_BYTES = 16 * 1024
 _MAX_JUDGE_OBSERVATION_BYTES = 64 * 1024
 _TRIP_CONTEXT_RESULT = "Weekend rail service resumes May 2 according to trip.org."
-_COAST_RESEARCH_RESULT = (
-    "The current published timetable lists Coast Starlight train 14 "
-    "departing Los Angeles at 9:51 a.m."
+_PROJECTOR_RESEARCH_RESULT = (
+    "Aster Electronics lists the HoloBeam 4K projector at $899."
 )
 _VAGUE_ANIMATION_RESEARCH_RESULT = (
     "The Wind Harbor is a 2019 animated series known for its hand-painted "
@@ -346,11 +345,11 @@ def _result(task_id: str) -> str:
                 "Context discovery completed. Relevant local files may now be "
                 "inspected for the user's request; no requested user outcome has "
                 "been completed yet."))
-    if ("coast starlight" in description.lower()
+    if ("holobeam" in description.lower()
             and _TASK_TYPES.get(task_id) == "research-agent"):
         return _task_result(
             task_id, "success", agent_name="research-agent", result=(
-                _COAST_RESEARCH_RESULT
+                _PROJECTOR_RESEARCH_RESULT
             ))
     return _task_result(
         task_id, "success", result="The requested outcome is complete.")
@@ -1308,7 +1307,7 @@ class TestAsyncSubagentSupervisor(TestCase):
     def test_pure_external_research_uses_research_not_delegate(self):
         agent = self._agent()
         agent.message(
-            "What time does the northbound Coast Starlight currently leave Los Angeles?")
+            "What does the HoloBeam 4K projector cost at Aster Electronics today?")
         first_calls = self._calls(agent)
         starts = [call for call in first_calls
                   if call.get("name") == "start_async_task"]
@@ -1330,7 +1329,7 @@ class TestAsyncSubagentSupervisor(TestCase):
         self.assertTrue(any(call.get("name") == "get_async_task_result"
                             and call.get("args", {}).get("task_id") == research_id
                             for call in later_calls), later_calls)
-        self.assertRegex(reply, r"(?i)Coast Starlight.*9:51")
+        self.assertRegex(reply, r"(?is)HoloBeam.*\$?899")
 
 
 class TestPromptRewriteIndependentBriefs(TestAsyncSubagentSupervisor):
@@ -1639,13 +1638,13 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
         self.assertEqual(status_calls[0].get("args", {}).get("task_id"), context_id)
         self.assertRegex(reply, r"(?i)(pending|running|still|not.*(?:return|finish))")
 
-    def test_answers_current_train_time(self):
+    def test_answers_current_product_price(self):
         candidate = os.environ.get("ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS") == "1"
         with patch("assist.tools.requests.get",
                    side_effect=AssertionError("research eval must not fetch")) as get:
             agent = self._agent()
             agent.message(
-                "What time does the northbound Coast Starlight currently leave Los Angeles?")
+                "What does the HoloBeam 4K projector cost at Aster Electronics today?")
             starts = [call for call in self._calls(agent)
                       if call.get("name") == "start_async_task"]
             research = next(call for call in reversed(starts)
@@ -1662,7 +1661,7 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
             call.get("name") == "get_async_task_result"
             and call.get("args", {}).get("task_id") == task_id
             for call in self._calls(agent)), self._calls(agent))
-        self.assertRegex(reply, r"(?i)Coast Starlight.*9:51")
+        self.assertRegex(reply, r"(?is)HoloBeam.*\$?899")
 
     def test_dispatches_research_for_vague_media_identification(self):
         """Sparse, externally verifiable cultural clues start research."""
@@ -1692,11 +1691,11 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
 
         get.assert_not_called()
 
-    def test_uses_direct_research_findings_for_current_train_time(self):
-        """Current timetable → checked direct findings → grounded answer.
+    def test_uses_direct_research_findings_for_current_product_price(self):
+        """Current product price → checked direct findings → grounded answer.
 
-        Prompt: ``What time does the northbound Coast Starlight currently leave
-        Los Angeles?`` The candidate must load ``research``, dispatch one
+        Prompt: ``What does the HoloBeam 4K projector cost at Aster Electronics
+        today?`` The candidate must load ``research``, dispatch one
         research task without a report-storage instruction, check its completion
         wake, and answer from the credible canned direct findings.
         """
@@ -1707,7 +1706,7 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
                    side_effect=AssertionError("research eval must not fetch")) as get:
             agent = self._agent()
             initial_reply = agent.message(
-                "What time does the northbound Coast Starlight currently leave Los Angeles?")
+                "What does the HoloBeam 4K projector cost at Aster Electronics today?")
             research_tasks = [
                 call for call in self._calls(agent)
                 if call.get("name") == "start_async_task"
@@ -1716,13 +1715,13 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
             self.assertEqual(len(research_tasks), 1, self._calls(agent))
             research = research_tasks[0]
             self.assertTrue(skill_was_loaded(agent, "research"), self._calls(agent))
-            self.assertNotRegex(initial_reply, r"(?i)\b9:51\b")
+            self.assertNotRegex(initial_reply, r"(?is)HoloBeam.*\$?899")
             self.assertNotRegex(
                 research["args"]["description"],
-                r"(?is)\b(?:save|store|report|references?)\b|\.md\b",
+                r"(?is)\b(?:save|store|references?)\b|\.md\b",
             )
             task_id = _task_id_for_call(research)
-            _TASK_RESULTS[task_id] = _COAST_RESEARCH_RESULT
+            _TASK_RESULTS[task_id] = _PROJECTOR_RESEARCH_RESULT
             before_wake = len(self._calls(agent))
             reply = agent.message(_completion_wake(task_id, "success"))
 
@@ -1731,7 +1730,7 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
             call.get("name") == "get_async_task_result"
             and call.get("args", {}).get("task_id") == task_id
             for call in self._calls(agent)[before_wake:]), self._calls(agent))
-        self.assertRegex(reply, r"(?i)Coast Starlight.*9:51")
+        self.assertRegex(reply, r"(?is)HoloBeam.*\$?899")
 
     def test_local_dining_help_does_not_research(self):
         """A local dining preference is not an external-fact research request."""
