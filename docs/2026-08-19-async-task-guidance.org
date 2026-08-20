@@ -156,14 +156,14 @@ starting at N=3 and expanding only while its target remains reachable.
 | Journey | Pre-split baseline | Split candidate | Contract |
 |-
 | Explicit pending-status question | 0/7 (historical run stopped when N=10 target became unreachable) | 10/10 | One =get_async_task_status= call for the known task, then an honest pending reply. |
-| Context completion starts research | 3/3 (historical) | 5/5 | The completion wake retrieves its result, starts one research task, and makes no later launch-turn call. |
-| Completion wake uses output | not separately sampled | 5/5 | Retrieve the exact terminal task result before responding; do not reopen local files. |
-| Context-informed external research | 0/3 | 2/5 | Wait for local context before research, use the returned May 17 fact in the research brief, then complete the answer. |
+| Context completion starts research | 3/3 (historical) | 10/10 | The completion wake retrieves its result, starts one research task, and makes no later launch-turn call. |
+| Completion wake uses output | 3/3 | 10/10 | Retrieve the exact terminal task result before responding; do not reopen local files. |
+| Context-informed external research | 0/3 | 2/10 | Wait for local context before research, use the returned May 17 fact in the research brief, then complete the answer. |
 
 The first three rows meet their stated acceptance contract. The final row is
 recorded as unstable rather than tuned in this change: baseline already failed
 all three samples, through both premature research and repeated overloaded
-checks, while the split candidate completed two of five. Its failures begin
+checks, while the split candidate completed two of ten. Its failures begin
 research before context has supplied the date, an existing general evidence-plan
 violation that the prompt already states explicitly. Repeating that rule or
 adding an eval-shaped rider would be a separate prompt experiment, not a
