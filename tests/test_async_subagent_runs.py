@@ -231,6 +231,33 @@ def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
     assert (wakes[0].id, "parent", {}) in submitted
 
 
+def test_terminal_task_recovery_reuses_a_legacy_completion_wake(
+        monkeypatch, tmp_path):
+    """Prompt wording may change without breaking durable wake recovery."""
+    submitted, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect files", metadata=metadata)
+    threads._runs().claim(child.thread_id, child.id)
+    child = threads._runs().transition(
+        child.thread_id, child.id, "success", result="child result")
+    legacy = threads._create_run(
+        "parent",
+        "Task ID: sub-stable\nCall check_async_task with the exact task ID.",
+        origin="task-completion",
+        work_id=f"task-completion:{child.work_id}",
+        dispatch_key=f"task-completion:{child.id}",
+    )
+
+    wake = threads._complete_child_handoff(child)
+
+    assert wake is not None and wake.id == legacy.id
+    assert (legacy.id, "parent", {}) in submitted
+    assert len([
+        run for run in threads._runs().list("parent")
+        if run.dispatch_key == legacy.dispatch_key
+    ]) == 1
+
+
 def test_context_completion_carries_only_parent_timezone_to_schedule(
         monkeypatch, tmp_path):
     """The original browser zone reaches the later schedule, never its location."""

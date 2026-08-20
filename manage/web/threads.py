@@ -1887,6 +1887,16 @@ def _complete_child_handoff(run: Run) -> Run | None:
         logging.info("parent of child run %s was deleted", run.id)
         MANAGER.hard_delete(run.thread_id)
         return None
+    dispatch_key = f"task-completion:{run.id}"
+    existing = next(
+        (candidate for candidate in _runs().list(run.parent_thread_id)
+         if candidate.dispatch_key == dispatch_key),
+        None,
+    )
+    if existing is not None:
+        if existing.status == "pending":
+            _RESUME_SCHEDULER.submit(existing.id, existing.thread_id)
+        return existing
     try:
         parent = _runs().get(run.parent_thread_id, run.parent_run_id)
     except RunNotFound:
@@ -1903,7 +1913,7 @@ def _complete_child_handoff(run: Run) -> Run | None:
             rider=_time_only_rider(parent),
             origin="task-completion",
             work_id=f"task-completion:{run.work_id}",
-            dispatch_key=f"task-completion:{run.id}")
+            dispatch_key=dispatch_key)
     except FileNotFoundError:
         if not os.path.isdir(MANAGER.thread_dir(run.parent_thread_id)):
             logging.info("parent of child run %s was deleted", run.id)
