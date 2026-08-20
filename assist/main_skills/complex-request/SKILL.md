@@ -39,11 +39,11 @@ known input paths belong in the self-contained task brief.
 
    A subagent receives no parent conversation history. Never use shorthand such as
    "handle the second item" or assume it can infer omitted context.
-5. After each completion wake, check the exact task. Reconcile the TODOs with the
-   checked result and workspace evidence, then start newly unblocked work. Leave
-   pending siblings alone; their own completion will wake you, so never poll or do
-   their work yourself. A failed or timed-out outcome stays failed: do not retry it,
-   replace it yourself, or start its dependents unless the user asks you to try again.
+5. After each completion wake, reconcile the TODOs with that task's result and
+   workspace evidence, then start newly unblocked work. Leave pending siblings
+   alone; their own completion will wake you, so never poll or do their work
+   yourself. A failed or timed-out outcome stays failed: do not retry it, replace
+   it yourself, or start its dependents unless the user asks you to try again.
 6. Before finishing, compare the requested outcomes with actual results. Correct any
    missed or stale TODO state, verify each outcome, and report what completed, what
    remains usable, and what is blocked.

@@ -166,7 +166,7 @@ def test_classified_kernel_matches_each_final_skills_enabled_request(census):
         "glob", "grep"]
     executable = [*filesystem, "execute"]
     async_lifecycle = [
-        "start_async_task", "check_async_task", "update_async_task",
+        "start_async_task", "get_async_task_status", "get_async_task_result", "update_async_task",
         "cancel_async_task", "list_async_tasks"]
     expected = {
         "web-main-core": [*executable, "load_skill", *async_lifecycle],
@@ -621,7 +621,7 @@ def test_fixed_role_delegate_and_capture_input_boundaries(census):
 
     delegate = _call(census, "web-delegate")
     assert "task" in delegate["visible_tools"]
-    assert not ({"start_async_task", "check_async_task"}
+    assert not ({"start_async_task", "get_async_task_status", "get_async_task_result"}
                 & set(delegate["visible_tools"]))
 
     capture = _call(census, "capture")

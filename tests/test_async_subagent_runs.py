@@ -179,7 +179,7 @@ def test_parent_deletion_cannot_leave_a_new_orphan_task(monkeypatch, tmp_path):
     assert not os.path.exists(threads.MANAGER.thread_dir("sub-race"))
 
 
-def test_five_tools_round_trip_through_real_private_asgi(monkeypatch, tmp_path):
+def test_six_tools_round_trip_through_real_private_asgi(monkeypatch, tmp_path):
     submitted = _root(monkeypatch, tmp_path)
     threads.MANAGER.reserve("parent")
     parent = threads._create_run("parent", "question")
@@ -192,8 +192,11 @@ def test_five_tools_round_trip_through_real_private_asgi(monkeypatch, tmp_path):
             "inspect files", "context-agent", runtime("start"))
         task_id = launched.split("task_id: ", 1)[1].split(".", 1)[0]
         assert task_id in TOOLS["list_async_tasks"].func(runtime("list"))
-        assert '"status": "pending"' in TOOLS["check_async_task"].func(
-            task_id, runtime("check"))
+        status = TOOLS["get_async_task_status"].func(task_id, runtime("status"))
+        assert '"status": "pending"' in status
+        assert '"result"' not in status
+        assert "not terminal" in TOOLS["get_async_task_result"].func(
+            task_id, runtime("result"))
         assert "Task updated" in TOOLS["update_async_task"].func(
             task_id, "inspect org files", runtime("update"))
         assert "Task cancelled" in TOOLS["cancel_async_task"].func(
@@ -219,7 +222,7 @@ def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
              if run.origin == "task-completion"]
     assert len(wakes) == 1
     assert wakes[0].resume is False
-    assert "Call check_async_task" in wakes[0].text
+    assert "Call get_async_task_result" in wakes[0].text
     assert "child result" not in wakes[0].text
     assert os.path.isdir(threads.MANAGER.thread_dir("sub-stable"))
     task = SERVICE.get_thread("sub-stable")["values"]["async_task"]

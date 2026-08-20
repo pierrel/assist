@@ -26,9 +26,9 @@ planned evidence-only `delegate-agent`
 
 ## Complete
 
-1. On a completion wake, check only its planned group. For more than eight
-   groups, start the next wave only after checking the current wave.
-2. After every planned group succeeds and is checked, only the main agent
+1. On a completion wake, act only on its planned group. For more than eight
+   groups, start the next wave only after receiving the current wave's results.
+2. After every planned group succeeds and its result is available, only the main agent
    updates shared artifacts and writes the requested synthesis. Copy only facts
    from the checked evidence; preserve unknowns and never infer or replace a
    reported role, source, or status. If a group fails or times out, leave shared
