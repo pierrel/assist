@@ -75,7 +75,7 @@ def test_large_async_task_result_gets_untrusted_marker():
     backend = _StubBackend()
     mw = ToolResultToFileMiddleware(
         backend,
-        tools=frozenset({"check_async_task"}),
+        tools=frozenset({"get_async_task_result"}),
         floor_chars=4000,
         untrusted=True,
     )
@@ -83,7 +83,7 @@ def test_large_async_task_result_gets_untrusted_marker():
 
     out = _run(
         mw,
-        _Req(name="check_async_task", task_id="sub-1"),
+        _Req(name="get_async_task_result", task_id="sub-1"),
         _msg(planted + ("x" * 5000)),
     )
 

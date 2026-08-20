@@ -81,9 +81,9 @@ def protocol():
     return calls, tasks
 
 
-def test_five_upstream_shaped_tools_exist():
+def test_six_async_task_tools_exist():
     assert set(TOOLS) == {
-        "start_async_task", "check_async_task", "update_async_task",
+        "start_async_task", "get_async_task_status", "get_async_task_result", "update_async_task",
         "cancel_async_task", "list_async_tasks",
     }
 
@@ -144,7 +144,7 @@ def test_tool_node_injects_runtime_when_model_calls_start(protocol):
     assert "task_id: sub-" in result["messages"][-1].content
 
 
-def test_check_list_update_and_cancel_are_parent_scoped(protocol):
+def test_status_result_list_update_and_cancel_are_parent_scoped(protocol):
     _, tasks = protocol
     context = AsyncTaskContext("parent", "parent-run", "parent-work")
     with async_task_context(context):
@@ -152,8 +152,11 @@ def test_check_list_update_and_cancel_are_parent_scoped(protocol):
             "inspect", "context-agent", _runtime("start"))
         task_id = launched.split("task_id: ", 1)[1].split(".", 1)[0]
         assert task_id in TOOLS["list_async_tasks"].func(_runtime("list"))
-        assert '"status": "pending"' in TOOLS["check_async_task"].func(
-            task_id, _runtime("check"))
+        status = TOOLS["get_async_task_status"].func(task_id, _runtime("status"))
+        assert '"status": "pending"' in status
+        assert '"result"' not in status
+        assert "not terminal" in TOOLS["get_async_task_result"].func(
+            task_id, _runtime("result"))
         updated = TOOLS["update_async_task"].func(
             task_id, "inspect only org files", _runtime("update"))
         assert "Task updated" in updated
@@ -165,7 +168,46 @@ def test_check_list_update_and_cancel_are_parent_scoped(protocol):
 
     with async_task_context(AsyncTaskContext("other", "r", "w")):
         assert "not found in this conversation" in TOOLS[
-            "check_async_task"].func(task_id, _runtime("foreign"))
+            "get_async_task_status"].func(task_id, _runtime("foreign"))
+        assert "not found in this conversation" in TOOLS[
+            "get_async_task_result"].func(task_id, _runtime("foreign-result"))
+
+
+def test_terminal_result_is_separate_from_status(protocol):
+    _, tasks = protocol
+    context = AsyncTaskContext("parent", "parent-run", "parent-work")
+    with async_task_context(context):
+        launched = TOOLS["start_async_task"].func(
+            "inspect", "context-agent", _runtime("start"))
+        task_id = launched.split("task_id: ", 1)[1].split(".", 1)[0]
+        tasks[task_id].update({
+            "status": "success",
+            "result": "The requested report is ready.",
+            "error": None,
+        })
+        status = TOOLS["get_async_task_status"].func(
+            task_id, _runtime("status"))
+        result = TOOLS["get_async_task_result"].func(
+            task_id, _runtime("result"))
+
+    assert '"status": "success"' in status
+    assert "requested report" not in status
+    assert "requested report" in result
+
+    with async_task_context(context):
+        tasks[task_id].update({
+            "status": "error",
+            "result": None,
+            "error": "The report included private diagnostic details.",
+        })
+        status = TOOLS["get_async_task_status"].func(
+            task_id, _runtime("error-status"))
+        result = TOOLS["get_async_task_result"].func(
+            task_id, _runtime("error-result"))
+
+    assert '"status": "error"' in status
+    assert "private diagnostic details" not in status
+    assert "private diagnostic details" in result
 
 
 def test_unknown_agent_is_rejected_without_asgi_call(protocol):

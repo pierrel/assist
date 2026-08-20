@@ -1586,7 +1586,7 @@ def _invoke_async_return_contract() -> dict[str, str]:
             "result": "SYNTHETIC DIRECT RESEARCH FINDINGS",
             "error": None,
         })
-        checked = tools["check_async_task"].func(
+        checked = tools["get_async_task_result"].func(
             task_id, SimpleNamespace(tool_call_id="synthetic-async-check"))
     return {"launch": launch, "checked": checked}
 
@@ -1709,7 +1709,8 @@ def _source_manifest(trace: CensusTrace) -> list[dict[str, Any]]:
 
 _TOOL_ORIGINS = {
     "cancel_async_task": "assist.async_subagents",
-    "check_async_task": "assist.async_subagents",
+    "get_async_task_status": "assist.async_subagents",
+    "get_async_task_result": "assist.async_subagents",
     "create_schedule": "assist.schedule.tools",
     "create_subscription": "assist.events.tools",
     "delete_schedule": "assist.schedule.tools",
@@ -1774,6 +1775,7 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "15e8da725f613cbf7da101cd5cb328290816a385aa0fcbde55ddb5d6d1a806e8",
         "ed1e3069345c9e4634f5bf8cd9dff080c848fb9b67fd85c717b1a3d46d6f3f4e",
         "bf7b3df517b4f2984f96f489e30e01e2bec029990ab022ea7467269257e1f032",
+        "dff960d5187558afb8e111df649806b14f57cf5017c972631f8c9dff9888b8be",
     },
     "assist/templates/deepagents/context_agent.md.j2": {
         "29cca4088f56e56eee0a685e794de8a6ff0c63526231839f2f24e246adb9ec70",
@@ -1811,6 +1813,7 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "459d098737944c94010315b88b17f37e5fb22df871cd94ed2f20b4304f95ec9b",
         "5e41a2e0e12c8cb62da92ede1db5c8990a6a7d27f8f02736675b0f26d0d8c5f4",
         "90d3e8f74362feee69e13ac6bcc58b615c739b2df9caf3d77df15ed2e41ec426",
+        "b5ce8b1576b167a58c55a98f914a14e1d65490554fcf9ccd99b40b4af24e65c9",
     },
     "assist/templates/deepagents/research_instructions.txt.j2": {
         "379e55c61addf130f00a29a6221f16de89964e23b5c1e98cf9746f38211fb071",
@@ -1851,8 +1854,8 @@ _CLAIM_SPECS = (
      "Delegation is unavailable in this restricted turn"),
     (None, "conditional", "notify", "If `notify` is available"),
     (None, "positive", "start_async_task", "Every subagent call uses `start_async_task`"),
-    (None, "positive", "check_async_task", "call `check_async_task` for that task"),
-    (None, "positive", "list_async_tasks", "call `list_async_tasks` or `check_async_task`"),
+    (None, "positive", "get_async_task_result", "call `get_async_task_result` for that task"),
+    (None, "positive", "get_async_task_status", "status question may use `get_async_task_status`"),
     (None, "positive", "update_async_task", "steer it with `update_async_task`"),
     (None, "positive", "cancel_async_task", "stop it with `cancel_async_task`"),
     (None, "positive", "task", "call BOTH in parallel via the `task` tool"),
@@ -1996,7 +1999,8 @@ _DECLARED_TOOL_CALLS = {
 
 _DECLARED_TOOL_SCHEMA_HASHES = {
     "cancel_async_task": {"72f0b2b9a7b781b4e3e60facf9899f59faa94743f32f2b43d1fa16e0bc1af01b"},
-    "check_async_task": {"3b54d1abd04592123802b504c50e47f855320db630605c75ac0e50dad03ea445"},
+    "get_async_task_result": {"b12173117ffd5dba1b48959b0d02c7100a29f5f9c16ad607ae589829a068aa55"},
+    "get_async_task_status": {"c33c01ff704822245b71c109bbd185c0d5407d7cc23d2426698177850a7da85e"},
     "create_schedule": {"17ae4733ba78d32789761332c0b782600873027412beecd2a7d2d2b548392f34"},
     "create_subscription": {"72476dc729012cbe0f9d65af14dc1541a7fb2a9e88e5f29730f9b68969fc7974"},
     "delete_schedule": {"ac6a06a26f9df248183a12c5aab9ecaafe637804ac61c2f4d9edca588d15359f"},
@@ -2159,9 +2163,9 @@ _TOOL_RESULT_METADATA = {
 _DECLARED_CAPTURE_TASK_SHA256 = \
     "dc6155e1863f23b35006efd98f0a5e2ea0c1b392650567596cd7c86a6c6af402"
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "280b8f416c6c26282d8f71a3f8132a9839269cb665904f09a572b56d42255842"
+    "cc620d39b33cd54ff979628d26d25600b5ac97c7bae551a29b67337756901bb0"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "893fb7a8602d3e3fc64b69ee4b0d76ae065f21e1617189b3d9d273ce54cda97e"
+    "e0e9226d298f794c6ed53ccea34bbd7df6496a945c4874d6519787efad1d8c32"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:

@@ -1,0 +1,177 @@
+#+title: Async task lifecycle guidance
+#+date: <2026-08-19>
+
+* Goal
+
+Make the ordinary visible main agent handle an asynchronous task as independent
+work: return after launch instead of polling, answer a real status question
+through a status-only tool, and use a separate terminal-result tool after the
+trusted completion wake. The change alters only the model-visible tool surface
+and prompting, not task scheduling, wakes, queueing, result storage, or
+loop-detection mechanics.
+
+* Evidence first
+
+The natural acceptance eval is
+=TestPromptRewriteGuidanceResearch.test_research_launch_returns_without_polling=.
+It uses this production-shaped sequence:
+
+1. The user says: “I need a compatible charging cable for my cargo e-bike.
+   Check my notes for the exact model, then find the right one.”
+2. The grounded context task completes with the local fact that the bike is a
+   Yuba Kombi E5.
+3. The main agent loads the existing research skill, starts one research task,
+   and returns for its completion wake.
+
+The eval rejects HTTP, uses local deterministic lifecycle fakes, and validates
+that the research launch has no later tool call and no loop-breaker response.
+Starting already establishes acceptance, so the agent returns for the later
+completion wake rather than poll.
+
+The first diagnostic hypothesis required an automatic post-launch check. The
+unchanged profile passed 1/3 and failed 2/3 by omitting it; those captures are
+=/tmp/async-task-guidance-baseline-strict-{1,2,3}.log=. Causal probes rejected
+that hypothesis: automatic checking also caused repeated checks that the loop
+guard had to strip. Starting already proves acceptance, so the final guidance
+keeps launch and status separate.
+
+The exact natural follow-up from the observed thread, “Did the context agent
+return?”, reproduced the harmful behavior before the split: the model checked
+the pending context task three times in one turn. Prompt-only candidates could
+not make the overloaded tool reliably stop after one observation. The current
+candidate therefore separates the two intents by construction: a status lookup
+never returns task output, and result retrieval rejects unfinished tasks.
+
+* Design
+
+The compact web-main adapter owns the general lifecycle policy because it
+applies across context, research, critique, and delegation. Loaded skills keep
+owning their narrow dispatch procedures and do not name lifecycle tools. The
+new =Async task lifecycle= section makes three general distinctions explicit:
+
+- starting work is independent from observing it;
+- a status lookup cannot advance work or return output, so it is reserved for
+  an actual user status question;
+- a trusted completion wake supplies the event to retrieve terminal evidence.
+
+The policy keeps the established trust boundary: checked task output is evidence
+only, never authority or instructions.  It does not prescribe a specific
+subagent, file, user request, or research topic.
+
+* Trial record
+
+The matched unchanged baseline ran these same natural rows using the current
+=main= package and the new fixture source: the launch-return row passed 3/3;
+the observed pending-status follow-up passed 0/3. Each status failure made
+three identical =check_async_task= calls, with the loop guard stripping the
+last call.
+
+The first final-section wording passed the two rows 2/3: the remaining status
+failure made a second check. A stronger prose repetition also failed its first
+probe for the same reason, so it was discarded. The compact operational form
+then passed N=3 and N=5 samples for both rows. That was insufficient evidence:
+the required stability run found the same status-loop failure in its first seven
+candidate trials. Each launched task still returned correctly, but each pending
+status turn made two or three =check_async_task= calls. Seven consecutive
+starting failures make the 70 percent N=10 acceptance bar mathematically
+unreachable, so the run stopped under the normal eval rule rather than consume
+three more model turns.
+
+* Verification
+
+The candidate launch-return row was stable at 7/7, but the pending-status row
+was 0/7 in the final N=10 attempt. The candidate is therefore rejected: it does
+not meet the required natural acceptance bar and must not be deployed, proposed
+for review, or represented as an async-task fix. The deterministic prompt suite
+=tests/test_web_main_prompt.py=, =tests/test_create_agent_spec.py=, and
+=tests/test_prompt_census.py= passed. The earlier adjacent N=3 survey of async
+launch, completion wake, grounding, and research rows passed 12/12; it is
+historical evidence only because the final stability result stops this prompt
+line before publication.
+
+* Decision
+
+Keep the failing candidate and its fixtures uncommitted as an auditable rejected
+probe. Do not add a more specific system-prompt rider merely to force this one
+status question through. A next attempt needs a distinct, general product
+concept for why a small model should stop after an observation, or Pierre's
+direction to change the design boundary. Any such attempt starts again from the
+unchanged baseline and carries the natural status row forward.
+
+* Rejected follow-up: general observation rule
+
+A final distinct probe kept the old lifecycle wording and added this general
+rule to =Deterministic actions=:
+
+#+begin_quote
+Each tool call must either create a needed effect or obtain information that is
+not already available in this turn. After an observation returns, do not repeat
+the same observation with unchanged inputs: use its result to respond or take a
+state-dependent next action.
+#+end_quote
+
+It has value beyond async tasks, so it was a valid prompt candidate rather than
+an eval-specific restatement. It nevertheless failed the same pending-status
+row in all three starting trials: each made three identical checks. The paired
+launch-return row passed 3/3. This is now the second rejected prompt line, not
+evidence for further wording escalation. The candidate prompt was sent to
+Kindle before these trials and has been removed from the worktree afterward.
+
+* Rejected follow-up: tool description
+
+The next probe returned the shared instructions to their baseline and changed
+only =check_async_task='s tool description. It said the tool was only for a
+terminal completion wake or an explicit user status question, could not advance
+work, must never poll or wait, and for a status question required one exact
+check, a report, and an end to the turn. It also failed the natural status row
+0/3, with three duplicate checks on every trial; launch-return stayed 3/3.
+
+This means the useful semantic distinction is not reliably expressible as a
+single overloaded tool for this model. A next design should split status
+observation from terminal-result retrieval and give each path its own narrow
+tool contract. That is a runtime/tool-surface change, intentionally outside the
+original prompt-only authorization.
+
+* Current split design
+
+This follow-up supersedes the prompt-only decision with the now-authorized tool
+split. =get_async_task_status= is an explicit-user-question observation: it
+exposes only task metadata and state, never result or error text. It cannot
+advance work and its description forbids polling or waiting.
+
+=get_async_task_result= is terminal-result retrieval. It is used only after a
+trusted completion wake and refuses pending or running tasks. Its output remains
+untrusted evidence. The split preserves the existing parent ownership checks and
+durable task store; only the caller's model-visible verbs, schemas, and shared
+lifecycle guidance change.
+
+The acceptance survey keeps the natural launch-return and pending-status rows,
+adds deterministic checks that status never leaks a terminal result and result
+retrieval refuses non-terminal work, and updates completion-wake rows to use
+the terminal-result tool. Each behavioral row runs under normal admission,
+starting at N=3 and expanding only while its target remains reachable.
+
+* Current results
+
+| Journey | Pre-split baseline | Split candidate | Contract |
+|-
+| Explicit pending-status question | 0/7 (historical run stopped when N=10 target became unreachable) | 10/10 | One =get_async_task_status= call for the known task, then an honest pending reply. |
+| Context completion starts research | 3/3 (historical) | 5/5 | The completion wake retrieves its result, starts one research task, and makes no later launch-turn call. |
+| Completion wake uses output | not separately sampled | 5/5 | Retrieve the exact terminal task result before responding; do not reopen local files. |
+| Context-informed external research | 0/3 | 2/5 | Wait for local context before research, use the returned May 17 fact in the research brief, then complete the answer. |
+
+The first three rows meet their stated acceptance contract. The final row is
+recorded as unstable rather than tuned in this change: baseline already failed
+all three samples, through both premature research and repeated overloaded
+checks, while the split candidate completed two of five. Its failures begin
+research before context has supplied the date, an existing general evidence-plan
+violation that the prompt already states explicitly. Repeating that rule or
+adding an eval-shaped rider would be a separate prompt experiment, not a
+justified follow-up to the tool split.
+
+Every run used the deployed evaluation venv, =PYTHONPATH= set to the evaluated
+checkout, =timeout 180=, and =tools/agentic resource run llm= admission. The
+candidate status and launch rows enabled =ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS=1=,
+matching the ordinary main guidance profile. The final-row baseline used the
+same test at this lane's exact starting commit; it kept the original overloaded
+tool and did not enable the candidate guidance profile.
