@@ -277,7 +277,8 @@ def _result(task_id: str) -> str:
                 f"{status}. Wait for its completion wake before retrieving a "
                 "result.")
     if status == "cancelled":
-        return _task_result(task_id, status)
+        return (f"Task `{task_id}` was cancelled. It has no completion wake or "
+                "terminal result; use its status or cancellation response.")
     if task_id in _TASK_RESULTS:
         return _task_result(task_id, "success", result=_TASK_RESULTS[task_id])
     career_evidence = _career_evidence(description)
