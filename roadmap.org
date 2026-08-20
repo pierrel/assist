@@ -1061,6 +1061,50 @@ and diagnostics while =loaded_skill_tools= remains invocation-local.  Focused
 migration coverage proves a thread learns new bundled, domain, and normal web
 =render= skills, including a body-only update.
 
+*** TODO Reproduce and repair repeated-work routing and failure recovery
+Observed in production thread =20260722202239-f12319a8= on 2026-08-20. The
+scheduled weekly career scan read =/workspace/career/job-pipeline.md=, then
+put roughly twenty companies into one =research-agent= task rather than loading
+=orchestrate-repeated-work= and partitioning the workload. That child made 94
+tool calls (48 =read_url= and 28 =search_internet=) before hitting the
+LangGraph 300-step recursion limit. On the later continuation, the main agent
+made the identical =read_file(/workspace/career/job-pipeline.md, limit=30,
+offset=69)= call three times despite narrating that it would visit careers
+pages; the exact-repeat loop guard stripped the fourth call and ended the turn.
+
+The loop guard is not the primary defect: it predates prompt rearchitecture and
+correctly prevents an unbounded loop. The missing behavior is useful recovery
+after an oversized specialist task fails. The 2026-08-13 run of the same weekly
+job did launch five bounded research tasks and completed, so the production
+trace establishes a regression-shaped routing failure but not its cause. The
+2026-08-20 oversized launch also occurred before that morning's async
+status/result split deployment, so do not attribute the launch to that later
+change without evidence. The likely architecture question is whether moving
+repeated-work procedure behind progressive skill selection left this system
+turn insufficiently reliable; the trace does not prove that hypothesis.
+
+The existing capability eval
+=TestAsyncSubagentSupervisor.test_career_scan_selects_repeated_work_skill_from_metadata_capability=
+checks a synthetic career scan, skill selection, and batches of at most five.
+It does not cover this system-scheduled shape or recovery from a failed group.
+The retained production evidence is the thread's =runs.json= plus the
+checkpoint trace in =$ASSIST_THREADS_DIR/threads.db=; search the thread ID and
+the failed child =sub-dcac5c97583c769ea80d09b0= when resuming.
+
+*Next experiment, before prompt or mechanical changes:*
+1. Build a natural scheduled-scan eval with the production-sized repeated
+   workload but no tool/skill names in its prompt. Baseline current main at N=3.
+2. Add a local child-result fixture that reaches the same terminal recursion
+   failure. Validate a bounded partition on launch and an honest incomplete
+   response after one failed group, with no direct take-over and no repeated
+   local read.
+3. Compare the current profile at N=3. If it fails, iterate only on general
+   repeated-work selection or recovery guidance, preserving adjacent skill and
+   research rows. Do not add a file-, company-, or loop-specific rider.
+4. If general guidance cannot reliably select the bounded workflow, stop and
+   bring a design decision to Pierre: deterministic routing may be warranted,
+   but is a separate mechanical boundary rather than a prompt patch.
+
 *** TODO P2c: Suppress recently loaded skill descriptions until useful again
 After P2b, compare turn-count, provider-reported input-plus-output-token,
 compaction, and only-if-needed hybrid gates.  Temporarily omit a successfully
