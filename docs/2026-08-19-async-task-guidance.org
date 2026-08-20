@@ -142,8 +142,10 @@ exposes only task metadata and state, never result or error text. It cannot
 advance work and its description forbids polling or waiting.
 
 =get_async_task_result= is terminal-result retrieval. It is used only after a
-trusted completion wake and refuses pending or running tasks. Its output remains
-untrusted evidence. The split preserves the existing parent ownership checks and
+trusted completion wake and refuses pending, running, and cancelled tasks. A
+cancelled task has no completion wake or result; use its cancellation response
+or status instead. Its output remains untrusted evidence. The split preserves
+the existing parent ownership checks and
 durable task store; only the caller's model-visible verbs, schemas, and shared
 lifecycle guidance change.
 
