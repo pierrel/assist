@@ -157,7 +157,7 @@ starting at N=3 and expanding only while its target remains reachable.
 |-
 | Explicit pending-status question | 0/7 (historical run stopped when N=10 target became unreachable) | 10/10 | One =get_async_task_status= call for the known task, then an honest pending reply. |
 | Context completion starts research | 3/3 (historical) | 10/10 | The completion wake retrieves its result, starts one research task, and makes no later launch-turn call. |
-| Completion wake uses output | 3/3 | 10/10 | Retrieve the exact terminal task result before responding; do not reopen local files. |
+| Completion wake uses output | 3/3 | 10/10, then 3/3 after oracle repair | Retrieve the exact terminal task result before responding; do not reopen local files. |
 | Context-informed external research | 0/3 | 2/10 | Wait for local context before research, use the returned May 17 fact in the research brief, then complete the answer. |
 
 The first three rows meet their stated acceptance contract. The final row is
@@ -168,6 +168,23 @@ research before context has supplied the date, an existing general evidence-plan
 violation that the prompt already states explicitly. Repeating that rule or
 adding an eval-shaped rider would be a separate prompt experiment, not a
 justified follow-up to the tool split.
+
+* Oracle repair
+
+The older generic external-result fixture used a real train name but gave an
+internally contradictory timetable: it called Train 14 northbound from Los
+Angeles at 9:51 a.m. The model sometimes recognized the contradiction and
+either explained it or substituted a remembered schedule. That made the row a
+test of a disputed real-world fact rather than of terminal-result consumption.
+
+The current generic and direct-result rows instead ask for the current price of
+a fictional HoloBeam 4K projector at Aster Electronics. The local research
+fixture returns a price of $899, which has no competing travel capability or
+model-world fact. Both current forms passed 3/3 under the split profile. The
+earlier direct-result control had already passed 3/3 on the pre-split profile
+and 10/10 on the split profile; the current 3/3 confirms that the repaired
+oracle remains a valid natural external-fact shape. This changes only eval
+fixtures and validation, not production guidance.
 
 Every run used the deployed evaluation venv, =PYTHONPATH= set to the evaluated
 checkout, =timeout 180=, and =tools/agentic resource run llm= admission. The
