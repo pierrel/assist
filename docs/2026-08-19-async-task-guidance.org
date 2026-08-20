@@ -152,9 +152,6 @@ now finds and resumes an already-persisted wake before rendering a new one.
 That compatibility guard is necessary because the wake text names the current
 terminal-result tool and may legitimately change across a deployment; it does
 not alter task scheduling or create an additional wake.
-The web-main lifecycle guidance also maps a retained older
-=check_async_task= completion wake to =get_async_task_result=, so the durable
-wake remains actionable until it is consumed.
 
 The acceptance survey keeps the natural launch-return and pending-status rows,
 adds deterministic checks that status never leaks a terminal result and result
