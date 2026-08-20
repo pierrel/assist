@@ -214,7 +214,7 @@ message or system instruction.
 
 ** Deterministic tests
 
-1. All five task tools use the private ASGI Agent Protocol app.
+1. At the time, all five task tools used the private ASGI Agent Protocol app.
 2. Start and update replay return the same logical work without duplicate Runs.
 3. Multiple starts return in one parent turn and execute serially.
 4. Every success, error, timeout, and cancellation produces one coherent task
