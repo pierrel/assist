@@ -165,6 +165,8 @@ def test_status_result_list_update_and_cancel_are_parent_scoped(protocol):
             task_id, _runtime("cancel"))
         assert "Task cancelled" in cancelled
         assert tasks[task_id]["status"] == "cancelled"
+        assert "no completion wake or terminal result" in TOOLS[
+            "get_async_task_result"].func(task_id, _runtime("cancelled-result"))
 
     with async_task_context(AsyncTaskContext("other", "r", "w")):
         assert "not found in this conversation" in TOOLS[

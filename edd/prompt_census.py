@@ -1999,7 +1999,7 @@ _DECLARED_TOOL_CALLS = {
 
 _DECLARED_TOOL_SCHEMA_HASHES = {
     "cancel_async_task": {"72f0b2b9a7b781b4e3e60facf9899f59faa94743f32f2b43d1fa16e0bc1af01b"},
-    "get_async_task_result": {"b12173117ffd5dba1b48959b0d02c7100a29f5f9c16ad607ae589829a068aa55"},
+    "get_async_task_result": {"8752493ed656605373caa6e21c68c7f475f4d5229c7fb25f5c6591ce006337c4"},
     "get_async_task_status": {"c33c01ff704822245b71c109bbd185c0d5407d7cc23d2426698177850a7da85e"},
     "create_schedule": {"17ae4733ba78d32789761332c0b782600873027412beecd2a7d2d2b548392f34"},
     "create_subscription": {"72476dc729012cbe0f9d65af14dc1541a7fb2a9e88e5f29730f9b68969fc7974"},
