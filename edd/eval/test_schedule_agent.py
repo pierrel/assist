@@ -1,21 +1,25 @@
-"""Eval: the agent maps natural-language recurrence to the right create_schedule args.
+"""Evals for natural schedule selection and persisted outcomes.
 
-The cadence math + the tool are unit-tested (deterministic); the small-model risk is the
-mapping from "on the 25th of every 2 months" to day_of_month=25, month_interval=2. We
-assert on the create_schedule TOOL-CALL args the agent emits (not the store) — that isolates
-the NL→args mapping and doesn't need the run config's tz to be wired.
+The capability probes cover cadence mapping through ``create_schedule`` arguments
+and referential changes through reload/modify tool traces. Production-shaped
+web-main rows additionally assert on the persisted store so a plausible completion
+response cannot substitute for the requested state change.
 """
 import os
 import tempfile
 from types import SimpleNamespace
 from unittest import TestCase, mock
 
+from langchain_core.messages import ToolMessage
+
 from assist.agent import create_agent, AgentHarness
 from assist.context_rider import CONTEXT_RIDER_KEY
 from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
+from assist.schedule.model import Cadence, Schedule
 from assist.schedule.tools import schedule_tools
 from assist.schedule.store import ScheduleStore
+from .test_async_subagents import reset_task_fixture
 from .utils import (
     agent_tool_calls, create_filesystem, skill_was_loaded,
     prompt_rewrite_web_main_spec,
@@ -81,7 +85,7 @@ class TestScheduleAgent(TestCase):
 
 
 class TestPromptRewriteScheduleOutcome(TestCase):
-    """Natural web-main comparison with a persisted recurring schedule outcome."""
+    """Natural web-main comparisons with persisted recurring-schedule outcomes."""
 
     @classmethod
     def setUpClass(cls):
@@ -119,3 +123,102 @@ class TestPromptRewriteScheduleOutcome(TestCase):
         self.assertEqual(cadence.hour, 9)
         self.assertIn("financ", saved[0].prompt.lower())
         self.assertRegex(str(reply).lower(), r"(reminder|scheduled|next run)")
+
+    def test_deletes_named_recurring_reminder(self):
+        """A natural removal request loads scheduling and changes persisted state."""
+        thread_id = "schedule-delete-eval"
+        target = Schedule(
+            id="a17c9e4b23d1",
+            thread_id=thread_id,
+            prompt="Evening meditation check-in: ask whether today's session happened.",
+            cadence=Cadence(hour=18, minute=0),
+            tz="America/Los_Angeles",
+            next_fire_at="2030-01-02T02:00:00+00:00",
+            created_at="2026-08-21T16:00:00+00:00",
+        )
+        control = Schedule(
+            id="f04d8a6c91e2",
+            thread_id=thread_id,
+            prompt="Morning meditation intention check-in.",
+            cadence=Cadence(hour=8, minute=0),
+            tz="America/Los_Angeles",
+            next_fire_at="2030-01-01T16:00:00+00:00",
+            created_at="2026-08-21T16:00:00+00:00",
+        )
+
+        with tempfile.TemporaryDirectory(prefix="schedule_delete_store_") as store_root, \
+                tempfile.TemporaryDirectory(prefix="schedule_delete_workspace_") as root:
+            os.makedirs(os.path.join(store_root, thread_id))
+            create_filesystem(root, {"README.org": "Personal workspace."})
+            store = ScheduleStore(store_root)
+            store.add(target)
+            store.add(control)
+            config = {"configurable": {
+                "thread_id": thread_id,
+                CONTEXT_RIDER_KEY: SimpleNamespace(tz="America/Los_Angeles"),
+            }}
+            reset_task_fixture()
+            with mock.patch.dict(os.environ, {
+                    "ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1",
+            }, clear=False), \
+                 mock.patch("assist.schedule.tools.get_config", return_value=config), \
+                 mock.patch("assist.tools.requests.get",
+                            side_effect=AssertionError(
+                                "schedule eval must not fetch URLs")) as get, \
+                 stub_research_subagent():
+                agent = AgentHarness(create_agent(
+                    self.model, root,
+                    spec=prompt_rewrite_web_main_spec(
+                        tools=tuple(schedule_tools(store)))),
+                    thread_id=thread_id)
+                reply = str(agent.message(
+                    "Please remove the nightly scheduled reminder. "
+                    "I don't think I need it anymore."))
+            get.assert_not_called()
+            saved = store.for_thread(thread_id)
+
+        calls = agent_tool_calls(agent)
+        call_names = [call.get("name") for call in calls]
+        messages = agent.all_messages()
+        diagnostics = {
+            "calls": calls,
+            "saved": saved,
+            "reply": reply,
+            "messages": messages,
+        }
+        self.assertTrue(skill_was_loaded(agent, "schedule"), diagnostics)
+        self.assertTrue(calls, diagnostics)
+        self.assertEqual(call_names[0], "load_skill", diagnostics)
+        schedule_loads = [
+            i for i, call in enumerate(calls)
+            if call.get("name") == "load_skill"
+            and (call.get("args") or {}).get("name") == "schedule"]
+        schedule_lists = [
+            i for i, call in enumerate(calls)
+            if call.get("name") == "list_schedules"]
+        target_deletes = [
+            i for i, call in enumerate(calls)
+            if call.get("name") == "delete_schedule"
+            and (call.get("args") or {}).get("schedule_id") == target.id]
+        self.assertTrue(schedule_loads, diagnostics)
+        self.assertTrue(schedule_lists, diagnostics)
+        self.assertTrue(target_deletes, diagnostics)
+        self.assertLess(schedule_loads[0], schedule_lists[0], diagnostics)
+        self.assertLess(schedule_lists[0], target_deletes[0], diagnostics)
+        self.assertFalse(any(
+            call.get("name") == "delete_schedule"
+            and (call.get("args") or {}).get("schedule_id") == control.id
+            for call in calls), diagnostics)
+        self.assertEqual(saved, [control], diagnostics)
+        delete_call = calls[target_deletes[0]]
+        delete_results = [
+            message for message in messages
+            if isinstance(message, ToolMessage)
+            and message.tool_call_id == delete_call.get("id")]
+        self.assertEqual(len(delete_results), 1, diagnostics)
+        self.assertEqual(
+            delete_results[0].content,
+            f"Deleted schedule {target.id}.",
+            diagnostics,
+        )
+        self.assertTrue(reply.strip(), diagnostics)
