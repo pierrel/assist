@@ -864,8 +864,62 @@ The dev-agent → skill migration shipped in four phases (see [[file:docs/2026-0
 Production already passes =sandbox_backend= through every agent factory (see =assist/thread.py=).  Most evals (=test_agent.py=, =test_context_agent.py=, =test_org_format_skill.py=) still use the standard filesystem backend for speed.  Add a config knob (env var or pytest marker) so the suite can be run in sandbox-mode without slowing the fast path.
 ** TODO Memory-middleware / tool-API trap
 Documented as an open question in the skills doc and partly overlaps with the =write_file= recoverability item above.  The deepagents memory middleware presents synthetic placeholders ("(No memory loaded)", "System reminder: File exists but has empty contents") that the small model treats as editable content; combined with =write_file='s refuse-overwrite policy this produces a no-clean-exit loop.  Either fix needs both ends to align.
-** TODO Make more evals around skill use
-The evals should test varying levels of skill mentions (implicit vs explicit) and check whether the appropriate skill(s) were loaded.
+** TODO Prevent prose-only completion when a skill owns the state change
+A 2026-08-21 production turn exposed a gap between progressive disclosure and
+truthful completion.  The user naturally asked to remove an existing recurring
+check-in and conditionally restore it after several missed days.  The agent did
+not load =schedule=, inspect schedules, or mutate one, but still reported that
+the schedule had been removed.  On the correction turn it loaded =schedule=
+and the same tools completed the deletion, proving that capability availability
+and wiring were not the failure.
+
+The catalog already describes =schedule= as applying to changed, paused, and
+cancelled recurring prompts.  The core also forbids claiming a completed change
+without evidence.  The structural gap is that gated tools cannot run before a
+skill load, but a terminal prose response can bypass both the load and the
+effect.  The conditional promise is a second problem: private memory can retain
+an intention, but cannot observe future state or wake the agent.  A promise to
+act later needs a durable trigger or an honest statement that none was installed.
+
+*Eval before changing guidance or machinery:*
+1. Add a production-shaped web-main regression with an existing named evening
+   schedule plus an unrelated schedule.  Natural delete wording must load
+   =schedule=, list when the id is unknown, mutate only the intended entry, and
+   derive the completion report from the successful result and final store.
+2. Split the original compound request into delete-only and conditional-rearm
+   rows.  For the latter, use an explicit threshold and require a persisted
+   observer/trigger; exercise it against synthetic missed-day state and verify
+   the original reminder returns.  Add a separate vague-threshold row to learn
+   whether the agent makes its assumption explicit or asks.
+3. Cover the schedule lifecycle with natural create, inspect, modify, pause,
+   resume, and delete rows plus nearby non-schedule negatives.  Every stateful
+   row asserts both the skill load and the resulting store state.  Add a reusable
+   oracle that rejects success language when no requested state change occurred.
+4. Run a cheaper selection-only panel first: 15--25 paraphrases and referential
+   follow-ups against the full production catalog.  This distinguishes catalog
+   matching from the procedure followed after load.  Then baseline the natural
+   end-to-end rows at N=3.
+5. Survey the remaining load evals while building the safety panel.  Current
+   strong load-plus-outcome precedents include formatting, rendering,
+   calculation, PDF, travel, website, subscription, and domain skills.  Close
+   the highest-value gaps: schedule lifecycle, shared-doc outcomes, dev
+   load-to-completion linkage, and direct behavior coverage for =egress=,
+   =regexp=, =maintain-thread-state=, and =complex-request=.
+
+*Candidate order:* first test a general pre-response skill protocol: before a
+final response represents capability-owned state as created, changed, removed,
+or sent, match and load that capability and ground the claim in its successful
+result.  Then test a general schedule description/body improvement that makes
+the procedure list exact target, mutate, and report returned state.  Run matched
+adjacent skill and no-skill rows at N=3, confidence at N=5, and stability at
+N=10; new natural behavior must reach at least 70% with no regressions.
+
+If prompt and skill variants remain materially unreliable, stop for a design
+decision on a narrow skill-selection preflight that makes a prose-only bypass
+unreachable for host-effect requests.  Do not add a generic regex over final
+prose: semantic claim detection would be brittle and would duplicate the
+model's job inside middleware.  The originating hypothesis is preserved in
+=llm-agentic-experiments/seeds/2026-08-21-skill-load-before-completion-claim.md=.
 ** TODO Explore deepagents code interpreter for the =calculate= skill
 LangChain shipped a code-interpreter middleware for deepagents (=CodeInterpreterMiddleware= from =langchain_quickjs=) and an "interpreter skill" pattern that layers reusable typed modules on top.  See [[https://www.langchain.com/blog/give-your-agents-an-interpreter][blog: Give Your Agents an Interpreter]] and [[https://www.langchain.com/blog/interpreter-skills][blog: Interpreter Skills]].
 
