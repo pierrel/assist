@@ -91,6 +91,9 @@ class TestPromptRewriteScheduleOutcome(TestCase):
     def setUpClass(cls):
         cls.model = select_assistant_model(0.1)
 
+    def setUp(self):
+        reset_task_fixture()
+
     def test_creates_requested_recurring_reminder(self):
         thread_id = "schedule-eval"
         with tempfile.TemporaryDirectory(prefix="schedule_web_main_store_") as store_root, \
@@ -157,7 +160,6 @@ class TestPromptRewriteScheduleOutcome(TestCase):
                 "thread_id": thread_id,
                 CONTEXT_RIDER_KEY: SimpleNamespace(tz="America/Los_Angeles"),
             }}
-            reset_task_fixture()
             with mock.patch.dict(os.environ, {
                     "ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1",
             }, clear=False), \
@@ -189,6 +191,11 @@ class TestPromptRewriteScheduleOutcome(TestCase):
         self.assertTrue(skill_was_loaded(agent, "schedule"), diagnostics)
         self.assertTrue(calls, diagnostics)
         self.assertEqual(call_names[0], "load_skill", diagnostics)
+        self.assertEqual(
+            (calls[0].get("args") or {}).get("name"),
+            "schedule",
+            diagnostics,
+        )
         schedule_loads = [
             i for i, call in enumerate(calls)
             if call.get("name") == "load_skill"
