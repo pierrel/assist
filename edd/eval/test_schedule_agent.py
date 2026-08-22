@@ -92,6 +92,9 @@ class TestPromptRewriteScheduleOutcome(TestCase):
         cls.model = select_assistant_model(0.1)
 
     def setUp(self):
+        self.enterContext(mock.patch.dict(os.environ, {
+            "ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1",
+        }, clear=False))
         reset_task_fixture()
 
     def test_creates_requested_recurring_reminder(self):
@@ -160,10 +163,7 @@ class TestPromptRewriteScheduleOutcome(TestCase):
                 "thread_id": thread_id,
                 CONTEXT_RIDER_KEY: SimpleNamespace(tz="America/Los_Angeles"),
             }}
-            with mock.patch.dict(os.environ, {
-                    "ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1",
-            }, clear=False), \
-                 mock.patch("assist.schedule.tools.get_config", return_value=config), \
+            with mock.patch("assist.schedule.tools.get_config", return_value=config), \
                  mock.patch("assist.tools.requests.get",
                             side_effect=AssertionError(
                                 "schedule eval must not fetch URLs")) as get, \
