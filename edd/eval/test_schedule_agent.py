@@ -5,9 +5,8 @@ and referential changes through reload/modify tool traces. Production-shaped
 web-main rows additionally assert on the persisted store so a plausible completion
 response cannot substitute for the requested state change.
 """
-import os
 import json
-import re
+import os
 import tempfile
 from types import SimpleNamespace
 from unittest import TestCase, mock
@@ -19,11 +18,11 @@ from pydantic import PrivateAttr
 from assist.agent import create_agent, AgentHarness
 from assist.context_rider import CONTEXT_RIDER_KEY
 from assist.model_manager import select_assistant_model
+from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from assist.spec import AgentSpec
 from assist.schedule.model import Cadence, Schedule
 from assist.schedule.tools import schedule_tools
 from assist.schedule.store import ScheduleStore
-from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from .test_async_subagents import reset_task_fixture
 from .utils import (
     agent_tool_calls, create_filesystem, skill_was_loaded,
@@ -87,8 +86,8 @@ class TestScheduleAgent(TestCase):
             any(c.get("day_of_month") == 25 and c.get("month_interval") == 2 for c in calls),
             f"expected create_schedule with day_of_month=25, month_interval=2; calls: {calls}")
 
-    def test_referential_followup_reloads_skill_and_modifies_schedule(self):
-        """A new invocation resets disclosure, but the active task still routes."""
+    def test_referential_followup_uses_retained_skill_and_modifies_schedule(self):
+        """A natural follow-up keeps the prior skill's callable capability."""
         with stub_research_subagent():
             agent = self._agent()
             agent.message("Remind me every day at 7 AM to take my vitamins.")
@@ -96,7 +95,7 @@ class TestScheduleAgent(TestCase):
             agent.message("Actually, make it 8 AM instead.")
 
         later_loads = agent_tool_calls(agent, "load_skill")[before:]
-        self.assertTrue(any(
+        self.assertFalse(any(
             (call.get("args") or {}).get("name") == "schedule"
             for call in later_loads), later_loads)
         self.assertTrue(agent_tool_calls(agent, "modify_schedule"),
@@ -115,13 +114,6 @@ class TestPromptRewriteScheduleOutcome(TestCase):
         "one in the morning. The assistant inspected them, and neither reminder "
         "was changed."
     )
-    CONTINUATION_TOOLS_GUIDANCE = """
-
-When a compacted conversation has continuing goals, add a short
-`## CONTINUATION TOOLS` section. List only the previously available tools that
-remain necessary to continue the user's goal, using each exact tool name in
-backticks and a short purpose. Omit tools that are no longer needed.
-"""
 
     @classmethod
     def setUpClass(cls):
@@ -253,12 +245,6 @@ backticks and a short purpose. Omit tools that are no longer needed.
         }
 
         self.assertTrue(calls, diagnostics)
-        self.assertEqual(call_names[0], "load_skill", diagnostics)
-        self.assertEqual(
-            (calls[0].get("args") or {}).get("name"),
-            "schedule",
-            diagnostics,
-        )
         schedule_loads = [
             i for i, call in enumerate(calls)
             if call.get("name") == "load_skill"
@@ -270,14 +256,24 @@ backticks and a short purpose. Omit tools that are no longer needed.
             i for i, call in enumerate(calls)
             if call.get("name") == "delete_schedule"
             and (call.get("args") or {}).get("schedule_id") == target.id]
-        self.assertTrue(schedule_loads, diagnostics)
+        if prior_schedule_turn:
+            self.assertFalse(schedule_loads, diagnostics)
+        else:
+            self.assertEqual(call_names[0], "load_skill", diagnostics)
+            self.assertEqual(
+                (calls[0].get("args") or {}).get("name"),
+                "schedule",
+                diagnostics,
+            )
+            self.assertTrue(schedule_loads, diagnostics)
         self.assertTrue(target_deletes, diagnostics)
         if compact or not prior_schedule_turn:
             self.assertTrue(schedule_lists, diagnostics)
-            self.assertLess(schedule_loads[0], schedule_lists[0], diagnostics)
+            if schedule_loads:
+                self.assertLess(schedule_loads[0], schedule_lists[0], diagnostics)
             self.assertLess(schedule_lists[0], target_deletes[0], diagnostics)
         else:
-            self.assertLess(schedule_loads[0], target_deletes[0], diagnostics)
+            self.assertFalse(schedule_loads, diagnostics)
         self.assertFalse(any(
             call.get("name") == "delete_schedule"
             and (call.get("args") or {}).get("schedule_id") == control.id
@@ -358,13 +354,10 @@ backticks and a short purpose. Omit tools that are no longer needed.
         self.assertRegex(str(reply).lower(), r"(reminder|scheduled|next run)")
 
     def test_later_turn_uses_a_different_tool_from_the_retained_skill(self):
-        """A loaded schedule capability remains usable for a later operation.
+        """A natural follow-up uses a different tool from the loaded skill.
 
-        The first user request needs ``create_schedule``.  The natural follow-up
-        needs ``pause_schedule`` instead: it is deliberately a different tool
-        declared by the same skill.  The follow-up must not reload ``schedule``;
-        it proves that the prior skill instructions and its disclosed tool
-        surface survived together across the user-turn boundary.
+        Creating the reminder loads ``schedule``. Pausing it needs the different
+        ``pause_schedule`` tool, and must not reload the skill.
         """
         thread_id = "retained-schedule-skill-eval"
         with tempfile.TemporaryDirectory(prefix="retained_schedule_store_") as store_root, \
@@ -377,96 +370,73 @@ backticks and a short purpose. Omit tools that are no longer needed.
                 CONTEXT_RIDER_KEY: SimpleNamespace(tz="America/Los_Angeles"),
             }}
             with mock.patch("assist.schedule.tools.get_config", return_value=config), \
-                 mock.patch("assist.tools.requests.get",
-                            side_effect=AssertionError(
-                                "schedule eval must not fetch URLs")) as get, \
+                 mock.patch("assist.tools.requests.get", side_effect=AssertionError(
+                     "schedule eval must not fetch URLs")) as get, \
                  stub_research_subagent():
                 agent = AgentHarness(create_agent(
                     self.model, root,
                     spec=prompt_rewrite_web_main_spec(
                         tools=tuple(schedule_tools(store)))),
                     thread_id=thread_id)
-                agent.message(
-                    "Remind me every day at 7 AM to take my vitamins.")
-                first_turn_calls = agent_tool_calls(agent)
-                before_followup = len(first_turn_calls)
-
+                agent.message("Remind me every day at 7 AM to take my vitamins.")
+                initial_calls = agent_tool_calls(agent)
+                before_followup = len(initial_calls)
                 reply = str(agent.message("Pause that reminder for now."))
             get.assert_not_called()
             saved = store.for_thread(thread_id)
 
-        initial_names = [call.get("name") for call in first_turn_calls]
         followup_calls = agent_tool_calls(agent)[before_followup:]
-        followup_names = [call.get("name") for call in followup_calls]
         diagnostics = {
-            "initial_calls": first_turn_calls,
+            "initial_calls": initial_calls,
             "followup_calls": followup_calls,
             "saved": saved,
             "reply": reply,
-            "messages": agent.all_messages(),
         }
-
         self.assertTrue(any(
             call.get("name") == "load_skill"
             and (call.get("args") or {}).get("name") == "schedule"
-            for call in first_turn_calls), diagnostics)
-        self.assertIn("create_schedule", initial_names, diagnostics)
+            for call in initial_calls), diagnostics)
+        self.assertTrue(any(call.get("name") == "create_schedule"
+                            for call in initial_calls), diagnostics)
         self.assertFalse(any(
             call.get("name") == "load_skill"
             and (call.get("args") or {}).get("name") == "schedule"
             for call in followup_calls), diagnostics)
-        self.assertIn("pause_schedule", followup_names, diagnostics)
+        self.assertTrue(any(call.get("name") == "pause_schedule"
+                            for call in followup_calls), diagnostics)
         self.assertEqual(len(saved), 1, diagnostics)
         self.assertFalse(saved[0].enabled, diagnostics)
         self.assertRegex(reply.lower(), r"paus", diagnostics)
 
     def test_different_skill_tool_after_forced_compaction(self):
-        """Compare disclosure profiles after the original skill result compacts.
+        """Compaction keeps compact native schemas, never a full skill replay.
 
-        The user-facing sequence stays natural.  The profile is selected by the
-        eval process, not by either user message.  This trial also captures the
-        effective post-compaction request, so a direct pause cannot pass by
-        accidentally receiving the old skill result again.
+        The natural two-turn request is the same as the prior test. The harness
+        forces one real-model summary immediately before turn two so this covers
+        the boundary where the full ``load_skill`` ToolMessage has disappeared.
         """
         from deepagents.middleware.summarization import SummarizationMiddleware
-        from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
 
-        profile = os.environ.get("ASSIST_SKILL_DISCLOSURE_PROFILE", "reset")
-        self.assertIn(profile, {
-            "reset", "persistent_full", "persistent_compact",
-            "summary_selected", "summary_guided_selected",
-        })
-        thread_id = f"retained-skill-compaction-{profile}"
+        thread_id = "retained-skill-compaction-eval"
         pause_prompt = "Pause that reminder for now."
-        summary_prompt = DEFAULT_SUMMARY_PROMPT
-        if profile == "summary_guided_selected":
-            summary_prompt = summary_prompt.replace(
-                "\n</instructions>",
-                f"{self.CONTINUATION_TOOLS_GUIDANCE}\n</instructions>",
-                1,
-            )
 
         class PauseTurnSummarizationMiddleware(SummarizationMiddleware):
-            """Force exactly one real-model summary immediately before turn two."""
-
             def _should_summarize(self, messages, _total_tokens):
                 return bool(messages and isinstance(messages[-1], HumanMessage)
                             and messages[-1].content == pause_prompt)
 
         def pause_turn_summary(model, backend):
             return PauseTurnSummarizationMiddleware(
-                model, backend=backend, keep=("messages", 1),
-                summary_prompt=summary_prompt)
+                model, backend=backend, keep=("messages", 1))
 
         observed_requests = []
-        original_modified_request = SmallModelSkillsMiddleware._modified_request
+        original_modify_request = SmallModelSkillsMiddleware.modify_request
 
         def capture_modified_request(middleware, request):
-            modified, selected = original_modified_request(middleware, request)
+            modified = original_modify_request(middleware, request)
             if any(getattr(message, "additional_kwargs", {}).get("lc_source")
                    == "summarization" for message in request.messages):
                 observed_requests.append({
-                    "selected": sorted(selected) if selected is not None else None,
                     "tool_names": [
                         item["function"]["name"] if isinstance(item, dict)
                         else item.name for item in modified.tools
@@ -480,7 +450,7 @@ backticks and a short purpose. Omit tools that are no longer needed.
                         and "## Tool contracts" in str(message.content)
                         for message in modified.messages),
                 })
-            return modified, selected
+            return modified
 
         with tempfile.TemporaryDirectory(prefix="retained_compaction_store_") as store_root, \
                 tempfile.TemporaryDirectory(prefix="retained_compaction_workspace_") as root:
@@ -496,7 +466,7 @@ backticks and a short purpose. Omit tools that are no longer needed.
                      "schedule eval must not fetch URLs")) as get, \
                  mock.patch("deepagents.graph.create_summarization_middleware",
                             side_effect=pause_turn_summary), \
-                 mock.patch.object(SmallModelSkillsMiddleware, "_modified_request",
+                 mock.patch.object(SmallModelSkillsMiddleware, "modify_request",
                                    capture_modified_request), \
                  stub_research_subagent():
                 agent = AgentHarness(create_agent(
@@ -514,67 +484,38 @@ backticks and a short purpose. Omit tools that are no longer needed.
             saved = store.for_thread(thread_id)
 
         followup_calls = agent_tool_calls(agent)[before_followup:]
-        followup_names = [call.get("name") for call in followup_calls]
-        event = state.get("_summarization_event")
-        summary = str(event["summary_message"].content) if event else ""
         diagnostics = {
-            "profile": profile,
-            "summary": summary,
+            "summary": str(state.get("_summarization_event")),
             "observed_requests": observed_requests,
             "followup_calls": followup_calls,
             "saved": saved,
             "reply": reply,
         }
         print("SKILL_RETENTION_TRACE " + json.dumps(diagnostics, default=str))
-
-        self.assertIsNotNone(event, diagnostics)
+        self.assertIsNotNone(state.get("_summarization_event"), diagnostics)
         self.assertTrue(observed_requests, diagnostics)
-        # The first post-compaction request is the treatment boundary.  Later
-        # requests may correctly contain a newly loaded skill in the control.
-        self.assertFalse(observed_requests[0]["has_load_result"], diagnostics)
-        self.assertFalse(observed_requests[0]["has_tool_contract"], diagnostics)
-        self.assertIn("pause_schedule", followup_names, diagnostics)
+        boundary = observed_requests[0]
+        self.assertFalse(boundary["has_load_result"], diagnostics)
+        self.assertFalse(boundary["has_tool_contract"], diagnostics)
+        self.assertIn("pause_schedule", boundary["tool_names"], diagnostics)
+        self.assertFalse(any(
+            call.get("name") == "load_skill"
+            and (call.get("args") or {}).get("name") == "schedule"
+            for call in followup_calls), diagnostics)
+        self.assertTrue(any(call.get("name") == "pause_schedule"
+                            for call in followup_calls), diagnostics)
         self.assertEqual(len(saved), 1, diagnostics)
         self.assertFalse(saved[0].enabled, diagnostics)
         self.assertRegex(reply.lower(), r"paus", diagnostics)
-        reloaded = any(call.get("name") == "load_skill"
-                       and (call.get("args") or {}).get("name") == "schedule"
-                       for call in followup_calls)
-        boundary_request = observed_requests[0]
-        selected = boundary_request["selected"]
-        if profile == "reset":
-            self.assertTrue(reloaded, diagnostics)
-        elif profile in {"persistent_full", "persistent_compact"}:
-            self.assertFalse(reloaded, diagnostics)
-            self.assertIn("pause_schedule", boundary_request["tool_names"], diagnostics)
-        elif profile == "summary_selected":
-            expected = sorted(
-                name for name in ("create_schedule", "list_schedules",
-                                  "modify_schedule", "pause_schedule",
-                                  "resume_schedule", "delete_schedule")
-                if re.search(rf"(?<![A-Za-z0-9_]){name}(?![A-Za-z0-9_])", summary))
-            self.assertEqual(selected, expected, diagnostics)
-            self.assertEqual(not reloaded, "pause_schedule" in selected, diagnostics)
-            if reloaded:
-                self.assertTrue(any(
-                    "pause_schedule" in request["tool_names"]
-                    for request in observed_requests[1:]), diagnostics)
-        else:
-            section = re.search(
-                r"^## CONTINUATION TOOLS\s*$([\s\S]*?)(?=^## |\Z)", summary,
-                flags=re.MULTILINE)
-            self.assertIsNotNone(section, diagnostics)
-            self.assertIn("pause_schedule", selected, diagnostics)
-            self.assertFalse(reloaded, diagnostics)
 
     def test_deletes_named_recurring_reminder(self):
         """A natural removal request loads scheduling and changes persisted state."""
         self._run_delete_case(prior_schedule_turn=False, compact=False)
 
     def test_deletes_named_recurring_reminder_after_prior_schedule_turn(self):
-        """An uncompacted end-to-end follow-up reloads before changing state."""
+        """An uncompacted follow-up reuses the active scheduling capability."""
         self._run_delete_case(prior_schedule_turn=True, compact=False)
 
     def test_deletes_named_recurring_reminder_after_compaction(self):
-        """A compacted follow-up reloads after prior instructions leave active context."""
+        """A compacted follow-up retains native scheduling schemas without replay."""
         self._run_delete_case(prior_schedule_turn=True, compact=True)
