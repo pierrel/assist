@@ -491,7 +491,6 @@ class TestPromptRewriteScheduleOutcome(TestCase):
             "saved": saved,
             "reply": reply,
         }
-        print("SKILL_RETENTION_TRACE " + json.dumps(diagnostics, default=str))
         self.assertIsNotNone(state.get("_summarization_event"), diagnostics)
         self.assertTrue(observed_requests, diagnostics)
         boundary = observed_requests[0]

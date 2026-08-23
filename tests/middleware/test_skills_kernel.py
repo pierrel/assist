@@ -167,6 +167,21 @@ def test_legacy_checkpoint_without_activation_does_not_disclose_tools():
     assert update["loaded_skill_tools"].value == frozenset()
 
 
+def test_overwrite_loaded_tools_remain_available_during_state_transition():
+    """Reducer wrappers are state values, not a second authorization shape."""
+    middleware = SmallModelSkillsMiddleware(
+        backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"])
+    state = {
+        "skills_metadata": [_skill()],
+        "loaded_skill_tools": Overwrite(frozenset({"travel"})),
+    }
+
+    assert middleware._tool_is_allowed(state, "travel")
+    updated = middleware.modify_request(_request(middleware, state))
+
+    assert [item.name for item in updated.tools] == ["kernel_tool", "travel"]
+
+
 def test_activation_must_match_the_current_skill_catalog_and_schema():
     middleware = SmallModelSkillsMiddleware(
         backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"],
@@ -254,7 +269,7 @@ def test_existing_checkpoint_refreshes_changed_bundled_and_domain_catalog(tmp_pa
         checkpoint["skills_catalog_fingerprint"]
     assert isinstance(refreshed["loaded_skill_tools"], Overwrite)
     assert refreshed["loaded_skill_tools"].value == frozenset()
-    state = {**checkpoint, **refreshed, "loaded_skill_tools": frozenset()}
+    state = {**checkpoint, **refreshed}
     for name in ("render", "domain-notes"):
         result = middleware.tools[0].func(
             name, SimpleNamespace(state=state, config={}, tool_call_id=name))

@@ -284,7 +284,8 @@ def _make_load_skill_tool(middleware: "SmallModelSkillsMiddleware"):
         skill_file = _sanitize(raw_skill_file)
 
         newly_available = middleware._disclosed_declared_tools(skill)
-        already_loaded = frozenset(runtime.state.get("loaded_skill_tools", ()))
+        already_loaded = frozenset(_state_value(
+            runtime.state, "loaded_skill_tools", ()))
         declared_names = tuple(skill.get("allowed_tools", ()))
         new_names = [name for name in declared_names
                      if name in newly_available and name not in already_loaded]
@@ -452,8 +453,8 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
             for tool in skill.get("allowed_tools", ()))
 
     def _tool_is_allowed(self, state: dict[str, Any], name: str) -> bool:
-        return name not in self._gated_tools(state) or name in state.get(
-            "loaded_skill_tools", ())
+        return name not in self._gated_tools(state) or name in _state_value(
+            state, "loaded_skill_tools", ())
 
     def modify_request(self, request: ModelRequest) -> ModelRequest:
         """Add the catalog and expose exactly the tools allowed for this request."""
