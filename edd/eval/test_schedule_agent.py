@@ -1,7 +1,7 @@
 """Evals for natural schedule selection and persisted outcomes.
 
 The capability probes cover cadence mapping through ``create_schedule`` arguments
-and referential changes through reload/modify tool traces. Production-shaped
+and referential changes through retained-skill/modify tool traces. Production-shaped
 web-main rows additionally assert on the persisted store so a plausible completion
 response cannot substitute for the requested state change.
 """
