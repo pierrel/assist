@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import operator
+import re
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
@@ -22,6 +23,7 @@ from deepagents.middleware.skills import (
     SkillsState,
 )
 from langchain.agents.middleware.types import (
+    ExtendedModelResponse,
     ModelRequest,
     PrivateStateAttr,
     ToolCallRequest,
@@ -37,7 +39,10 @@ from assist.middleware.output_sanitization import _sanitize
 
 
 _LOAD_ARTIFACT_SCHEMA = "assist.skill-load.v1"
-SkillDisclosureProfile = Literal["reset", "persistent_full", "persistent_compact"]
+SkillDisclosureProfile = Literal[
+    "reset", "persistent_full", "persistent_compact", "summary_selected",
+    "summary_guided_selected",
+]
 
 SMALL_MODEL_SKILLS_PROMPT = """
 
@@ -65,10 +70,11 @@ still matches the skill for the active task established by the conversation.
 ### Pre-action check (MANDATORY — apply on every turn before any tool call)
 
 Before issuing your first tool call on a turn, scan the user's latest message
-and its active task against every skill description above. If a matching skill
-is already active, use its tools and rules directly. Otherwise, if a skill
-matches, call only `load_skill(name="<matched skill>")` in that response. Do
-not combine it with `ls`, `read_file`, `task`, `edit_file`, or a newly disclosed
+and its active task against every skill description above. A matching skill may
+already have tools available; use them directly. Reload the skill when you need
+operating guidance that is no longer in context. If a skill must be
+loaded, call only `load_skill(name="<matched skill>")` in that response. Do not
+combine it with `ls`, `read_file`, `task`, `edit_file`, or a newly disclosed
 tool. Only if no skill matches may you proceed directly to the task.
 
 Tools available for this response: {tools_available}.
@@ -134,6 +140,11 @@ class SmallModelSkillsState(SkillsState):
     historical_gated_tools: NotRequired[
         Annotated[frozenset[str], PrivateStateAttr, operator.or_]
     ]
+    summary_selected_tools: NotRequired[Annotated[frozenset[str], PrivateStateAttr]]
+    """Summary-selected tools plus any tools loaded after that summary."""
+
+    summary_selection_sha256: NotRequired[Annotated[str, PrivateStateAttr]]
+    """Identity of the summary that established ``summary_selected_tools``."""
 
 
 class _LoadArtifact(TypedDict):
@@ -144,12 +155,9 @@ class _LoadArtifact(TypedDict):
 
 
 class _ActiveSkill(TypedDict):
-    """The activation needed to restore a compacted skill result exactly."""
+    """The catalog-bound callable capability retained after a load."""
 
-    content: str
-    result_sha256: str
     schema_fingerprint: str | None
-    tool_call_id: str
     tools: frozenset[str]
 
 
@@ -159,6 +167,14 @@ def _sha256(value: str) -> str:
 
 def _bytes_sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _state_frozenset(state: dict[str, Any], key: str) -> frozenset[str]:
+    """Read a private set update whether LangGraph has reduced it yet or not."""
+    value = state.get(key, ())
+    if isinstance(value, Overwrite):
+        value = value.value
+    return frozenset(value)
 
 
 def _source_contains(source: str, path: str) -> bool:
@@ -311,14 +327,15 @@ def _make_load_skill_tool(middleware: "SmallModelSkillsMiddleware"):
         if middleware.persistent:
             active = dict(runtime.state.get("active_skills", {}))
             active[name] = {
-                "content": content,
-                "result_sha256": artifact["result_sha256"],
                 "schema_fingerprint": middleware._schema_fingerprint(
                     newly_available),
-                "tool_call_id": runtime.tool_call_id,
                 "tools": newly_available,
             }
             update["active_skills"] = active
+        if middleware.summary_selected and "summary_selection_sha256" in runtime.state:
+            update["summary_selected_tools"] = Overwrite(
+                _state_frozenset(runtime.state, "summary_selected_tools") |
+                newly_available)
         return Command(update=update)
 
     return load_skill
@@ -344,7 +361,9 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
             name: value for value in tool_definitions
             if (name := _tool_name(value)) is not None
         }
-        if disclosure_profile not in {"reset", "persistent_full", "persistent_compact"}:
+        if disclosure_profile not in {
+                "reset", "persistent_full", "persistent_compact",
+                "summary_selected", "summary_guided_selected"}:
             raise ValueError(f"unsupported skill disclosure profile: {disclosure_profile!r}")
         self.disclosure_profile = disclosure_profile
         if self._gated_sources:
@@ -358,9 +377,19 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
     def persistent(self) -> bool:
         return self.disclosure_profile != "reset"
 
+    @property
+    def compact(self) -> bool:
+        return self.disclosure_profile in {
+            "persistent_compact", "summary_selected", "summary_guided_selected"}
+
+    @property
+    def summary_selected(self) -> bool:
+        return self.disclosure_profile in {
+            "summary_selected", "summary_guided_selected"}
+
     def _tool_contract(self, names: Iterable[str]) -> str | None:
         """Return a complete ToolMessage contract, or fail closed if one is absent."""
-        if self.disclosure_profile != "persistent_compact":
+        if not self.compact:
             return ""
         names = tuple(sorted(names))
         if any(name not in self._tool_definitions for name in names):
@@ -438,17 +467,53 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
         return name not in self._gated_tools(state) or name in state.get(
             "loaded_skill_tools", ())
 
-    def modify_request(self, request: ModelRequest) -> ModelRequest:
+    @staticmethod
+    def _summary_text(messages) -> str | None:
+        summary = next((message for message in reversed(messages)
+                        if not isinstance(message, ToolMessage)
+                        and getattr(message, "additional_kwargs", {}).get(
+                            "lc_source") == "summarization"), None)
+        if summary is None or not isinstance(summary.content, str):
+            return None
+        return summary.content
+
+    def _summary_selected_tools(self, request: ModelRequest,
+                                active_tools: frozenset[str]) -> frozenset[str] | None:
+        """Select prior callable tools from the current compaction summary."""
+        if not self.summary_selected:
+            return None
+        text = self._summary_text(request.messages)
+        if text is None:
+            return None
+        summary_sha256 = _sha256(text)
+        if request.state.get("summary_selection_sha256") == summary_sha256:
+            return _state_frozenset(request.state, "summary_selected_tools")
+        if self.disclosure_profile == "summary_guided_selected":
+            section = re.search(
+                r"^## CONTINUATION TOOLS\s*$([\s\S]*?)(?=^## |\Z)", text,
+                flags=re.MULTILINE)
+            if section is None:
+                return frozenset()
+            names = set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", section.group(1)))
+            return frozenset(name for name in active_tools if name in names)
+        return frozenset(
+            name for name in active_tools
+            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", text))
+
+    def _modified_request(self, request: ModelRequest) -> tuple[ModelRequest, frozenset[str] | None]:
         """Add the catalog and expose exactly the tools allowed for this request."""
-        retained = [
-            tool_value for tool_value in request.tools
-            if (name := _tool_name(tool_value)) is None
-            or self._tool_is_allowed(request.state, name)
-        ]
         active_tools = frozenset(
             tool for activation in request.state.get("active_skills", {}).values()
             for tool in activation["tools"])
-        if self.disclosure_profile == "persistent_compact":
+        selected_tools = self._summary_selected_tools(request, active_tools)
+        allowed_tools = (selected_tools if selected_tools is not None
+                         else frozenset(request.state.get("loaded_skill_tools", ())))
+        retained = [
+            tool_value for tool_value in request.tools
+            if (name := _tool_name(tool_value)) is None
+            or name not in self._gated_tools(request.state) or name in allowed_tools
+        ]
+        if self.compact:
             retained = [
                 (self._compact_schema(tool_value)
                  if _tool_name(tool_value) in active_tools else tool_value)
@@ -465,70 +530,43 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
             tools=retained,
             system_message=deepagents_skills.append_to_system_message(
                 request.system_message, skills_section),
-        )
+        ), selected_tools
 
-    @staticmethod
-    def _is_active_result(message, activation: _ActiveSkill) -> bool:
-        return (isinstance(message, ToolMessage)
-                and message.tool_call_id == activation["tool_call_id"]
-                and isinstance(message.content, str)
-                and _sha256(message.content) == activation["result_sha256"])
-
-    @staticmethod
-    def _is_active_load_call(message, name: str, activation: _ActiveSkill) -> bool:
-        return (isinstance(message, AIMessage) and any(
-            call.get("id") == activation["tool_call_id"]
-            and call.get("name") == "load_skill"
-            and call.get("args", {}).get("name") == name
-            for call in message.tool_calls))
-
-    @classmethod
-    def _is_active_pair_message(cls, message, name: str,
-                                activation: _ActiveSkill) -> bool:
-        return (cls._is_active_result(message, activation)
-                or cls._is_active_load_call(message, name, activation))
-
-    def _restore_compacted_activations(self, request: ModelRequest) -> ModelRequest:
-        """Restore missing load results as ordinary paired history after compaction."""
-        if not self.persistent:
-            return request
-        active = request.state.get("active_skills", {})
-        missing = [
-            (name, activation) for name, activation in active.items()
-            if not (any(self._is_active_result(message, activation)
-                        for message in request.messages)
-                    and any(self._is_active_load_call(message, name, activation)
-                            for message in request.messages))
-        ]
-        if not missing:
-            return request
-        messages = [
-            message for message in request.messages
-            if not any(self._is_active_pair_message(message, name, activation)
-                       for name, activation in missing)
-        ]
-        restored = []
-        for name, activation in missing:
-            tool_call_id = activation["tool_call_id"]
-            restored.extend((
-                AIMessage(content="", tool_calls=[{
-                    "name": "load_skill", "args": {"name": name}, "id": tool_call_id,
-                }]),
-                ToolMessage(
-                    content=activation["content"], name="load_skill",
-                    status="success", tool_call_id=tool_call_id),
-            ))
-        index = 1 if messages and messages[0].additional_kwargs.get(
-            "lc_source") == "summarization" else 0
-        return request.override(messages=[
-            *messages[:index], *restored, *messages[index:]])
+    def modify_request(self, request: ModelRequest) -> ModelRequest:
+        """Compatibility seam used by focused middleware tests."""
+        return self._modified_request(request)[0]
 
     def wrap_model_call(self, request: ModelRequest, handler):
-        return handler(self._restore_compacted_activations(self.modify_request(request)))
+        modified, selected_tools = self._modified_request(request)
+        response = handler(modified)
+        if selected_tools is None:
+            return response
+        summary = self._summary_text(request.messages)
+        assert summary is not None
+        return ExtendedModelResponse(
+            model_response=response,
+            command=Command(update={
+                "loaded_skill_tools": Overwrite(selected_tools),
+                "summary_selected_tools": Overwrite(selected_tools),
+                "summary_selection_sha256": _sha256(summary),
+            }),
+        )
 
     async def awrap_model_call(self, request: ModelRequest, handler):
-        return await handler(self._restore_compacted_activations(
-            self.modify_request(request)))
+        modified, selected_tools = self._modified_request(request)
+        response = await handler(modified)
+        if selected_tools is None:
+            return response
+        summary = self._summary_text(request.messages)
+        assert summary is not None
+        return ExtendedModelResponse(
+            model_response=response,
+            command=Command(update={
+                "loaded_skill_tools": Overwrite(selected_tools),
+                "summary_selected_tools": Overwrite(selected_tools),
+                "summary_selection_sha256": _sha256(summary),
+            }),
+        )
 
     def _catalog_from_responses(self, source: str, ls_result, responses):
         """Parse one source and return metadata, content identity, and host records."""
@@ -665,12 +703,19 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
             active_update = active
         historical_gated = frozenset(state.get("historical_gated_tools", ())) | \
             self._catalog_gated_tools(skills)
-        return {
+        active_tools = frozenset(
+            tool for activation in active.values() for tool in activation["tools"])
+        retained_tools = (frozenset(state.get("loaded_skill_tools", ())) & active_tools
+                          if self.summary_selected else active_tools)
+        update = {
             "active_skills": active_update,
             "historical_gated_tools": historical_gated,
-            "loaded_skill_tools": Overwrite(frozenset(
-                tool for activation in active.values() for tool in activation["tools"])),
+            "loaded_skill_tools": Overwrite(retained_tools),
         }
+        if catalog_changed or not active:
+            update["summary_selected_tools"] = Overwrite(frozenset())
+            update["summary_selection_sha256"] = ""
+        return update
 
     def before_agent(self, state, runtime, config):
         backend = self._get_backend(state, runtime, config)

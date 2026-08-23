@@ -6,6 +6,8 @@ web-main rows additionally assert on the persisted store so a plausible completi
 response cannot substitute for the requested state change.
 """
 import os
+import json
+import re
 import tempfile
 from types import SimpleNamespace
 from unittest import TestCase, mock
@@ -21,6 +23,7 @@ from assist.spec import AgentSpec
 from assist.schedule.model import Cadence, Schedule
 from assist.schedule.tools import schedule_tools
 from assist.schedule.store import ScheduleStore
+from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from .test_async_subagents import reset_task_fixture
 from .utils import (
     agent_tool_calls, create_filesystem, skill_was_loaded,
@@ -112,6 +115,13 @@ class TestPromptRewriteScheduleOutcome(TestCase):
         "one in the morning. The assistant inspected them, and neither reminder "
         "was changed."
     )
+    CONTINUATION_TOOLS_GUIDANCE = """
+
+When a compacted conversation has continuing goals, add a short
+`## CONTINUATION TOOLS` section. List only the previously available tools that
+remain necessary to continue the user's goal, using each exact tool name in
+backticks and a short purpose. Omit tools that are no longer needed.
+"""
 
     @classmethod
     def setUpClass(cls):
@@ -409,6 +419,153 @@ class TestPromptRewriteScheduleOutcome(TestCase):
         self.assertEqual(len(saved), 1, diagnostics)
         self.assertFalse(saved[0].enabled, diagnostics)
         self.assertRegex(reply.lower(), r"paus", diagnostics)
+
+    def test_different_skill_tool_after_forced_compaction(self):
+        """Compare disclosure profiles after the original skill result compacts.
+
+        The user-facing sequence stays natural.  The profile is selected by the
+        eval process, not by either user message.  This trial also captures the
+        effective post-compaction request, so a direct pause cannot pass by
+        accidentally receiving the old skill result again.
+        """
+        from deepagents.middleware.summarization import SummarizationMiddleware
+        from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
+
+        profile = os.environ.get("ASSIST_SKILL_DISCLOSURE_PROFILE", "reset")
+        self.assertIn(profile, {
+            "reset", "persistent_full", "persistent_compact",
+            "summary_selected", "summary_guided_selected",
+        })
+        thread_id = f"retained-skill-compaction-{profile}"
+        pause_prompt = "Pause that reminder for now."
+        summary_prompt = DEFAULT_SUMMARY_PROMPT
+        if profile == "summary_guided_selected":
+            summary_prompt = summary_prompt.replace(
+                "\n</instructions>",
+                f"{self.CONTINUATION_TOOLS_GUIDANCE}\n</instructions>",
+                1,
+            )
+
+        class PauseTurnSummarizationMiddleware(SummarizationMiddleware):
+            """Force exactly one real-model summary immediately before turn two."""
+
+            def _should_summarize(self, messages, _total_tokens):
+                return bool(messages and isinstance(messages[-1], HumanMessage)
+                            and messages[-1].content == pause_prompt)
+
+        def pause_turn_summary(model, backend):
+            return PauseTurnSummarizationMiddleware(
+                model, backend=backend, keep=("messages", 1),
+                summary_prompt=summary_prompt)
+
+        observed_requests = []
+        original_modified_request = SmallModelSkillsMiddleware._modified_request
+
+        def capture_modified_request(middleware, request):
+            modified, selected = original_modified_request(middleware, request)
+            if any(getattr(message, "additional_kwargs", {}).get("lc_source")
+                   == "summarization" for message in request.messages):
+                observed_requests.append({
+                    "selected": sorted(selected) if selected is not None else None,
+                    "tool_names": [
+                        item["function"]["name"] if isinstance(item, dict)
+                        else item.name for item in modified.tools
+                    ],
+                    "has_load_result": any(
+                        isinstance(message, ToolMessage)
+                        and message.name == "load_skill"
+                        for message in modified.messages),
+                    "has_tool_contract": any(
+                        isinstance(message, ToolMessage)
+                        and "## Tool contracts" in str(message.content)
+                        for message in modified.messages),
+                })
+            return modified, selected
+
+        with tempfile.TemporaryDirectory(prefix="retained_compaction_store_") as store_root, \
+                tempfile.TemporaryDirectory(prefix="retained_compaction_workspace_") as root:
+            os.makedirs(os.path.join(store_root, thread_id))
+            create_filesystem(root, {"README.org": "Personal workspace."})
+            store = ScheduleStore(store_root)
+            config = {"configurable": {
+                "thread_id": thread_id,
+                CONTEXT_RIDER_KEY: SimpleNamespace(tz="America/Los_Angeles"),
+            }}
+            with mock.patch("assist.schedule.tools.get_config", return_value=config), \
+                 mock.patch("assist.tools.requests.get", side_effect=AssertionError(
+                     "schedule eval must not fetch URLs")) as get, \
+                 mock.patch("deepagents.graph.create_summarization_middleware",
+                            side_effect=pause_turn_summary), \
+                 mock.patch.object(SmallModelSkillsMiddleware, "_modified_request",
+                                   capture_modified_request), \
+                 stub_research_subagent():
+                agent = AgentHarness(create_agent(
+                    self.model, root,
+                    spec=prompt_rewrite_web_main_spec(
+                        tools=tuple(schedule_tools(store)))),
+                    thread_id=thread_id)
+                agent.message("Remind me every day at 7 AM to take my vitamins.")
+                before_followup = len(agent_tool_calls(agent))
+                reply = str(agent.message(pause_prompt))
+                state = agent.agent.get_state({
+                    "configurable": {"thread_id": thread_id},
+                }).values
+            get.assert_not_called()
+            saved = store.for_thread(thread_id)
+
+        followup_calls = agent_tool_calls(agent)[before_followup:]
+        followup_names = [call.get("name") for call in followup_calls]
+        event = state.get("_summarization_event")
+        summary = str(event["summary_message"].content) if event else ""
+        diagnostics = {
+            "profile": profile,
+            "summary": summary,
+            "observed_requests": observed_requests,
+            "followup_calls": followup_calls,
+            "saved": saved,
+            "reply": reply,
+        }
+        print("SKILL_RETENTION_TRACE " + json.dumps(diagnostics, default=str))
+
+        self.assertIsNotNone(event, diagnostics)
+        self.assertTrue(observed_requests, diagnostics)
+        # The first post-compaction request is the treatment boundary.  Later
+        # requests may correctly contain a newly loaded skill in the control.
+        self.assertFalse(observed_requests[0]["has_load_result"], diagnostics)
+        self.assertFalse(observed_requests[0]["has_tool_contract"], diagnostics)
+        self.assertIn("pause_schedule", followup_names, diagnostics)
+        self.assertEqual(len(saved), 1, diagnostics)
+        self.assertFalse(saved[0].enabled, diagnostics)
+        self.assertRegex(reply.lower(), r"paus", diagnostics)
+        reloaded = any(call.get("name") == "load_skill"
+                       and (call.get("args") or {}).get("name") == "schedule"
+                       for call in followup_calls)
+        boundary_request = observed_requests[0]
+        selected = boundary_request["selected"]
+        if profile == "reset":
+            self.assertTrue(reloaded, diagnostics)
+        elif profile in {"persistent_full", "persistent_compact"}:
+            self.assertFalse(reloaded, diagnostics)
+            self.assertIn("pause_schedule", boundary_request["tool_names"], diagnostics)
+        elif profile == "summary_selected":
+            expected = sorted(
+                name for name in ("create_schedule", "list_schedules",
+                                  "modify_schedule", "pause_schedule",
+                                  "resume_schedule", "delete_schedule")
+                if re.search(rf"(?<![A-Za-z0-9_]){name}(?![A-Za-z0-9_])", summary))
+            self.assertEqual(selected, expected, diagnostics)
+            self.assertEqual(not reloaded, "pause_schedule" in selected, diagnostics)
+            if reloaded:
+                self.assertTrue(any(
+                    "pause_schedule" in request["tool_names"]
+                    for request in observed_requests[1:]), diagnostics)
+        else:
+            section = re.search(
+                r"^## CONTINUATION TOOLS\s*$([\s\S]*?)(?=^## |\Z)", summary,
+                flags=re.MULTILINE)
+            self.assertIsNotNone(section, diagnostics)
+            self.assertIn("pause_schedule", selected, diagnostics)
+            self.assertFalse(reloaded, diagnostics)
 
     def test_deletes_named_recurring_reminder(self):
         """A natural removal request loads scheduling and changes persisted state."""
