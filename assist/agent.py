@@ -475,6 +475,8 @@ def create_agent(model: BaseChatModel,
         # and visibility unchanged.
         gated_sources=(() if legacy_skill_composition else skill_sources),
         registered_tools=(_tool_name(tool_value) for tool_value in agent_tools),
+        tool_definitions=agent_tools,
+        disclosure_profile=os.environ.get("ASSIST_SKILL_DISCLOSURE_PROFILE", "reset"),
     )
     memory_mw = SmallModelMemoryMiddleware(
         backend=backend, memories_path=memories_path,
