@@ -182,6 +182,21 @@ def _tool_name(tool_value: Any) -> str | None:
     return name if isinstance(name, str) else None
 
 
+def _openai_tool_schema(tool_value: BaseTool | dict[str, Any] | Callable) -> dict[str, Any]:
+    """Return the provider contract, wrapping runtime-injected callables first.
+
+    A normal Assist tool may be a plain function with a ``ToolRuntime``
+    parameter. LangChain's direct converter treats that injected parameter as a
+    JSON Schema field; its normal ``tool(...)`` wrapper correctly removes it.
+    """
+    try:
+        return convert_to_openai_tool(tool_value)
+    except Exception:
+        if isinstance(tool_value, BaseTool) or isinstance(tool_value, dict):
+            raise
+        return convert_to_openai_tool(tool(tool_value))
+
+
 def _winner(state: dict[str, Any], requested_name: str) -> dict[str, Any] | None:
     return next(
         (skill for skill in state.get("skills_metadata", ())
@@ -359,8 +374,11 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
         names = tuple(sorted(names))
         if any(name not in self._tool_definitions for name in names):
             return None
-        schemas = [convert_to_openai_tool(self._tool_definitions[name])
-                   for name in names]
+        try:
+            schemas = [_openai_tool_schema(self._tool_definitions[name])
+                       for name in names]
+        except Exception:
+            return None
         if not schemas:
             return ""
         return "## Tool contracts\n\n```json\n" + json.dumps(
@@ -371,15 +389,18 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
         names = tuple(sorted(names))
         if any(name not in self._tool_definitions for name in names):
             return None
-        schemas = [convert_to_openai_tool(self._tool_definitions[name])
-                   for name in names]
+        try:
+            schemas = [_openai_tool_schema(self._tool_definitions[name])
+                       for name in names]
+        except Exception:
+            return None
         return _sha256(json.dumps(
             schemas, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
 
     @staticmethod
     def _compact_schema(tool_value: BaseTool | dict[str, Any]) -> dict[str, Any]:
         """Keep the native callable shape while moving explanatory prose to history."""
-        schema = json.loads(json.dumps(convert_to_openai_tool(tool_value)))
+        schema = json.loads(json.dumps(_openai_tool_schema(tool_value)))
 
         def strip(node):
             if isinstance(node, dict):
