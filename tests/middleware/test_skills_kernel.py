@@ -13,7 +13,7 @@ from pydantic import PrivateAttr
 from deepagents.backends import FilesystemBackend
 from langchain.agents.middleware.types import ModelRequest
 from langchain.agents.middleware.types import ToolCallRequest
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.tools import tool
 from langgraph.types import Command, Overwrite
@@ -49,6 +49,16 @@ def _skill(path="/skills/travel/SKILL.md"):
         "name": "travel", "description": "Travel help.",
         "path": path, "allowed_tools": ["travel"],
         "license": None, "compatibility": None, "metadata": {},
+    }
+
+
+def _activation(content="Travel procedure.", tool_call_id="load-1"):
+    return {
+        "content": content,
+        "result_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "schema_fingerprint": None,
+        "tool_call_id": tool_call_id,
+        "tools": frozenset({"travel"}),
     }
 
 
@@ -164,6 +174,138 @@ def test_before_agent_resets_activation_even_when_metadata_is_checkpointed():
 
     assert isinstance(update["loaded_skill_tools"], Overwrite)
     assert update["loaded_skill_tools"].value == frozenset()
+
+
+def test_persistent_profile_retains_a_skill_tool_without_replaying_its_body():
+    middleware = SmallModelSkillsMiddleware(
+        backend=SimpleNamespace(), sources=["/skills/"],
+        bundled_sources=["/skills/"], disclosure_profile="persistent_full")
+    state = {
+        "skills_metadata": [_skill()],
+        "skills_catalog_fingerprint": "current",
+        "loaded_skill_tools": frozenset({"travel"}),
+        "active_skills": {"travel": _activation()},
+        "historical_gated_tools": frozenset({"travel"}),
+    }
+
+    with patch.object(middleware, "_catalog_snapshot",
+                      return_value=([_skill()], [], "current")):
+        update = middleware.before_agent(state, SimpleNamespace(), {})
+    request = middleware.modify_request(_request(
+        middleware, {**state, **update,
+                     "loaded_skill_tools": update["loaded_skill_tools"].value}))
+
+    assert update["loaded_skill_tools"].value == frozenset({"travel"})
+    assert [item.name for item in request.tools] == ["kernel_tool", "travel"]
+    assert "Travel procedure." not in _system_text(request.system_message)
+
+
+def test_compact_profile_moves_tool_prose_to_the_loaded_contract():
+    middleware = SmallModelSkillsMiddleware(
+        backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"],
+        tool_definitions=[travel], disclosure_profile="persistent_compact")
+    state = {
+        "skills_metadata": [_skill()],
+        "loaded_skill_tools": frozenset({"travel"}),
+        "active_skills": {"travel": _activation()},
+    }
+
+    request = middleware.modify_request(_request(middleware, state))
+    compact = next(item for item in request.tools if isinstance(item, dict)
+                   and item["function"]["name"] == "travel")
+
+    assert "description" not in compact["function"]
+    assert "description" not in compact["function"]["parameters"]
+
+
+def test_compact_profile_pairs_every_active_schema_with_a_toolmessage_contract():
+    body = b"---\nname: travel\ndescription: Travel help.\n---\n\nRULES"
+    backend = SimpleNamespace(download_files=lambda _paths: [
+        SimpleNamespace(error=None, content=body)])
+    middleware = SmallModelSkillsMiddleware(
+        backend=backend, sources=["/skills/"], bundled_sources=["/skills/"],
+        tool_definitions=[{"type": "function", "function": {
+            "name": "travel", "description": "Provider travel contract.",
+            "parameters": {"type": "object", "properties": {}}}}],
+        disclosure_profile="persistent_compact")
+    result = middleware.tools[0].func(
+        "travel", SimpleNamespace(
+            state={"skills_metadata": [_skill()], "loaded_skill_tools": frozenset()},
+            config={}, tool_call_id="load-1"))
+
+    assert isinstance(result, Command)
+    assert "Provider travel contract." in result.update["messages"][0].content
+
+
+def test_compact_profile_refuses_a_skill_without_a_full_tool_contract():
+    body = b"---\nname: travel\ndescription: Travel help.\n---\n\nRULES"
+    backend = SimpleNamespace(download_files=lambda _paths: [
+        SimpleNamespace(error=None, content=body)])
+    middleware = SmallModelSkillsMiddleware(
+        backend=backend, sources=["/skills/"], bundled_sources=["/skills/"],
+        disclosure_profile="persistent_compact")
+
+    result = middleware.tools[0].func(
+        "travel", SimpleNamespace(
+            state={"skills_metadata": [_skill()], "loaded_skill_tools": frozenset()},
+            config={}, tool_call_id="load-1"))
+
+    assert isinstance(result, str)
+    assert "tool definition unavailable" in result
+
+
+def test_persistent_profile_restores_a_compacted_skill_result_as_tool_history():
+    middleware = SmallModelSkillsMiddleware(
+        backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"],
+        disclosure_profile="persistent_full")
+    summary = HumanMessage(
+        content="Earlier conversation.", additional_kwargs={"lc_source": "summarization"})
+    request = _request(middleware, {
+        "active_skills": {"travel": _activation("Travel procedure.")},
+    })
+    request = request.override(messages=[summary, HumanMessage(content="continue")])
+    received = []
+
+    result = middleware.wrap_model_call(
+        request, lambda restored: (received.append(restored), "called")[1])
+    restored = received[0].messages
+
+    assert result == "called"
+    assert restored[0] == summary
+    assert isinstance(restored[1], AIMessage)
+    assert restored[1].tool_calls[0]["name"] == "load_skill"
+    assert isinstance(restored[2], ToolMessage)
+    assert restored[2].content == "Travel procedure."
+    assert restored[3].content == "continue"
+
+
+def test_persistent_profile_replaces_a_partial_compacted_skill_pair():
+    middleware = SmallModelSkillsMiddleware(
+        backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"],
+        disclosure_profile="persistent_full")
+    activation = _activation("Travel procedure.")
+    summary = HumanMessage(
+        content="Earlier conversation.", additional_kwargs={"lc_source": "summarization"})
+    complete_call = AIMessage(content="", tool_calls=[{
+        "name": "load_skill", "args": {"name": "travel"}, "id": "load-1"}])
+    complete_result = ToolMessage(
+        content="Travel procedure.", name="load_skill", tool_call_id="load-1")
+
+    for partial in ([complete_call], [complete_result]):
+        request = _request(middleware, {"active_skills": {"travel": activation}})
+        request = request.override(messages=[summary, *partial, HumanMessage(content="continue")])
+        received = []
+        middleware.wrap_model_call(
+            request, lambda restored: (received.append(restored), "called")[1])
+        restored = received[0].messages
+        calls = [message for message in restored if isinstance(message, AIMessage)
+                 and any(call.get("id") == "load-1" for call in message.tool_calls)]
+        results = [message for message in restored if isinstance(message, ToolMessage)
+                   and message.tool_call_id == "load-1"]
+
+        assert len(calls) == 1
+        assert len(results) == 1
+        assert results[0].content == "Travel procedure."
 
 
 def _write_skill(root, source, name, body="Follow the current procedure."):
@@ -411,7 +553,8 @@ def test_parallel_load_updates_have_union_reducer():
     backend = SimpleNamespace(download_files=lambda _paths: [
         SimpleNamespace(error=None, content=body)])
     middleware = SmallModelSkillsMiddleware(
-        backend=backend, sources=["/skills/"], bundled_sources=["/skills/"])
+        backend=backend, sources=["/skills/"], bundled_sources=["/skills/"],
+        disclosure_profile="persistent_full")
     skills = [
         {**_skill("/skills/one/SKILL.md"), "name": "one",
          "allowed_tools": ["travel"]},
@@ -422,15 +565,81 @@ def test_parallel_load_updates_have_union_reducer():
     updates = [
         middleware.tools[0].func(
             name, SimpleNamespace(state=state, config={}, tool_call_id=name)
-        ).update["loaded_skill_tools"]
+        ).update
         for name in ("one", "two")
     ]
-    outer = get_type_hints(
+    tool_outer = get_type_hints(
         SmallModelSkillsState, include_extras=True)["loaded_skill_tools"]
-    annotated = get_args(outer)[0]
+    tool_annotated = get_args(tool_outer)[0]
+    active_outer = get_type_hints(
+        SmallModelSkillsState, include_extras=True)["active_skills"]
+    active_annotated = get_args(active_outer)[0]
 
-    assert operator.or_ in get_args(annotated)[1:]
-    assert operator.or_(*updates) == frozenset({"travel", "kernel_tool"})
+    assert operator.or_ in get_args(tool_annotated)[1:]
+    assert operator.or_ in get_args(active_annotated)[1:]
+    assert operator.or_(*(update["loaded_skill_tools"] for update in updates)) == \
+        frozenset({"travel", "kernel_tool"})
+    merged_active = operator.or_(*(update["active_skills"] for update in updates))
+    assert {name: activation["tools"] for name, activation in merged_active.items()} == {
+        "one": frozenset({"travel"}), "two": frozenset({"kernel_tool"})}
+
+
+def test_catalog_change_revokes_active_tools_without_making_them_baseline_visible():
+    middleware = SmallModelSkillsMiddleware(
+        backend=SimpleNamespace(), sources=["/skills/"],
+        bundled_sources=["/skills/"], disclosure_profile="persistent_full")
+    state = {
+        "skills_metadata": [_skill()],
+        "skills_catalog_fingerprint": "before",
+        "loaded_skill_tools": frozenset({"travel"}),
+        "active_skills": {"travel": _activation()},
+        "historical_gated_tools": frozenset({"travel"}),
+    }
+    revoked = {**_skill(), "allowed_tools": []}
+
+    with patch.object(middleware, "_catalog_snapshot",
+                      return_value=([revoked], [], "after")):
+        update = middleware.before_agent(state, SimpleNamespace(), {})
+    refreshed = {
+        **state, **update,
+        "active_skills": update["active_skills"].value,
+        "loaded_skill_tools": update["loaded_skill_tools"].value,
+    }
+    request = middleware.modify_request(_request(middleware, refreshed))
+
+    assert isinstance(update["active_skills"], Overwrite)
+    assert update["active_skills"].value == {}
+    assert update["loaded_skill_tools"].value == frozenset()
+    assert update["historical_gated_tools"] == frozenset({"travel"})
+    assert [item.name for item in request.tools] == ["kernel_tool"]
+
+
+def test_tool_schema_change_invalidates_the_paired_activation():
+    middleware = SmallModelSkillsMiddleware(
+        backend=SimpleNamespace(), sources=["/skills/"],
+        bundled_sources=["/skills/"], tool_definitions=[travel],
+        disclosure_profile="persistent_full")
+    activation = _activation()
+    activation["schema_fingerprint"] = middleware._schema_fingerprint({"travel"})
+    state = {
+        "skills_metadata": [_skill()],
+        "skills_catalog_fingerprint": "current",
+        "active_skills": {"travel": activation},
+        "historical_gated_tools": frozenset({"travel"}),
+    }
+    middleware._tool_definitions["travel"] = {
+        "type": "function", "function": {
+            "name": "travel", "description": "A changed contract.",
+            "parameters": {"type": "object", "properties": {}},
+        }}
+
+    with patch.object(middleware, "_catalog_snapshot",
+                      return_value=([_skill()], [], "current")):
+        update = middleware.before_agent(state, SimpleNamespace(), {})
+
+    assert isinstance(update["active_skills"], Overwrite)
+    assert update["active_skills"].value == {}
+    assert update["loaded_skill_tools"].value == frozenset()
 
 
 def test_failed_load_has_no_state_or_artifact():
@@ -619,6 +828,65 @@ def test_compiled_graph_discloses_after_load_then_resets_next_invocation():
               and message.tool_call_id == "travel-2"]
     assert len(hidden) == 1 and hidden[0].status == "error"
     assert second["messages"][-1].content == "second done"
+
+
+def test_persistent_profile_uses_a_second_skill_tool_without_reloading():
+    from assist.agent import create_agent
+    from assist.spec import AgentSpec
+
+    @tool("create_reminder")
+    def create_reminder(label: str) -> str:
+        """Create a reminder."""
+        return label
+
+    @tool("pause_reminder")
+    def pause_reminder(label: str) -> str:
+        """Pause a reminder."""
+        return label
+
+    model = _RecordingModel(responses=[
+        AIMessage(content="", tool_calls=[{
+            "name": "load_skill", "args": {"name": "schedule"}, "id": "load-1"}]),
+        AIMessage(content="", tool_calls=[{
+            "name": "create_reminder", "args": {"label": "vitamins"},
+            "id": "create-1"}]),
+        AIMessage(content="created"),
+        AIMessage(content="", tool_calls=[{
+            "name": "pause_reminder", "args": {"label": "vitamins"},
+            "id": "pause-1"}]),
+        AIMessage(content="paused"),
+    ])
+    model.bound_tools = []
+
+    with tempfile.TemporaryDirectory() as skill_root, tempfile.TemporaryDirectory() as wd:
+        skill_dir = Path(skill_root) / "schedule"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: schedule\ndescription: Manage reminders.\n"
+            "allowed-tools: create_reminder, pause_reminder\n---\n\nUse the tools.\n",
+            encoding="utf-8",
+        )
+        with patch.dict("os.environ", {"ASSIST_SKILL_DISCLOSURE_PROFILE": "persistent_full"}):
+            agent = create_agent(
+                model, wd, spec=AgentSpec(
+                    tools=(create_reminder, pause_reminder), async_subagent_tools=(),
+                    skill_sources={"/schedule-skill/": FilesystemBackend(
+                        root_dir=skill_root, virtual_mode=True)}))
+            config = {"configurable": {"thread_id": "persistent-schedule"}}
+            first = agent.invoke(
+                {"messages": [{"role": "user", "content": "remind me"}]}, config)
+            second = agent.invoke(
+                {"messages": [{"role": "user", "content": "pause it"}]}, config)
+
+    assert "create_reminder" not in model.bound_tools[0]
+    assert "create_reminder" in model.bound_tools[1]
+    assert "pause_reminder" in model.bound_tools[3]
+    assert not any(message.name == "load_skill" and message.tool_call_id != "load-1"
+                   for message in second["messages"] if isinstance(message, ToolMessage))
+    assert any(message.name == "pause_reminder" and message.status == "success"
+               for message in second["messages"] if isinstance(message, ToolMessage))
+    assert first["messages"][-1].content == "created"
+    assert second["messages"][-1].content == "paused"
 
 
 def test_compiled_graph_discloses_domain_skill_tool_after_load():
