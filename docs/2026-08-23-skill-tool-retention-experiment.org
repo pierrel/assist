@@ -1,0 +1,90 @@
+#+title: Skill tool-schema retention experiment
+
+* Objective
+
+Compare five narrowly defined outcomes after framework compaction removes a
+loaded skill result.  This is an experimental branch only.  It is not deployed,
+and no profile is enabled for ordinary Assist traffic.
+
+* Shared scenario
+
+Each trial has a fresh thread, schedule store, and workspace.  The natural
+conversation is:
+
+1. "Remind me every day at 7 AM to take my vitamins."
+2. "Pause that reminder for now."
+
+Compaction is forced immediately before the second turn and preserves only the
+second user message plus its summary.  Research is stubbed and network access
+is rejected.  The eval records the effective post-compaction schemas, summary,
+tool trace, persisted schedule, and whether the second turn reloads the skill.
+
+* Conditions
+
+| condition | native schemas after compaction | skill body and first-load contract | expected continuation |
+|-----------+---------------------------------+------------------------------------+-----------------------|
+| control   | none until a reload              | gone                               | reload then pause      |
+| T1        | all prior skill schemas, full    | gone                               | direct pause           |
+| T2        | all prior skill schemas, compact | gone                               | direct pause           |
+| T3a       | compact schemas named in ordinary summary | gone                      | exact selection; direct pause only when selected |
+| T3b       | compact schemas named in a structured continuation-tools section | gone | structured selection and direct pause |
+
+T3a parses only exact names belonging to a skill that was previously loaded.
+T3b parses only exact backticked names in its dedicated section.  A malformed
+or absent selection retains nothing, so it causes a safe reload rather than an
+authority expansion.
+
+* Implementation boundary
+
+Persistent profiles retain only a skill's declared tool names and their catalog
+fingerprint.  They never recreate the old =load_skill= call or its result.
+The summarization middleware wraps the skill middleware, so the latter sees the
+new summary message on the same compaction call.  Selection updates both the
+provider tool list and the runtime allowed-tool state, preventing a hidden
+hallucinated call from bypassing the filter.
+
+The guided-summary prompt exists only in the forced-compaction eval fixture.  A
+future product proposal would need to configure the Deep Agents summarizer
+deliberately; this experiment does not add that production mechanism.
+
+* Review record
+
+** Accepted
+
+- Simplify the prototype by removing message-pair restoration and all retained
+  body/hash/call-id state.
+- Test selection mechanics deterministically and end-to-end behavior with the
+  actual model.
+- Treat the default summary as a separate factor: T3a can safely reload when
+  it does not name a needed tool.
+
+** Rejected for this experiment
+
+- Replaying a full loaded skill or tool contract after compaction.  It changes
+  the intended treatment and masks the lifetime question.
+- Product plumbing for a custom summary prompt.  It is unnecessary to learn
+  whether the treatment is promising and would expand the experimental scope.
+
+* Interpretation
+
+Every condition runs only through N=3.  This is an exploratory decision aid,
+not a stability or statistical-superiority claim.  Each result is reported at
+the trial level.  The earlier 3/3 results that restored skill messages are
+explicitly superseded because they evaluated a different treatment.
+
+* Registered exploratory run order
+
+Run the forced-compaction test once per profile in each of these blocks:
+
+1. =reset=, =persistent_full=, =persistent_compact=, =summary_selected=,
+   =summary_guided_selected=
+2. =persistent_full=, =persistent_compact=, =summary_selected=,
+   =summary_guided_selected=, =reset=
+3. =persistent_compact=, =summary_selected=, =summary_guided_selected=,
+   =reset=, =persistent_full=
+
+Every episode uses the shared LLM admission wrapper, the same fully qualified
+pytest node, and =ASSIST_SKILL_DISCLOSURE_PROFILE=<profile>=.  Preserve every
+terminal result, including admission denial, timeout, or test failure.  The
+result table belongs in the completion report; it is intentionally not a
+production benchmark or release gate.

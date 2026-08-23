@@ -52,12 +52,9 @@ def _skill(path="/skills/travel/SKILL.md"):
     }
 
 
-def _activation(content="Travel procedure.", tool_call_id="load-1"):
+def _activation():
     return {
-        "content": content,
-        "result_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
         "schema_fingerprint": None,
-        "tool_call_id": tool_call_id,
         "tools": frozenset({"travel"}),
     }
 
@@ -254,58 +251,121 @@ def test_compact_profile_refuses_a_skill_without_a_full_tool_contract():
     assert "tool definition unavailable" in result
 
 
-def test_persistent_profile_restores_a_compacted_skill_result_as_tool_history():
+def test_persistent_profile_does_not_restore_a_compacted_skill_result():
     middleware = SmallModelSkillsMiddleware(
         backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"],
         disclosure_profile="persistent_full")
     summary = HumanMessage(
         content="Earlier conversation.", additional_kwargs={"lc_source": "summarization"})
-    request = _request(middleware, {
-        "active_skills": {"travel": _activation("Travel procedure.")},
-    })
+    request = _request(middleware, {"active_skills": {"travel": _activation()}})
     request = request.override(messages=[summary, HumanMessage(content="continue")])
     received = []
 
     result = middleware.wrap_model_call(
-        request, lambda restored: (received.append(restored), "called")[1])
-    restored = received[0].messages
+        request, lambda current: (received.append(current), "called")[1])
 
     assert result == "called"
-    assert restored[0] == summary
-    assert isinstance(restored[1], AIMessage)
-    assert restored[1].tool_calls[0]["name"] == "load_skill"
-    assert isinstance(restored[2], ToolMessage)
-    assert restored[2].content == "Travel procedure."
-    assert restored[3].content == "continue"
+    assert received[0].messages == [summary, HumanMessage(content="continue")]
 
 
-def test_persistent_profile_replaces_a_partial_compacted_skill_pair():
+def test_summary_selected_profile_retains_only_exact_names_from_summary():
     middleware = SmallModelSkillsMiddleware(
         backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"],
-        disclosure_profile="persistent_full")
-    activation = _activation("Travel procedure.")
+        disclosure_profile="summary_selected")
     summary = HumanMessage(
-        content="Earlier conversation.", additional_kwargs={"lc_source": "summarization"})
-    complete_call = AIMessage(content="", tool_calls=[{
-        "name": "load_skill", "args": {"name": "travel"}, "id": "load-1"}])
-    complete_result = ToolMessage(
-        content="Travel procedure.", name="load_skill", tool_call_id="load-1")
+        content="Use travel when the trip resumes.",
+        additional_kwargs={"lc_source": "summarization"})
+    request = _request(middleware, {
+        "active_skills": {"travel": _activation()},
+        "loaded_skill_tools": frozenset({"travel"}),
+        "historical_gated_tools": frozenset({"travel"}),
+    }).override(messages=[summary, HumanMessage(content="continue")])
 
-    for partial in ([complete_call], [complete_result]):
-        request = _request(middleware, {"active_skills": {"travel": activation}})
-        request = request.override(messages=[summary, *partial, HumanMessage(content="continue")])
-        received = []
-        middleware.wrap_model_call(
-            request, lambda restored: (received.append(restored), "called")[1])
-        restored = received[0].messages
-        calls = [message for message in restored if isinstance(message, AIMessage)
-                 and any(call.get("id") == "load-1" for call in message.tool_calls)]
-        results = [message for message in restored if isinstance(message, ToolMessage)
-                   and message.tool_call_id == "load-1"]
+    modified, selected = middleware._modified_request(request)
 
-        assert len(calls) == 1
-        assert len(results) == 1
-        assert results[0].content == "Travel procedure."
+    assert selected == frozenset({"travel"})
+    assert [item["function"]["name"] if isinstance(item, dict) else item.name
+            for item in modified.tools] == ["kernel_tool", "travel"]
+
+
+def test_guided_summary_selected_profile_ignores_names_outside_its_section():
+    middleware = SmallModelSkillsMiddleware(
+        backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"],
+        disclosure_profile="summary_guided_selected")
+    summary = HumanMessage(
+        content=("The old task used `travel`.\n\n## CONTINUATION TOOLS\n"
+                 "- No further callable capability is needed."),
+        additional_kwargs={"lc_source": "summarization"})
+    request = _request(middleware, {
+        "active_skills": {"travel": _activation()},
+        "loaded_skill_tools": frozenset({"travel"}),
+        "historical_gated_tools": frozenset({"travel"}),
+    }).override(messages=[summary, HumanMessage(content="continue")])
+
+    modified, selected = middleware._modified_request(request)
+
+    assert selected == frozenset()
+    assert [item.name for item in modified.tools] == ["kernel_tool"]
+
+
+def test_summary_selection_command_restricts_future_hidden_calls():
+    middleware = SmallModelSkillsMiddleware(
+        backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"],
+        disclosure_profile="summary_selected")
+    summary = HumanMessage(
+        content="No callable capability remains.",
+        additional_kwargs={"lc_source": "summarization"})
+    request = _request(middleware, {
+        "active_skills": {"travel": _activation()},
+        "loaded_skill_tools": frozenset({"travel"}),
+        "historical_gated_tools": frozenset({"travel"}),
+    }).override(messages=[summary, HumanMessage(content="continue")])
+
+    response = middleware.wrap_model_call(
+        request, lambda _request: AIMessage(content="done"))
+
+    update = response.command.update
+    assert update["loaded_skill_tools"].value == frozenset()
+    assert update["summary_selected_tools"].value == frozenset()
+    assert update["summary_selection_sha256"]
+    hidden = middleware.after_model({
+        "skills_metadata": [_skill()],
+        "historical_gated_tools": frozenset({"travel"}),
+        "loaded_skill_tools": update["loaded_skill_tools"].value,
+        "messages": [AIMessage(content="", tool_calls=[{
+            "name": "travel", "args": {}, "id": "remembered-1"}])],
+    }, None)
+    assert hidden["messages"][0].status == "error"
+
+    async def handler(_request):
+        return AIMessage(content="done")
+
+    async_response = asyncio.run(middleware.awrap_model_call(request, handler))
+    async_update = async_response.command.update
+    assert async_update["loaded_skill_tools"].value == frozenset()
+    assert async_update["summary_selected_tools"].value == frozenset()
+
+
+def test_post_summary_load_reauthorizes_its_tools():
+    body = b"---\nname: travel\ndescription: Travel help.\n---\n\nRULES"
+    middleware = SmallModelSkillsMiddleware(
+        backend=SimpleNamespace(download_files=lambda _paths: [
+            SimpleNamespace(error=None, content=body)]),
+        sources=["/skills/"], bundled_sources=["/skills/"],
+        tool_definitions=[travel],
+        disclosure_profile="summary_selected")
+    runtime = SimpleNamespace(
+        state={
+            "skills_metadata": [_skill()],
+            "loaded_skill_tools": frozenset(),
+            "summary_selection_sha256": "current-summary",
+            "summary_selected_tools": frozenset(),
+        },
+        config={}, tool_call_id="load-1")
+
+    result = middleware.tools[0].func("travel", runtime)
+
+    assert result.update["summary_selected_tools"].value == frozenset({"travel"})
 
 
 def _write_skill(root, source, name, body="Follow the current procedure."):
