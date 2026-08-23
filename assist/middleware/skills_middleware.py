@@ -398,7 +398,8 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
             schemas, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
 
     @staticmethod
-    def _compact_schema(tool_value: BaseTool | dict[str, Any]) -> dict[str, Any]:
+    def _compact_schema(
+            tool_value: BaseTool | dict[str, Any] | Callable) -> dict[str, Any]:
         """Keep the native callable shape while moving explanatory prose to history."""
         schema = json.loads(json.dumps(_openai_tool_schema(tool_value)))
 
