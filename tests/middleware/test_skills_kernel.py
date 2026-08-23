@@ -16,6 +16,7 @@ from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.tools import tool
+from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command, Overwrite
 
 from assist.middleware.skills_middleware import (
@@ -449,6 +450,25 @@ def test_retained_active_tool_uses_a_compact_native_schema_without_replay():
     assert schema["function"]["name"] == "travel"
     assert "description" not in schema["function"]
     assert schema["function"]["parameters"]["required"] == ["origin", "destination"]
+
+
+def test_runtime_injected_callable_has_a_load_contract_and_compact_schema():
+    def send_email(to: str, subject: str, runtime: ToolRuntime) -> str:
+        """Send a message after approval."""
+        return f"{to}:{subject}:{runtime.tool_call_id}"
+
+    middleware = SmallModelSkillsMiddleware(
+        backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"],
+        tool_definitions=(send_email,))
+
+    contract = middleware._tool_contract({"send_email"})
+    compact = middleware._compact_schema(send_email)
+
+    assert contract is not None
+    assert '"name": "send_email"' in contract
+    assert '"runtime"' not in contract
+    assert compact["function"]["parameters"]["required"] == ["to", "subject"]
+    assert "runtime" not in compact["function"]["parameters"]["properties"]
 
 
 def test_disclosure_intersects_declarations_with_this_agent_tools():

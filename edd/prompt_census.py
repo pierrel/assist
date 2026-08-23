@@ -2036,7 +2036,10 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "request_egress": {"84fdeccfd7466d726247ecc6c482c1bded92bf33eb54a7ce137cd42c233c35b4"},
     "resume_schedule": {"884f79fb96c7e374a2e204ed9f00203243607a71a1440a954936a0516a612183"},
     "search_internet": {"a240ffc08228c91577dde743290e775c51b5aa1c3b059cd147f490fa999def13"},
-    "send_email": {"13a0df1decb69fe0f4839784c892bd4d5b68b341beef6c5985e799f8d86ab9a7"},
+    "send_email": {
+        "13a0df1decb69fe0f4839784c892bd4d5b68b341beef6c5985e799f8d86ab9a7",
+        "24507d2f519918733b0db1404c15d4f956d29e75f70f03a1d7b2e383a3913cac",
+    },
     "start_async_task": {"eddaad4cd7c4daac2dcb056eda682895987de8d4c2ba869fc00f2a2aa8157793"},
     "travel": {"00329efd850f0564a51fc91cda1cef386988a8538eb4dbf9c58a3103f99f9384"},
     "update_async_task": {"f01d4f360963e9d7c9f00b36e0518dc09e6a26a4cab50f304e893c613655a5b4"},
@@ -2082,7 +2085,17 @@ def _expected_tool_results() -> dict[str, str]:
             "'Push to origin' in their browser.",
         "synthetic-call-hitl-skill-load":
             _expected_skill_file("synthetic-call-hitl-skill-load")
-            + "\n\nNewly available tools: send_email.",
+            + "\n\n## Tool contracts\n\n```json\n[\n  {\n    \"function\": {\n"
+            + "      \"description\": \"Send one plain-text email after the user approves its exact contents.\\n\\nGive one recipient address, a subject, and the complete plain-text body. The sender\\nand oversight CC are fixed by the web service and cannot be changed here.\",\n"
+            + "      \"name\": \"send_email\",\n"
+            + "      \"parameters\": {\n"
+            + "        \"properties\": {\n"
+            + "          \"body\": {\n            \"type\": \"string\"\n          },\n"
+            + "          \"subject\": {\n            \"type\": \"string\"\n          },\n"
+            + "          \"to\": {\n            \"type\": \"string\"\n          }\n"
+            + "        },\n        \"required\": [\n          \"to\",\n          \"subject\",\n          \"body\"\n        ],\n"
+            + "        \"type\": \"object\"\n      }\n    },\n    \"type\": \"function\"\n  }\n]\n```\n\n"
+            + "Newly available tools: send_email.",
         "synthetic-call-skill-precedence-built-in-load":
             _expected_skill_file("synthetic-call-skill-precedence-built-in-load")
             + "\n\nNo additional tools became available.",
@@ -2165,7 +2178,7 @@ _DECLARED_CAPTURE_TASK_SHA256 = \
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "cc620d39b33cd54ff979628d26d25600b5ac97c7bae551a29b67337756901bb0"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "e0e9226d298f794c6ed53ccea34bbd7df6496a945c4874d6519787efad1d8c32"
+    "26635f4350aade0557684817794f61278f379957826b9feae0fd0138227783ce"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
@@ -2464,8 +2477,9 @@ def _assert_closed_artifact_shapes(artifact: dict[str, Any]) -> None:
             if tool_schema["type"] != "function":
                 raise AssertionError("provider tool schema has an undeclared type")
             function = tool_schema["function"]
-            _assert_keys(function, {"name", "description", "parameters"},
-                         "provider tool function")
+            if set(function) not in ({"name", "description", "parameters"},
+                                      {"name", "parameters"}):
+                raise AssertionError("provider tool function has undeclared fields")
             _assert_json_schema(function["parameters"])
             schema_hash = _sha(tool_schema)
             if function["name"] == "task":
