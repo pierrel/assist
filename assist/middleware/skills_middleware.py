@@ -346,7 +346,8 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
     def __init__(self, *, backend, sources, bundled_sources: Iterable[str] = (),
                  gated_sources: Iterable[str] | None = None,
                  registered_tools: Iterable[str] | None = None,
-                 tool_definitions: Iterable[BaseTool | dict[str, Any]] = ()):
+                 tool_definitions: Iterable[
+                     BaseTool | dict[str, Any] | Callable] = ()):
         super().__init__(backend=backend, sources=sources)
         self._bundled_sources = frozenset(bundled_sources)
         self._gated_sources = frozenset(
