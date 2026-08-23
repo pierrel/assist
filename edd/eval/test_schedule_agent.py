@@ -347,6 +347,69 @@ class TestPromptRewriteScheduleOutcome(TestCase):
         self.assertIn("financ", saved[0].prompt.lower())
         self.assertRegex(str(reply).lower(), r"(reminder|scheduled|next run)")
 
+    def test_later_turn_uses_a_different_tool_from_the_retained_skill(self):
+        """A loaded schedule capability remains usable for a later operation.
+
+        The first user request needs ``create_schedule``.  The natural follow-up
+        needs ``pause_schedule`` instead: it is deliberately a different tool
+        declared by the same skill.  The follow-up must not reload ``schedule``;
+        it proves that the prior skill instructions and its disclosed tool
+        surface survived together across the user-turn boundary.
+        """
+        thread_id = "retained-schedule-skill-eval"
+        with tempfile.TemporaryDirectory(prefix="retained_schedule_store_") as store_root, \
+                tempfile.TemporaryDirectory(prefix="retained_schedule_workspace_") as root:
+            os.makedirs(os.path.join(store_root, thread_id))
+            create_filesystem(root, {"README.org": "Personal workspace."})
+            store = ScheduleStore(store_root)
+            config = {"configurable": {
+                "thread_id": thread_id,
+                CONTEXT_RIDER_KEY: SimpleNamespace(tz="America/Los_Angeles"),
+            }}
+            with mock.patch("assist.schedule.tools.get_config", return_value=config), \
+                 mock.patch("assist.tools.requests.get",
+                            side_effect=AssertionError(
+                                "schedule eval must not fetch URLs")) as get, \
+                 stub_research_subagent():
+                agent = AgentHarness(create_agent(
+                    self.model, root,
+                    spec=prompt_rewrite_web_main_spec(
+                        tools=tuple(schedule_tools(store)))),
+                    thread_id=thread_id)
+                agent.message(
+                    "Remind me every day at 7 AM to take my vitamins.")
+                first_turn_calls = agent_tool_calls(agent)
+                before_followup = len(first_turn_calls)
+
+                reply = str(agent.message("Pause that reminder for now."))
+            get.assert_not_called()
+            saved = store.for_thread(thread_id)
+
+        initial_names = [call.get("name") for call in first_turn_calls]
+        followup_calls = agent_tool_calls(agent)[before_followup:]
+        followup_names = [call.get("name") for call in followup_calls]
+        diagnostics = {
+            "initial_calls": first_turn_calls,
+            "followup_calls": followup_calls,
+            "saved": saved,
+            "reply": reply,
+            "messages": agent.all_messages(),
+        }
+
+        self.assertTrue(any(
+            call.get("name") == "load_skill"
+            and (call.get("args") or {}).get("name") == "schedule"
+            for call in first_turn_calls), diagnostics)
+        self.assertIn("create_schedule", initial_names, diagnostics)
+        self.assertFalse(any(
+            call.get("name") == "load_skill"
+            and (call.get("args") or {}).get("name") == "schedule"
+            for call in followup_calls), diagnostics)
+        self.assertIn("pause_schedule", followup_names, diagnostics)
+        self.assertEqual(len(saved), 1, diagnostics)
+        self.assertFalse(saved[0].enabled, diagnostics)
+        self.assertRegex(reply.lower(), r"paus", diagnostics)
+
     def test_deletes_named_recurring_reminder(self):
         """A natural removal request loads scheduling and changes persisted state."""
         self._run_delete_case(prior_schedule_turn=False, compact=False)
