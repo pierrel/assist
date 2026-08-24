@@ -400,7 +400,7 @@ class TestPromptRewriteLocalGrounding(TestCase):
             self.assertIn(term, thread_memory.lower(), details)
         self.assertRegex(
             thread_memory,
-            r"(?is)\b(?:when|if)\b.{0,300}\b(?:encourag|remind)\b",
+            r"(?is)\b(?:when|if)\b.{0,300}\b(?:encourag\w*|remind\w*)\b",
             details,
         )
 
