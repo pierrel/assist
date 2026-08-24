@@ -226,22 +226,37 @@ projector, runtime headroom, and voice workload present.
 Do not use IQ3 or lower for Assist merely to advertise a larger window: the measured quality
 curve steepens below 14GB. Test all three candidates with the same llama.cpp revision, chat
 template, sampling, tool schemas, and Assist N=3/5/10 panel; select on Assist outcomes,
-throughput, and stable usable context, not KL divergence alone.
+throughput, and stable usable context, not KL divergence alone. The first long-context
+candidate is the current Unsloth =UD-Q4_K_XL= rebuild, not a lower-bit weight quant: its
+importance-aware layout has the published quality advantage around its 17.6GB size and enough
+weight quality for the agent to benefit from the larger window.
 
-*Context and vision budget:* Qwen3.8's native 262k context is a model limit, not a promise
-that a 24GB 3090 can hold it. Its attention cache is approximately 256KB/token: 2GB at 8k,
-4GB at 16k, and 8GB at 32k. Reserve cache, projector, CUDA/runtime headroom, and the active
-voice workload before setting =-c=. Target a measured 16k first, then grow only while
-long-thread, tool-result eviction, and latency remain acceptable. To buy context without
-needlessly shrinking weights, evaluate symmetric =--cache-type-k q8_0 --cache-type-v q8_0=
-with Flash Attention after the full-precision-cache baseline. Q8 KV commonly uses about half
-the cache memory; it must earn its place on our long-thread and tool-use panel. Treat 4-bit KV
-as a separate, more aggressive experiment, not the default for an agent. Qwen3.8 can remove the
-separate text-versus-vision model swap because it is natively multimodal, but its projector
-and the voice model still make simultaneous long-context vision and calling untenable on the
-single card. The viable choices are admission-controlled voice/vision model swapping, a
-second GPU, or a deliberately lower-context image path; prefer the first or second over a
-quality regression.
+*128k context and vision budget:* 100k is the minimum acceptance target and 128k is the
+preferred target. The earlier 16k estimate was wrong for this hybrid architecture: only 16 of
+Qwen3.8's 64 layers retain a growing attention KV cache; the other 48 Gated DeltaNet layers
+retain fixed recurrent state. On =UD-Q4_K_XL=, a symmetric =q4_0= K/V cache is measured at
+about 18KiB/token across those attention layers, so 128k is a plausible 24GB-card target
+without cutting model weights below Q4. A published 24GB NVIDIA L4 measurement reaches 127k
+with the native MTP head and q4 KV, and reaches far beyond it with an experimental block
+drafter. Treat that as feasibility evidence only: the exact 3090 build must prove its own
+headroom and behavior.
+
+The first reliable configuration is one full-GPU slot, current llama.cpp, Flash Attention,
+=--parallel 1=, =-ub 256=, and =--fit= with a conservative =--fit-target= reserve rather than
+hard-coding =-c= to the nominal VRAM maximum. Start without speculative decoding: Qwen's native
+MTP head adds a draft context whose memory grows with the target window. First demonstrate 100k
+with symmetric =q8_0= K/V cache and varied long turns; then demonstrate 128k with =q4_0= K/V
+cache, varied final micro-batch shapes, a deep-fill conversation, and a clean over-limit 400
+rather than a CUDA OOM. 4-bit KV is therefore a required, measured capacity technique for the
+128k product target, not a blind quality sacrifice. Only after that passes may MTP or another
+drafter be reintroduced and independently requalified for both context and tool behavior.
+
+Qwen3.8 can remove the separate text-versus-vision model swap because it is natively
+multimodal, but the =mmproj= and image tokens still consume the same GPU budget. Measure the
+128k text path first, then repeat it with the projector and one bounded image-worker request.
+The 24GB card cannot also keep the voice model resident at this target. Vision and voice must
+use explicit model admission/unload-reload, or one must move to a second GPU. Do not make
+ordinary image use silently lower the text window.
 
 *Evaluation sequence:* upgrade llama.cpp; run its direct provider matrix and plain text/
 thinking/tool-call compatibility probes; establish a Qwen3.6 N=3 baseline; run each Qwen3.8
@@ -254,7 +269,8 @@ and every selected eval. Eval-measured, not intuition.
 Sources: [[https://huggingface.co/Qwen/Qwen3.8-27B-FP8][Qwen model card]],
 [[https://huggingface.co/unsloth/Qwen3.8-27B-GGUF][Unsloth Dynamic 3 GGUFs]], and
 [[https://huggingface.co/AtomicChat/Qwen3.8-27B-GGUF][AtomicChat GGUF measurements]];
-[[https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md][llama.cpp server options]].
+[[https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md][llama.cpp server options]];
+[[https://github.com/hanxiao/Qwen3.8-27B-UD-Q4_K_XL-L4][24GB Qwen3.8 long-context measurements]].
 * Research improvements
 Research is at the heart of what this agent is capable of. It's strictly guided not to use internal knowledge
 ** TODO Create some evals on how you want it to act
