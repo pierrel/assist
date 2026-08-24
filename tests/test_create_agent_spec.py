@@ -181,6 +181,26 @@ class TestSpecWiring(_CreateAgentHarness):
         assert legacy_skills.system_prompt_template == composed_skills.system_prompt_template
         assert legacy_memory.sources == web_main_memory.sources
 
+    def test_outcome_checklist_rider_is_web_main_only_and_opt_in(self):
+        """The experiment appends guidance only; it never changes the tool stack."""
+        from assist.middleware.outcome_checklist import OutcomeChecklistMiddleware
+
+        with patch.dict(os.environ, {"ASSIST_OUTCOME_CHECKLIST_RIDER": "0"}):
+            control = self._build(spec=AgentSpec(
+                async_subagent_tools=_async_task_tools, web_main=True))
+        with patch.dict(os.environ, {"ASSIST_OUTCOME_CHECKLIST_RIDER": "1"}):
+            treatment = self._build(spec=AgentSpec(
+                async_subagent_tools=_async_task_tools, web_main=True))
+            non_web = self._build(spec=AgentSpec(async_subagent_tools=_async_task_tools))
+
+        assert not any(isinstance(item, OutcomeChecklistMiddleware)
+                       for item in control["middleware"])
+        assert any(isinstance(item, OutcomeChecklistMiddleware)
+                   for item in treatment["middleware"])
+        assert not any(isinstance(item, OutcomeChecklistMiddleware)
+                       for item in non_web["middleware"])
+        assert treatment["tools"] == control["tools"]
+
     def test_web_main_requires_the_main_lifecycle_profile(self):
         with pytest.raises(ValueError, match="main role with async lifecycle tools"):
             AgentSpec(web_main=True)

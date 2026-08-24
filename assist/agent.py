@@ -63,6 +63,7 @@ from assist.middleware.context_rider_middleware import ContextRiderMiddleware
 from assist.middleware.interjection import InterjectionMiddleware
 from assist.middleware.image_input_guard import ImageInputGuardMiddleware
 from assist.middleware.prompt_composition import PromptCompositionMiddleware
+from assist.middleware.outcome_checklist import OutcomeChecklistMiddleware
 from assist.env import env_int
 
 
@@ -576,6 +577,14 @@ def create_agent(model: BaseChatModel,
             # prompt appenders remain outside it, while Assist prompt owners
             # keep their existing order inside it.
             *([PromptCompositionMiddleware(static_prompt)] if spec.web_main else []),
+            # An experimental, prompt-only rider for mixed turns with independent
+            # outcomes. It remains opt-in while the sealed lab compares it with
+            # the current memory treatment. The framework TodoListMiddleware is
+            # part of Deep Agents' base stack, so this only supplies the
+            # outcome-reconciliation rationale and changes no tool or state.
+            *([OutcomeChecklistMiddleware()]
+              if spec.web_main and env_int("ASSIST_OUTCOME_CHECKLIST_RIDER", 0)
+              else []),
             # Offload a large execute result (a long build/test log) to a file +
             # hand the model a preview + grep instruction — big logs are the classic
             # context-flooder for the small model.  head_tail preview: a log's salient
