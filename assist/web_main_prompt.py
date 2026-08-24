@@ -78,13 +78,16 @@ def _assemble(template: str, adapter_template: str, **kwargs: object) -> WebMain
     return WebMainPrompt(text=text, shared_fragments=shared, adapter=adapter)
 
 
-def render_deep_web_main_prompt(*, guidance_skills: bool) -> WebMainPrompt:
+def render_deep_web_main_prompt(
+        *, guidance_skills: bool, async_outcome_reconciliation: bool = False,
+) -> WebMainPrompt:
     """Render the Deep Agents web-main prompt without changing its text order."""
     return _assemble(
         "deepagents/assist_core.md.j2",
         "deepagents/web_main_adapter.md.j2",
         guidance_skills=guidance_skills,
         immediate_research_dispatch=False,
+        async_outcome_reconciliation=async_outcome_reconciliation,
     )
 
 
