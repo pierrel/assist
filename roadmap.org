@@ -247,9 +247,10 @@ hard-coding =-c= to the nominal VRAM maximum. Start without speculative decoding
 MTP head adds a draft context whose memory grows with the target window. First demonstrate 100k
 with symmetric =q8_0= K/V cache and varied long turns; then demonstrate 128k with =q4_0= K/V
 cache, varied final micro-batch shapes, a deep-fill conversation, and a clean over-limit 400
-rather than a CUDA OOM. 4-bit KV is therefore a required, measured capacity technique for the
-128k product target, not a blind quality sacrifice. Only after that passes may MTP or another
-drafter be reintroduced and independently requalified for both context and tool behavior.
+rather than a CUDA OOM. 4-bit KV is the leading capacity technique for the 128k product target,
+especially once vision headroom is included; it is not a blind quality sacrifice. Only after
+that passes may MTP or another drafter be reintroduced and independently requalified for both
+context and tool behavior.
 
 Qwen3.8 can remove the separate text-versus-vision model swap because it is natively
 multimodal, but the =mmproj= and image tokens still consume the same GPU budget. Measure the
