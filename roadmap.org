@@ -11,15 +11,20 @@ not supported"). Guarded for now by =ImageInputGuardMiddleware= (strips image bl
 text note before the model call) + text-only guidance in general_instructions. Pierre: it's
 possible, we should enable it. Plan when we pick this up:
 - *Isolate in a vision-specific subagent.* A full-res image is ~hundreds-2k+ vision tokens;
-  the main 128k window must not carry that. The subagent sees the image, hands the main
+  the main context must not carry that. The subagent sees the image, hands the main
   agent a text description. Route images there instead of stripping them.
-- *Model:* needs a Qwen3-VL variant + its mmproj (a model SWAP, not a flag — llama.cpp
-  already has qwen3vl support built: =llama-qwen2vl-cli=, =src/models/qwen3vl.cpp=).
+- *Model:* Qwen3.8-27B is the leading candidate for the text-model upgrade and is natively
+  vision-language. Its GGUF still needs the separate =mmproj-Qwen3.8-27B-F16.gguf= and a
+  current llama.cpp that supports its =qwen35= architecture. First prove an OpenAI-compatible
+  multimodal request, image-token bounds, and the existing subagent handoff before replacing
+  =ImageInputGuardMiddleware=. Do not introduce a separate vision model if this one qualifies.
 - *VRAM is the binding constraint — and a VOICE MODEL is already loaded; factor it in.* The
   24GB 3090 sits at ~19.7GB used by the text llama-server. Don't forget the voice model's
-  footprint on top when budgeting. A VL model + vision encoder almost certainly won't
-  co-reside with text + voice at Q4 — likely needs load/unload (a swap the vision subagent
-  triggers), a smaller VL model, or a second GPU.
+  footprint on top when budgeting. Qwen3.8's attention cache alone is about 2GB at 8k and
+  8GB at 32k, before the projector and runtime headroom. A usable long-context Qwen3.8 plus
+  vision projector will not co-reside with the voice model on this card. Use explicit model
+  admission and unload/reload for vision and voice, or add a second GPU; do not solve this by
+  silently shrinking context or dropping to a low-quality quant.
 - When it lands, drop =ImageInputGuardMiddleware= (or repoint it to dispatch to the vision
   subagent rather than strip).
 * Architecture
@@ -193,16 +198,58 @@ The dev agent needs significant improvements
 ** TODO Many more evals
 Consider checking out a version of this app to make changes to
 ** TODO Language/project-specific guidance
-** TODO Explore upgrading the local small model to Qwen3.7
+** TODO Explore upgrading the local small model to Qwen3.8
 The dev/agent stack now targets Qwen3.6-27B (Q4_K_M gguf) on local
-llama.cpp (see CLAUDE.md "Small-model targeting").  A newer
-Qwen3.7-class release may close the gap to GPT-4-class behavior on the
-failure modes we prompt-engineer around (tool-call composition,
-multi-turn instruction following, elisp/config restatement for the
-emacsos channel).  Explore: stand it up on vLLM, re-run =edd/eval/= at
-the standard N=3/5/10 cadence, and quantify the pass-rate delta vs. the
-current model before committing to a switch (VRAM/throughput cost,
-context window, AWQ availability).  Eval-measured, not intuition.
+llama.cpp (see CLAUDE.md "Small-model targeting"). Qwen3.8-27B keeps the same dense
+27B class but adds a native vision encoder, a 262,144-token native window, controllable
+thinking, and a new =qwen35= llama.cpp architecture. It is the model-upgrade candidate for
+the failure modes we currently prompt-engineer around: tool-call composition, planning from
+environment feedback, multi-turn instruction following, research, and elisp/config
+restatement for the emacsos channel.
+
+*Expected Assist impact, not a migration claim:* Qwen's published same-size comparison
+reports Qwen3.8 versus Qwen3.6 gains of 9.6 points on terminal-agent coding (73.0 vs 63.4),
+8.2 on SWE-bench Pro (61.7 vs 53.5), 9.7 on long-horizon office work (70.7 vs 61.0), and
+10.4 on instruction following (79.5 vs 69.1). Those are promising proxies for the dev skill,
+general tool use, async task follow-through, research synthesis, and phone configuration, but
+they use upstream harnesses and are not predictions of Assist pass rates. Qualify the exact
+provider/template/tool schema before trusting any gain; retain the current model until the
+matched Assist eval panel proves it.
+
+*Quant and capacity decision:* compare current downloadable GGUFs rather than treating a
+quant name as a quality guarantee. Start with the quality/capacity frontier: AtomicChat
+=AD-IQ4_XS= (16.5GB, reported 95.39% next-token agreement) and =AD-Q4_K_M= (17.1GB,
+95.59%), plus Unsloth Dynamic 3 =UD-Q4_K_XL= (17.6GB), whose publisher reports better
+accuracy around the 18GB point. =AD-Q5_K_M-Q4_K_M= (18.6GB) is the high-quality 24GB-card
+candidate, and its publisher budgets it for about 16k context; remeasure that with the
+projector, runtime headroom, and voice workload present.
+Do not use IQ3 or lower for Assist merely to advertise a larger window: the measured quality
+curve steepens below 14GB. Test all three candidates with the same llama.cpp revision, chat
+template, sampling, tool schemas, and Assist N=3/5/10 panel; select on Assist outcomes,
+throughput, and stable usable context, not KL divergence alone.
+
+*Context and vision budget:* Qwen3.8's native 262k context is a model limit, not a promise
+that a 24GB 3090 can hold it. Its attention cache is approximately 256KB/token: 2GB at 8k,
+4GB at 16k, and 8GB at 32k. Reserve cache, projector, CUDA/runtime headroom, and the active
+voice workload before setting =-c=. Target a measured 16k first, then grow only while
+long-thread, tool-result eviction, and latency remain acceptable. Qwen3.8 can remove the
+separate text-versus-vision model swap because it is natively multimodal, but its projector
+and the voice model still make simultaneous long-context vision and calling untenable on the
+single card. The viable choices are admission-controlled voice/vision model swapping, a
+second GPU, or a deliberately lower-context image path; prefer the first or second over a
+quality regression.
+
+*Evaluation sequence:* upgrade llama.cpp; run its direct provider matrix and plain text/
+thinking/tool-call compatibility probes; establish a Qwen3.6 N=3 baseline; run each Qwen3.8
+quant at N=3, review, then N=5 and N=10 without regressions. Add a small vision capability
+probe only after the text candidate passes: image receipt, bounded image tokens, a factual
+description handed back to the main agent, and no image blocks in ordinary text turns. Record
+model file SHA, llama.cpp revision, =mmproj= SHA, context, GPU allocation, sampling, tokens/s,
+and every selected eval. Eval-measured, not intuition.
+
+Sources: [[https://huggingface.co/Qwen/Qwen3.8-27B-FP8][Qwen model card]],
+[[https://huggingface.co/unsloth/Qwen3.8-27B-GGUF][Unsloth Dynamic 3 GGUFs]], and
+[[https://huggingface.co/AtomicChat/Qwen3.8-27B-GGUF][AtomicChat GGUF measurements]].
 * Research improvements
 Research is at the heart of what this agent is capable of. It's strictly guided not to use internal knowledge
 ** TODO Create some evals on how you want it to act
