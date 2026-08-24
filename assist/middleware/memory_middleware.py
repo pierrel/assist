@@ -6,17 +6,16 @@ memory file (``AGENTS.md``).
 
 One change from the upstream behavior: the system-prompt block injected
 alongside the loaded memory is rewritten in an imperative,
-small-model-friendly form.  Upstream wraps every loaded source in
-``<agent_memory>`` tags and follows that with ~50 lines of guidelines
-and three full prose examples; our variant trims that to a focused
-block of how-to-save / when-to-save / when-not-to-save / pre-action
-check.
+small-model-friendly form.  The one-source form keeps focused
+how-to-save / when-to-save / when-not-to-save / pre-action guidance.
+When thread-private memory is also available, a concise scope-aware
+form directs each durable fact to the repository or the current thread.
 
 We do NOT register a dedicated ``save_memory`` tool — earlier versions
-did, but the model does not need the affordance.  Memory is saved by
-having the model invoke its existing ``write_file`` / ``edit_file``
-tools against ``AGENTS.md``, with the loaded ``<agent_memory>`` block
-serving as the anchor for the ``edit_file`` replace.
+did, but the model does not need the affordance. Repository memory is
+saved to ``AGENTS.md`` and web-main thread state to ``/agent/memory.md``
+through the model's existing ``write_file`` / ``edit_file`` tools, with
+the loaded blocks serving as ``edit_file`` anchors.
 
 Read happens automatically: our ``before_agent`` / ``abefore_agent``
 overrides discard the upstream state cache and reload every configured
@@ -114,24 +113,52 @@ in prose but never persists it.  The check exists to prevent that.
 """
 
 
-THREAD_MEMORY_PROMPT = """{repo_prompt}
+THREAD_MEMORY_PROMPT = """<agent_memory>
+{repo_memory}
+</agent_memory>
 
 <thread_memory>
 {thread_memory}
 </thread_memory>
 
-## Thread memory
+## Durable memory
 
-`{repo_memory_path}` is durable repository memory shared across threads.
-`{thread_memory_path}` belongs only to this thread. Use it for the current
-goal, processes, decisions, corrections, progress, blockers, and useful working
-notes.
+When the user establishes a future or conditional response within this thread,
+it is a commitment. Before acknowledging it or promising that response, write
+its operative details to `{thread_memory_path}`. A prose-only acknowledgment is
+not a saved commitment.
+For a new commitment whose operative details are explicit in the user's
+message, make that write your first tool call. A mixed request does not change
+that: save a self-contained commitment before beginning unrelated work that
+needs user files, personal information, or current state outside `/agent`.
+Ground first only when the commitment's own operative details need that
+information.
+A commitment does not become optional because the same turn has other work:
+after the needed grounding is complete, persist it before the final response.
 
-`/agent` is your agent-owned working space for anything useful across this
-long-running thread. Proactively manage it without waiting for the user to ask.
-Put a fact in repository memory only when it should remain useful across
-threads. Never put current-thread state there. When one message contains both
-scopes, update the two files separately.
+When the requested response is wholly the recorded commitment, fulfill it
+directly from relevant thread memory. If it also needs mutable user data or
+current state outside `/agent`, follow grounding instead.
+
+The repository memory file `{repo_memory_path}` is shared across conversations.
+`{thread_memory_path}` is private to this thread. Before saving, decide the
+lifetime of the information:
+
+- Save a fact, preference, or behavioral rule in repository memory only when it
+  should apply across future conversations.
+- Save the current goal, process, decision, commitment, or conditional response
+  in thread memory when it applies to this conversation.
+
+A current-work checkpoint belongs in `{thread_memory_path}`, never a user file.
+Do not create a user file merely to track the work.
+
+Persist the operative details before saying they are saved or promising a
+future response. For repository memory, write or append one plain-prose
+sentence to `{repo_memory_path}`. For thread memory, write or append concise
+Markdown to `{thread_memory_path}`. When the corresponding block is empty, use
+`write_file`; otherwise use `edit_file`. Never save credentials, API keys, or
+passwords. When one message contains both scopes, update the two files
+separately.
 """
 
 
@@ -189,18 +216,18 @@ class SmallModelMemoryMiddleware(MemoryMiddleware):
         memory_body = contents.get(memory_path, "")
         if not memory_body.strip():
             memory_body = "(No memory loaded)"
-        repo_prompt = SMALL_MODEL_MEMORY_PROMPT.format(
-            agent_memory=memory_body, memory_path=memory_path,
-        )
         if len(self.sources) == 1:
-            return repo_prompt
+            return SMALL_MODEL_MEMORY_PROMPT.format(
+                agent_memory=memory_body,
+                memory_path=memory_path,
+            )
 
         thread_memory_path = self.sources[1]
         thread_memory = contents.get(thread_memory_path, "")
         if not thread_memory.strip():
             thread_memory = "(No thread memory loaded)"
         return THREAD_MEMORY_PROMPT.format(
-            repo_prompt=repo_prompt,
+            repo_memory=memory_body,
             repo_memory_path=memory_path,
             thread_memory_path=thread_memory_path,
             thread_memory=thread_memory,

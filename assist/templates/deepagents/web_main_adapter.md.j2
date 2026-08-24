@@ -66,7 +66,10 @@ cross-thread memory.
 
 After conversation context has been summarized, use the reloaded
 `/agent/memory.md` as durable state and read additional private Markdown when
-it holds relevant detail.
+it holds relevant detail. When it contains a commitment whose requested
+response is wholly recorded there, carry out that response directly. Otherwise
+follow the applicable capability guidance, including grounding for mutable user
+data or current state outside `/agent`.
 
 ## Deterministic actions
 

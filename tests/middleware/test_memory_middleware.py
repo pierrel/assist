@@ -128,10 +128,17 @@ class TestMemoryPromptFormatting(TestCase):
         self.assertNotIn("Current goal", out[repo_start:repo_end])
         self.assertIn("Current goal", out[thread_start:thread_end])
         self.assertNotIn("Prefer compact tables", out[thread_start:thread_end])
-        self.assertIn("durable repository memory shared across threads", out)
-        self.assertIn("belongs only to this thread", out)
-        self.assertIn("goal, processes, decisions", " ".join(out.split()))
-        self.assertIn("update the two files separately", out)
+        self.assertIn("shared across conversations", out)
+        self.assertIn("private to this thread", out)
+        self.assertIn("Before saving, decide the lifetime", " ".join(out.split()))
+        self.assertIn("conditional response", out)
+        self.assertIn("update the two files separately", " ".join(out.split()))
+        self.assertIn("Persist the operative details", out)
+        self.assertIn("A prose-only acknowledgment", out)
+        self.assertIn("fulfill it", " ".join(out.split()))
+        self.assertIn("Ground first only", out)
+        self.assertIn("unrelated work", out)
+        self.assertIn("mutable user data", out)
 
 
 class TestStaleMemoryReread(TestCase):

@@ -798,39 +798,65 @@ def _content_segments(owner: str, text: str, scenario: str,
         if memory_path_match is None:
             raise AssertionError(f"memory path is absent from {scenario}")
         memory_path = memory_path_match.group(1)
-        repo_prompt, repo_segments = _render_owned_template(
-            memory_prompt,
-            memory_source,
-            {
-                "agent_memory": {"value": agent_memory["value"],
-                                 "source_ids": [agent_memory["id"]]},
-                "memory_path": {"value": memory_path,
-                                "source_ids": ["python:assist.agent.create_agent"]},
-            },
-        )
         if "<thread_memory>" not in text:
-            rendered, segments = repo_prompt, repo_segments
+            rendered, segments = _render_owned_template(
+                memory_prompt,
+                memory_source,
+                {
+                    "agent_memory": {"value": agent_memory["value"],
+                                     "source_ids": [agent_memory["id"]]},
+                    "memory_path": {
+                        "value": memory_path,
+                        "source_ids": ["python:assist.agent.create_agent"],
+                    },
+                },
+            )
         else:
             thread_memory = _fixture_or_literal(
                 sources, scenario, "thread_memory",
                 "(No thread memory loaded)", formatter_id)
             thread_path_match = re.search(
-                r"\n`([^`]+)` belongs only to this thread", text)
+                r"\n`([^`]+)` (?:belongs only to|is private to) this thread", text)
             if thread_path_match is None:
                 raise AssertionError(f"thread memory path is absent from {scenario}")
+            values = {
+                "thread_memory": {"value": thread_memory["value"],
+                                  "source_ids": [thread_memory["id"]]},
+                "repo_memory_path": {
+                    "value": memory_path,
+                    "source_ids": ["python:assist.agent.create_agent"],
+                },
+                "thread_memory_path": {
+                    "value": thread_path_match.group(1),
+                    "source_ids": ["python:assist.agent.create_agent"],
+                },
+            }
+            if "{repo_prompt}" in thread_prompt:
+                repo_prompt, repo_segments = _render_owned_template(
+                    memory_prompt,
+                    memory_source,
+                    {
+                        "agent_memory": {"value": agent_memory["value"],
+                                         "source_ids": [agent_memory["id"]]},
+                        "memory_path": {
+                            "value": memory_path,
+                            "source_ids": ["python:assist.agent.create_agent"],
+                        },
+                    },
+                )
+                values["repo_prompt"] = {
+                    "value": repo_prompt,
+                    "segments": repo_segments,
+                }
+            else:
+                values["repo_memory"] = {
+                    "value": agent_memory["value"],
+                    "source_ids": [agent_memory["id"]],
+                }
             rendered, segments = _render_owned_template(
                 thread_prompt,
                 thread_source,
-                {
-                    "repo_prompt": {"value": repo_prompt,
-                                    "segments": repo_segments},
-                    "thread_memory": {"value": thread_memory["value"],
-                                      "source_ids": [thread_memory["id"]]},
-                    "repo_memory_path": {"value": memory_path,
-                                         "source_ids": ["python:assist.agent.create_agent"]},
-                    "thread_memory_path": {"value": thread_path_match.group(1),
-                                           "source_ids": ["python:assist.agent.create_agent"]},
-                },
+                values,
             )
     elif owner == "assist.ContextRiderMiddleware" and operation == "replace":
         if not prior_spans:
@@ -1776,6 +1802,8 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "ed1e3069345c9e4634f5bf8cd9dff080c848fb9b67fd85c717b1a3d46d6f3f4e",
         "bf7b3df517b4f2984f96f489e30e01e2bec029990ab022ea7467269257e1f032",
         "dff960d5187558afb8e111df649806b14f57cf5017c972631f8c9dff9888b8be",
+        "f00beabf03c77d6c927d666b46e273255e1d20cb7fcf6de3fade76048cf71590",
+        "18d49de8eaec4b2a63de4ef096cee6fc12118e27ca589003ec7f30c17ea27d24",
     },
     "assist/templates/deepagents/context_agent.md.j2": {
         "29cca4088f56e56eee0a685e794de8a6ff0c63526231839f2f24e246adb9ec70",
@@ -2178,7 +2206,7 @@ _DECLARED_CAPTURE_TASK_SHA256 = \
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "cc620d39b33cd54ff979628d26d25600b5ac97c7bae551a29b67337756901bb0"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "26635f4350aade0557684817794f61278f379957826b9feae0fd0138227783ce"
+    "9211ee08c83bc820338cabf4747982b7df90fc895d362aeb3d43da2e103debec"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:

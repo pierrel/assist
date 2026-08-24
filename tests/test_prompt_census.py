@@ -444,6 +444,19 @@ def test_private_workspace_checkpoint_boundary_is_web_main_only(census):
             assert marker not in text
 
 
+def test_post_summary_thread_commitment_guidance_is_web_main_only(census):
+    markers = (
+        "After conversation context has been summarized",
+        "response is wholly recorded there",
+    )
+    for call in census["calls"]:
+        text = _system_prompt(call)
+        if call["scenario"] in {"web-main-core", "web-main-full"}:
+            assert all(marker in text for marker in markers)
+        else:
+            assert all(marker not in text for marker in markers)
+
+
 def test_user_and_persistent_tmp_guidance_are_web_main_only(census):
     markers = (
         "`/user` is the user-owned file tree.",
@@ -689,8 +702,6 @@ def test_expected_audit_findings_are_reported_not_hidden(census):
                     for finding in census["findings"])
     main_claims = census["capabilities"]["web-main-core:0"]["claims"]
     assert any(claim["polarity"] == "conditional" and claim["tool"] == "notify"
-               for claim in main_claims)
-    assert any(claim["polarity"] == "ordered" and claim["tool"] == "task"
                for claim in main_claims)
     context = census["capabilities"]["context-read-only:0"]
     assert context["effective_actions"]["write_file"] == "observed-denied"
@@ -1316,7 +1327,7 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(historical_p0_prompt) == 31_279
     # The rewrite moves the stock base ahead of the compact Assist core. The
     # historical rows below deliberately retain their original P0-P2b3 values.
-    assert len(current_prompt) == 25_214
+    assert len(current_prompt) == 23_576
     assert len(schemas) == 18_554
     assert len(census["calls"]) == 30
     assert len(census["tool_nodes"]) == 38
