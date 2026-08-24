@@ -75,11 +75,13 @@ Constraints on the saved sentence:
 - The user states a persistent fact about themselves (identity,
   possessions, preferences, environment) NOT already in
   `<agent_memory>` above.
-- The user gives forward-looking feedback or a behavioral rule.
-  Examples: "in the future ...", "from now on ...", "always ...",
-  "never ...", "I prefer X over Y", "I'd rather see ...", "don't do X
-  again", "next time ...".  Save the rule even when the user did not
-  say "remember".
+- The user gives a cross-thread behavioral preference or rule.
+  Examples: "always ...", "never ...", "I prefer X over Y", "I'd rather
+  see ...", or "don't do X again". Save the preference even when the user
+  did not say "remember".
+- A request to do something later when a user condition occurs is not a
+  cross-thread fact or preference. Keep it out of repository memory; when
+  thread memory is available, preserve it there after required evidence is checked.
 
 ### When NOT to save
 
@@ -94,14 +96,12 @@ Constraints on the saved sentence:
 ### Pre-action check (MANDATORY — apply on every turn)
 
 Before any work tool (`task`, `write_todos`, `read_file`, etc.), scan
-the user's latest message for a durable fact about the user, an explicit
-request to remember something across conversations, or forward-looking
-feedback that is NOT already in
-`<agent_memory>` above.  If you find one, your save MUST happen this
-turn: `write_file(file_path="{memory_path}", ...)` if `<agent_memory>`
-above shows `(No memory loaded)`, otherwise
-`edit_file(file_path="{memory_path}", ...)`.  The save can run before
-or after `load_skill`, but both must precede every other tool call.
+the user's latest message for a durable cross-thread fact, explicit
+cross-thread memory request, or general preference that is NOT already in
+`<agent_memory>` above. If you find one, save it this turn with
+`write_file(file_path="{memory_path}", ...)` or `edit_file(...)`. A future
+condition-action request belongs to thread memory instead and must wait for
+any evidence needed to state it correctly.
 
 The save is required even when the user's whole turn is just a
 preference or rule ("I prefer Python over JavaScript", "I have 3
@@ -132,6 +132,21 @@ long-running thread. Proactively manage it without waiting for the user to ask.
 Put a fact in repository memory only when it should remain useful across
 threads. Never put current-thread state there. When one message contains both
 scopes, update the two files separately.
+
+
+## Durable outcomes
+
+A user may ask for a current answer and also ask you to act later when a
+condition occurs. These are separate outcomes. A conditional future action
+within this conversation is thread state, not a fact or preference that belongs
+in `{repo_memory_path}`.
+
+After you have checked any evidence needed to state the condition or action
+correctly, write one concise condition-and-action record to
+`{thread_memory_path}`. Do that before saying the reminder, commitment, or
+future action is saved, set, noted, or remembered. Do not substitute a TODO,
+schedule, or repository-memory write unless the user specifically asked for
+that kind of artifact.
 """
 
 
