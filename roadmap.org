@@ -232,7 +232,11 @@ throughput, and stable usable context, not KL divergence alone.
 that a 24GB 3090 can hold it. Its attention cache is approximately 256KB/token: 2GB at 8k,
 4GB at 16k, and 8GB at 32k. Reserve cache, projector, CUDA/runtime headroom, and the active
 voice workload before setting =-c=. Target a measured 16k first, then grow only while
-long-thread, tool-result eviction, and latency remain acceptable. Qwen3.8 can remove the
+long-thread, tool-result eviction, and latency remain acceptable. To buy context without
+needlessly shrinking weights, evaluate symmetric =--cache-type-k q8_0 --cache-type-v q8_0=
+with Flash Attention after the full-precision-cache baseline. Q8 KV commonly uses about half
+the cache memory; it must earn its place on our long-thread and tool-use panel. Treat 4-bit KV
+as a separate, more aggressive experiment, not the default for an agent. Qwen3.8 can remove the
 separate text-versus-vision model swap because it is natively multimodal, but its projector
 and the voice model still make simultaneous long-context vision and calling untenable on the
 single card. The viable choices are admission-controlled voice/vision model swapping, a
@@ -249,7 +253,8 @@ and every selected eval. Eval-measured, not intuition.
 
 Sources: [[https://huggingface.co/Qwen/Qwen3.8-27B-FP8][Qwen model card]],
 [[https://huggingface.co/unsloth/Qwen3.8-27B-GGUF][Unsloth Dynamic 3 GGUFs]], and
-[[https://huggingface.co/AtomicChat/Qwen3.8-27B-GGUF][AtomicChat GGUF measurements]].
+[[https://huggingface.co/AtomicChat/Qwen3.8-27B-GGUF][AtomicChat GGUF measurements]];
+[[https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md][llama.cpp server options]].
 * Research improvements
 Research is at the heart of what this agent is capable of. It's strictly guided not to use internal knowledge
 ** TODO Create some evals on how you want it to act
