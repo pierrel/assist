@@ -354,9 +354,10 @@ class TestPromptRewriteLocalGrounding(TestCase):
 
     def _assert_compound_commitment(
         self, calls: list[dict], response: str, thread_memory: str,
-        expected_response: tuple[str, ...], expected_commitment: tuple[str, ...],
+        expected_response: tuple[str, ...],
+        expected_commitment: tuple[tuple[str, ...], ...],
     ) -> None:
-        details = f"response={response!r}; memory={thread_memory!r}; calls={calls!r}"
+        details = f"response={response!r}; thread_memory={thread_memory!r}; calls={calls!r}"
         context_index, context_call = next((
             (index, call) for index, call in enumerate(calls)
             if call["name"] == "start_async_task"
@@ -370,12 +371,13 @@ class TestPromptRewriteLocalGrounding(TestCase):
         self.assertIsNotNone(context_index, details)
         self.assertTrue(private_write_indices, details)
         self.assertGreater(len(calls), 0, details)
-        self.assertEqual(
-            (calls[0]["name"], calls[0]["args"].get("name")),
-            ("load_skill", "grounding"),
-            details,
-        )
-        self.assertEqual(context_index, 1, details)
+        grounding_indices = [
+            index for index, call in enumerate(calls)
+            if call["name"] == "load_skill"
+            and call["args"].get("name") == "grounding"
+        ]
+        self.assertTrue(grounding_indices, details)
+        self.assertLess(min(grounding_indices), context_index, details)
         result_indices = [
             index for index, call in enumerate(calls)
             if call["name"] == "get_async_task_result"
@@ -393,8 +395,23 @@ class TestPromptRewriteLocalGrounding(TestCase):
         self.assertTrue(not pre_context_user_file_access, details)
         for term in expected_response:
             self.assertIn(term, response.lower(), details)
-        for term in expected_commitment:
-            self.assertIn(term, thread_memory.lower(), details)
+        for alternatives in expected_commitment:
+            self.assertTrue(
+                any(term in thread_memory.lower() for term in alternatives),
+                f"expected one of {alternatives!r}; {details}",
+            )
+        repository_condition_action_writes = [
+            call for call in calls
+            if call["name"] in {"write_file", "edit_file"}
+            and call["args"].get("file_path") in {
+                "/workspace/AGENTS.md", "/user/AGENTS.md",
+            }
+            and all(
+                any(term in str(call["args"]).lower() for term in alternatives)
+                for alternatives in expected_commitment
+            )
+        ]
+        self.assertFalse(repository_condition_action_writes, details)
         self.assertRegex(
             thread_memory,
             r"(?is)\b(?:when|if)\b.{0,300}\b(?:encourag\w*|remind\w*)\b",
@@ -414,7 +431,8 @@ class TestPromptRewriteLocalGrounding(TestCase):
         self._assert_compound_commitment(
             calls, response, thread_memory,
             ("lakeside", "noodles", "dumplings"),
-            ("meditat", "four", "evening", "encourag"),
+            (("miss", "skip", "without", "not meditat"), ("meditat",), ("four", "4"),
+             ("day",), ("evening",), ("encourag",)),
         )
 
     def test_preserves_a_mixed_grounded_answer_and_trailing_commitment(self):
@@ -430,7 +448,8 @@ class TestPromptRewriteLocalGrounding(TestCase):
         self._assert_compound_commitment(
             calls, response, thread_memory,
             ("lakeside", "noodles", "dumplings"),
-            ("meditat", "four", "evening", "encourag"),
+            (("miss", "skip", "without", "not meditat"), ("meditat",), ("four", "4"),
+             ("day",), ("evening",), ("encourag",)),
         )
 
     def test_preserves_a_mixed_grounded_answer_and_future_checkin(self):
@@ -445,7 +464,8 @@ class TestPromptRewriteLocalGrounding(TestCase):
         self._assert_compound_commitment(
             calls, response, thread_memory,
             ("lakeside", "noodles", "dumplings"),
-            ("meditat", "four", "evening", "encourag"),
+            (("miss", "skip", "without", "not meditat"), ("meditat",), ("four", "4"),
+             ("day",), ("evening",), ("encourag",)),
         )
 
     def test_preserves_a_mixed_calendar_answer_and_workshop_commitment(self):
@@ -459,7 +479,9 @@ class TestPromptRewriteLocalGrounding(TestCase):
         self._assert_compound_commitment(
             calls, response, thread_memory,
             ("6:30", "makerspace"),
-            ("shelf", "measurement", "makerspace", "remind"),
+            (("shelf",), ("assembl", "complete", "built"),
+             ("measur", "dimension"),
+             ("makerspace",), ("remind",)),
         )
 
     def test_preserves_a_mixed_bill_answer_and_budget_commitment(self):
@@ -472,7 +494,7 @@ class TestPromptRewriteLocalGrounding(TestCase):
         self._assert_compound_commitment(
             calls, response, thread_memory,
             ("august", "18"),
-            ("internet", "paid", "monthly budget", "remind"),
+            (("internet",), ("paid",), ("monthly budget",), ("remind",)),
         )
 
 

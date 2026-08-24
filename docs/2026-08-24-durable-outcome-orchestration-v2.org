@@ -2,10 +2,17 @@
 
 * Status
 
-Design only. The isolated durable-outcome treatment replicated in the lab, but
-the first ordinary-web integration probe was 0/3 on a frozen full-row oracle.
-This document defines the next causal question. It does not authorize a release,
-deployment, or a new model run until the lab registration and harness are sealed.
+Historical experiment record, not current implementation guidance. The todo
+rider below was tested in the lab's incomplete, invalidated v3 screen and
+supplies no support for the rider; its source was removed. The later async-result
+rider also did not improve valid durable capture. The confirmed memory-only
+guidance is the candidate; its sealed confirmation and the preserved rejected
+screens live in =llm-agentic-experiments= under
+=results/2026-08-24-durable-promise-outcome-v2/= and
+=results/2026-08-24-durable-promise-orchestration-v4/=.
+
+This document preserves the original causal question and boundary. It does not
+authorize a release, deployment, or a new model run.
 
 * Problem
 
@@ -16,7 +23,7 @@ async context task, then lose the second during result handling and synthesis.
 The preceding memory-only treatment made private persistence much more likely in
 an isolated loop but did not establish this richer route.
 
-* Hypothesis
+* Original hypothesis
 
 The existing todo list is a temporary execution checklist. A general rider that
 asks the model to enumerate independent user-visible outcomes before beginning
@@ -24,7 +31,7 @@ tool or asynchronous work will make it reconcile the complete turn before its
 reply. It should improve mixed-turn completion without making a todo substitute
 for durable thread memory.
 
-* Treatment boundary
+* Original treatment boundary
 
 Control is the exact current C1 memory guidance from the sealed
 =durable-promise-outcome-v2= study. It already distinguishes cross-thread
@@ -46,7 +53,7 @@ This is intentionally not specific to grounding, meditation, a skill, or a
 memory path. Simple, direct requests retain the framework's default advice not
 to create todos.
 
-* Implementation
+* Original implementation (removed)
 
 Add one Assist middleware whose only behavior is to append the treatment text to
 the system message. It owns no tools, state, routing, or lifecycle. Install it
