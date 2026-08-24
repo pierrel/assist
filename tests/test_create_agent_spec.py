@@ -181,23 +181,6 @@ class TestSpecWiring(_CreateAgentHarness):
         assert legacy_skills.system_prompt_template == composed_skills.system_prompt_template
         assert legacy_memory.sources == web_main_memory.sources
 
-    def test_async_outcome_reconciliation_is_web_main_only_and_opt_in(self):
-        """The prompt experiment changes no web-main tool or middleware stack."""
-        with patch.dict(os.environ, {"ASSIST_ASYNC_OUTCOME_RECONCILIATION": "0"}):
-            control = self._build(spec=AgentSpec(
-                async_subagent_tools=_async_task_tools, web_main=True))
-        with patch.dict(os.environ, {"ASSIST_ASYNC_OUTCOME_RECONCILIATION": "1"}):
-            treatment = self._build(spec=AgentSpec(
-                async_subagent_tools=_async_task_tools, web_main=True))
-            non_web = self._build(spec=AgentSpec(async_subagent_tools=_async_task_tools))
-
-        assert "After checking a terminal task result" not in control["system_prompt"]
-        assert "After checking a terminal task result" in treatment["system_prompt"]
-        assert "After checking a terminal task result" not in non_web["system_prompt"]
-        assert treatment["tools"] == control["tools"]
-        assert [type(item) for item in treatment["middleware"]] == [
-            type(item) for item in control["middleware"]]
-
     def test_web_main_requires_the_main_lifecycle_profile(self):
         with pytest.raises(ValueError, match="main role with async lifecycle tools"):
             AgentSpec(web_main=True)

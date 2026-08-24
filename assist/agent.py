@@ -555,10 +555,7 @@ def create_agent(model: BaseChatModel,
                        "async" if spec.async_subagent_tools else "disabled")
     if spec.web_main:
         static_prompt = render_deep_web_main_prompt(
-            guidance_skills=spec.main_guidance_skills,
-            async_outcome_reconciliation=bool(
-                env_int("ASSIST_ASYNC_OUTCOME_RECONCILIATION", 0)),
-        ).text
+            guidance_skills=spec.main_guidance_skills).text
     else:
         static_prompt = base_prompt_for(
             "deepagents/general_instructions.md.j2",
