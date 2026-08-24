@@ -378,7 +378,8 @@ class TestAgentWorkspaceGuidance(TestCase):
                 "should start", "can help",
             ))
         )
-        unsupported_autonomy = any(term in first_reply.lower() for term in (
+        visible_replies = f"{first_reply}\n{reply}".lower()
+        unsupported_autonomy = any(term in visible_replies for term in (
             "i'll monitor", "i will monitor", "i'll notice", "i will notice",
             "automatically remind", "proactively remind", "on my own",
         ))
