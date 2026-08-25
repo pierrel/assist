@@ -1214,6 +1214,31 @@ Freeze specialist prompts, tool behavior, search/provenance guards, report store
 budgets, and topology.  The goal is to delete redundant caller guidance, not to
 add a new research mechanism.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-4][P4 hypothesis and gate]].
 
+**** TODO P4a: Test delegate-oriented orchestration before changing its policy
+The current main profile normally performs one bounded multi-step outcome
+itself.  Test the opposite policy in small, causal stages rather than changing
+the prompt wholesale: a main-only =delegate(task)= facade over the existing
+durable =delegate-agent= launch path, a compact main orchestration section, and
+one role-projected shared research skill source.  The main writes a complete
+brief and owns lifecycle/dependencies/final synthesis; the delegate receives
+the concrete loaded procedure, performs the work, and returns verified evidence.
+
+Keep direct context/research/critique, trivial deterministic actions, and the
+bounded repeated-work workflow as explicit counterexamples.  The facade stage
+mechanically moves each current main whole-task caller to =delegate= without
+changing its detailed procedure or routing policy; only then does generic async
+launch stop exposing =delegate-agent=.  Its leaf-specialist and management
+contracts remain unchanged.  Evaluate matched C0/C1/C2/C3 panels: baseline,
+facade/interface cutover, shared-source capability, then natural bounded-outcome
+routing.  Use distinct natural artifact/truthfulness oracles and labelled
+implementation traces, preserve lifecycle/security regressions, and require no
+regression plus the usual staged N=3/5/10 confidence process.  Private =/agent=
+access is a later M1 authority experiment, not a prerequisite or a hidden part
+of the prompt candidate.
+
+Full reviewed design, inventory, deterministic gates, and proposed new evals:
+[[file:docs/2026-08-24-delegate-orchestration-experiment.org][delegate-oriented orchestration experiment]].
+
 *** TODO P5: Align research specialist role contracts
 This is an umbrella of prompt-source-sized experiments with routing, tools,
 storage, and topology frozen. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-5][the P5 boundary]].
