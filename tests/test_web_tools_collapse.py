@@ -26,7 +26,7 @@ def threads_root(tmp_path, monkeypatch):
 class _Chat:
     def __init__(self, msgs, web_msgs=None):
         self._msgs = msgs
-        self._web_msgs = web_msgs or msgs
+        self._web_msgs = msgs if web_msgs is None else web_msgs
 
     def get_messages(self):
         return self._msgs
@@ -72,6 +72,14 @@ def test_human_and_ai_messages_untouched(threads_root):
     assert '<div class="msg user">' in html and '<div class="msg assistant">' in html
     assert '<details class="msg user"' not in html
     assert '<details class="msg assistant"' not in html
+
+
+def test_empty_web_projection_does_not_fall_back_to_ordinary_messages(threads_root):
+    html = _render(threads_root, [
+        {"role": "assistant", "content": "ordinary transcript only"},
+    ], web_msgs=[])
+
+    assert "ordinary transcript only" not in html
 
 
 def test_tool_call_prose_stays_visible_without_expanding_activity(threads_root):
