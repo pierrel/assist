@@ -244,7 +244,7 @@ class TestPromptRewriteFitnessPlan(TestCase):
 
 
 class TestPromptRewriteLocalGrounding(TestCase):
-    """Compare a local factual answer in the ordinary web-main shape."""
+    """Compare grounded local answers and compound thread commitments in web main."""
 
     @classmethod
     def setUpClass(cls):
@@ -254,11 +254,24 @@ class TestPromptRewriteLocalGrounding(TestCase):
         self.workspace = tempfile.mkdtemp(prefix="local_grounding_eval_")
         self.agent_dir = tempfile.mkdtemp(prefix="prompt_rewrite_grounding_agent_")
         create_filesystem(self.workspace, {
-            "README.org": "Personal details are in profile.org.",
+            "README.org": (
+                "Personal details are in profile.org. Current obligations are in "
+                "calendar.org and budget.org."
+            ),
             "profile.org": dedent("""\
                 * Me
                 Home: Lakeside neighborhood, Centerville
                 Food: noodles and dumplings
+                """),
+            "calendar.org": dedent("""\
+                * Tuesday
+                ** Makerspace orientation
+                Time: 6:30 PM
+                """),
+            "budget.org": dedent("""\
+                * August obligations
+                ** Internet bill
+                Due: August 18
                 """),
         })
         self.sandbox = SandboxManager.get_sandbox_backend(
@@ -306,6 +319,183 @@ class TestPromptRewriteLocalGrounding(TestCase):
                          "The answer must use the saved neighborhood")
         self.assertRegex(response, r"(?i)noodles?.*dumplings?|dumplings?.*noodles?",
                          "The answer must use the saved food preferences")
+
+    def _compound_commitment(self, prompt: str, context_result: str) -> tuple:
+        """Run one natural local-grounding turn that also establishes a commitment."""
+        with patch("assist.tools.requests.get",
+                   side_effect=AssertionError("compound-memory eval must not fetch URLs")) as get, \
+             patch("assist.tools.requests.post",
+                   side_effect=AssertionError("compound-memory eval must not post URLs")) as post, \
+             patch.dict(os.environ,
+                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1"},
+                        clear=False), \
+             stub_research_subagent():
+            agent = AgentHarness(create_agent(
+                self.model,
+                self.workspace,
+                agent_dir=self.agent_dir,
+                sandbox_backend=self.sandbox,
+                spec=prompt_rewrite_web_main_spec(),
+            ))
+            initial_response = agent.message(prompt)
+            context = next((
+                call for call in agent_tool_calls(agent, "start_async_task")
+                if call["args"].get("subagent_type") == "context-agent"), None)
+            if context is not None:
+                _TASK_RESULTS[_task_id_for_call(context)] = context_result
+            completion_response = complete_web_main_tasks(agent)
+        get.assert_not_called()
+        post.assert_not_called()
+
+        response = (completion_response if context is not None else initial_response)
+        memory_path = os.path.join(self.agent_dir, "memory.md")
+        thread_memory = read_file(memory_path) if os.path.exists(memory_path) else ""
+        return agent_tool_calls(agent), response, thread_memory
+
+    def _assert_compound_commitment(
+        self, calls: list[dict], response: str, thread_memory: str,
+        expected_response: tuple[str, ...],
+        expected_commitment: tuple[tuple[str, ...], ...],
+    ) -> None:
+        details = f"response={response!r}; thread_memory={thread_memory!r}; calls={calls!r}"
+        context_index, context_call = next((
+            (index, call) for index, call in enumerate(calls)
+            if call["name"] == "start_async_task"
+            and call["args"].get("subagent_type") == "context-agent"
+        ), (None, None))
+        private_write_indices = [
+            index for index, call in enumerate(calls)
+            if call["name"] in {"write_file", "edit_file"}
+            and str(call["args"].get("file_path", "")).startswith("/agent/")
+        ]
+        self.assertIsNotNone(context_index, details)
+        self.assertTrue(private_write_indices, details)
+        self.assertGreater(len(calls), 0, details)
+        grounding_indices = [
+            index for index, call in enumerate(calls)
+            if call["name"] == "load_skill"
+            and call["args"].get("name") == "grounding"
+        ]
+        self.assertTrue(grounding_indices, details)
+        self.assertLess(min(grounding_indices), context_index, details)
+        result_indices = [
+            index for index, call in enumerate(calls)
+            if call["name"] == "get_async_task_result"
+            and call["args"].get("task_id") == _task_id_for_call(context_call)
+        ]
+        self.assertTrue(result_indices, details)
+        pre_context_user_file_access = [
+            index for index, call in enumerate(calls)
+            if index < context_index
+            and (call["name"] == "execute"
+                 or call["name"] in {"read_file", "edit_file", "write_file"}
+                 and str(call["args"].get("file_path", "")).startswith(
+                     ("/workspace/", "/user/")))
+        ]
+        self.assertTrue(not pre_context_user_file_access, details)
+        for term in expected_response:
+            self.assertIn(term, response.lower(), details)
+        for alternatives in expected_commitment:
+            self.assertTrue(
+                any(term in thread_memory.lower() for term in alternatives),
+                f"expected one of {alternatives!r}; {details}",
+            )
+        repository_condition_action_writes = [
+            call for call in calls
+            if call["name"] in {"write_file", "edit_file"}
+            and call["args"].get("file_path") in {
+                "/workspace/AGENTS.md", "/user/AGENTS.md",
+            }
+            and all(
+                any(term in str(call["args"]).lower() for term in alternatives)
+                for alternatives in expected_commitment
+            )
+        ]
+        self.assertFalse(repository_condition_action_writes, details)
+        self.assertRegex(
+            thread_memory,
+            r"(?is)\b(?:when|if)\b.{0,300}\b(?:encourag\w*|remind\w*)\b",
+            details,
+        )
+
+    def test_preserves_a_mixed_grounded_answer_and_leading_commitment(self):
+        """Ground dinner preferences while retaining a meditation check-in rule."""
+        calls, response, thread_memory = self._compound_commitment(
+            "When I tell you I've missed meditation for four days, please "
+            "encourage me to start the evening check-in again. I'm choosing "
+            "dinner at home tonight. What neighborhood am I in, and what food "
+            "do I usually like?",
+            "Found /profile.org. Home: Lakeside neighborhood, Centerville. "
+            "Food: noodles and dumplings.",
+        )
+        self._assert_compound_commitment(
+            calls, response, thread_memory,
+            ("lakeside", "noodles", "dumplings"),
+            (("miss", "skip", "without", "not meditat"), ("meditat",), ("four", "4"),
+             ("day",), ("evening",), ("encourag",)),
+        )
+
+    def test_preserves_a_mixed_grounded_answer_and_trailing_commitment(self):
+        """Keep a later conditional response while answering first-mentioned work."""
+        calls, response, thread_memory = self._compound_commitment(
+            "I'm choosing dinner at home tonight. What neighborhood am I in, "
+            "and what food do I usually like? Also, when I tell you I've "
+            "missed meditation for four days, please encourage me to restart "
+            "the evening check-in.",
+            "Found /profile.org. Home: Lakeside neighborhood, Centerville. "
+            "Food: noodles and dumplings.",
+        )
+        self._assert_compound_commitment(
+            calls, response, thread_memory,
+            ("lakeside", "noodles", "dumplings"),
+            (("miss", "skip", "without", "not meditat"), ("meditat",), ("four", "4"),
+             ("day",), ("evening",), ("encourag",)),
+        )
+
+    def test_preserves_a_mixed_grounded_answer_and_future_checkin(self):
+        """Keep an independently phrased future check-in while grounding dinner."""
+        calls, response, thread_memory = self._compound_commitment(
+            "For a future check-in, if I say I have skipped meditation for "
+            "four days, encourage me to start the evening check-in again. "
+            "What neighborhood am I in, and what food do I usually like?",
+            "Found /profile.org. Home: Lakeside neighborhood, Centerville. "
+            "Food: noodles and dumplings.",
+        )
+        self._assert_compound_commitment(
+            calls, response, thread_memory,
+            ("lakeside", "noodles", "dumplings"),
+            (("miss", "skip", "without", "not meditat"), ("meditat",), ("four", "4"),
+             ("day",), ("evening",), ("encourag",)),
+        )
+
+    def test_preserves_a_mixed_calendar_answer_and_workshop_commitment(self):
+        """Ground a calendar fact while retaining a physical-work handoff rule."""
+        calls, response, thread_memory = self._compound_commitment(
+            "When I tell you the shelf is assembled, remind me to bring its "
+            "measurements to the makerspace. What time is my makerspace "
+            "orientation on Tuesday?",
+            "Found /calendar.org. Makerspace orientation on Tuesday is at 6:30 PM.",
+        )
+        self._assert_compound_commitment(
+            calls, response, thread_memory,
+            ("6:30", "makerspace"),
+            (("shelf",), ("assembl", "complete", "built"),
+             ("measur", "dimension"),
+             ("makerspace",), ("remind",)),
+        )
+
+    def test_preserves_a_mixed_bill_answer_and_budget_commitment(self):
+        """Ground a bill date while retaining a later bookkeeping response."""
+        calls, response, thread_memory = self._compound_commitment(
+            "When I tell you I've paid the internet bill, remind me to update "
+            "my monthly budget. What date is it due?",
+            "Found /budget.org. The internet bill is due August 18.",
+        )
+        self._assert_compound_commitment(
+            calls, response, thread_memory,
+            ("august", "18"),
+            (("internet",), ("paid",), ("monthly budget",), ("remind",)),
+        )
 
 
 class TestPromptRewriteTodoList(TestCase):

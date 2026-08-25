@@ -1,0 +1,98 @@
+#+title: Durable outcome orchestration v2
+
+* Status
+
+Historical experiment record, not current implementation guidance. The todo
+rider below was tested in the lab's incomplete, invalidated v3 screen and
+supplies no support for the rider; its source was removed. The later async-result
+rider also did not improve valid durable capture. The confirmed memory-only
+guidance is the candidate; its sealed confirmation and the preserved rejected
+screens live in =llm-agentic-experiments= under
+=results/2026-08-24-durable-promise-outcome-v2/= and
+=results/2026-08-24-durable-promise-orchestration-v4/=.
+
+This document preserves the original causal question and boundary. It does not
+authorize a release, deployment, or a new model run.
+
+* Problem
+
+One natural user turn can contain independent outcomes: an answer that needs
+grounding now and a conditional action that must survive until later. In the
+ordinary web graph, the model can complete the first outcome through a skill and
+async context task, then lose the second during result handling and synthesis.
+The preceding memory-only treatment made private persistence much more likely in
+an isolated loop but did not establish this richer route.
+
+* Original hypothesis
+
+The existing todo list is a temporary execution checklist. A general rider that
+asks the model to enumerate independent user-visible outcomes before beginning
+tool or asynchronous work will make it reconcile the complete turn before its
+reply. It should improve mixed-turn completion without making a todo substitute
+for durable thread memory.
+
+* Original treatment boundary
+
+Control is the exact current C1 memory guidance from the sealed
+=durable-promise-outcome-v2= study. It already distinguishes cross-thread
+memory from a conditional action saved to =/agent/memory.md=.
+
+Treatment differs only by this text appended beside the framework's normal todo
+guidance:
+
+#+begin_quote
+When one user turn has multiple independently valuable outcomes and you start
+tool, skill, or asynchronous work on one, use a short todo list with one
+outcome per item if that work could cause another to be missed. Mark each item
+complete only when the outcome is actually done, then reconcile the list before
+replying. The todo list tracks this turn; it does not replace any user-requested
+file, schedule, or durable thread-memory record.
+#+end_quote
+
+This is intentionally not specific to grounding, meditation, a skill, or a
+memory path. Simple, direct requests retain the framework's default advice not
+to create todos.
+
+* Original implementation (removed)
+
+Add one Assist middleware whose only behavior is to append the treatment text to
+the system message. It owns no tools, state, routing, or lifecycle. Install it
+only in ordinary web-main composition, after the framework's =TodoListMiddleware=
+has appended its normal prompt. The control omits this middleware. This is the
+minimum mechanical support needed to test prompt wording at the actual todo
+prompt boundary.
+
+* Measurements
+
+The experimental unit is one fresh ordinary-web thread and sandbox. Every row
+records rendered system prompt, provider schemas, fixture identity, model
+settings, tool trace, final reply, and private memory result.
+
+Primary outcome: strict full-row completion:
+
+1. grounding follows the normal lifecycle;
+2. the immediate answer uses the supplied local result;
+3. the condition and action are saved in private thread memory;
+4. the reply does not claim unsupported autonomous monitoring or completion.
+
+Components remain visible: grounding, factual answer, durable outcome capture,
+honesty, todo use, and final todo state. Numeric equivalents such as =4= and
+=four= must be accepted in the semantic persistence component before the next
+study runs; strict text matching alone is not the causal outcome.
+
+* Experimental boundary
+
+The existing meditation/profile, makerspace, and bill rows are development and
+regression rows because they have already informed this work. They cannot be
+called holdouts. A new lab study will seal fresh natural confirmation rows,
+counterbalanced C0/C1 order, a deterministic component oracle, model/graph and
+schema identities, and an analysis plan before model use. Development chooses a
+single literal rider; only the fresh confirmation can support a release
+recommendation.
+
+* Non-goals
+
+- Do not change the TODO tool, its persistent semantics, or task scheduling.
+- Do not make a delegate agent a checklist.
+- Do not add a task-specific prompt rider or a special-case memory mechanism.
+- Do not treat a completed todo as proof that a durable action was saved.

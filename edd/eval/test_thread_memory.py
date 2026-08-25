@@ -314,3 +314,95 @@ class TestAgentWorkspaceGuidance(TestCase):
         logger.info("agent-workspace compaction probe: %s", metrics)
         self.assertIsNotNone(state.get("_summarization_event"), metrics)
         self.assertIn("monday", reply.lower(), metrics)
+
+    def test_preserves_a_user_requested_check_in_commitment_across_compaction(self):
+        """A thread-specific check-in commitment survives a summary boundary."""
+        from deepagents.middleware.summarization import SummarizationMiddleware
+        from langchain_core.messages import HumanMessage
+
+        report_prompt = "I haven't meditated in four days."
+
+        class NeutralSummary(SummarizationMiddleware):
+            """Remove the commitment from compacted history without another LLM call."""
+
+            def _create_summary(self, _messages):
+                return "The user is discussing an ongoing personal routine."
+
+            async def _acreate_summary(self, _messages):
+                return self._create_summary(_messages)
+
+            def _should_summarize(self, messages, _total_tokens):
+                return bool(messages and isinstance(messages[-1], HumanMessage)
+                            and messages[-1].content == report_prompt)
+
+        def compact_after_first_turn(model, backend):
+            return NeutralSummary(model, backend=backend, keep=("messages", 1))
+
+        before_workspace = self._workspace_files()
+
+        def run():
+            with mock.patch("deepagents.graph.create_summarization_middleware",
+                            side_effect=compact_after_first_turn):
+                agent = self._agent()
+            first_reply = self._message(
+                agent,
+                "When I tell you I've missed meditation for four days, please "
+                "encourage me to start the evening check-in again.",
+            )
+            memory_path = os.path.join(self.agent_dir, "memory.md")
+            memory_before_compaction = (
+                read_file(memory_path) if os.path.exists(memory_path) else "")
+            reply = self._message(agent, report_prompt)
+            state = agent.agent.get_state({
+                "configurable": {"thread_id": agent.thread_id},
+            }).values
+            return agent, first_reply, memory_before_compaction, reply, state
+
+        agent, first_reply, memory_before_compaction, reply, state = self._run(run)
+        summary_event = state.get("_summarization_event")
+        summary = "" if summary_event is None else str(
+            summary_event["summary_message"].content).lower()
+        memory = memory_before_compaction.lower()
+        durable_commitment = (
+            "meditat" in memory
+            and any(term in memory for term in ("four", "4"))
+            and "day" in memory
+            and any(term in memory for term in ("evening", "check-in", "check in"))
+            and "encourag" in memory
+            and any(term in memory for term in ("start", "restart", "resume"))
+        )
+        follow_up_honors_commitment = (
+            any(term in reply.lower() for term in ("evening", "check-in", "check in"))
+            and any(term in reply.lower() for term in (
+                "encourag", "restart", "resume", "nudge", "back on track",
+                "should start", "can help",
+            ))
+        )
+        visible_replies = f"{first_reply}\n{reply}".lower()
+        unsupported_autonomy = any(term in visible_replies for term in (
+            "i'll monitor", "i will monitor", "i'll notice", "i will notice",
+            "automatically remind", "proactively remind", "on my own",
+        ))
+        history_path = (summary_event or {}).get("file_path")
+        history_reads = [
+            call for call in agent_tool_calls(agent)
+            if call.get("name") == "read_file"
+            and (isinstance(path := ((call.get("args") or {}).get("file_path")
+                                    or (call.get("args") or {}).get("path")), str)
+                 and (path == history_path
+                      or path.startswith("/conversation_history/")))
+        ]
+        metrics = (
+            f"summary={summary!r}; memory_before_compaction={memory_before_compaction!r}; "
+            f"first_reply={first_reply!r}; reply={reply!r}; "
+            f"unsupported_autonomy={unsupported_autonomy}; "
+            f"history_reads={history_reads!r}; messages={agent.all_messages()}"
+        )
+        self.assertIsNotNone(summary_event, metrics)
+        self.assertNotIn("meditat", summary, metrics)
+        self.assertNotIn("evening", summary, metrics)
+        self.assertFalse(history_reads, metrics)
+        self.assertFalse(unsupported_autonomy, metrics)
+        self.assertTrue(durable_commitment, metrics)
+        self.assertTrue(follow_up_honors_commitment, metrics)
+        self.assertEqual(before_workspace, self._workspace_files(), metrics)

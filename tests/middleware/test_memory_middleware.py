@@ -100,10 +100,10 @@ class TestMemoryPromptFormatting(TestCase):
         self.assertNotIn("save_memory", SMALL_MODEL_MEMORY_PROMPT)
 
     def test_prompt_keeps_current_work_out_of_repository_memory(self):
-        """Project progress is thread state, not a cross-thread user fact."""
-        self.assertIn("Current project progress", SMALL_MODEL_MEMORY_PROMPT)
+        """Thread-specific outcomes are not cross-thread user facts."""
+        self.assertIn("condition-action", SMALL_MODEL_MEMORY_PROMPT)
         self.assertIn("private thread memory", SMALL_MODEL_MEMORY_PROMPT)
-        self.assertIn("remember something across conversations",
+        self.assertIn("cross-thread behavioral preference",
                       SMALL_MODEL_MEMORY_PROMPT)
 
     def test_repo_and_thread_memory_are_loaded_and_distinguished(self):
