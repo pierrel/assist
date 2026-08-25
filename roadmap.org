@@ -590,6 +590,43 @@ or escape-then-markdown for the tool/assistant text while keeping the render-blo
 pipeline. Eval/verify: a message containing =<img onerror>= must not execute.
 
 * Reliability
+** TODO Preserve substantive assistant content attached to a tool call
+*Observed 2026-08-25, thread =20260825100714-d4070722= ("Doctor appointment
+prep").*  The user asked for inbox topics plus eating/workout summaries.  A
+=context-agent= succeeded and the main agent generated the full doctor summary,
+but it emitted that prose in the same =AIMessage= as a =write_todos= call.  The
+next model step supplied only a short "Good luck..." closer.  The web page
+showed the closer and hid the complete summary in a collapsed tool-activity
+entry.  On a follow-up asking to compile it, the model again generated "Here's
+the full summary" with a tool call, then a short closer, so the incident
+reproduced in the same thread.
+
+The first turn used one context task for all three asks rather than separate
+outcome delegates.  That made the work less efficient but did not lose the
+answer, so it is not part of this reliability fix.
+
+*Root cause.*  =assist/thread.py:_messages_to_dicts= classifies every
+=AIMessage= that has tool calls as a =tools= record and attaches its prose to
+that record.  =manage/web/threads.py= intentionally collapses all =tools=
+records.  Thus a tool call makes a user-visible answer disappear.  This is not
+a missing task result or a prompt failure: the context task and main summary
+both completed.  The mapping predates the incident (June 2026), but ordinary
+=write_todos= use makes the latent UI bug severe.
+
+*Fix.*  Preserve the separate semantic events: render non-empty prose from an
+AI message as a normal assistant bubble and render its tool activity as the
+adjacent collapsed tool row.  Do not depend on prompting the model never to put
+prose beside a tool call.  Add a deterministic web-render regression test with
+a substantive message plus =write_todos= and a later brief final message; the
+substantive answer must remain visible without expanding activity.
+
+*Cross-interface follow-up.*  =Thread.message()= returns only the final
+=AIMessage= content, so CLI and completion observers can lose the earlier
+substantive text too.  Decide whether the shared thread result should carry a
+structured list of user-visible assistant outputs rather than trying to infer a
+single "best" message.  Keep this a deliberate shared-contract design, not a
+web-only heuristic.
+
 ** TODO Deliver a completed context task after an early polling failure
 Thread =20260817084835-4df04000= started a context task to locate an existing
 Org appointment item.  The main agent prematurely polled the task until loop
