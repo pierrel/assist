@@ -361,6 +361,24 @@ class TestMessagesToDicts:
         out = _messages_to_dicts([m])
         assert out[0]["role"] == "tools" and "read_file" in out[0]["content"]
 
+    def test_web_projection_splits_tool_call_content(self):
+        from assist.thread import _messages_to_dicts
+        content = "The full appointment summary."
+        m = self._ai(content=content, tool_calls=[
+            {"name": "write_todos", "args": {"todos": []}, "id": "1"},
+        ])
+
+        ordinary = _messages_to_dicts([m])
+        web = _messages_to_dicts([m], split_tool_call_content=True)
+
+        assert ordinary == [{"role": "tools",
+                             "content": "Calling write_todos with {'todos': []} \n> " + content,
+                             "names": ["write_todos"]}]
+        assert web == [{"role": "tools",
+                       "content": "Calling write_todos with {'todos': []}",
+                       "names": ["write_todos"]},
+                       {"role": "assistant", "content": content}]
+
     def test_tools_dict_carries_structured_names(self):
         # the collapsed-turn summary is built from these names, not re-parsed text
         from assist.thread import _messages_to_dicts, tool_call_label

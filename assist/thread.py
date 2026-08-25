@@ -27,14 +27,16 @@ def render_tool_calls(message: AIMessage) -> str:
     return _render_calls(calls, getattr(message, "content", None))
 
 
-def _messages_to_dicts(raw: list) -> list[dict]:
+def _messages_to_dicts(raw: list, *, split_tool_call_content: bool = False) -> list[dict]:
     """Convert checkpointer messages to the role/content dicts the web UI renders.
 
     Pure (no agent/state access) so it's unit-testable. An AIMessage's tool calls
-    become the ``"tools"`` text line (which also carries the message's own content
-    when it has calls); a message with content and no tool calls is an
-    ``"assistant"`` message (its content may carry a ```render block the web layer
-    turns into a file embed); a HumanMessage is ``"user"``."""
+    become the ``"tools"`` text line. The web-only split projection puts an AI
+    message's non-empty content in a following ``"assistant"`` record; the ordinary
+    projection keeps that content in the tools line for existing non-web consumers.
+    A message with content and no tool calls is an ``"assistant"`` message (its
+    content may carry a ```render block the web layer turns into a file embed); a
+    HumanMessage is ``"user"``."""
     msgs: list[dict] = []
     for m in raw:
         if isinstance(m, HumanMessage):
@@ -43,8 +45,11 @@ def _messages_to_dicts(raw: list) -> list[dict]:
             calls = getattr(m, "tool_calls", None)
             if calls:
                 msgs.append({"role": "tools",
-                             "content": _render_calls(calls, m.content),
+                             "content": _render_calls(
+                                 calls, None if split_tool_call_content else m.content),
                              "names": [tool_call_label(c) for c in calls]})
+                if split_tool_call_content and m.content:
+                    msgs.append({"role": "assistant", "content": m.content})
             elif m.content:
                 msgs.append({"role": "assistant", "content": m.content})
     return msgs
@@ -331,9 +336,16 @@ class Thread:
         return _ContextBoundIterator(ctx, _gen())
 
     def get_messages(self) -> list[dict]:
-        """Return user/assistant messages from checkpointer state as role/content dicts."""
+        """Return the ordinary role/content projection, including tool records."""
         state = self.agent.get_state(self.runconfig)
         return _messages_to_dicts(state.values.get("messages", []))
+
+
+    def get_web_messages(self) -> list[dict]:
+        """Return the web-only message projection with tool-call prose visible."""
+        state = self.agent.get_state(self.runconfig)
+        return _messages_to_dicts(
+            state.values.get("messages", []), split_tool_call_content=True)
 
 
     def get_raw_messages(self) -> List[AnyMessage]:

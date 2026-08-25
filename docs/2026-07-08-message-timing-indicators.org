@@ -1,6 +1,6 @@
 #+TITLE: Message timing indicators + single-word thread-list statuses (web UI)
 #+DATE: <2026-07-08>
-#+STATUS: DESIGN (Phase 1). Smallest change that satisfies the 3 requirements; agent/checkpoint hot path + assist/thread.py deliberately untouched.
+#+STATUS: DESIGN (Phase 1). Smallest change that satisfies the 3 requirements; the agent/checkpoint hot path remains deliberately untouched.
 
 * Requirements
 1. *Elapsed human→AI* on each completed turn — a small badge on the assistant reply (e.g. "14s", "2m 5s").
@@ -13,7 +13,7 @@ Fact: langchain =BaseMessage= has no timestamp; the langgraph checkpoint has a p
 - *LIVE (part 2):* store one =started_at= field in the existing =status.json= when a turn begins. =render_thread= embeds a *server-computed* =baseline_seconds = now - started_at=; a tiny inline JS ticks it up locally via =performance.now()= delta. No polling, no server round-trips, no clock-skew dependency (the page has NO client polling today — threads.py:1105).
 - *COMPLETED (part 1):* a per-thread sidecar =turn_timings.json= (mirrors the existing =merge_conflict.json= trio in state.py:233-289), a flat JSON object keyed by *human-message ordinal* → *seconds* (an int). (Design-review fix: NOT ={started_at, seconds}= — nothing reads a sidecar =started_at=; the badge is a pure duration and =started_at= lives in =status.json= for the live timer only. A copy here is a dead field.) Written off-loop by =_process_message= at its success exits; read on-loop by =render_thread= (one small missing-ok JSON read, exactly like =_get_status= / =_get_conflict=).
   - Rejected =AIMessage.response_metadata= (touches the model/middleware hot path + checkpoint round-trip) and checkpoint-=ts= derivation (fiddly, couples render to langgraph internals).
-  - Keyed by *human-message ordinal*, NOT raw message index: append-only, robust to errored/pre-feature turns, keeps =assist/thread.py= =_messages_to_dicts= UNTOUCHED (render tests stay green). *Fix-by-construction:* the ordinal is the count of ="user"=-role dicts in =chat.get_messages()=, computed by the SAME predicate on both sides — write side via =_human_ordinal(chat.get_messages())=, read side an inlined running count over the same =get_messages()= dicts. One representation + one predicate, so the two can't drift (the earlier draft said "raw HumanMessage list"; as-built both sides count the rendered ="user"= dicts). The render pass builds an =index→seconds= map from =chat.get_messages()= once, then consults it in the render loop. A render test pins badge-on-correct-bubble across a thread with a tool-only turn AND a review submission.
+  - Keyed by *human-message ordinal*, NOT raw message index: append-only and robust to errored/pre-feature turns. *Fix-by-construction:* the ordinal is the count of ="user"=-role dicts, computed by the SAME predicate on both sides — write side via =_human_ordinal(chat.get_messages())= and read side over =chat.get_web_messages()=. The web projection can split assistant/tool records but preserves every user record, so the count cannot drift. The render pass builds an =index→seconds= map from the web projection once, then consults it in the render loop. A render test pins badge-on-correct-bubble across a thread with a tool-only turn AND a review submission.
 - *Single-word statuses (part 3):* Pierre scoped this to the *thread-list page*. Use a list-only single-word mapping at the list call sites (threads.py:188,194); LEAVE the full =STAGE_LABELS= sentences on the in-thread banner (threads.py:523). *Design-review fix (I1):* the earlier "rewrite the shared dict in place" also shortened the in-thread banner — a surface Pierre didn't name, where the sentences carry real "why" info (esp. =paused= / =queued=). The two-line duplication is trivial and does not justify downgrading the banner. (O1 resolved: list-only.)
 
 * Why it's event-loop-safe (load-bearing — single-worker uvicorn)
@@ -37,14 +37,14 @@ Fact: langchain =BaseMessage= has no timestamp; the langgraph checkpoint has a p
 
 ** Part 1 — completed-turn badges
 5. state.py — sidecar trio mirroring the conflict file: =_timings_path=, =_get_timings= (missing/corrupt→={}=, never raises), =_append_timing= (read-modify-write + =_atomic_write=). Only =_get_timings= runs on the loop (bare missing-ok read).
-6. =_process_message= success exits (threads.py:934 awaiting_approval, 937 ready): =ordinal = #HumanMessages in chat.get_raw_messages()= (thread.py:312), =seconds = now - started_at=, =_append_timing(...)=. The pause path returns early (line 955) so exactly one entry per turn across pauses.
+6. =_process_message= success exits (threads.py:934 awaiting_approval, 937 ready): =ordinal = _human_ordinal(chat.get_messages())=, =seconds = now - started_at=, =_append_timing(...)=. The pause path returns early (line 955) so exactly one entry per turn across pauses.
 7. =_format_elapsed(seconds)= → "14s" | "2m 5s" | "1h 3m" (JS side a 3-line mirror).
 8. =render_thread= reverse loop (threads.py:482-518): load =timings= once; forward-pass build =index→elapsed= map by counting ="user"= dicts; attach to the *concluding assistant reply* of each turn; emit a muted =<span>= badge (threads.py:506-508). =dict.get= throughout → no entry → no badge.
 
 ** Tests
 9. Unit: =_format_elapsed= boundaries; =_get_timings= missing/corrupt→={}=.
 10. Render (symptom not proxy): seed =turn_timings.json= for a 3-turn thread, assert the badge is on the CORRECT assistant bubble; busy thread with =started_at= → baseline span + script present; pre-feature thread (no sidecar) → no crash, no badge.
-11. Event-loop: =render_thread= returns promptly with the sidecar present, no lock taken. tests/test_render.py:319-348 stays green UNCHANGED (proof thread.py is untouched).
+11. Event-loop: =render_thread= returns promptly with the sidecar present, no lock taken. The existing =tests/test_render.py= projection coverage stays green.
 
 * Edge cases (chosen behavior)
 - *Paused/resumed turn:* elapsed is WALL-CLOCK from human message to completion, INCLUDING pause + queue-wait (the user-meaningful "time to answer"); the scheduler's =accumulated_active_ms= is internal, not used. Timer keeps ticking through the pause. (O3 — confirm vs active-time.)
@@ -55,7 +55,7 @@ Fact: langchain =BaseMessage= has no timestamp; the langgraph checkpoint has a p
 * Resolved by design-review (as-built decisions)
 - *O1 → list-only* (interfaces/intention I1): single words on the thread-list page only; banner keeps sentences.
 - *Sidecar value → flat =seconds=* (simplicity #1): no dead =started_at= copy.
-- *Ordinal join → one counting predicate (="user"= dicts in =chat.get_messages()=) on both sides* (interfaces C1 / simplicity #2), pinned by a tool-only-+-review-submission render test.
+- *Ordinal join → one counting predicate (="user"= dicts in the ordinary write projection and web read projection)* (interfaces C1 / simplicity #2), pinned by a tool-only-+-review-submission render test.
 - *Event-loop rationale corrected* (liveness #1): safe because the field rides a pre-existing on-loop atomic write (no NEW blocking); heavy sidecar write is off-loop.
 - *C4* — =started_at= is SUBMIT time (includes queue-wait); add a one-line comment so a reader doesn't assume processing-start (or name it =submitted_at=).
 - *C5* — badge attaches to "the last =assistant=-role bubble strictly before the next =user= bubble" (no double-badge; tools-only tail gets none). O2: record on awaiting_approval, render only on plain assistant bubbles.
@@ -72,5 +72,5 @@ Fact: langchain =BaseMessage= has no timestamp; the langgraph checkpoint has a p
 * Critical files
 - manage/web/threads.py (worker + render + banner)
 - manage/web/state.py (STAGE_LABELS + sidecar trio)
-- assist/thread.py (read-only reference: get_raw_messages:312; _messages_to_dicts:30 stays untouched)
+- assist/thread.py (read-only reference: =get_raw_messages=; the web projection preserves the same user-role count)
 - tests/test_render.py (must stay green unchanged; add timing render tests here or tests/test_web_timing.py)

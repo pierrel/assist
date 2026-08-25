@@ -1,0 +1,65 @@
+#+title: Tool-call content visibility
+#+date: <2026-08-25>
+
+* Goal
+
+Keep substantive prose from an =AIMessage= visible in the web conversation
+when that same message also requests a tool.  Tool activity remains a compact,
+collapsed adjacent row.
+
+* Observed failure
+
+The prior web projection from =assist.thread._messages_to_dicts= turned every
+AI message with tool calls into one =tools= record and put the message prose in
+that record's content.  =manage.web.threads.render_thread= deliberately renders
+=tools= records in collapsed =details= elements, so a later brief final message
+could appear as the only visible answer.
+
+* Design
+
+1. Keep the checkpointer's model message and the existing =get_messages()=
+   projection unchanged.  That projection is also input to automatic title
+   generation and capture tooling, neither of which is part of this issue.
+2. Add a web-only projection in =assist/thread.py=.  It reuses
+   =_messages_to_dicts= with an explicit split mode: an AI message with calls
+   becomes a tool-only record followed by an assistant record when it has
+   content.  The page is newest-first, so this ordering shows the assistant
+   prose immediately above its collapsed activity row while preserving the
+   established ordering of later model messages.
+3. Make =manage/web/threads.py= request that web-only projection.  Its normal
+   assistant renderer already creates a visible bubble, including render-block
+   handling, and its =tools= renderer already provides the required collapsed
+   adjacent activity.
+4. Keep =render_tool_calls= and its CLI-facing formatting unchanged.  The web
+   projection calls the existing formatter without message prose; CLI streaming
+   and =Thread.message()= are separate contracts.
+
+* Scope and non-goals
+
+This is a deterministic web-history rendering fix.  It neither changes the
+ordinary transcript used by thread titles or capture tooling, model guidance,
+tools, queueing, persistence, async task lifecycle, or the final response
+returned by =Thread.message()=.  A structured collection of user-visible
+outputs for CLI and completion observers remains the roadmap's separate
+shared-contract design.
+
+* User flow and verification
+
+For an answer that includes substantive prose plus =write_todos= and is then
+followed by a brief final message, the conversation shows, newest first: the
+brief final message, the substantive assistant bubble, and the collapsed
+=write_todos= activity row.  The deterministic regression builds those actual
+=AIMessage= objects, passes their web projection to =render_thread=, and
+asserts the rendered HTML contains the full prose in a normal assistant bubble
+without opening the activity row.  Projection tests pin both the new two-record
+web shape and the unchanged ordinary transcript shape.
+
+* Risk review
+
+The only changed boundaries are pure in-memory conversion and the web renderer's
+choice of projection.  A tool-only message remains one collapsed record; an
+assistant-only message remains one assistant record.  The shared ordinary
+transcript remains unchanged, so this does not add an untrusted-output path to
+the title model or capture agent.  No request handling, I/O, authentication,
+untrusted-input sink, or event-loop work changes.  The existing markdown-render
+security issue is outside this fix and is unchanged.
