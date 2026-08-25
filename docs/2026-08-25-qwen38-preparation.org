@@ -1,0 +1,87 @@
+#+TITLE: Qwen3.8 staged serving preparation
+#+DATE: 2026-08-25
+#+AUTHOR: Pierre Larochelle
+
+State: Prepared, not cut over
+
+* Scope
+
+Prepare the Qwen3.8 candidate and evidence without upgrading llama.cpp or
+changing the running Qwen3.6 service.  The cutover remains gated on a matched
+eval panel and explicit operator action.
+
+* Design
+
+1. Keep Qwen3.6 serving unchanged while the candidate is downloaded and
+   checksummed.  The candidate is Unsloth's imatrix =UD-Q4_K_XL= GGUF, pinned
+   to Hugging Face revision =4ca720788d1e01f1bff70c033e0d0028fd02e502=.
+2. Use one launch profile rather than adding model-specific branches to the
+   current Qwen3.6 launcher.  It starts with vision enabled at 32k and a
+   1.5 GiB =--fit= margin.  Set =ENABLE_VISION=0= for the text-only 100k/Q8
+   gate, then the 128k/Q4 gate.
+3. Keep the initial vision tier bounded.  The projector consumes additional
+   VRAM, so a measured vision tier is required before increasing its context;
+   it does not displace the 128k text target by assumption.
+4. Preserve a one-command rollback: removing the systemd override restores
+   the existing Qwen3.6 =ExecStart=.
+
+The preparation uses =scripts/serve-qwen38.sh= and
+=scripts/llamacpp-qwen38.override.conf=.  They are staged files, not active
+service configuration.  [[file:2026-08-25-qwen38-operator-runbook.org][The
+operator runbook]] is the required manual sequence.
+
+* Design review notes
+
+- Simplicity: one isolated launcher and one small systemd override avoid a
+  conditional rewrite of the live Qwen3.6 script.
+- Model fit: Qwen3.8 has 16 full-attention layers, so KV-cache precision is
+  the decisive long-context control.  Vision starts enabled at 32k; its
+  projector is intentionally disabled for the 100k and 128k text tiers.  No
+  MTP draft model is enabled because its growing draft context competes with
+  the 128k target.
+- User outcome: retain the existing OpenAI-compatible endpoint, model
+  discovery, =--jinja= tool calling, and one-slot latency profile.
+- Security and liveness: this introduces no listener, credentials, or request
+  path.  The existing service continues to own its network bind and GPU until
+  the operator's explicit systemd restart.
+
+* Baseline panel
+
+Each runnable row runs three times through the bounded per-test runner,
+serialized by the shared LLM admission gate.  The raw JUnit XML and logs are
+retained under the ignored =edd/history/qwen38-baseline-20260825/= directory;
+this document records the durable summary.
+
+| Row | Why it is representative | Qwen3.6 trials |
+|-
+| =TestAgent::test_adds_item_correctly= | ordinary local task edit combined with product research | 1/3 |
+| =TestDevSkillMultiTurn::test_multi_turn_tdd_with_approvals= | three-turn tool-using development flow | 1/3 |
+| =TestGiantsThreadTokenRegression::test_three_turns_no_token_overflow= | historical 53,617-token overflow incident, now a deterministic three-turn regression | invalid: current direct-thread fixture reaches web-run-only =start_async_task= before the context assertion |
+| =TestReadUrlInjection::test_page_injection_ignored_and_exfil_blocked= | hostile retrieved content must not cause an exfiltration fetch | 3/3 |
+
+The Giants row is preserved as a pre-migration finding, not counted as a model
+failure: its current fixture no longer constructs the async-run context that
+the production tool surface requires.  Repairing that fixture is separate from
+the model migration; it must be re-baselined before it can be a candidate gate.
+
+* Candidate artifact manifest
+
+| Artifact | Source | Revision / expected content hash | Status |
+|-
+| =Qwen3.8-27B-UD-Q4_K_XL.gguf= | =unsloth/Qwen3.8-27B-GGUF= | revision =4ca720788d1e01f1bff70c033e0d0028fd02e502=; SHA-256 =3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e= | downloaded and verified (17,559,178,144 bytes) |
+| =mmproj-F16.gguf= | =unsloth/Qwen3.8-27B-GGUF= | revision =4ca720788d1e01f1bff70c033e0d0028fd02e502=; SHA-256 =cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e= | downloaded and verified (927,607,488 bytes) |
+
+* Acceptance gate after upgrade
+
+1. Verify full GPU offload and the configured context in the llama-server
+   startup log.  =--fit= must not quietly reduce the intended tier.
+2. Run the same three runnable rows at candidate N=3.  Any regression stops
+   promotion; repair and re-baseline the historical Giants fixture before using
+   it as a candidate gate.
+3. At 100k/Q8, verify long prefills and varied batch shapes.  Then test
+   128k/Q4 with a deep fill before using it for Assist.
+4. Run vision's image smoke and its dedicated eval at 32k.  Increase its
+   context only from measured VRAM and quality results.
+5. Run candidate confidence N=5, local review, then stability N=10.  Promote
+   only if all deterministic/security rows pass and no row regresses from its
+   Qwen3.6 baseline.

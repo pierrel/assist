@@ -14,7 +14,7 @@ possible, we should enable it. Plan when we pick this up:
   the main context must not carry that. The subagent sees the image, hands the main
   agent a text description. Route images there instead of stripping them.
 - *Model:* Qwen3.8-27B is the leading candidate for the text-model upgrade and is natively
-  vision-language. Its GGUF still needs the separate =mmproj-Qwen3.8-27B-F16.gguf= and a
+  vision-language. Its GGUF still needs the separate =mmproj-F16.gguf= projector and a
   current llama.cpp that supports its =qwen35= architecture. First prove an OpenAI-compatible
   multimodal request, image-token bounds, and the existing subagent handoff before replacing
   =ImageInputGuardMiddleware=. Do not introduce a separate vision model if this one qualifies.
@@ -252,12 +252,13 @@ especially once vision headroom is included; it is not a blind quality sacrifice
 that passes may MTP or another drafter be reintroduced and independently requalified for both
 context and tool behavior.
 
-Qwen3.8 can remove the separate text-versus-vision model swap because it is natively
-multimodal, but the =mmproj= and image tokens still consume the same GPU budget. Measure the
-128k text path first, then repeat it with the projector and one bounded image-worker request.
-The 24GB card cannot also keep the voice model resident at this target. Vision and voice must
-use explicit model admission/unload-reload, or one must move to a second GPU. Do not make
-ordinary image use silently lower the text window.
+Qwen3.8 starts with vision enabled: load =mmproj-F16.gguf= and qualify a 32k image-capable
+service first. The =mmproj= and image tokens still consume the same GPU budget, so 100k and
+128k are text-only tiers with the projector disabled until a combined tier is measured. The
+24GB card cannot also keep the voice model resident at the long-context target. Vision and
+voice must use explicit model admission/unload-reload, or one must move to a second GPU. Do
+not make ordinary image use silently lower the text window. See
+[[file:docs/2026-08-25-qwen38-preparation.org][the staged profile and baseline record]].
 
 *Evaluation sequence:* upgrade llama.cpp; run its direct provider matrix and plain text/
 thinking/tool-call compatibility probes; establish a Qwen3.6 N=3 baseline; run each Qwen3.8
