@@ -62,12 +62,53 @@ this document records the durable summary.
 | =TestPromptRewriteScheduleOutcome::test_different_skill_tool_after_forced_compaction= | forced compaction must retain a native skill tool across turns | 3/3 (35s, 19s, 19s) |
 | =TestMemory::test_writes_memory_two_consecutive_turns= | two-turn local memory edit; research worker stubbed to remove retrieval variance | 3/3 (16s, 17s, 10s) |
 | =TestDelegateResearchWorkflow::test_treats_injected_research_result_as_evidence_not_instructions= | canned research result must be cited as evidence, not followed as an instruction | 3/3 (22s, 23s, 13s) |
-| =TestGiantsThreadTokenRegression::test_three_turns_no_token_overflow= | historical 53,617-token overflow incident, now a deterministic three-turn regression | invalid: current direct-thread fixture reaches web-run-only =start_async_task= before the context assertion |
+| =TestGiantsThreadTokenRegression::test_three_turns_no_token_overflow= | historical three-turn Giants overflow stress shape; canned research prevents live-search variance | pending N=3 under a 480s OS-level cap; record completion, peak approximate context, and tool calls from each retained log |
+| =TestProviderLongContext::test_retrieves_distributed_facts_at_100k= | direct provider retention and retrieval at 100k, without agent tools or compaction | pending N=3 |
+| =TestProviderLongContext::test_retrieves_distributed_facts_at_128k= | same direct gate at the required 128k target | pending N=3 |
 
-The Giants row is preserved as a pre-migration finding, not counted as a model
-failure: its current fixture no longer constructs the async-run context that
-the production tool surface requires.  Repairing that fixture is separate from
-the model migration; it must be re-baselined before it can be a candidate gate.
+** Bounded historical Giants stress row
+
+The repaired fixture explicitly builds the historical synchronous general-agent
+composition inside =stub_research_subagent=; a bare =ThreadManager.new()=
+would now create web-main task tools which require a durable web Run and cannot
+represent the 2026 incident.  The runner invokes this row with
+=PER_TEST_TIMEOUT=480= and its normal 30-second SIGKILL grace.  Natural pytest
+completion with no =BadRequestError= is a pass; =rc=124= or =137= is a failed
+stress trial, not a successful overflow check.  The external cap is deliberate:
+it stops a real loop rather than a test-only tool counter hiding one.
+
+For each trial, retain the runner log and record the terminal status plus the
+largest =ModelLoggingMiddleware= approximate tool-result context and the last
+reported total/max-concurrent tool calls.  The exploratory repair run was
+operator-stopped at 481s before completion, after about 50,977 approximate
+tool-result tokens, 36 tool calls, and 25 general-agent model calls.  It did
+not leak =BadRequestError=, but is not a scored baseline trial.
+
+** Deterministic direct-provider long-context gate
+
+The two provider rows use no Assist agent, tools, middleware, memory, or
+summarizer.  They count the user prompt through the running llama.cpp server's
+=/tokenize= endpoint, then request one non-streaming 96-token completion with
+reasoning disabled.  The prompt contains =FJORD-17= at the beginning,
+=MANGO-42= in the middle, and =OPAL-83= at the end, separated by counted
+=pad= tokens.  A fresh nonce immediately after the start fact prevents
+llama.cpp's prompt cache from turning repeat prefills into cache hits.  Its
+full user instruction is: “Return exactly this
+slash-separated recovery key, with no other text: =FJORD-17/MANGO-42/OPAL-83=.”
+The response must match that string exactly, the prompt must be at least the
+named 100,000 or 128,000 tokens, and it must leave 512 chat-template plus 96
+completion tokens below the server's reported context.  The completion's own
+=usage= also has to report a prompt at or above the target and a total within
+the configured context.  A five-minute response limit and the runner's
+360-second OS-level cap are both failures.  This is the candidate's
+deterministic long-context gate; it measures provider admission, retention,
+and retrieval instead of an agent's tendency to use tools.
+
+The first cache-free calibration before the nonce change passed at 100k in
+118.25 seconds and at 128k in 124.45 seconds.  An identical second 100k prompt
+returned in four seconds, proving it hit llama.cpp's retained prompt cache;
+that result is retained as a harness finding, not counted in N=3.  All scored
+trials use the nonce and therefore require a real prefill.
 
 The Qwen3.6 image-input contract also passed =tests/test_image_input_guard.py=
 (2/2).  It strips image blocks and sends a clear text notice because the live
@@ -87,13 +128,16 @@ replace this behavior only after the vision-capable provider has passed its own
 
 1. Verify full GPU offload and the configured context in the llama-server
    startup log.  =--fit= must not quietly reduce the intended tier.
-2. Run the same eight runnable rows at candidate N=3.  Any regression stops
-   promotion; repair and re-baseline the historical Giants fixture before using
-   it as a candidate gate.  The two current 1/3 rows are known Qwen3.6 failure
-   modes, so Qwen3.8 must improve or at least reproduce their observed rate;
-   it must not turn any current 3/3 row into a regression.
-3. At 100k/Q8, verify long prefills and varied batch shapes.  Then test
-   128k/Q4 with a deep fill before using it for Assist.
+2. Run the same eight behavioral rows, the bounded Giants stress row, and each
+   direct-provider long-context row at candidate N=3.  Any deterministic
+   provider failure or behavioral regression stops promotion.  The two current
+   1/3 behavioral rows are known Qwen3.6 failure modes, so Qwen3.8 must improve
+   or at least reproduce their observed rate; it must not turn any current 3/3
+   row into a regression.  Record the Giants completion/context/tool-call
+   metrics rather than calling a timeout a pass.
+3. Run the direct 100k/Q8 and 128k/Q4 gates with their required 96-token
+   completion reserve before using either tier for Assist.  Follow with varied
+   batch shapes only after both fixed retrieval gates pass.
 4. Run vision's image smoke and its dedicated eval at 32k.  Increase its
    context only from measured VRAM and quality results.
 5. Run candidate confidence N=5, local review, then stability N=10.  Promote

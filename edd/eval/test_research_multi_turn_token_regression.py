@@ -33,8 +33,10 @@ architecture: deepagents 0.6.1's auto-installed `SummarizationMiddleware`
 handles terminal sanitize-and-truncate.  If summarization regresses or
 its plumbing breaks, this test should fail again.
 
-What this test pins down: a three-turn run of the exact prompts that
-failed must complete without `BadRequestError` reaching the caller.
+What this test pins down: a three-turn run of the exact prompts runs under the
+eval runner's fixed 480-second OS-level cap.  A natural pytest completion must
+not leak `BadRequestError`; a timeout is recorded as a failed stress trial, not
+silently treated as an overflow pass.
 
 The agent's *research quality* is not asserted — the failure under test
 is about context-size handling, not answer correctness.  Lenient
@@ -44,16 +46,15 @@ that turns landed at all.
 The research subagent is MOCKED (a large canned report per turn via
 ``stub_research_subagent``) — see ``AGENTS.md`` testing guideline #5:
 real search rate-limits SearXNG, and this eval tests the caller-facing
-overflow guard, not search behavior.  The canned report drives the
-orchestrator's context/summarization path across the three turns
-without SearXNG, so the run is rate-limit-free and deterministic (and
-much faster than the real-search version).  The mock is entered BEFORE
-the ``Thread`` is constructed (``Thread.__init__`` eagerly builds the
-agent — see ``stub_research_subagent``'s usage constraint).  (Historical
-note: the original ``BadRequestError`` was a 53k-context older model; on
-the current 131k model this run passes without forcing overflow — it is
-a plumbing regression guard for the summarizer/retry wiring, which the
-mocked context still exercises.)
+overflow guard, not search behavior.  The fixture explicitly constructs the
+historical synchronous general-agent composition; ordinary web runs are now
+async and have separate lifecycle coverage.  The canned report drives the
+orchestrator's context/summarization path across the three turns without
+SearXNG, so the run is rate-limit-free and deterministic.  (Historical note:
+the original ``BadRequestError`` was a 53k-context older model; on the current
+131k model this run passes without forcing overflow — it is a plumbing
+regression guard for the summarizer/retry wiring, which the mocked context
+still exercises.)
 """
 import logging
 import os
@@ -64,21 +65,36 @@ from unittest import TestCase
 
 from openai import BadRequestError
 
+from assist.spec import AgentSpec
+from assist.thread import Thread
 from assist.thread_manager import ThreadManager
 from edd.eval.utils import stub_research_subagent
 
-# A substantial canned research report (~a few KB) so the stubbed subagent still
-# drives the orchestrator's context/summarization path across the 3 turns without
-# hitting SearXNG.  Repeated realistic sentences, not lorem, so token counting is
-# representative.
+# A substantial, prompt-relevant canned research report drives the historical
+# synchronous context/summarization path across the three turns without hitting
+# SearXNG. Numbered source notes keep the bulk varied so the parent can use the
+# findings rather than mistaking its own fixture for a failed research loop.
 _CANNED_REPORT = (
-    "The San Francisco Giants finished the 2024 season with a competitive record, "
-    "anchored by strong starting pitching and a resurgent bullpen. Key contributors "
-    "posted career-best numbers at the plate, and the team remained in the divisional "
-    "race deep into September. Notable series included a home sweep and several "
-    "walk-off wins that kept the wildcard hopes alive. Season-ticket packages, mini "
-    "plans, and single-game options were compared for value across the schedule. "
-) * 60
+    "# Fixture research report: San Francisco Giants tickets\n\n"
+    "## Plan findings\n"
+    "The fixture records full-season, partial-plan, and flexible-membership "
+    "options. Exact weekend or 1 PM bundles depend on that season's inventory, "
+    "so the customer should ask the club about current availability.\n\n"
+    "## Flexible-membership calculation\n"
+    "The fixture's example has a $500 membership credit, a $50 single-game seat, "
+    "and a 30 percent member discount, making the member seat $35 and the saving "
+    "$15 per game. $500 divided by $15 is 33.34, so 34 attended games offset the "
+    "membership fee through the discount alone; the included $500 credit changes "
+    "the overall value comparison.\n\n"
+    "## Recorded sources\n"
+    "https://www.mlb.com/giants/tickets\n"
+    "https://www.mlb.com/giants/tickets/season-tickets\n\n"
+    + "\n".join(
+        f"Supporting ticket record {number}: plan availability, seat pricing, "
+        f"credits, and discounts are recorded for comparison {number}."
+        for number in range(1, 201)
+    )
+)
 
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
@@ -112,19 +128,16 @@ TURN_3 = (
 class TestGiantsThreadTokenRegression(TestCase):
     """Three-turn run of thread 20260426073544-71c17777.
 
-    Pass criterion: no `openai.BadRequestError` reaches the caller across
-    all three turns.  Other failures (network, recursion limits, rate
-    limits) are not the bug under test — they are reported as test errors
-    rather than failures so the regression signal stays clean.
+    The runner, not pytest-timeout, supplies this row's 480-second process
+    cap (see ``scripts/run-evals.sh``).  Its retained log is also the evidence
+    source for peak approximate context, tool-call count, and completion
+    status.  The cap is intentionally external: it kills a real agent loop
+    instead of adding a test-only branch that could hide one.
     """
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         self.tm = ThreadManager(root_dir=self.tmpdir)
-        # NOTE: the Thread is created INSIDE the stub context in the test body, not
-        # here — Thread.__init__ eagerly builds its agent (calls create_research_agent),
-        # so it must be constructed while stub_research_subagent() is patched or the
-        # mock is too late and the real (SearXNG-hitting) subagent gets built.
 
     def tearDown(self):
         try:
@@ -147,14 +160,15 @@ class TestGiantsThreadTokenRegression(TestCase):
             )
 
     def test_three_turns_no_token_overflow(self):
-        # Mock the research subagent (no SearXNG → rate-limit-free + deterministic).
-        # This eval tests the CALLER-facing overflow guard (no BadRequestError leaks
-        # past retry/rollback across 3 turns), not search behavior — so a large canned
-        # research report per turn drives the orchestrator's context/summarization path
-        # without real search — rate-limit-free, deterministic, and faster than real search.
+        # Explicitly select the incident's synchronous composition.  A bare
+        # ThreadManager.new() now creates an async web-main agent, whose task tools
+        # require a durable web Run and therefore cannot represent this regression.
         with stub_research_subagent(_CANNED_REPORT):
-            # Build the Thread INSIDE the patch — its __init__ eagerly builds the agent.
-            self.thread = self.tm.new()
+            thread_id = self.tm.reserve()
+            working_dir = self.tm.make_default_working_dir(self.tm.thread_dir(thread_id))
+            self.thread = Thread(
+                working_dir, thread_id=thread_id, checkpointer=self.tm.checkpointer,
+                model=self.tm.model, spec=AgentSpec())
             r1 = self._send("turn 1", TURN_1)
             logger.info("turn 1 response (first 300 chars): %s", str(r1)[:300])
             r2 = self._send("turn 2", TURN_2)
