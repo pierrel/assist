@@ -47,10 +47,11 @@ operator runbook]] is the required manual sequence.
 
 * Baseline panel
 
-Each runnable row runs three times through the bounded per-test runner,
-serialized by the shared LLM admission gate.  The raw JUnit XML and logs are
-retained under the ignored =edd/history/qwen38-baseline-20260825/= directory;
-this document records the durable summary.
+Each model-facing row runs three times through the bounded per-test runner,
+serialized by the shared LLM admission gate.  The deterministic two-case image
+guard is not model-facing.  The raw JUnit XML and logs are retained under the
+ignored =edd/history/qwen38-baseline-20260825/= directory; this document
+records the durable summary.
 
 | Row | Why it is representative | Qwen3.6 trials |
 |-
