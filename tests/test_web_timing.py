@@ -47,6 +47,9 @@ class _FakeThread:
     def get_messages(self):
         return self._m
 
+    def get_web_messages(self):
+        return self._m
+
 
 @pytest.fixture
 def thread_env(tmp_path, monkeypatch):

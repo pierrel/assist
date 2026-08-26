@@ -24,17 +24,21 @@ def threads_root(tmp_path, monkeypatch):
 
 
 class _Chat:
-    def __init__(self, msgs):
+    def __init__(self, msgs, web_msgs=None):
         self._msgs = msgs
+        self._web_msgs = msgs if web_msgs is None else web_msgs
 
     def get_messages(self):
         return self._msgs
 
+    def get_web_messages(self):
+        return self._web_msgs
 
-def _render(root, msgs):
+
+def _render(root, msgs, web_msgs=None):
     os.makedirs(root / "t1", exist_ok=True)
     state.DESCRIPTION_CACHE["t1"] = "T"
-    return render_thread("t1", _Chat(msgs))
+    return render_thread("t1", _Chat(msgs, web_msgs))
 
 
 def test_tools_turn_is_collapsed_details(threads_root):
@@ -68,6 +72,37 @@ def test_human_and_ai_messages_untouched(threads_root):
     assert '<div class="msg user">' in html and '<div class="msg assistant">' in html
     assert '<details class="msg user"' not in html
     assert '<details class="msg assistant"' not in html
+
+
+def test_empty_web_projection_does_not_fall_back_to_ordinary_messages(threads_root):
+    html = _render(threads_root, [
+        {"role": "assistant", "content": "ordinary transcript only"},
+    ], web_msgs=[])
+
+    assert "ordinary transcript only" not in html
+
+
+def test_tool_call_prose_stays_visible_without_expanding_activity(threads_root):
+    from assist.thread import _messages_to_dicts
+    from langchain_core.messages import AIMessage
+
+    summary = "Bring the full medication and exercise summary."
+    raw = [
+        AIMessage(content=summary, tool_calls=[
+            {"name": "write_todos", "args": {"todos": []}, "id": "call-1"},
+        ]),
+        AIMessage(content="Good luck."),
+    ]
+    ordinary = _messages_to_dicts(raw)
+    web = _messages_to_dicts(raw, split_tool_call_content=True)
+
+    html = _render(threads_root, ordinary, web)
+    activity = html[html.index('<details class="msg tools">'):html.index("</details>")]
+    assert '<div class="msg assistant">' in html
+    assert summary in html and summary not in activity
+    assert '<summary>write_todos</summary>' in activity
+    assert '<details class="msg tools" open' not in html
+    assert html.index("Good luck.") < html.index(summary) < html.index(activity)
 
 
 class TestToolsSummary:

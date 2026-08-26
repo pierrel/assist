@@ -502,8 +502,9 @@ def _format_elapsed(seconds: float) -> str:
 
 def _human_ordinal(msgs: list[dict]) -> int:
     """The turn ordinal = count of user-role bubbles. Counted the SAME way (over
-    chat.get_messages() dicts) on the write side (recording) and the read side
-    (badge placement), so the two can't drift — the design's single-counter rule."""
+    the ordinary and web message projections) on the write side (recording) and
+    the read side (badge placement), so the two can't drift — the design's
+    single-counter rule."""
     return sum(1 for m in msgs if m.get("role") == "user")
 
 
@@ -584,7 +585,8 @@ def render_thread(
 
     # During the initial setup stages there is no agent state worth showing yet.
     msgs: list[dict] = [] if is_init else (pi_messages if pi_messages is not None
-                                            else ([] if chat is None else chat.get_messages()))
+                                            else ([] if chat is None else
+                                                  getattr(chat, "get_web_messages", chat.get_messages)()))
     trace_by_run = {}
     trace_run_ids = set()
     if is_pi and pi_traces is not None:
@@ -625,7 +627,7 @@ def render_thread(
     # bubble so it's visible right after the redirect — unless the agent has
     # already persisted an identical user message into the conversation (the
     # `not any(...)` dedup guard below), in which case it's already shown.
-    # Append (not insert-at-0): get_messages() is chronological and the page
+    # Append (not insert-at-0): the web projection is chronological and the page
     # renders reversed (newest-at-top), so appending places the pending
     # message at the TOP — as the latest message, right below the in-progress
     # "..." placeholder — instead of stranding it at the very bottom under the
