@@ -422,12 +422,15 @@ class TestSelectAssistantModel(TestCase):
     def test_qwen38_enables_thinking_without_service_override(self):
         """A Qwen3.8 endpoint gets its native reasoning request by default."""
         config = model_manager.OpenAIConfig(
-            url="http://x/v1", model="Qwen3.8-27B", api_key="EMPTY", context_len=131072,
+            url="http://x/v1",
+            model="/models/Qwen3.8-27B-Q4_K_M.gguf",
+            api_key="EMPTY",
+            context_len=131072,
         )
         with patch.object(model_manager, "current_model_config", return_value=config), \
              patch.object(model_manager, "select_chat_model") as select:
             model_manager.select_assistant_model(0.1)
-        select.assert_called_once_with(0.1, enable_thinking=True)
+        select.assert_called_once_with(1.0, enable_thinking=True)
 
 
 class TestRequestTimeoutAndRetries(TestCase):

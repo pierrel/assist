@@ -96,6 +96,7 @@ args=(
     --threads "$THREADS"
     --jinja
     --reasoning "$REASONING"
+    --reasoning-preserve
 )
 
 if [[ -n "$REASONING_BUDGET" ]]; then
