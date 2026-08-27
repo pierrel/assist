@@ -74,13 +74,17 @@ curl --fail --silent http://127.0.0.1:8000/v1/models
 #+end_src
 
 The service starts with vision enabled at 32,768 tokens, one parallel slot,
-Flash Attention, =--ubatch-size 256=, and a 1.5 GiB =--fit= reserve.  Confirm
-the log reports full GPU offload, the projector, the intended context, and no
-fallback to CPU.  A startup that fits only by lowering context or GPU layers
-does not pass.  Run the image smoke and vision eval first.
+Flash Attention, =--ubatch-size 256=, a 1.5 GiB =--fit= reserve, and a
+1,024-token minimum per image.  The launcher defaults to a loopback listener
+with localhost-only CORS.  It refuses any broader bind without an API key (set
+=LLAMA_API_KEY= or =LLAMA_API_KEY_FILE= in the service environment; never put
+the key in the tracked launcher).  Confirm the log reports full GPU offload,
+the projector, the intended context, and no fallback to CPU.  A startup that
+fits only by lowering context or GPU layers does not pass.  Run the image smoke
+and vision eval first.
 
-2. Switch off the projector for the text-only 100k/Q8 tier, run the three-row
-   matched candidate panel at N=3, and exercise deep prompt fills near 100k
+2. Switch off the projector for the text-only 100k/Q8 tier, run the matched
+   candidate panel at N=3, and exercise deep prompt fills near 100k
    with varied prefill batch shapes:
 
 #+begin_src sh
@@ -92,12 +96,14 @@ sudo systemctl unset-environment ENABLE_VISION CTX_SIZE KV_TYPE_K KV_TYPE_V
 
 Watch =nvidia-smi= and the service journal for CUDA OOM or restart cycles.
 
-3. Only after that passes, restart with the text-only 128k profile:
+3. Only after that passes, restart with the text-only 131,072-token/Q4 profile
+   that matches Qwen3.6. Run both the existing 128k direct gate and the new
+   near-full 130k direct gate:
 
 #+begin_src sh
 sudo systemctl set-environment CTX_SIZE=131072 KV_TYPE_K=q4_0 KV_TYPE_V=q4_0
 sudo systemctl restart llamacpp.service
-# Repeat the startup checks, a deep near-128k fill, and the matched eval panel.
+# Repeat the startup checks, the 128k and 130k direct fills, and the matched eval panel.
 sudo systemctl unset-environment CTX_SIZE KV_TYPE_K KV_TYPE_V
 #+end_src
 
