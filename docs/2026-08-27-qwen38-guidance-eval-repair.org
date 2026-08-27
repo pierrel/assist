@@ -52,9 +52,10 @@ The repair is deliberately narrow.
    it proves the local date reaches research and the final answer.  Add the
    delegate outcome assertions before any optional single-dispatch efficiency
    diagnostic.
-5. Run the repaired rows against Qwen3.8's live low-effort, thinking-preserved,
-   1.0-temperature profile.  Compare user outcomes and safety boundaries with
-   Qwen3.6; report extra tool calls as performance diagnostics, not failures.
+5. Run the repaired rows against Qwen3.8's live low-effort, native-thinking,
+   no-history-preservation, 1.0-temperature profile.  Compare user outcomes
+   and safety boundaries with Qwen3.6; report extra tool calls as performance
+   diagnostics, not failures.
 
 * Measured staging result
 
