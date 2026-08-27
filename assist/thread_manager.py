@@ -98,10 +98,6 @@ def _triage_skill_sources() -> dict:
 # render skill: a schedule's effect needs the web's co-resident Scheduler, so emacsos and
 # the eval agents (which build their own agents) must NOT get a tool that never fires.
 _web_tools: tuple = ()
-# The research child has a deliberately narrower profile.  It can request or
-# reduce sandbox egress grants but never inherits the ordinary main's shell or
-# host-effect tools.
-_web_egress_tools: tuple = ()
 # A message-triage turn (inbound SMS) runs on UNTRUSTED input, so it gets a SEPARATE,
 # reduced tool set: only the reply tool (HITL-gated) — NOT the schedule/subscription tools,
 # which are host-effect and NOT sandbox-contained (an injected text must not be able to
@@ -117,11 +113,6 @@ _web_triage_interrupt_on: dict | None = None
 def set_web_tools(tools) -> None:
     global _web_tools
     _web_tools = tuple(tools)
-
-
-def set_web_egress_tools(tools) -> None:
-    global _web_egress_tools
-    _web_egress_tools = tuple(tools)
 
 
 def set_web_triage_tools(tools) -> None:
@@ -346,8 +337,7 @@ class ThreadManager:
         elif assistant_id == "research-agent":
             specialized = create_research_agent(
                 self.model, working_dir, self.checkpointer,
-                sandbox_backend=sandbox_backend, leaf=True,
-                egress_tools=_web_egress_tools)
+                sandbox_backend=sandbox_backend, leaf=True)
         elif assistant_id not in {"general-agent", "delegate-agent"}:
             raise ValueError(f"unknown assistant: {assistant_id}")
         async_tools = (async_task_tools if assistant_id == "general-agent"

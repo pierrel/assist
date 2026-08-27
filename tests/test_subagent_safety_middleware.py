@@ -140,14 +140,16 @@ class TestSubagentSafetyMiddleware(TestCase):
             and "read_url" in middleware._tools)
         self.assertTrue(offload._page_navigation)
 
-    def test_leaf_research_agent_has_egress_request_but_no_shell(self):
-        """Host approval does not widen a research child's authority to execute."""
+    def test_leaf_research_agent_pairs_execution_with_egress_skill_and_tools(self):
+        """An execution-capable child receives the egress skill and tools."""
         from assist.agent import create_research_agent
         from assist.egress.tools import egress_tools
         from assist.egress.store import EgressStore
+        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 
         request, _, _ = egress_tools(EgressStore("/tmp/egress-test"), frozenset())
-        with patch("assist.agent.create_deep_agent") as create:
+        with patch("assist.agent.create_deep_agent") as create, \
+             patch("assist.agent.supports_execution", return_value=True):
             create.return_value = MagicMock()
             create_research_agent(
                 MagicMock(), working_dir="/tmp/x", leaf=True,
@@ -156,6 +158,53 @@ class TestSubagentSafetyMiddleware(TestCase):
         names = {getattr(tool, "name", getattr(tool, "__name__", None))
                  for tool in create.call_args.kwargs["tools"]}
         self.assertEqual(names, {"search_internet", "read_url", "request_egress"})
+        egress_skill = next(
+            middleware for middleware in create.call_args.kwargs["middleware"]
+            if isinstance(middleware, SmallModelSkillsMiddleware))
+        self.assertEqual(egress_skill._skill_names, frozenset({"egress"}))
+
+    def test_research_pipeline_subagents_pair_execution_with_egress(self):
+        """The synchronous research workers cannot drift from the same policy."""
+        from assist.agent import create_research_agent
+        from assist.egress.tools import egress_tools
+        from assist.egress.store import EgressStore
+        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
+
+        request, _, _ = egress_tools(EgressStore("/tmp/egress-test"), frozenset())
+        with patch("assist.agent.create_deep_agent") as create, \
+             patch("assist.agent.supports_execution", return_value=True):
+            create.return_value = MagicMock()
+            create_research_agent(
+                MagicMock(), working_dir="/tmp/x", egress_tools=(request,))
+
+        subagents = {item["name"]: item for item in create.call_args.kwargs["subagents"]}
+        for name in ("research-agent", "critique-agent", "fact-check-agent"):
+            tool_names = {
+                getattr(tool, "name", getattr(tool, "__name__", None))
+                for tool in subagents[name].get("tools", [])}
+            self.assertIn("request_egress", tool_names)
+            skill = next(middleware for middleware in subagents[name]["middleware"]
+                         if isinstance(middleware, SmallModelSkillsMiddleware))
+            self.assertEqual(skill._skill_names, frozenset({"egress"}))
+
+    def test_execution_subagent_catalog_exposes_only_egress_skill(self):
+        """Specialists load the egress workflow, not a misleading broad catalog."""
+        from assist.backends import SKILLS_ROUTE, create_composite_backend
+        from assist.egress.tools import egress_tools
+        from assist.egress.store import EgressStore
+        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
+
+        request, listing, remove = egress_tools(
+            EgressStore("/tmp/egress-test"), frozenset())
+        backend = create_composite_backend("/tmp/x")
+        middleware = SmallModelSkillsMiddleware(
+            backend=backend, sources=[SKILLS_ROUTE],
+            bundled_sources=[SKILLS_ROUTE], gated_sources=[SKILLS_ROUTE],
+            registered_tools=("request_egress", "list_allowed_hosts", "remove_allowed_host"),
+            tool_definitions=(request, listing, remove), skill_names={"egress"})
+
+        skills, _, _ = middleware._catalog_snapshot(backend)
+        self.assertEqual([skill["name"] for skill in skills], ["egress"])
 
     def test_main_agent_dict_subagents_have_safety_mw(self):
         from assist.agent import create_agent

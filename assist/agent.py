@@ -6,6 +6,7 @@ from deepagents import (create_deep_agent, CompiledSubAgent,
                         GeneralPurposeSubagentProfile, HarnessProfile,
                         register_harness_profile)
 from deepagents.backends.protocol import BackendProtocol
+from deepagents.middleware.filesystem import supports_execution
 from langchain.messages import AIMessage, AnyMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -67,6 +68,45 @@ from assist.env import env_int
 
 
 logger = logging.getLogger(__name__)
+
+
+# The web composition installs these once it has the visible-thread approval
+# store and proxy policy. Every web profile that can execute then receives the
+# same egress skill and tools automatically. Other embedders deliberately do
+# not receive a dead approval tool: they have no compatible approval card,
+# store, or proxy contract to honor it.
+_execution_egress_tools: tuple = ()
+
+
+def set_execution_egress_tools(tools) -> None:
+    """Configure egress tools for every execution-capable Assist profile."""
+    global _execution_egress_tools
+    _execution_egress_tools = tuple(tools)
+
+
+def _execution_egress(backend: BackendProtocol, extra_tools=()) -> tuple:
+    """Return configured egress tools iff Deep Agents exposes ``execute``."""
+    if not supports_execution(backend):
+        return ()
+    tools = []
+    seen = set()
+    for tool_value in (*_execution_egress_tools, *extra_tools):
+        name = _tool_name(tool_value)
+        if name not in seen:
+            seen.add(name)
+            tools.append(tool_value)
+    return tuple(tools)
+
+
+def _egress_skills_middleware(backend: BackendProtocol, tools: tuple):
+    """Give execution-capable specialist profiles the one relevant skill."""
+    if not tools:
+        return None
+    return SmallModelSkillsMiddleware(
+        backend=backend, sources=[SKILLS_ROUTE],
+        bundled_sources=[SKILLS_ROUTE], gated_sources=[SKILLS_ROUTE],
+        registered_tools=(_tool_name(tool_value) for tool_value in tools),
+        tool_definitions=tools, skill_names={"egress"})
 
 
 def _tool_name(tool_value) -> str:
@@ -395,6 +435,7 @@ def create_agent(model: BaseChatModel,
         backend = _create_standard_backend(working_dir,
                                            extra_routes=extra_routes,
                                            default_backend=spec.default_backend)
+    execution_egress_tools = _execution_egress(backend)
 
     # Put caller guidance and the async main's orchestration skills before broad
     # shared/domain skills. Source order is prompt salience, not an access guard;
@@ -439,6 +480,7 @@ def create_agent(model: BaseChatModel,
     for tool_value in (
         *list(spec.async_subagent_tools or ()),
         *list(spec.tools),
+        *execution_egress_tools,
         travel, directions, map_data, read_url,
     ):
         # Deep Agents binds tools by name.  Specs may use provider-schema dicts
@@ -691,6 +733,8 @@ def create_context_agent(model: BaseChatModel,
     else:
         backend = _create_standard_backend(working_dir,
                                            default_backend=default_backend)
+    execution_egress_tools = _execution_egress(backend)
+    egress_skills = _egress_skills_middleware(backend, execution_egress_tools)
     logging_mw = ModelLoggingMiddleware("context-agent")
 
     agent = create_deep_agent(
@@ -699,7 +743,9 @@ def create_context_agent(model: BaseChatModel,
         system_prompt=base_prompt_for(prompt_template,
                                       workspace_dir=workspace_dir),
         backend=backend,
-        middleware=base_mw + middleware + [logging_mw],
+        tools=list(execution_egress_tools),
+        middleware=base_mw + middleware
+        + ([egress_skills] if egress_skills is not None else []) + [logging_mw],
     )
 
     # 500 graph steps ≈ 45 model calls with deepagents' ~11 nodes per cycle.
@@ -837,6 +883,7 @@ def create_research_agent(model: BaseChatModel,
         backend = create_sandbox_composite_backend(references_sandbox)
     else:
         backend = create_references_backend(working_dir)
+    execution_egress_tools = _execution_egress(backend, egress_tools)
     logging_mw = ModelLoggingMiddleware("research-agent")
 
     # Safety middleware installed on every dict-spec subagent below.
@@ -892,27 +939,34 @@ def create_research_agent(model: BaseChatModel,
         "name": "research-agent",
         "description": "Used to research more in depth questions. Only give this researcher one topic at a time. It will return research results.",
         "system_prompt": base_prompt_for("deepagents/sub_research.txt.j2"),
-        "tools": [search_internet, read_url],
+        "tools": [search_internet, read_url, *execution_egress_tools],
         "middleware": _subagent_safety_mw() + _read_url_guards(
-            trust_human_messages=trust_human_messages),
+            trust_human_messages=trust_human_messages)
+        + ([_egress_skills_middleware(backend, execution_egress_tools)]
+           if execution_egress_tools else []),
     }
 
     critique_sub_agent = {
         "name": "critique-agent",
         "description": "Used to critique the final report. You MUST provide the file it should critique.",
         "system_prompt": base_prompt_for("deepagents/sub_critique.txt.j2"),
-        "middleware": _subagent_safety_mw(),
+        "tools": list(execution_egress_tools),
+        "middleware": _subagent_safety_mw()
+        + ([_egress_skills_middleware(backend, execution_egress_tools)]
+           if execution_egress_tools else []),
     }
 
     fact_check_sub_agent = {
         "name": "fact-check-agent",
         "description": "Used to check all references for alignment with claims and statements. You MUST provide the file it should fact-check.",
         "system_prompt": base_prompt_for("deepagents/fact_checker.md.j2"),
-        "tools": [read_url],
+        "tools": [read_url, *execution_egress_tools],
         # Fact-checker re-fetches URLs cited in the report it's handed — those appear in
         # its context (the report ToolMessage), so they pass; an invented URL is refused.
         "middleware": _subagent_safety_mw() + _read_url_guards(
-            trust_human_messages=trust_human_messages),
+            trust_human_messages=trust_human_messages)
+        + ([_egress_skills_middleware(backend, execution_egress_tools)]
+           if execution_egress_tools else []),
     }
 
     # The orchestrator DELEGATES searching to the research-agent (see its
@@ -924,10 +978,10 @@ def create_research_agent(model: BaseChatModel,
     # only layers that read_url.  This removes the orchestrator's URL-fabrication
     # surface entirely (it cannot 404-loop on a guessed URL if it has no read_url)
     # and enforces clean delegation instead of the orchestrator doing worker work.
-    # Only the direct web child receives the small egress-management surface.
-    # It is intentionally not ``execute``: approval may widen sandbox network
-    # access, but does not restore unrestricted shell authority to research.
-    leaf_tools = [search_internet, read_url, *egress_tools] if leaf else []
+    # Execution and egress are one capability: no execution-capable research
+    # profile can hit the proxy without also getting its approval workflow.
+    leaf_tools = [search_internet, read_url, *execution_egress_tools] if leaf else []
+    egress_skills = _egress_skills_middleware(backend, execution_egress_tools)
     agent = create_deep_agent(
         model=model,
         tools=leaf_tools,
@@ -949,6 +1003,7 @@ def create_research_agent(model: BaseChatModel,
                        + _read_url_guards(
                            trust_human_messages=trust_human_messages)
                        if leaf else [])
+                    + ([egress_skills] if egress_skills is not None else [])
                     + [logging_mw]),
         subagents=([] if leaf else [critique_sub_agent,
                                     research_sub_agent,

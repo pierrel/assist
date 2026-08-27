@@ -30,12 +30,12 @@ normal main-agent request retains its existing one resolution turn.  Multiple
 children may wait on one host request; cancelling or deleting one cannot
 resume another.
 
-The child profile receives the egress request and grant-reduction tools, but
-not unrestricted =execute=.  This ships the durable approval boundary first.
-A narrowly scoped sandbox fetch capability, and a browser for JavaScript-only
-sites, are separate follow-ups.  Thus this change prevents the spin and makes
-an approved curl-like transport possible without silently restoring broad
-shell authority.
+Execution and egress are one capability. Every configured Assist web profile
+whose backend exposes =execute= automatically receives the egress tools and
+the egress skill, including research workers and their synchronous
+subagents. An embedder without Assist's approval-card/store/proxy contract
+does not receive a nonfunctional imitation. A browser for JavaScript-only
+sites remains a separate follow-up.
 
 * Security and liveness
 
@@ -61,7 +61,8 @@ shell authority.
 Unit coverage pins: a child request records the parent-thread scope and exact
 waiter; approval and decline each create one resume only; duplicate actions,
 another child's waiter, cancellation, and startup recovery cannot resume the
-wrong task; the child profile exposes no =execute=; and the visible card stays
-on the parent thread.  Existing egress and async-task suites remain the
-regression set.  A real-model flow is deferred until the currently active
-production child has stopped, and runs through shared model admission.
+wrong task; every execution-capable research profile has the egress skill and
+tools; and the visible card stays on the parent thread. Existing egress and
+async-task suites remain the regression set. A real-model flow is deferred
+until the currently active production child has stopped, and runs through
+shared model admission.

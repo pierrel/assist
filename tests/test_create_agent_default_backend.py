@@ -31,6 +31,10 @@ from deepagents.backends.protocol import SandboxBackendProtocol, WriteResult
 from deepagents.middleware.filesystem import supports_execution
 
 
+def request_egress(host: str, port: int, task: str) -> str:
+    return f"{host}:{port} {task}"
+
+
 class _FakeSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
     """A SandboxBackendProtocol default: fs methods from FilesystemBackend
     plus `execute` — the shape of emacsos's planned EmacsBackend."""
@@ -146,6 +150,27 @@ class TestCreateAgentDefaultBackend:
         assert backend.default is inj
         # The hinge: a SandboxBackendProtocol default => execute tool enabled.
         assert supports_execution(backend) is True
+
+    def test_execution_automatically_adds_configured_egress_tools(self):
+        """The execution capability, not a profile-specific call site, owns egress."""
+        from assist import agent as agent_mod
+        from assist.agent import set_execution_egress_tools
+        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
+
+        prior = agent_mod._execution_egress_tools
+        set_execution_egress_tools((request_egress,))
+        try:
+            kwargs = self._build(spec=AgentSpec(default_backend=_FakeSandboxBackend(
+                root_dir=tempfile.mkdtemp(), virtual_mode=True)))
+        finally:
+            set_execution_egress_tools(prior)
+
+        names = {getattr(tool, "name", getattr(tool, "__name__", None))
+                 for tool in kwargs["tools"]}
+        assert "request_egress" in names
+        skills = next(item for item in kwargs["middleware"]
+                      if isinstance(item, SmallModelSkillsMiddleware))
+        assert "request_egress" in skills._registered_tools
 
     def test_non_sandbox_default_does_not_enable_execute(self):
         backend = self._build(spec=AgentSpec(default_backend=_fs()))["backend"]
