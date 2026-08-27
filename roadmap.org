@@ -534,6 +534,37 @@ Relates to the single-LLM-slot constraint and [[queued-research-rate-limit-resil
 (a long turn is often a search-starved research grind — fixing the trigger shortens
 the jobs this would interleave).
 
+** TODO Recover every fair-scheduler quantum pause
+*Observed 2026-08-27.* The fair scheduler correctly asked a long-running web
+turn to yield after its 120-second quantum when another turn was waiting.  The
+turn checkpointed, its active Run became =interrupted=, and a successor Run was
+persisted as =pending=.  But the resume worker never claimed that successor:
+the thread stayed =paused= indefinitely, subsequent user messages only added
+more pending Runs, and the production-admission gate treated the stale paused
+thread as active work.  This is not a Qwen3.8 behavior problem.  A slower
+model makes the quantum easier to reach, but Qwen3.6 has the same broken
+recovery path.
+
+*Goal.* A scheduler-requested pause is a transient handoff, never a durable
+terminal state.  Once the waiting turn releases the slot, the original thread
+must resume exactly once from its checkpoint and eventually reach a terminal
+Run state.  A process restart between pause and resume must recover the same
+way; it must not strand an =interrupted= head and =pending= successor forever.
+New user messages may queue behind that recovery, but may not prevent it from
+being admitted.
+
+*How.* Trace the contract across =THREAD_QUEUE.request_pause=, the queue
+middleware's yield, durable Run transition/successor creation,
+=_RESUME_SCHEDULER= submission, and startup recovery.  Fix the owner of the
+missing handoff rather than clearing =status.json= or making production
+admission ignore paused threads.  Add a production-shaped integration test:
+hold one real resumable web turn until the quantum pause, submit a second turn,
+let it complete, then assert the first turn's successor is claimed and the
+original user-visible request completes.  Repeat with a process-recovery
+boundary after the pause.  Assert no thread remains =paused= with an
+=interrupted= head and runnable =pending= successor, and that the event loop
+remains responsive while the queue is contended.
+
 * Context rider
 ** DONE "Last seen" location saver — deliberate tool lookup, 2026-08-15
 Every web message records a fresh browser fix in one private global record. A normal
