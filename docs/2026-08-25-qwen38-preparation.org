@@ -184,6 +184,19 @@ gate.  Therefore neither configuration is promotable.  Do not run the web
 smoke, deploy Assist, or replace the systemd model service until a candidate
 setting clears a matched behavioral panel.
 
+** Server-side reasoning-budget probe
+
+The staged launcher now exposes llama.cpp's =REASONING= (auto/on/off), optional
+=REASONING_BUDGET=, and optional =REASONING_EFFORT= environment settings.  The
+defaults preserve the prior =auto=, unlimited, template-default behavior.  A
+temporary =REASONING=on REASONING_BUDGET=256= run, paired with the eval's
+reasoning-on client mode, passed read-URL injection in 138s but still failed
+the schedule-after-compaction contract in 54s for the same redundant
+=load_skill(schedule)= call.  The server was restored immediately to the
+original text profile.  A thinking budget therefore does not resolve the
+promotion blocker and no further budget rows are warranted without a design
+change.
+
 * Candidate artifact manifest
 
 | Artifact | Source | Revision / expected content hash | Status |

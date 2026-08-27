@@ -15,6 +15,9 @@ IMAGE_MIN_TOKENS="${IMAGE_MIN_TOKENS:-1024}"
 API_KEY_FILE="${LLAMA_API_KEY_FILE:-}"
 THREADS="${THREADS:-8}"
 FIT_TARGET_MIB="${FIT_TARGET_MIB:-1536}"
+REASONING="${REASONING:-auto}"
+REASONING_BUDGET="${REASONING_BUDGET:-}"
+REASONING_EFFORT="${REASONING_EFFORT:-}"
 
 if [[ "$ENABLE_VISION" == "1" ]]; then
     CTX_SIZE="${CTX_SIZE:-32768}"
@@ -41,6 +44,23 @@ fi
 if [[ "$ENABLE_VISION" != "0" && "$ENABLE_VISION" != "1" ]]; then
     echo "ERROR: ENABLE_VISION must be 0 or 1." >&2
     exit 1
+fi
+if [[ "$REASONING" != "auto" && "$REASONING" != "on" && "$REASONING" != "off" ]]; then
+    echo "ERROR: REASONING must be auto, on, or off." >&2
+    exit 1
+fi
+if [[ -n "$REASONING_BUDGET" && ! "$REASONING_BUDGET" =~ ^-?[0-9]+$ ]]; then
+    echo "ERROR: REASONING_BUDGET must be an integer." >&2
+    exit 1
+fi
+if [[ -n "$REASONING_EFFORT" ]]; then
+    case "$REASONING_EFFORT" in
+        default|minimal|low|medium|high|xhigh|max) ;;
+        *)
+            echo "ERROR: REASONING_EFFORT must be default, minimal, low, medium, high, xhigh, or max." >&2
+            exit 1
+            ;;
+    esac
 fi
 if [[ -n "$API_KEY_FILE" && ! -r "$API_KEY_FILE" ]]; then
     echo "ERROR: LLAMA_API_KEY_FILE is not readable: $API_KEY_FILE" >&2
@@ -75,7 +95,15 @@ args=(
     --fit-target "$FIT_TARGET_MIB"
     --threads "$THREADS"
     --jinja
+    --reasoning "$REASONING"
 )
+
+if [[ -n "$REASONING_BUDGET" ]]; then
+    args+=(--reasoning-budget "$REASONING_BUDGET")
+fi
+if [[ -n "$REASONING_EFFORT" ]]; then
+    args+=(--reasoning-effort "$REASONING_EFFORT")
+fi
 
 if [[ "$ENABLE_VISION" == "1" ]]; then
     args+=(--mmproj "$MMPROJ_PATH" --image-min-tokens "$IMAGE_MIN_TOKENS")
@@ -84,5 +112,5 @@ if [[ -n "$API_KEY_FILE" ]]; then
     args+=(--api-key-file "$API_KEY_FILE")
 fi
 
-echo "Starting staged Qwen3.8 profile: host=$HOST:$PORT context=$CTX_SIZE KV=$KV_TYPE_K/$KV_TYPE_V vision=$ENABLE_VISION"
+echo "Starting staged Qwen3.8 profile: host=$HOST:$PORT context=$CTX_SIZE KV=$KV_TYPE_K/$KV_TYPE_V vision=$ENABLE_VISION reasoning=$REASONING budget=${REASONING_BUDGET:-unlimited} effort=${REASONING_EFFORT:-default}"
 exec "$LLAMA_BIN" "${args[@]}"
