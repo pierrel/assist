@@ -51,6 +51,10 @@ class TestProviderLongContext(TestCase):
     def test_retrieves_distributed_facts_at_128k(self):
         self._assert_context_gate(128_000)
 
+    def test_retrieves_distributed_facts_at_130k(self):
+        """Exercise nearly all of the 131,072-token Q4 serving tier."""
+        self._assert_context_gate(130_000)
+
     def _assert_context_gate(self, target_tokens: int) -> None:
         # llama.cpp retains matching prompt prefixes across requests.  A fresh
         # nonce immediately after the start fact makes every trial pay the real

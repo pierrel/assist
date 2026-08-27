@@ -9,17 +9,22 @@ MODEL_PATH="${MODEL_PATH:-$LLAMA_ROOT/models/Qwen3.8-27B-UD-Q4_K_XL/Qwen3.8-27B-
 MMPROJ_PATH="${MMPROJ_PATH:-$LLAMA_ROOT/models/Qwen3.8-27B-UD-Q4_K_XL/mmproj-F16.gguf}"
 ENABLE_VISION="${ENABLE_VISION:-1}"
 PORT="${PORT:-8000}"
-HOST="${HOST:-0.0.0.0}"
+HOST="${HOST:-127.0.0.1}"
+CORS_ORIGINS="${CORS_ORIGINS:-localhost}"
+IMAGE_MIN_TOKENS="${IMAGE_MIN_TOKENS:-1024}"
+API_KEY_FILE="${LLAMA_API_KEY_FILE:-}"
 THREADS="${THREADS:-8}"
 FIT_TARGET_MIB="${FIT_TARGET_MIB:-1536}"
 
 if [[ "$ENABLE_VISION" == "1" ]]; then
     CTX_SIZE="${CTX_SIZE:-32768}"
+    KV_TYPE_K="${KV_TYPE_K:-q8_0}"
+    KV_TYPE_V="${KV_TYPE_V:-q8_0}"
 else
-    CTX_SIZE="${CTX_SIZE:-100000}"
+    CTX_SIZE="${CTX_SIZE:-131072}"
+    KV_TYPE_K="${KV_TYPE_K:-q4_0}"
+    KV_TYPE_V="${KV_TYPE_V:-q4_0}"
 fi
-KV_TYPE_K="${KV_TYPE_K:-q8_0}"
-KV_TYPE_V="${KV_TYPE_V:-q8_0}"
 
 if [[ ! -x "$LLAMA_BIN" ]]; then
     echo "ERROR: llama-server is missing; complete the upgrade before cutover." >&2
@@ -37,6 +42,14 @@ if [[ "$ENABLE_VISION" != "0" && "$ENABLE_VISION" != "1" ]]; then
     echo "ERROR: ENABLE_VISION must be 0 or 1." >&2
     exit 1
 fi
+if [[ -n "$API_KEY_FILE" && ! -r "$API_KEY_FILE" ]]; then
+    echo "ERROR: LLAMA_API_KEY_FILE is not readable: $API_KEY_FILE" >&2
+    exit 1
+fi
+if [[ "$HOST" != "127.0.0.1" && "$HOST" != "::1" && -z "$API_KEY_FILE" && -z "${LLAMA_API_KEY:-}" ]]; then
+    echo "ERROR: a non-loopback listener requires LLAMA_API_KEY or LLAMA_API_KEY_FILE." >&2
+    exit 1
+fi
 
 # Vision is enabled for the initial Qwen3.8 service.  It starts at 32k because
 # its projector needs its own VRAM and quality measurements.  Set
@@ -49,9 +62,11 @@ fi
 args=(
     --model "$MODEL_PATH"
     --host "$HOST" --port "$PORT"
+    --cors-origins "$CORS_ORIGINS"
     --ctx-size "$CTX_SIZE"
     --cache-type-k "$KV_TYPE_K"
     --cache-type-v "$KV_TYPE_V"
+    --n-gpu-layers all
     --parallel 1
     --flash-attn on
     --batch-size 2048
@@ -62,13 +77,12 @@ args=(
     --jinja
 )
 
-# Leave GPU layers unset so --fit can select the greatest full-offload fit with
-# the requested margin.  The cutover gate rejects a profile that cannot still
-# offload every layer; an explicit N_GPU_LAYERS override is deliberately absent.
-
 if [[ "$ENABLE_VISION" == "1" ]]; then
-    args+=(--mmproj "$MMPROJ_PATH")
+    args+=(--mmproj "$MMPROJ_PATH" --image-min-tokens "$IMAGE_MIN_TOKENS")
+fi
+if [[ -n "$API_KEY_FILE" ]]; then
+    args+=(--api-key-file "$API_KEY_FILE")
 fi
 
-echo "Starting staged Qwen3.8 profile: context=$CTX_SIZE KV=$KV_TYPE_K/$KV_TYPE_V vision=$ENABLE_VISION"
+echo "Starting staged Qwen3.8 profile: host=$HOST:$PORT context=$CTX_SIZE KV=$KV_TYPE_K/$KV_TYPE_V vision=$ENABLE_VISION"
 exec "$LLAMA_BIN" "${args[@]}"
