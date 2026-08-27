@@ -64,6 +64,12 @@ The final command must show that the old =ExecStart= is reset and replaced by
 
 * Text cutover and measured argument loop
 
+For temporary experimentation only, the staged launcher accepts
+=REASONING=auto|on|off=, an optional integer =REASONING_BUDGET=, and an optional
+=REASONING_EFFORT=.  Its defaults are =auto=, unlimited, and the template
+default.  These controls require their own matched behavioral gate; do not add
+them to the service environment merely because a single evaluation improves.
+
 1. Restart manually, then wait for the endpoint:
 
 #+begin_src sh
