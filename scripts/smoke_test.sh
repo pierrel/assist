@@ -10,8 +10,10 @@
 #
 set -euo pipefail
 
-# $1 wins; else ASSIST_BASE_URL (set to https://... when TLS is on); else http default.
-BASE_URL="${1:-${ASSIST_BASE_URL:-http://localhost:${ASSIST_PORT:-5050}}}"
+# $1 wins; else ASSIST_BASE_URL; else the local TLS endpoint used by Assist.
+# A developer running an older plain-HTTP server can still pass its URL
+# explicitly or set ASSIST_BASE_URL.
+BASE_URL="${1:-${ASSIST_BASE_URL:-https://localhost:${ASSIST_PORT:-5050}}}"
 POLL_INTERVAL=3      # seconds between polls
 POLL_TIMEOUT=300     # max seconds to wait for a response
 
