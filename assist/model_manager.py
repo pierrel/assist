@@ -368,17 +368,20 @@ def select_chat_model(
 def select_assistant_model(
     temperature: float,
     *,
-    enable_thinking: bool = False,
+    enable_thinking: bool | None = None,
 ) -> BaseChatModel:
     """Chat model configured the way assist actually runs it.
 
-    Thin wrapper over :func:`select_chat_model` that defaults Qwen3
-    reasoning OFF — the production configuration (see ``Thread`` and the
-    web summary flow).  Both prod and the eval harness build their models
-    through here so the reasoning setting can't drift apart as new call
-    sites are added: the eval/prod mismatch this consolidates cost a full
-    night of NO-XML eval timeouts before it was found.
+    Thin wrapper over :func:`select_chat_model`.  Reasoning is off by
+    default for the established Qwen3.6 service.  Set
+    ``ASSIST_ENABLE_THINKING=1`` on a service to opt its ordinary assistant
+    turns into the model's native thinking mode; an explicit argument always
+    wins.  This keeps model-server and client request configuration together
+    without changing lower-level callers.
 
-    Pass ``enable_thinking=True`` for the rare reasoning-on path.
+    Both prod and the eval harness build their models through here so their
+    request shape cannot drift as new call sites are added.
     """
+    if enable_thinking is None:
+        enable_thinking = os.getenv("ASSIST_ENABLE_THINKING") == "1"
     return select_chat_model(temperature, enable_thinking=enable_thinking)

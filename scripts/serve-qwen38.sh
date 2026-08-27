@@ -71,9 +71,9 @@ if [[ "$HOST" != "127.0.0.1" && "$HOST" != "::1" && -z "$API_KEY_FILE" && -z "${
     exit 1
 fi
 
-# Vision is enabled for the initial Qwen3.8 service.  It starts at 32k because
-# its projector needs its own VRAM and quality measurements.  Set
-# ENABLE_VISION=0 for the text-only 100k/Q8 and 128k/Q4 qualification tiers.
+# Vision requires its own 32k tier because the projector consumes VRAM.  The
+# deployed text profile sets ENABLE_VISION=0 to retain its qualified 131k
+# context; an operator can enable the separate vision tier when needed.
 if [[ "$ENABLE_VISION" == "1" && "$CTX_SIZE" -gt 32768 ]]; then
     echo "ERROR: vision is qualified only at 32768 tokens in this staged profile." >&2
     exit 1

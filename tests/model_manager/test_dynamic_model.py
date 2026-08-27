@@ -383,9 +383,9 @@ class TestSelectChatModel(TestCase):
 class TestSelectAssistantModel(TestCase):
     """``select_assistant_model`` is the prod/eval-shared constructor.
 
-    Its contract: reasoning OFF by default, overrideable to on.  The
-    whole point is that prod and the eval harness can't drift apart on
-    the reasoning setting, so these tests pin the default.
+    Its contract: reasoning is OFF by default, service-configurable, and
+    overrideable per caller.  The whole point is that prod and the eval
+    harness can't drift apart on request shape, so these tests pin it.
     """
 
     def test_defaults_thinking_off(self):
@@ -409,6 +409,15 @@ class TestSelectAssistantModel(TestCase):
             llm = model_manager.select_assistant_model(0.1, enable_thinking=True)
         eb = getattr(llm, "extra_body", None)
         self.assertFalse(eb, f"Expected no extra_body for True; got {eb!r}")
+
+    def test_service_can_enable_thinking(self):
+        """The Qwen3.8 service profile opts ordinary assistant turns in."""
+        with patch.dict(
+            "os.environ",
+            {"ASSIST_MODEL_URL": "http://x/v1", "ASSIST_ENABLE_THINKING": "1"},
+        ):
+            llm = model_manager.select_assistant_model(0.1)
+        self.assertFalse(getattr(llm, "extra_body", None))
 
 
 class TestRequestTimeoutAndRetries(TestCase):
