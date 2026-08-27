@@ -66,9 +66,13 @@ The final command must show that the old =ExecStart= is reset and replaced by
 
 For temporary experimentation only, the staged launcher accepts
 =REASONING=auto|on|off=, an optional integer =REASONING_BUDGET=, and an optional
-=REASONING_EFFORT=.  Its defaults are =auto=, unlimited, and the template
-default.  These controls require their own matched behavioral gate; do not add
-them to the service environment merely because a single evaluation improves.
+=REASONING_EFFORT=, and =REASONING_PRESERVE=0|1=.  Its defaults are =auto=,
+unlimited, the template default, and =1=. Set =REASONING_PRESERVE=0= when the
+matched tool-agent gate shows that full reasoning-history retention causes
+context growth or liveness loss; this retains only the latest assistant
+reasoning turn. These controls require their own matched behavioral gate; do
+not add them to the service environment merely because a single evaluation
+improves.
 
 1. Restart manually, then wait for the endpoint:
 

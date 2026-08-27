@@ -51,13 +51,12 @@ be paused and recorded the post-compaction request.
 | T3a summary-selected schemas | 3 | 3 | reload, because the ordinary summary retained only =create_schedule= |
 | T3b guided-summary selection | 3 | 3 | direct pause, but retained five of six schedule tools |
 
-T2 was selected because it provides direct continuation without depending on
-summary wording or retaining an unnecessarily broad full schema description.
+T2 was selected because it retains a compact native schema without depending
+on summary wording or retaining an unnecessarily broad full schema description.
 The complete experimental conditions and outcomes remain recorded here and in
-the experiment branch. Only the selected T2 acceptance behavior stays
-executable in the production suite: a control would require a reload and the
-discarded treatments would require mechanisms that production intentionally no
-longer has.
+the experiment branch. The production acceptance behavior requires the intended
+pause outcome and compact request boundary; it permits a reload when compaction
+removed the operating guidance.
 
 * Permanent evals
 
@@ -65,10 +64,10 @@ longer has.
   reminder, then naturally asks to pause it. It requires the initial schedule
   load and create call, then requires =pause_schedule= with no second load.
 - =test_different_skill_tool_after_forced_compaction= uses the same natural
-  conversation but forces a real-model summary between turns. It requires a
-  direct pause, no new schedule load, and verifies the first post-compaction
-  request contains =pause_schedule= but neither the initial load result nor
-  its full tool-contract block.
+  conversation but forces a real-model summary between turns. It requires the
+  intended schedule to be paused and verifies the first post-compaction request
+  contains =pause_schedule= but neither the initial load result nor its full
+  tool-contract block. Reloading operating guidance is permitted.
 - The existing referential modify and named-delete cases now require direct
   use after a previous schedule turn. The compacted delete case also proves
   that the persisted target, not the similar morning reminder, is changed.

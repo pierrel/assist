@@ -21,6 +21,8 @@ import shutil
 
 from unittest import TestCase
 
+from assist.spec import AgentSpec
+from assist.thread import Thread
 from assist.thread_manager import ThreadManager
 from assist.sandbox_manager import SandboxManager
 
@@ -30,8 +32,8 @@ class TestDevSkillMultiTurn(TestCase):
 
     def setUp(self):
         self.workspace = tempfile.mkdtemp()
-        # Project indicator so the general agent's prompt pre-loads the dev
-        # skill body (small-model reliability path).
+        # Project indicator for the model's development request. This local
+        # profile loads the dev skill through the ordinary skill route.
         with open(os.path.join(self.workspace, "pyproject.toml"), "w") as f:
             f.write('[project]\nname = "test-project"\n')
         self.sandbox = SandboxManager.get_sandbox_backend(self.workspace)
@@ -41,11 +43,24 @@ class TestDevSkillMultiTurn(TestCase):
 
     def tearDown(self):
         SandboxManager.cleanup(self.workspace)
+        self.thread_manager.close()
         if os.path.exists(self.workspace):
             shutil.rmtree(self.workspace, ignore_errors=True)
 
     def _new_thread(self):
-        return self.thread_manager.new(sandbox_backend=self.sandbox)
+        """Build the executable local profile, not web-only task tooling.
+
+        This is a direct ``Thread`` journey, not a durable web Run. Advertising
+        ``start_async_task`` here would make the model select a tool whose
+        required ``AsyncTaskContext`` the harness does not install.
+        """
+        return Thread(
+            self.workspace,
+            checkpointer=self.thread_manager.checkpointer,
+            model=self.thread_manager.model,
+            sandbox_backend=self.sandbox,
+            spec=AgentSpec(),
+        )
 
     def test_multi_turn_tdd_with_approvals(self):
         """Three user turns — feature request, approve plan, approve tests.

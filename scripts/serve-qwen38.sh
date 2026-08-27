@@ -18,6 +18,7 @@ FIT_TARGET_MIB="${FIT_TARGET_MIB:-1536}"
 REASONING="${REASONING:-auto}"
 REASONING_BUDGET="${REASONING_BUDGET:-}"
 REASONING_EFFORT="${REASONING_EFFORT:-}"
+REASONING_PRESERVE="${REASONING_PRESERVE:-1}"
 
 if [[ "$ENABLE_VISION" == "1" ]]; then
     CTX_SIZE="${CTX_SIZE:-32768}"
@@ -62,6 +63,10 @@ if [[ -n "$REASONING_EFFORT" ]]; then
             ;;
     esac
 fi
+if [[ "$REASONING_PRESERVE" != "0" && "$REASONING_PRESERVE" != "1" ]]; then
+    echo "ERROR: REASONING_PRESERVE must be 0 or 1." >&2
+    exit 1
+fi
 if [[ -n "$API_KEY_FILE" && ! -r "$API_KEY_FILE" ]]; then
     echo "ERROR: LLAMA_API_KEY_FILE is not readable: $API_KEY_FILE" >&2
     exit 1
@@ -96,8 +101,13 @@ args=(
     --threads "$THREADS"
     --jinja
     --reasoning "$REASONING"
-    --reasoning-preserve
 )
+
+if [[ "$REASONING_PRESERVE" == "1" ]]; then
+    args+=(--reasoning-preserve)
+else
+    args+=(--no-reasoning-preserve)
+fi
 
 if [[ -n "$REASONING_BUDGET" ]]; then
     args+=(--reasoning-budget "$REASONING_BUDGET")
@@ -113,5 +123,5 @@ if [[ -n "$API_KEY_FILE" ]]; then
     args+=(--api-key-file "$API_KEY_FILE")
 fi
 
-echo "Starting staged Qwen3.8 profile: host=$HOST:$PORT context=$CTX_SIZE KV=$KV_TYPE_K/$KV_TYPE_V vision=$ENABLE_VISION reasoning=$REASONING budget=${REASONING_BUDGET:-unlimited} effort=${REASONING_EFFORT:-default}"
+echo "Starting staged Qwen3.8 profile: host=$HOST:$PORT context=$CTX_SIZE KV=$KV_TYPE_K/$KV_TYPE_V vision=$ENABLE_VISION reasoning=$REASONING budget=${REASONING_BUDGET:-unlimited} effort=${REASONING_EFFORT:-default} preserve=$REASONING_PRESERVE"
 exec "$LLAMA_BIN" "${args[@]}"

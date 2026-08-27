@@ -1,6 +1,6 @@
 ---
 name: grounding
-description: Load this skill alone, before choosing another capability or looking up files, when answering or acting requires locating or interpreting the user's notes, plans, preferences, task lists, or earlier work outside /agent, or changing an existing user file whose location or format is not already established. Examples include “what do my notes say?”, “what do I usually prefer?”, and “add this to my list.” Use the discovered local facts to choose any later capability. Skip a self-contained request with no user-specific state, such as a calculation or displaying a named file or directory.
+description: "Load this skill alone, before choosing another capability or looking up files, when answering or acting requires locating or interpreting the user's notes, plans, preferences, task lists, or earlier work outside /agent, or changing an existing user file whose location or format is not already established. If an external lookup needs a date, name, place, or identifier from user files, grounding is the only first capability: do not load travel or research, or launch their work, until the context result supplies it. Examples include ‘what do my notes say?’, ‘what do I usually prefer?’, and ‘add this to my list.’ Use the discovered local facts to choose any later capability. Skip a self-contained request with no user-specific state, such as a calculation or displaying a named file or directory."
 ---
 
 # Grounding workflow
