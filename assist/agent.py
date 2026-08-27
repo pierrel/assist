@@ -739,7 +739,7 @@ def create_research_agent(model: BaseChatModel,
                           checkpointer=None,
                           middleware=[],
                           sandbox_backend=None,
-                          *, leaf: bool = False,
+                          *, leaf: bool = False, egress_tools=(),
                           trust_human_messages: bool = True) -> RollbackRunnable:
     """Create a DeepAgents-based agent suitable for general-purpose research replies.
 
@@ -924,9 +924,13 @@ def create_research_agent(model: BaseChatModel,
     # only layers that read_url.  This removes the orchestrator's URL-fabrication
     # surface entirely (it cannot 404-loop on a guessed URL if it has no read_url)
     # and enforces clean delegation instead of the orchestrator doing worker work.
+    # Only the direct web child receives the small egress-management surface.
+    # It is intentionally not ``execute``: approval may widen sandbox network
+    # access, but does not restore unrestricted shell authority to research.
+    leaf_tools = [search_internet, read_url, *egress_tools] if leaf else []
     agent = create_deep_agent(
         model=model,
-        tools=[search_internet, read_url] if leaf else [],
+        tools=leaf_tools,
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=(base_prompt_for("deepagents/sub_research.txt.j2") if leaf
                        else base_prompt_for(

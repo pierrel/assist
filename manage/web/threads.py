@@ -50,7 +50,10 @@ from langchain_core.messages import HumanMessage
 from assist.backlog import PendingMessage
 from assist.run_service import InvalidRunTransition, Run, RunNotFound
 from assist.async_subagents import AsyncTaskContext, async_task_context
-from assist.egress.store import resolution_prompt
+from assist.egress.store import EgressWaiter, resolution_prompt
+from assist.egress.tools import (EGRESS_ORIGIN_THREAD_ID,
+                                 EGRESS_WAITER_RUN_ID,
+                                 EGRESS_WAITER_THREAD_ID)
 from starlette.concurrency import run_in_threadpool
 from assist.middleware.interjection import (collect_interjection_ids,
                                             register_interjection_callbacks)
@@ -1703,6 +1706,25 @@ def _delegate_configurable(run: Run) -> dict | None:
     return {DELEGATE_USER_URLS_KEY: run.delegate_user_urls}
 
 
+def _child_configurable(run: Run) -> dict | None:
+    """Inject executor-owned identity for a child egress wait, if applicable."""
+    configurable = _delegate_configurable(run) or {}
+    if run.parent_thread_id is not None:
+        configurable.update({
+            EGRESS_ORIGIN_THREAD_ID: run.parent_thread_id,
+            EGRESS_WAITER_THREAD_ID: run.thread_id,
+            EGRESS_WAITER_RUN_ID: run.id,
+        })
+    return configurable or None
+
+
+def _child_awaits_egress(run: Run) -> bool:
+    if EGRESS_STORE is None or run.parent_thread_id is None:
+        return False
+    return EGRESS_STORE.has_pending_waiter(
+        run.parent_thread_id, EgressWaiter(run.thread_id, run.id))
+
+
 def _frequency_configurable(run: Run | None, *, sender: str | None,
                             assistant_id: str) -> dict | None:
     """Return the maintenance identity only for an ordinary visible web Run."""
@@ -1744,12 +1766,16 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                     chat = MANAGER.get(
                         run.thread_id, working_dir=parent_working_dir,
                         sandbox_backend=sandbox, assistant_id=run.assistant_id,
-                        configurable=_delegate_configurable(run))
-                    result = (chat.resume() if (resume or run.resume)
+                        configurable=_child_configurable(run))
+                    result = (chat.resume_action(run.resume_decision)
+                              if run.resume_decision is not None
+                              else chat.resume() if (resume or run.resume)
                               else chat.message(run.text or ""))
                     with _RUN_ADMISSION_LOCK:
                         run = _runs().transition(
-                            run.thread_id, run.id, "success", result=result)
+                            run.thread_id, run.id,
+                            "awaiting_approval" if _child_awaits_egress(run)
+                            else "success", result=result)
     except ThreadPauseRequested:
         carry = THREAD_QUEUE.pop_hold(run.thread_id)
         with _RUN_ADMISSION_LOCK:
@@ -1843,7 +1869,7 @@ def _recover_child_run(run: Run) -> None:
         chat = MANAGER.get(
             run.thread_id, working_dir=parent_working_dir, sandbox_backend=None,
             assistant_id=run.assistant_id,
-            configurable=_delegate_configurable(run))
+        configurable=_child_configurable(run))
         snap = chat.agent.get_state(chat.runconfig)
         if (getattr(snap, "next", None) or ()
                 or (getattr(snap, "interrupts", None) or ())):
@@ -3299,6 +3325,37 @@ def _dispatch_egress_resolution(tid: str) -> None:
     _mark_urgent(tid)
 
 
+def _resume_egress_waiters(tid: str) -> None:
+    """Resume only child Runs durably parked on this thread's resolved cards."""
+    if EGRESS_STORE is None:
+        return
+    for waiter in EGRESS_STORE.resolved_waiters(tid):
+        with _RUN_ADMISSION_LOCK:
+            try:
+                parked = _runs().get(waiter.thread_id, waiter.run_id)
+            except RunNotFound:
+                EGRESS_STORE.remove_waiter(tid, waiter)
+                continue
+            if (parked.status != "awaiting_approval"
+                    or parked.parent_thread_id != tid):
+                EGRESS_STORE.remove_waiter(tid, waiter)
+                continue
+            dispatch_key = f"egress-resume:{parked.id}"
+            if any(candidate.dispatch_key == dispatch_key
+                   for candidate in _runs().list(waiter.thread_id)):
+                EGRESS_STORE.remove_waiter(tid, waiter)
+                continue
+            successor = _create_run(
+                waiter.thread_id, None, assistant_id=parked.assistant_id,
+                mode="child", parent_thread_id=parked.parent_thread_id,
+                parent_run_id=parked.parent_run_id, dispatch_key=dispatch_key,
+                work_id=parked.work_id, resume_decision={"type": "approve"},
+                active_ms=parked.active_ms, origin=parked.origin,
+                delegate_user_urls=parked.delegate_user_urls)
+            EGRESS_STORE.remove_waiter(tid, waiter)
+        _RESUME_SCHEDULER.submit(successor.id, successor.thread_id)
+
+
 def _geo_on_complete(tid: str, message: str) -> None:
     """on_complete: deliver the region-ready (or -failed) message into the thread as a
     fresh turn + mark it urgent, so the agent picks the original request back up."""
@@ -3498,6 +3555,9 @@ def queue_recovery_runs() -> None:
             _recover_interrupted_child(child)
         elif child.status in {"success", "error", "timeout"}:
             _complete_child_handoff(child)
+
+    for tid in visible:
+        _resume_egress_waiters(tid)
 
     for tid in visible:
         abandoned = abandoned_by_tid[tid]

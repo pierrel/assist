@@ -140,6 +140,23 @@ class TestSubagentSafetyMiddleware(TestCase):
             and "read_url" in middleware._tools)
         self.assertTrue(offload._page_navigation)
 
+    def test_leaf_research_agent_has_egress_request_but_no_shell(self):
+        """Host approval does not widen a research child's authority to execute."""
+        from assist.agent import create_research_agent
+        from assist.egress.tools import egress_tools
+        from assist.egress.store import EgressStore
+
+        request, _, _ = egress_tools(EgressStore("/tmp/egress-test"), frozenset())
+        with patch("assist.agent.create_deep_agent") as create:
+            create.return_value = MagicMock()
+            create_research_agent(
+                MagicMock(), working_dir="/tmp/x", leaf=True,
+                egress_tools=(request,))
+
+        names = {getattr(tool, "name", getattr(tool, "__name__", None))
+                 for tool in create.call_args.kwargs["tools"]}
+        self.assertEqual(names, {"search_internet", "read_url", "request_egress"})
+
     def test_main_agent_dict_subagents_have_safety_mw(self):
         from assist.agent import create_agent
 

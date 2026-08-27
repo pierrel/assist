@@ -19,7 +19,7 @@ from assist.record_store import PerThreadJsonStore, RecordNotFound
 
 RunStatus = Literal[
     "pending", "running", "success", "error", "timeout", "interrupted",
-    "cancelled",
+    "cancelled", "awaiting_approval",
 ]
 RunMode = Literal["turn", "child"]
 
@@ -27,9 +27,10 @@ RUNS_FILE = "runs.json"
 # ``interrupted`` is terminal for that protocol invocation. Logical work continues in
 # a new run sharing work_id; recovery still reconciles interrupted parents explicitly.
 NONTERMINAL_STATUSES = frozenset({"pending", "running"})
+AWAITING_APPROVAL_STATUSES = frozenset({"awaiting_approval"})
 TERMINAL_STATUSES = frozenset(
     {"success", "error", "timeout", "interrupted", "cancelled"})
-_STATUSES = NONTERMINAL_STATUSES | TERMINAL_STATUSES
+_STATUSES = NONTERMINAL_STATUSES | AWAITING_APPROVAL_STATUSES | TERMINAL_STATUSES
 _MODES = frozenset({"turn", "child"})
 
 
@@ -133,10 +134,13 @@ _TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     # restart can never dispatch it as a second answer.
     "pending": frozenset({"running", "success", "timeout", "cancelled"}),
     "running": frozenset({"pending", "success", "error", "timeout",
-                           "interrupted", "cancelled"}),
+                           "interrupted", "cancelled", "awaiting_approval"}),
     # A protocol run that interrupts never becomes running again. Resumption creates a
     # NEW run on the same thread with the same logical work_id.
     "interrupted": frozenset({"cancelled"}),
+    # A user resolution starts a NEW child slice, preserving the interrupted
+    # graph checkpoint and leaving this parked invocation immutable.
+    "awaiting_approval": frozenset({"cancelled"}),
     "success": frozenset(),
     "error": frozenset(),
     "timeout": frozenset(),

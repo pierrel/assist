@@ -45,7 +45,7 @@ from assist.geo.proposals import ProposalStore
 from assist.geo.registry import RegionRegistry
 from assist.geo.tools import geo_tools
 from assist.thread_manager import (
-    ThreadManager, set_web_tools, set_web_triage_tools, set_web_interrupt_on,
+    ThreadManager, set_web_tools, set_web_egress_tools, set_web_triage_tools, set_web_interrupt_on,
     set_web_triage_interrupt_on)
 from assist.thread_engine import read_thread_engine
 from assist.pi_preview import PiPreviewPolicy
@@ -187,6 +187,7 @@ set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_S
               + notify_tools(lambda tid: _mark_urgent(tid))
               + _geo_tools + _egress_tools + email_tools() + [get_location]
               + frequency_tools(FREQUENCY_STORE))
+set_web_egress_tools(_egress_tools)
 set_web_triage_tools(reply_tools())
 set_web_interrupt_on(EMAIL_INTERRUPT_ON)
 set_web_triage_interrupt_on(REPLY_INTERRUPT_ON)

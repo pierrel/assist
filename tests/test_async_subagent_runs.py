@@ -16,6 +16,7 @@ from assist.async_subagents import (
     configure_async_subagent_app,
 )
 from assist.middleware.url_provenance import DELEGATE_USER_URLS_KEY
+from assist.egress.store import EgressRequest, EgressStore, EgressWaiter, request_key
 from manage.web.protocol_service import SERVICE
 
 
@@ -85,6 +86,63 @@ def test_child_sandbox_explicitly_omits_parent_agent_mount(monkeypatch, tmp_path
     threads._execute_child_run(child)
 
     assert sandbox_calls == [("parent", {"include_agent": False})]
+
+
+def test_child_egress_wait_releases_then_resumes_only_its_run(monkeypatch, tmp_path):
+    submitted, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run(
+        "sub-stable", "research-agent", "inspect jobs", metadata=metadata)
+    store = EgressStore(str(tmp_path / "egress"))
+    key = request_key("parent", "api.example.com", 443)
+    waiter = EgressWaiter(child.thread_id, child.id)
+    store.add_pending(EgressRequest(
+        host="api.example.com", port=443, task="inspect jobs", origin_tid="parent",
+        waiters=(waiter,)))
+    monkeypatch.setattr(threads, "EGRESS_STORE", store)
+    monkeypatch.setattr(threads, "_get_sandbox_backend", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        threads.MANAGER, "get",
+        lambda *args, **kwargs: SimpleNamespace(message=lambda text: "parked"))
+
+    threads._execute_child_run(child)
+
+    assert threads._runs().get(child.thread_id, child.id).status == "awaiting_approval"
+    assert SERVICE.get_thread(child.thread_id)["values"]["async_task"]["status"] == "awaiting_approval"
+    assert submitted == [(child.id, child.thread_id, {})]
+
+    store.resolve(key, "hour")
+    threads._resume_egress_waiters("parent")
+    resumes = [run for run in threads._runs().list(child.thread_id)
+               if run.dispatch_key == f"egress-resume:{child.id}"]
+    assert len(resumes) == 1
+    assert resumes[0].resume_decision == {"type": "approve"}
+    assert submitted[-1] == (resumes[0].id, child.thread_id, {})
+
+    threads._resume_egress_waiters("parent")
+    assert len([run for run in threads._runs().list(child.thread_id)
+                if run.dispatch_key == f"egress-resume:{child.id}"]) == 1
+
+
+def test_resolved_egress_never_resumes_cancelled_child(monkeypatch, tmp_path):
+    submitted, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run(
+        "sub-stable", "research-agent", "inspect jobs", metadata=metadata)
+    child = threads._runs().claim(child.thread_id, child.id)
+    child = threads._runs().transition(child.thread_id, child.id, "awaiting_approval")
+    store = EgressStore(str(tmp_path / "egress"))
+    key = request_key("parent", "api.example.com", 443)
+    waiter = EgressWaiter(child.thread_id, child.id)
+    store.add_pending(EgressRequest(
+        host="api.example.com", port=443, task="inspect jobs", origin_tid="parent",
+        waiters=(waiter,)))
+    store.resolve(key, "hour")
+    threads._runs().cancel(child.thread_id, child.id)
+    monkeypatch.setattr(threads, "EGRESS_STORE", store)
+
+    threads._resume_egress_waiters("parent")
+
+    assert store.resolved_waiters("parent") == []
+    assert submitted == [(child.id, child.thread_id, {})]
 
 
 def test_task_thread_replay_does_not_rewrite_its_identity(monkeypatch, tmp_path):

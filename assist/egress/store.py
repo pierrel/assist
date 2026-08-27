@@ -70,6 +70,29 @@ def approvals_dir_is_safe(egress_dir: str) -> bool:
 
 
 @dataclass(frozen=True)
+class EgressWaiter:
+    """One hidden child Run parked on a visible thread's egress request."""
+
+    thread_id: str
+    run_id: str
+
+    def to_dict(self) -> dict:
+        return {"thread_id": self.thread_id, "run_id": self.run_id}
+
+    @staticmethod
+    def from_dict(value: object) -> "EgressWaiter | None":
+        if not isinstance(value, dict):
+            return None
+        thread_id = value.get("thread_id")
+        run_id = value.get("run_id")
+        if not isinstance(thread_id, str) or not isinstance(run_id, str):
+            return None
+        if not thread_id or not run_id or len(thread_id) > 128 or len(run_id) > 128:
+            return None
+        return EgressWaiter(thread_id, run_id)
+
+
+@dataclass(frozen=True)
 class EgressRequest:
     host: str
     port: int
@@ -83,16 +106,28 @@ class EgressRequest:
     # so an old decline or a long-lived always-grant is not re-announced (or
     # its task re-run) on every later batch.
     dispatched: bool = False
+    # Legacy/main requests receive the existing resolution prompt. A child-only
+    # request is resumed through its exact waiters instead; sending its task to
+    # the main graph would recreate the cross-agent retry this design removes.
+    dispatch_main: bool = True
+    # Hidden child Runs that have checkpointed immediately after requesting
+    # this same host.  This is deliberately separate from ``task``: a card is
+    # scoped to the visible thread, while a resume must target one exact child.
+    waiters: tuple[EgressWaiter, ...] = ()
 
     @property
     def key(self) -> str:
         return request_key(self.origin_tid, self.host, self.port)
 
     def to_dict(self) -> dict:
-        return {"host": self.host, "port": self.port, "task": self.task,
+        value = {"host": self.host, "port": self.port, "task": self.task,
                 "origin_tid": self.origin_tid, "created_at": self.created_at,
                 "state": self.state, "expires_at": self.expires_at,
-                "dispatched": self.dispatched}
+                "dispatched": self.dispatched,
+                "dispatch_main": self.dispatch_main}
+        if self.waiters:
+            value["waiters"] = [waiter.to_dict() for waiter in self.waiters]
+        return value
 
     @staticmethod
     def from_dict(d: dict) -> "EgressRequest | None":
@@ -103,6 +138,9 @@ class EgressRequest:
             state = d.get("state", "pending")
             if state not in ("pending", "approved", "declined"):
                 return None     # unknown state: skip, don't persist garbage
+            raw_waiters = d.get("waiters", [])
+            if not isinstance(raw_waiters, list):
+                raw_waiters = []
             return EgressRequest(
                 host=host, port=port, task=str(d.get("task", "")),
                 origin_tid=tid, created_at=str(d.get("created_at", "")),
@@ -110,7 +148,10 @@ class EgressRequest:
                 expires_at=str(d.get("expires_at", "")),
                 # strict identity check: bool("false") is True — only a real
                 # JSON true may mark a record announced/prunable
-                dispatched=(d.get("dispatched") is True))
+                dispatched=(d.get("dispatched") is True),
+                dispatch_main=(d.get("dispatch_main") is not False),
+                waiters=tuple(waiter for value in raw_waiters
+                              if (waiter := EgressWaiter.from_dict(value)) is not None))
         except Exception:
             logger.warning("egress: malformed request record skipped: %.120r", d)
             return None
@@ -203,6 +244,8 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
         when refused, None on success."""
         with self._lock:
             recs = self._load()
+            if rec.key in recs:
+                return "existing"
             pending = [r for r in recs.values() if r.state == "pending"]
             if sum(1 for r in pending if r.origin_tid == rec.origin_tid) \
                     >= self.PER_THREAD_PENDING_CAP:
@@ -246,6 +289,18 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
             self._mutate(recs)
             return True
 
+    def discard_expired(self, key: str) -> bool:
+        """Drop an expired approval before a new request reuses its key."""
+        with self._lock:
+            recs = self._load()
+            rec = recs.get(key)
+            if rec is None or rec.state != "approved" \
+                    or _grant_live(rec, datetime.now(timezone.utc)):
+                return False
+            del recs[key]
+            self._mutate(recs)
+            return True
+
     def take_undispatched(self, tid: str) -> list[EgressRequest]:
         """Collect the thread's never-dispatched resolutions (approved live +
         declined) and mark them dispatched, atomically — the ONE resolution
@@ -257,15 +312,67 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
             # once by design (re-running an approved grant's task on retry
             # would be worse than losing one announcement; the BackgroundTask-
             # turn precedent already accepts crash loss).
-            batch = [r for r in recs.values()
-                     if r.origin_tid == tid and not r.dispatched
-                     and (r.state == "declined"
-                          or (r.state == "approved" and _grant_live(r, now)))]
-            for r in batch:
+            resolved = [r for r in recs.values()
+                        if r.origin_tid == tid and not r.dispatched
+                        and (r.state == "declined"
+                             or (r.state == "approved" and _grant_live(r, now)))]
+            for r in resolved:
                 recs[r.key] = replace(r, dispatched=True)
-            if batch:
+            if resolved:
                 self._mutate(recs)
-            return batch
+            return [r for r in resolved if r.dispatch_main]
+
+    def wait_for_resolution(self, key: str, waiter: EgressWaiter) -> EgressRequest | None:
+        """Attach one child Run to a pending request and return its current record.
+
+        The insert and state read share the store lock: an approval racing a
+        child cannot leave a newly parked Run stranded on an already-resolved
+        card.  Repeating the tool superstep after a LangGraph interrupt is
+        idempotent.
+        """
+        with self._lock:
+            recs = self._load()
+            rec = recs.get(key)
+            if rec is None:
+                return None
+            if rec.state == "pending" and waiter not in rec.waiters:
+                rec = replace(rec, waiters=(*rec.waiters, waiter))
+                recs[key] = rec
+                self._mutate(recs)
+            return rec
+
+    def resolved_waiters(self, tid: str) -> list[EgressWaiter]:
+        """Read exact child waiters after a visible thread's final card resolves."""
+        with self._lock:
+            result: list[EgressWaiter] = []
+            for rec in self._load().values():
+                if rec.origin_tid != tid or not rec.waiters:
+                    continue
+                if rec.state == "pending":
+                    continue
+                result.extend(rec.waiters)
+            return result
+
+    def remove_waiter(self, tid: str, waiter: EgressWaiter) -> bool:
+        """Forget a waiter only after its durable successor was committed."""
+        with self._lock:
+            recs = self._load()
+            changed = False
+            for key, rec in list(recs.items()):
+                if rec.origin_tid == tid and waiter in rec.waiters:
+                    recs[key] = replace(
+                        rec, waiters=tuple(item for item in rec.waiters
+                                           if item != waiter))
+                    changed = True
+            if changed:
+                self._mutate(recs)
+            return changed
+
+    def has_pending_waiter(self, tid: str, waiter: EgressWaiter) -> bool:
+        """Whether this exact child Run is parked on an unresolved card."""
+        with self._lock:
+            return any(rec.origin_tid == tid and rec.state == "pending"
+                       and waiter in rec.waiters for rec in self._load().values())
 
     def remove_thread(self, tid: str) -> int:
         """Thread deletion: a grant never outlives its scope."""

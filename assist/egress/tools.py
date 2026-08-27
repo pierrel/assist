@@ -27,8 +27,9 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from langgraph.config import get_config
+from langgraph.types import interrupt
 
-from assist.egress.store import (EgressRequest, EgressStore,
+from assist.egress.store import (EgressRequest, EgressStore, EgressWaiter,
                                  remaining_lifetime, request_key)
 
 _HOST_RE = re.compile(r"[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?")
@@ -39,6 +40,9 @@ _LABEL_RE = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
 # Base-infra names never proposable: already granted host-wide, and a grant
 # record for them would only be a rebinding-adjacent foothold.
 _INFRA_HOSTS = {"host.docker.internal", "10.0.0.1"}
+EGRESS_ORIGIN_THREAD_ID = "egress_origin_thread_id"
+EGRESS_WAITER_THREAD_ID = "egress_waiter_thread_id"
+EGRESS_WAITER_RUN_ID = "egress_waiter_run_id"
 
 
 def _thread_id() -> str | None:
@@ -47,6 +51,28 @@ def _thread_id() -> str | None:
     except RuntimeError:   # outside a langgraph runtime (direct call in a test)
         return None
     return str(tid) if tid is not None else None
+
+
+def _child_waiter() -> EgressWaiter | None:
+    """Return a web executor-injected child identity, never model arguments."""
+    try:
+        configurable = ((get_config() or {}).get("configurable") or {})
+    except RuntimeError:
+        return None
+    task_id = configurable.get(EGRESS_WAITER_THREAD_ID)
+    run_id = configurable.get(EGRESS_WAITER_RUN_ID)
+    if not isinstance(task_id, str) or not isinstance(run_id, str):
+        return None
+    return EgressWaiter(task_id, run_id)
+
+
+def _origin_thread_id() -> str | None:
+    try:
+        configurable = ((get_config() or {}).get("configurable") or {})
+    except RuntimeError:
+        return _thread_id()
+    origin = configurable.get(EGRESS_ORIGIN_THREAD_ID)
+    return origin if isinstance(origin, str) and origin else _thread_id()
 
 
 def _parse_host_port(host, port):
@@ -113,14 +139,13 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
         card appears in this thread and access starts only when the user
         approves it.
 
-        ``task`` must be a complete instruction for your future self: after
-        approval a follow-up turn runs with exactly this text, so include
-        what to fetch and what to do with it (if the work already succeeded
-        by then, just confirm). If you already know you need several hosts,
-        request them ALL before ending your turn — the follow-up runs once,
-        after the user resolves every pending request. After calling this,
-        tell the user approval is waiting in this thread and do NOT retry
-        the blocked command until approved.
+        ``task`` must be a complete instruction for an ordinary agent's
+        follow-up turn after approval. An async child instead checkpoints here
+        and the exact child resumes after the decision. If you already know
+        you need several hosts, request them ALL before ending your turn — an
+        ordinary follow-up runs once after the user resolves every pending
+        request. After calling this, tell the user approval is waiting in this
+        thread and do NOT retry the blocked command until approved.
         """
         h, p, err = _parse_host_port(host, port)
         if err:
@@ -128,14 +153,33 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
         if h in base_hosts:
             return (f"{h} is already on the base allowlist (any port) — "
                     "no request needed; just retry your command.")
-        tid = _thread_id()
+        tid = _origin_thread_id()
         if not tid:
             return "Couldn't record the request: no active thread."
         existing = {r.key: r for r in store.for_thread(tid)}
         key = request_key(tid, h, p)
         rec = existing.get(key)
+        if rec is None and store.discard_expired(key):
+            # ``for_thread`` correctly hides expired grants; remove the stale
+            # raw record too, otherwise a resumed child would be told to retry
+            # a proxy-denied connection forever.
+            rec = None
+        waiter = _child_waiter()
         if rec is not None:
             if rec.state == "pending":
+                if waiter is not None:
+                    current = store.wait_for_resolution(key, waiter)
+                    if current is not None and current.state == "pending":
+                        interrupt({"egress_request": key})
+                        rec = store.get(key)
+                    else:
+                        rec = current
+                    if rec is not None and rec.state != "pending":
+                        if rec.state == "declined":
+                            return (f"The user already DECLINED access to {h}:{p} — do "
+                                    "not re-ask; proceed without it.")
+                        return (f"{h}:{p} is already approved for this thread — just "
+                                "retry your command.")
                 return (f"{h}:{p} is already awaiting the user's approval "
                         "in this thread — stop retrying and finish your "
                         "answer.")
@@ -148,6 +192,7 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
             host=h, port=p,
             task=" ".join(str(task or "").split())[:500],
             origin_tid=tid,
+            dispatch_main=(waiter is None),
             created_at=datetime.now(timezone.utc).isoformat()))
         if refused == "thread-cap":
             return ("This thread already has several requests awaiting "
@@ -156,7 +201,22 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
         if refused == "global-cap":
             return ("Too many requests are already awaiting approval across "
                     "threads — tell the user and don't request more for now.")
+        if refused == "existing":
+            # A sibling child won the insert race. Re-enter the existing-record
+            # path so this child joins its card instead of publishing a second
+            # story about the same approval.
+            return request_egress(h, p, task)
         _event(tid, "egress_requested", host=h, port=p)
+        if waiter is not None:
+            current = store.wait_for_resolution(key, waiter)
+            if current is not None and current.state == "pending":
+                interrupt({"egress_request": key})
+                current = store.get(key)
+            if current is not None and current.state != "pending":
+                if current.state == "declined":
+                    return (f"The user DECLINED access to {h}:{p} — do not re-ask; "
+                            "proceed without it.")
+                return f"{h}:{p} is approved for this thread — retry your command."
         return (f"Recorded — access to {h}:{p} now awaits the user's "
                 "approval in this thread. Finish your answer, tell the user "
                 "approval is needed, and do NOT retry until approved.")

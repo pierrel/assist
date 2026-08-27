@@ -27,7 +27,8 @@ from assist.egress.store import remaining_lifetime, request_key
 from manage.web.app import app
 from manage.web.state import EGRESS_CSRF, EGRESS_STORE, MANAGER
 from manage.web.threads import (_FAVICON_LINKS, _PULL_TO_REFRESH_SCRIPT,
-                                _dispatch_egress_resolution, _require_deep_thread)
+                                _dispatch_egress_resolution,
+                                _resume_egress_waiters, _require_deep_thread)
 
 
 def _require_egress():
@@ -151,4 +152,5 @@ async def egress_action(decision: str, request: Request,
             _resolve_record, tid, host, port, decision)
         if batch_ready:
             background_tasks.add_task(_dispatch_egress_resolution, tid)
+            background_tasks.add_task(_resume_egress_waiters, tid)
     return RedirectResponse(_next(form), status_code=303)
