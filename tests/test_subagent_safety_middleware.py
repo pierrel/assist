@@ -9,6 +9,7 @@ the runaway/empty-response failure modes the rest of the agent stack
 defends against.  This test pins that protection so a future refactor
 of the dict specs cannot silently drop it.
 """
+from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
@@ -147,9 +148,10 @@ class TestSubagentSafetyMiddleware(TestCase):
         from assist.egress.store import EgressStore
         from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 
-        request, _, _ = egress_tools(EgressStore("/tmp/egress-test"), frozenset())
-        with patch("assist.agent.create_deep_agent") as create, \
+        with TemporaryDirectory() as egress_dir, \
+             patch("assist.agent.create_deep_agent") as create, \
              patch("assist.agent.supports_execution", return_value=True):
+            request, _, _ = egress_tools(EgressStore(egress_dir), frozenset())
             create.return_value = MagicMock()
             create_research_agent(
                 MagicMock(), working_dir="/tmp/x", leaf=True,
@@ -170,9 +172,10 @@ class TestSubagentSafetyMiddleware(TestCase):
         from assist.egress.store import EgressStore
         from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 
-        request, _, _ = egress_tools(EgressStore("/tmp/egress-test"), frozenset())
-        with patch("assist.agent.create_deep_agent") as create, \
+        with TemporaryDirectory() as egress_dir, \
+             patch("assist.agent.create_deep_agent") as create, \
              patch("assist.agent.supports_execution", return_value=True):
+            request, _, _ = egress_tools(EgressStore(egress_dir), frozenset())
             create.return_value = MagicMock()
             create_research_agent(
                 MagicMock(), working_dir="/tmp/x", egress_tools=(request,))
@@ -194,16 +197,17 @@ class TestSubagentSafetyMiddleware(TestCase):
         from assist.egress.store import EgressStore
         from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 
-        request, listing, remove = egress_tools(
-            EgressStore("/tmp/egress-test"), frozenset())
-        backend = create_composite_backend("/tmp/x")
-        middleware = SmallModelSkillsMiddleware(
-            backend=backend, sources=[SKILLS_ROUTE],
-            bundled_sources=[SKILLS_ROUTE], gated_sources=[SKILLS_ROUTE],
-            registered_tools=("request_egress", "list_allowed_hosts", "remove_allowed_host"),
-            tool_definitions=(request, listing, remove), skill_names={"egress"})
+        with TemporaryDirectory() as egress_dir:
+            request, listing, remove = egress_tools(
+                EgressStore(egress_dir), frozenset())
+            backend = create_composite_backend("/tmp/x")
+            middleware = SmallModelSkillsMiddleware(
+                backend=backend, sources=[SKILLS_ROUTE],
+                bundled_sources=[SKILLS_ROUTE], gated_sources=[SKILLS_ROUTE],
+                registered_tools=("request_egress", "list_allowed_hosts", "remove_allowed_host"),
+                tool_definitions=(request, listing, remove), skill_names={"egress"})
 
-        skills, _, _ = middleware._catalog_snapshot(backend)
+            skills, _, _ = middleware._catalog_snapshot(backend)
         self.assertEqual([skill["name"] for skill in skills], ["egress"])
 
     def test_main_agent_dict_subagents_have_safety_mw(self):
