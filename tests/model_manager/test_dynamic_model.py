@@ -383,9 +383,10 @@ class TestSelectChatModel(TestCase):
 class TestSelectAssistantModel(TestCase):
     """``select_assistant_model`` is the prod/eval-shared constructor.
 
-    Its contract: reasoning is OFF by default, service-configurable, and
-    overrideable per caller.  The whole point is that prod and the eval
-    harness can't drift apart on request shape, so these tests pin it.
+    Its contract: the established Qwen3.6 service disables reasoning, while
+    Qwen3.8 uses its native thinking mode.  Callers can explicitly override
+    either profile.  The whole point is that prod and the eval harness can't
+    drift apart on request shape, so these tests pin it.
     """
 
     def test_defaults_thinking_off(self):
@@ -410,15 +411,6 @@ class TestSelectAssistantModel(TestCase):
         eb = getattr(llm, "extra_body", None)
         self.assertFalse(eb, f"Expected no extra_body for True; got {eb!r}")
 
-    def test_service_can_enable_thinking(self):
-        """The Qwen3.8 service profile opts ordinary assistant turns in."""
-        with patch.dict(
-            "os.environ",
-            {"ASSIST_MODEL_URL": "http://x/v1", "ASSIST_ENABLE_THINKING": "1"},
-        ):
-            llm = model_manager.select_assistant_model(0.1)
-        self.assertFalse(getattr(llm, "extra_body", None))
-
     def test_qwen38_enables_thinking_without_service_override(self):
         """A Qwen3.8 endpoint gets its native reasoning request by default."""
         config = model_manager.OpenAIConfig(
@@ -430,7 +422,7 @@ class TestSelectAssistantModel(TestCase):
         with patch.object(model_manager, "current_model_config", return_value=config), \
              patch.object(model_manager, "select_chat_model") as select:
             model_manager.select_assistant_model(0.1)
-        select.assert_called_once_with(1.0, enable_thinking=True)
+        select.assert_called_once_with(0.1, enable_thinking=True)
 
 
 class TestRequestTimeoutAndRetries(TestCase):
