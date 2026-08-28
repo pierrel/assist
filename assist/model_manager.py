@@ -340,11 +340,11 @@ def select_chat_model(
 
     ``enable_thinking`` (default ``None``): see
     ``_build_openai_chat_model``.  Most callers should use
-    :func:`select_assistant_model` instead, which defaults Qwen3
-    reasoning OFF to match production; this lower-level entry point
-    leaves the upstream behavior alone unless told otherwise and is for
-    callers that need that (e.g. the reasoning-impact A/B eval, which
-    passes an explicit flag).
+    :func:`select_assistant_model` instead, which disables reasoning for
+    Qwen3.6 and preserves Qwen3.8's native thinking mode.  This
+    lower-level entry point leaves upstream behavior alone unless told
+    otherwise and is for callers that need that (e.g. the
+    reasoning-impact A/B eval, which passes an explicit flag).
     """
 
     config = _get_config()
@@ -380,5 +380,7 @@ def select_assistant_model(
     request shape cannot drift as new call sites are added.
     """
     if enable_thinking is None:
-        enable_thinking = "qwen3.8" in current_model_config().model.lower()
+        config = _get_config()
+        if config is not None:
+            enable_thinking = "qwen3.8" in config.model.lower()
     return select_chat_model(temperature, enable_thinking=enable_thinking)

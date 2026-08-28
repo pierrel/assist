@@ -9,11 +9,12 @@ from assist.promptable import env
 def pytest_configure():
     """Optionally force one reasoning mode for a focused model comparison.
 
-    The production-facing model factory defaults reasoning off.  A migration
-    experiment can set ``ASSIST_EVAL_REASONING_MODE=on`` to make eval modules
-    imported afterwards use the otherwise identical reasoning-on factory.
-    This is opt-in and eval-only: ordinary tests and Assist itself retain the
-    production default.
+    The production-facing model factory disables Qwen3.6 reasoning and keeps
+    Qwen3.8's native thinking mode.  A migration experiment can set
+    ``ASSIST_EVAL_REASONING_MODE=on`` to make eval modules imported afterwards
+    use the otherwise identical reasoning-on factory.  This is opt-in and
+    eval-only: ordinary tests and Assist itself retain their model-specific
+    default.
     """
     mode = os.environ.get("ASSIST_EVAL_REASONING_MODE")
     if mode is None:

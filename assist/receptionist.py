@@ -158,9 +158,9 @@ def create_receptionist(tools, domains):
     The three protective middleware are load-bearing on a phone call, not polish:
     EmptyResponseRecovery (a bare empty/<think>-only AIMessage would end the turn in
     dead air), ModelRetry (ChatOpenAI is built max_retries=0), BadRequestRetry (the
-    400 class). The model is built thinking-OFF with per-phase timeouts (a thinking
-    router would burn its latency budget on <think> tokens the caller never hears; a
-    hung first token is unbounded dead air)."""
+    400 class). The model uses Assist's model-specific thinking profile with per-phase
+    timeouts (a Qwen3.6 thinking router would burn its latency budget on <think> tokens
+    the caller never hears; a hung first token is unbounded dead air)."""
     # aliased: this is LangChain's vanilla create_agent, NOT assist.agent.create_agent
     # (the deepagent builder used everywhere else) — the distinction is the whole point.
     from langchain.agents import create_agent as create_langchain_agent
@@ -173,7 +173,7 @@ def create_receptionist(tools, domains):
     from assist.promptable import base_prompt_for
 
     return create_langchain_agent(
-        select_assistant_model(0.1),                # enable_thinking=False default + timeouts
+        select_assistant_model(0.1),                # model-specific thinking profile + timeouts
         tools,
         system_prompt=base_prompt_for("receptionist_system.md.j2", domains=domains),
         middleware=[_make_retry_middleware(),

@@ -389,9 +389,8 @@ class TestSelectAssistantModel(TestCase):
     drift apart on request shape, so these tests pin it.
     """
 
-    def test_defaults_thinking_off(self):
-        """No flag -> reasoning off (``chat_template_kwargs`` payload),
-        matching the production ``Thread`` config.
+    def test_qwen36_defaults_thinking_off(self):
+        """A Qwen3.6 endpoint gets the reasoning-off payload by default.
         """
         with patch.dict("os.environ", {"ASSIST_MODEL_URL": "http://x/v1"}):
             llm = model_manager.select_assistant_model(0.1)
@@ -401,6 +400,14 @@ class TestSelectAssistantModel(TestCase):
             {"enable_thinking": False},
             f"default should disable thinking; got {eb!r}",
         )
+
+    def test_missing_endpoint_keeps_select_chat_model_error(self):
+        """Missing configuration retains the established actionable error."""
+        with patch.dict("os.environ", {"ASSIST_MODEL_URL": ""}):
+            with self.assertRaisesRegex(
+                RuntimeError, "ASSIST_MODEL_URL is required"
+            ):
+                model_manager.select_assistant_model(0.1)
 
     def test_enable_thinking_true_opts_back_in(self):
         """``enable_thinking=True`` is the rare reasoning-on path; it
@@ -419,7 +426,7 @@ class TestSelectAssistantModel(TestCase):
             api_key="EMPTY",
             context_len=131072,
         )
-        with patch.object(model_manager, "current_model_config", return_value=config), \
+        with patch.object(model_manager, "_get_config", return_value=config), \
              patch.object(model_manager, "select_chat_model") as select:
             model_manager.select_assistant_model(0.1)
         select.assert_called_once_with(0.1, enable_thinking=True)
