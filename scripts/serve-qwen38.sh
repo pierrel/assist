@@ -3,7 +3,7 @@
 # service is stopped; it does not alter the service configuration.
 set -euo pipefail
 
-LLAMA_ROOT="${LLAMA_ROOT:-$HOME/llama-cpp}"
+: "${LLAMA_ROOT:?Set LLAMA_ROOT to the directory containing llama.cpp, models, and scripts.}"
 LLAMA_BIN="${LLAMA_BIN:-$LLAMA_ROOT/llama.cpp/build/bin/llama-server}"
 MODEL_PATH="${MODEL_PATH:-$LLAMA_ROOT/models/Qwen3.8-27B-UD-Q4_K_XL/Qwen3.8-27B-UD-Q4_K_XL.gguf}"
 MMPROJ_PATH="${MMPROJ_PATH:-$LLAMA_ROOT/models/Qwen3.8-27B-UD-Q4_K_XL/mmproj-F16.gguf}"
@@ -71,8 +71,8 @@ if [[ -n "$API_KEY_FILE" && ! -r "$API_KEY_FILE" ]]; then
     echo "ERROR: LLAMA_API_KEY_FILE is not readable: $API_KEY_FILE" >&2
     exit 1
 fi
-if [[ "$HOST" != "127.0.0.1" && "$HOST" != "::1" && -z "$API_KEY_FILE" && -z "${LLAMA_API_KEY:-}" ]]; then
-    echo "ERROR: a non-loopback listener requires LLAMA_API_KEY or LLAMA_API_KEY_FILE." >&2
+if [[ "$HOST" != "127.0.0.1" && "$HOST" != "::1" && -z "$API_KEY_FILE" ]]; then
+    echo "ERROR: a non-loopback listener requires LLAMA_API_KEY_FILE." >&2
     exit 1
 fi
 
