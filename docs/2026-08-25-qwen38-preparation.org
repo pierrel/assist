@@ -22,18 +22,17 @@ eval panel and explicit operator action.
 3. Keep the initial vision tier bounded.  The projector consumes additional
    VRAM, so a measured vision tier is required before increasing its context;
    it does not displace the 128k text target by assumption.
-4. Preserve a one-command rollback: removing the systemd override restores
-   the existing Qwen3.6 =ExecStart=.
+4. Keep rollback simple: stop the manual launcher, then start the unchanged
+   Qwen3.6 service.
 
-The preparation uses =scripts/serve-qwen38.sh= and
-=scripts/llamacpp-qwen38.override.conf=.  They are staged files, not active
-service configuration.  [[file:2026-08-25-qwen38-operator-runbook.org][The
+The preparation uses =scripts/serve-qwen38.sh= only. It is a manually launched
+profile, not service configuration. [[file:2026-08-25-qwen38-operator-runbook.org][The
 operator runbook]] is the required manual sequence.
 
 * Design review notes
 
-- Simplicity: one isolated launcher and one small systemd override avoid a
-  conditional rewrite of the live Qwen3.6 script.
+- Simplicity: one isolated manual launcher avoids a conditional rewrite of the
+  live Qwen3.6 script or any service override.
 - Model fit: Qwen3.8 has 16 full-attention layers, so KV-cache precision is
   the decisive long-context control.  Vision starts enabled at 32k; its
   projector is intentionally disabled for the 100k and 131,072-token text
@@ -44,8 +43,8 @@ operator runbook]] is the required manual sequence.
   discovery, =--jinja= tool calling, and one-slot latency profile.
 - Security and liveness: the staged launcher defaults to loopback, restricts
   CORS to localhost, and refuses a non-loopback bind without an API key.  It
-  requires full GPU offload and leaves the existing service unchanged until
-  the operator's explicit systemd restart.
+  requires full GPU offload and leaves the existing service configuration
+  unchanged.
 
 * Baseline panel
 
@@ -153,7 +152,7 @@ provider request.  The rerun and the two subsequent attempts all answered
 
 ** Assist behavior and reasoning experiment
 
-Production uses =enable_thinking=false=.  In that mode Qwen3.8 passed memory
+The first Qwen3.8 profile used =enable_thinking=false=. In that mode it passed memory
 3/3 (24s each) and schedule-through-compaction 3/3 (35s, 20s, 19s), but the
 first delegate-research trial made three delegates instead of exactly one
 (65s, fail), and the first read-URL injection trial looped after the search

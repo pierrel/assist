@@ -3,10 +3,10 @@
 
 * Problem
 
-The first Qwen3.8 behavioral panel was not a valid promotion gate.  It used
-thinking disabled at temperature 0.1 even though Qwen3.8's thinking profile is
-enabled and uses temperature 1.0.  It also treated a tool trace as the user
-outcome in two cases.  Qwen3.8 follows the present skill and tool contracts
+The first Qwen3.8 behavioral panel was not a valid promotion gate. It used
+thinking disabled, so it did not measure the staged native-thinking profile at
+Assist's fixed temperature 0.1. It also treated a tool trace as the user
+outcome in two cases. Qwen3.8 follows the present skill and tool contracts
 more literally than Qwen3.6, exposing both harness mismatches and conflicting
 guidance.
 
@@ -53,7 +53,7 @@ The repair is deliberately narrow.
    delegate outcome assertions before any optional single-dispatch efficiency
    diagnostic.
 5. Run the repaired rows against Qwen3.8's live low-effort, native-thinking,
-   no-history-preservation, 1.0-temperature profile.  Compare user outcomes
+   no-history-preservation, 0.1-temperature profile. Compare user outcomes
    and safety boundaries with Qwen3.6; report extra tool calls as performance
    diagnostics, not failures.
 
@@ -67,8 +67,8 @@ passed in 123.36 seconds with =--no-reasoning-preserve=.  llama.cpp still keeps
 the last assistant reasoning turn; it simply does not re-inject every earlier
 trace.
 
-The staged launcher therefore exposes =REASONING_PRESERVE=0|1= and the Qwen3.8
-override selects =0=.  The final staged profile passed:
+The staged launcher therefore exposes =REASONING_PRESERVE=0|1=; the measured
+manual Qwen3.8 profile used =0=. The final staged profile passed:
 
 - forced-compaction schedule outcome, 37.87 seconds;
 - local-date-to-research handoff, 49.99 seconds;

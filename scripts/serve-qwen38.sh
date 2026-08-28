@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Staged Qwen3.8 llama.cpp launch profile.  It is inert until an operator
-# installs it as the llamacpp service override described in the runbook.
+# Staged Qwen3.8 llama.cpp launch profile. Run it manually while the Qwen3.6
+# service is stopped; it does not alter the service configuration.
 set -euo pipefail
 
 LLAMA_ROOT="${LLAMA_ROOT:-$HOME/llama-cpp}"
@@ -50,8 +50,8 @@ if [[ "$REASONING" != "auto" && "$REASONING" != "on" && "$REASONING" != "off" ]]
     echo "ERROR: REASONING must be auto, on, or off." >&2
     exit 1
 fi
-if [[ -n "$REASONING_BUDGET" && ! "$REASONING_BUDGET" =~ ^-?[0-9]+$ ]]; then
-    echo "ERROR: REASONING_BUDGET must be an integer." >&2
+if [[ -n "$REASONING_BUDGET" && ! "$REASONING_BUDGET" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: REASONING_BUDGET must be a non-negative integer." >&2
     exit 1
 fi
 if [[ -n "$REASONING_EFFORT" ]]; then
@@ -76,9 +76,8 @@ if [[ "$HOST" != "127.0.0.1" && "$HOST" != "::1" && -z "$API_KEY_FILE" && -z "${
     exit 1
 fi
 
-# Vision requires its own 32k tier because the projector consumes VRAM.  The
-# deployed text profile sets ENABLE_VISION=0 to retain its qualified 131k
-# context; an operator can enable the separate vision tier when needed.
+# Vision requires its own 32k tier because the projector consumes VRAM. Set
+# ENABLE_VISION=0 only for the separately qualified long-context text tier.
 if [[ "$ENABLE_VISION" == "1" && "$CTX_SIZE" -gt 32768 ]]; then
     echo "ERROR: vision is qualified only at 32768 tokens in this staged profile." >&2
     exit 1
