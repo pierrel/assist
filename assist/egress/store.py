@@ -110,6 +110,10 @@ class EgressRequest:
     # request is resumed through its exact waiters instead; sending its task to
     # the main graph would recreate the cross-agent retry this design removes.
     dispatch_main: bool = True
+    # A child-created card can later be joined by the visible main agent.  Keep
+    # the main continuation separately: its task must not replace the child's
+    # approval reason or inherit it at resolution.
+    main_task: str = ""
     # Hidden child Runs that have checkpointed immediately after requesting
     # this same host.  This is deliberately separate from ``task``: a card is
     # scoped to the visible thread, while a resume must target one exact child.
@@ -124,7 +128,8 @@ class EgressRequest:
                 "origin_tid": self.origin_tid, "created_at": self.created_at,
                 "state": self.state, "expires_at": self.expires_at,
                 "dispatched": self.dispatched,
-                "dispatch_main": self.dispatch_main}
+                "dispatch_main": self.dispatch_main,
+                "main_task": self.main_task}
         if self.waiters:
             value["waiters"] = [waiter.to_dict() for waiter in self.waiters]
         return value
@@ -141,15 +146,18 @@ class EgressRequest:
             raw_waiters = d.get("waiters", [])
             if not isinstance(raw_waiters, list):
                 raw_waiters = []
+            dispatch_main = d.get("dispatch_main") is not False
+            task = str(d.get("task", ""))
             return EgressRequest(
-                host=host, port=port, task=str(d.get("task", "")),
+                host=host, port=port, task=task,
                 origin_tid=tid, created_at=str(d.get("created_at", "")),
                 state=state,
                 expires_at=str(d.get("expires_at", "")),
                 # strict identity check: bool("false") is True — only a real
                 # JSON true may mark a record announced/prunable
                 dispatched=(d.get("dispatched") is True),
-                dispatch_main=(d.get("dispatch_main") is not False),
+                dispatch_main=dispatch_main,
+                main_task=str(d.get("main_task", task if dispatch_main else "")),
                 waiters=tuple(waiter for value in raw_waiters
                               if (waiter := EgressWaiter.from_dict(value)) is not None))
         except Exception:
@@ -341,14 +349,37 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
                 self._mutate(recs)
             return rec
 
+    def enable_main_dispatch(self, key: str, task: str) -> EgressRequest | None:
+        """Ensure a pending card also resumes the visible main agent.
+
+        A child can create a child-only card first.  When the visible main
+        agent later requests that same exact host, it joins that card rather
+        than creating another one, so its distinct task must be retained for
+        the later visible continuation.
+        """
+        with self._lock:
+            recs = self._load()
+            rec = recs.get(key)
+            if rec is None:
+                return None
+            if rec.state == "pending" and not rec.dispatch_main:
+                rec = replace(
+                    rec, dispatch_main=True,
+                    main_task=" ".join(str(task or "").split())[:500])
+                recs[key] = rec
+                self._mutate(recs)
+            return rec
+
     def resolved_waiters(self, tid: str) -> list[EgressWaiter]:
         """Read exact child waiters after a visible thread's final card resolves."""
         with self._lock:
+            records = [rec for rec in self._load().values()
+                       if rec.origin_tid == tid]
+            if any(rec.state == "pending" for rec in records):
+                return []
             result: list[EgressWaiter] = []
-            for rec in self._load().values():
-                if rec.origin_tid != tid or not rec.waiters:
-                    continue
-                if rec.state == "pending":
+            for rec in records:
+                if not rec.waiters:
                     continue
                 result.extend(rec.waiters)
             return result
@@ -360,18 +391,28 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
             changed = False
             for key, rec in list(recs.items()):
                 if rec.origin_tid == tid and waiter in rec.waiters:
-                    recs[key] = replace(
+                    updated = replace(
                         rec, waiters=tuple(item for item in rec.waiters
                                            if item != waiter))
+                    if (updated.state == "pending" and not updated.dispatch_main
+                            and not updated.waiters):
+                        del recs[key]
+                    else:
+                        recs[key] = updated
                     changed = True
             if changed:
                 self._mutate(recs)
             return changed
 
-    def has_pending_waiter(self, tid: str, waiter: EgressWaiter) -> bool:
-        """Whether this exact child Run is parked on an unresolved card."""
+    def has_waiter(self, tid: str, waiter: EgressWaiter) -> bool:
+        """Whether this exact child Run is attached to this thread's card.
+
+        A resolution may win just before the worker records the child as
+        awaiting approval.  The waiter remains the durable handoff across
+        that small interval, regardless of the card's state.
+        """
         with self._lock:
-            return any(rec.origin_tid == tid and rec.state == "pending"
+            return any(rec.origin_tid == tid
                        and waiter in rec.waiters for rec in self._load().values())
 
     def remove_thread(self, tid: str) -> int:
@@ -418,7 +459,7 @@ def resolution_prompt(batch: list[EgressRequest]) -> str | None:
     for r in batch:
         if r.state == "approved":
             lines.append(f'- {r.host}:{r.port} APPROVED. Your recorded task: '
-                         f'"{r.task}"')
+                         f'"{r.main_task or r.task}"')
         elif r.state == "declined":
             lines.append(f"- {r.host}:{r.port} DECLINED — do not re-ask; "
                          "proceed without it.")

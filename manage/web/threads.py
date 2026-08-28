@@ -953,6 +953,8 @@ def render_thread(
                      'shown as punycode — verify it is the site you expect.'
                      '</div>' if _er.host.startswith("xn--") or ".xn--" in _er.host
                      else "")
+            _reason = _er.task if _er.main_task in ("", _er.task) else (
+                f"{_er.task}\nMain agent: {_er.main_task}")
             _fields = (f'<input type="hidden" name="token" value="{EGRESS_CSRF}">'
                        f'<input type="hidden" name="tid" value="{html.escape(tid)}">'
                        f'<input type="hidden" name="host" value="{_eh}">'
@@ -965,7 +967,7 @@ def render_thread(
                 + (f' ({_age})' if _age else '') + '.</div>'
                 f'{_puny}'
                 f'<div style="margin:.3rem 0; color:#6b7280">The agent\'s stated '
-                f'reason (not verified): \u201c{html.escape(_er.task[:300])}\u201d</div>'
+                f'reason (not verified): \u201c{html.escape(_reason[:300]).replace(chr(10), "<br>")}\u201d</div>'
                 f'<div style="margin:.3rem 0; font-size:.85rem">Approving opens this '
                 f'exact host and port, for this thread only. The hour starts when you '
                 f'approve. The proxy does not inspect contents; HTTPS traffic is '
@@ -1718,10 +1720,11 @@ def _child_configurable(run: Run) -> dict | None:
     return configurable or None
 
 
-def _child_awaits_egress(run: Run) -> bool:
+def _child_waits_for_egress(run: Run) -> bool:
+    """Whether a child has durably attached itself to an egress card."""
     if EGRESS_STORE is None or run.parent_thread_id is None:
         return False
-    return EGRESS_STORE.has_pending_waiter(
+    return EGRESS_STORE.has_waiter(
         run.parent_thread_id, EgressWaiter(run.thread_id, run.id))
 
 
@@ -1771,11 +1774,14 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                               if run.resume_decision is not None
                               else chat.resume() if (resume or run.resume)
                               else chat.message(run.text or ""))
+                    waits_for_egress = _child_waits_for_egress(run)
                     with _RUN_ADMISSION_LOCK:
                         run = _runs().transition(
                             run.thread_id, run.id,
-                            "awaiting_approval" if _child_awaits_egress(run)
+                            "awaiting_approval" if waits_for_egress
                             else "success", result=result)
+                    if waits_for_egress and run.parent_thread_id is not None:
+                        _resume_egress_waiters(run.parent_thread_id)
     except ThreadPauseRequested:
         carry = THREAD_QUEUE.pop_hold(run.thread_id)
         with _RUN_ADMISSION_LOCK:
@@ -3336,8 +3342,16 @@ def _resume_egress_waiters(tid: str) -> None:
             except RunNotFound:
                 EGRESS_STORE.remove_waiter(tid, waiter)
                 continue
-            if (parked.status != "awaiting_approval"
-                    or parked.parent_thread_id != tid):
+            if parked.parent_thread_id != tid:
+                EGRESS_STORE.remove_waiter(tid, waiter)
+                continue
+            # A resolution may race between the child tool's durable waiter
+            # write and this worker's terminal transition.  Preserve that
+            # waiter until the child is visibly parked; the worker then calls
+            # this function itself and resumes the already-resolved request.
+            if parked.status == "running":
+                continue
+            if parked.status != "awaiting_approval":
                 EGRESS_STORE.remove_waiter(tid, waiter)
                 continue
             dispatch_key = f"egress-resume:{parked.id}"
@@ -3354,6 +3368,14 @@ def _resume_egress_waiters(tid: str) -> None:
                 delegate_user_urls=parked.delegate_user_urls)
             EGRESS_STORE.remove_waiter(tid, waiter)
         _RESUME_SCHEDULER.submit(successor.id, successor.thread_id)
+
+
+def _remove_egress_waiter(run: Run) -> None:
+    """Drop a cancelled child's pending egress wait, if it has one."""
+    if EGRESS_STORE is None or run.parent_thread_id is None:
+        return
+    EGRESS_STORE.remove_waiter(
+        run.parent_thread_id, EgressWaiter(run.thread_id, run.id))
 
 
 def _geo_on_complete(tid: str, message: str) -> None:

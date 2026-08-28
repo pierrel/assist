@@ -167,19 +167,31 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
         waiter = _child_waiter()
         if rec is not None:
             if rec.state == "pending":
-                if waiter is not None:
-                    current = store.wait_for_resolution(key, waiter)
-                    if current is not None and current.state == "pending":
-                        interrupt({"egress_request": key})
-                        rec = store.get(key)
-                    else:
-                        rec = current
-                    if rec is not None and rec.state != "pending":
+                if waiter is None:
+                    rec = store.enable_main_dispatch(key, task)
+                    if rec is None:
+                        return request_egress(h, p, task)
+                    if rec.state != "pending":
                         if rec.state == "declined":
                             return (f"The user already DECLINED access to {h}:{p} — do "
                                     "not re-ask; proceed without it.")
                         return (f"{h}:{p} is already approved for this thread — just "
                                 "retry your command.")
+                    return (f"{h}:{p} is already awaiting the user's approval "
+                            "in this thread — stop retrying and finish your "
+                            "answer.")
+                current = store.wait_for_resolution(key, waiter)
+                if current is not None and current.state == "pending":
+                    interrupt({"egress_request": key})
+                    rec = store.get(key)
+                else:
+                    rec = current
+                if rec is not None and rec.state != "pending":
+                    if rec.state == "declined":
+                        return (f"The user already DECLINED access to {h}:{p} — do "
+                                "not re-ask; proceed without it.")
+                    return (f"{h}:{p} is already approved for this thread — just "
+                            "retry your command.")
                 return (f"{h}:{p} is already awaiting the user's approval "
                         "in this thread — stop retrying and finish your "
                         "answer.")
@@ -193,6 +205,8 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
             task=" ".join(str(task or "").split())[:500],
             origin_tid=tid,
             dispatch_main=(waiter is None),
+            main_task=(" ".join(str(task or "").split())[:500]
+                       if waiter is None else ""),
             created_at=datetime.now(timezone.utc).isoformat()))
         if refused == "thread-cap":
             return ("This thread already has several requests awaiting "
@@ -225,7 +239,7 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
         """List every host this thread can currently reach: the operator's
         base allowlist (any port; managed only via the committed config) and
         this thread's own approved grants with their remaining lifetime."""
-        tid = _thread_id()
+        tid = _origin_thread_id()
         lines = [f"- {h} (any port; base allowlist, operator-managed)"
                  for h in sorted(base_hosts)]
         if tid:
@@ -247,7 +261,7 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
         if h in base_hosts:
             return (f"{h} is on the operator-managed base allowlist — it "
                     "can't be removed from a thread.")
-        tid = _thread_id()
+        tid = _origin_thread_id()
         if not tid:
             return "No active thread."
         if store.revoke(request_key(tid, h, p)):

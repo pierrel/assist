@@ -83,7 +83,7 @@ def test_child_waiters_share_one_card_and_consume_once(tmp_path):
     assert st.wait_for_resolution(key, first).waiters == (first,)
     assert st.wait_for_resolution(key, first).waiters == (first,)
     assert st.wait_for_resolution(key, second).waiters == (first, second)
-    assert st.has_pending_waiter("t1", first)
+    assert st.has_waiter("t1", first)
     st.resolve(key, "decline")
     assert st.resolved_waiters("t1") == [first, second]
     assert st.remove_waiter("t1", first)
@@ -205,6 +205,59 @@ def test_child_request_uses_parent_scope_and_parks_exact_run(tmp_path, monkeypat
     assert paused == [{"egress_request": rec.key}]
     st.resolve(rec.key, "hour")
     assert resolution_prompt(st.take_undispatched("parent")) is None
+
+
+def test_child_manages_the_parent_egress_scope(tmp_path, monkeypatch):
+    st = _store(tmp_path)
+    monkeypatch.setattr(egress_tools_mod, "_origin_thread_id", lambda: "parent")
+    request, list_hosts, remove = egress_tools(st, frozenset())
+    request("api.example.com", 443, "fetch the public API")
+    st.resolve(request_key("parent", "api.example.com", 443), "hour")
+
+    assert "api.example.com:443" in list_hosts()
+    assert "Removed" in remove("api.example.com", 443)
+    assert st.for_thread("parent") == []
+
+
+def test_main_request_joining_child_card_keeps_main_resolution(tmp_path, monkeypatch):
+    """One card may park a child and retain the visible main continuation."""
+    st = _store(tmp_path)
+    waiter = EgressWaiter("sub-research", "run-123")
+    monkeypatch.setattr(egress_tools_mod, "_origin_thread_id", lambda: "parent")
+    monkeypatch.setattr(egress_tools_mod, "_child_waiter", lambda: waiter)
+    monkeypatch.setattr(egress_tools_mod, "interrupt", lambda _: None)
+    request, _, _ = egress_tools(st, frozenset())
+
+    request("api.example.com", 443, "fetch the public API")
+    monkeypatch.setattr(egress_tools_mod, "_child_waiter", lambda: None)
+    assert "already awaiting" in request(
+        "api.example.com", 443, "summarize the public API"
+    )
+
+    key = request_key("parent", "api.example.com", 443)
+    assert st.get(key).dispatch_main is True
+    assert st.get(key).main_task == "summarize the public API"
+    st.resolve(key, "hour")
+    batch = st.take_undispatched("parent")
+    assert [rec.host for rec in batch] == ["api.example.com"]
+    assert "summarize the public API" in resolution_prompt(batch)
+    assert "fetch the public API" not in resolution_prompt(batch)
+
+
+def test_resolved_waiters_wait_for_the_thread_card_batch(tmp_path):
+    st = _store(tmp_path)
+    waiter = EgressWaiter("sub-research", "run-123")
+    first = request_key("parent", "a.example.com", 443)
+    st.add_pending(EgressRequest(
+        host="a.example.com", port=443, task="first", origin_tid="parent",
+        waiters=(waiter,)))
+    st.add_pending(EgressRequest(
+        host="b.example.com", port=443, task="second", origin_tid="parent"))
+
+    st.resolve(first, "hour")
+    assert st.resolved_waiters("parent") == []
+    st.resolve(request_key("parent", "b.example.com", 443), "decline")
+    assert st.resolved_waiters("parent") == [waiter]
 
 
 @pytest.mark.parametrize(("decision", "expected"), [

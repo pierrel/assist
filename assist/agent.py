@@ -574,6 +574,7 @@ def create_agent(model: BaseChatModel,
         "description": "Reviews code diffs for bugs, missing tests, style issues, and security concerns. Provide the full git diff output when calling this agent.",
         "system_prompt": base_prompt_for("deepagents/dev_critique.md.j2",
                                          workspace_dir=workspace_dir),
+        "tools": list(execution_egress_tools),
         # Safety middleware — same rationale as the research-flow dict
         # subagents.  Includes the retry layers so a transient
         # APIConnectionError (incl. APITimeoutError) inside the critique
@@ -589,7 +590,10 @@ def create_agent(model: BaseChatModel,
                        # the LoopDetection/retry layers above.
                        SearchUnavailableBreakerMiddleware(
                            threshold=env_int("ASSIST_SEARCH_UNAVAILABLE_THRESHOLD", 4)),
-                       EmptyResponseRecoveryMiddleware()],
+                       EmptyResponseRecoveryMiddleware(),
+                       *([_egress_skills_middleware(
+                           backend, execution_egress_tools)]
+                         if execution_egress_tools else [])],
         **({"interrupt_on": spec.interrupt_on} if spec.interrupt_on else {}),
     }
 

@@ -23,6 +23,7 @@ from manage.web.threads import (
     _RUN_ADMISSION_LOCK,
     _create_run,
     _dispatch_pending_after,
+    _remove_egress_waiter,
     _require_deep_thread,
     _runs,
 )
@@ -211,7 +212,8 @@ class WebAgentProtocolService:
             active = self._task_active(runs)
             waiting = bool(runs and runs[-1].status in AWAITING_APPROVAL_STATUSES)
             if interrupt and waiting:
-                _runs().cancel(thread_id, runs[-1].id)
+                cancelled = _runs().cancel(thread_id, runs[-1].id)
+                _remove_egress_waiter(cancelled)
                 active = False
             if (interrupt and runs and not active
                     and runs[-1].status in TERMINAL_STATUSES):
@@ -220,7 +222,8 @@ class WebAgentProtocolService:
                 if not active:
                     for candidate in runs:
                         if candidate.status == "pending":
-                            _runs().cancel_pending(thread_id, candidate.id)
+                            cancelled = _runs().cancel_pending(thread_id, candidate.id)
+                            _remove_egress_waiter(cancelled)
             delegate_user_urls: tuple[str, ...] = ()
             if assistant_id == "delegate-agent":
                 owner_urls: dict[str, set[str | None]] = {}
@@ -276,16 +279,19 @@ class WebAgentProtocolService:
                 return existing_marker
             for candidate in logical:
                 if candidate.status == "pending":
-                    _runs().cancel_pending(thread_id, candidate.id)
+                    cancelled = _runs().cancel_pending(thread_id, candidate.id)
+                    _remove_egress_waiter(cancelled)
             if running is None:
                 interrupted = [candidate for candidate in logical
                                if candidate.status == "interrupted"]
                 waiting = [candidate for candidate in logical
                            if candidate.status == "awaiting_approval"]
                 for candidate in interrupted:
-                    _runs().cancel(thread_id, candidate.id)
+                    cancelled = _runs().cancel(thread_id, candidate.id)
+                    _remove_egress_waiter(cancelled)
                 for candidate in waiting:
-                    _runs().cancel(thread_id, candidate.id)
+                    cancelled = _runs().cancel(thread_id, candidate.id)
+                    _remove_egress_waiter(cancelled)
                 result = (waiting[-1] if waiting else interrupted[-1]
                           if interrupted else run)
                 if waiting or interrupted:

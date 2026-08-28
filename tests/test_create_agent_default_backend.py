@@ -172,6 +172,29 @@ class TestCreateAgentDefaultBackend:
                       if isinstance(item, SmallModelSkillsMiddleware))
         assert "request_egress" in skills._registered_tools
 
+    def test_execution_legacy_critique_pairs_egress_tool_and_skill(self):
+        """Every execution-capable legacy specialist gets the same pair."""
+        from assist import agent as agent_mod
+        from assist.agent import set_execution_egress_tools
+        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
+
+        prior = agent_mod._execution_egress_tools
+        set_execution_egress_tools((request_egress,))
+        try:
+            subagents = self._build(spec=AgentSpec(default_backend=_FakeSandboxBackend(
+                root_dir=tempfile.mkdtemp(), virtual_mode=True)))["subagents"]
+        finally:
+            set_execution_egress_tools(prior)
+
+        critique = next(item for item in subagents
+                        if item.get("name") == "critique-agent")
+        names = {getattr(tool, "name", getattr(tool, "__name__", None))
+                 for tool in critique["tools"]}
+        assert "request_egress" in names
+        skill = next(item for item in critique["middleware"]
+                     if isinstance(item, SmallModelSkillsMiddleware))
+        assert skill._skill_names == frozenset({"egress"})
+
     def test_non_sandbox_default_does_not_enable_execute(self):
         backend = self._build(spec=AgentSpec(default_backend=_fs()))["backend"]
         assert supports_execution(backend) is False
