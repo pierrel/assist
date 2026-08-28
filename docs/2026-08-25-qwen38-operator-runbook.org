@@ -46,21 +46,16 @@ The required capabilities are =--fit=, =--fit-target=, =--mmproj=, Flash
 Attention, Q4/Q8 KV cache types, and Qwen3.8 multimodal support.  If any are
 missing, stop and keep Qwen3.6 serving.
 
-* Stage the launcher and systemd override
+* Stage the launcher
 
-Install the tracked preparation files from the Assist checkout.  This does not
-restart anything.
+Install the tracked launcher from the Assist checkout. This does not alter or
+restart the Qwen3.6 service.
 
 #+begin_src sh
 install -m 755 scripts/serve-qwen38.sh "$HOME/llama-cpp/scripts/serve-qwen38.sh"
-sudo install -D -m 644 scripts/llamacpp-qwen38.override.conf \
-  /etc/systemd/system/llamacpp.service.d/qwen38.conf
-sudo systemctl daemon-reload
-systemctl cat llamacpp.service
 #+end_src
 
-The final command must show that the old =ExecStart= is reset and replaced by
-=serve-qwen38.sh=.  Do not restart until the eval window is clear.
+Do not stop the Qwen3.6 service until the eval window is clear.
 
 * Text cutover and measured argument loop
 
@@ -71,24 +66,24 @@ unlimited, the template default, and =1=. Set =REASONING_PRESERVE=0= when the
 matched tool-agent gate shows that full reasoning-history retention causes
 context growth or liveness loss; this retains only the latest assistant
 reasoning turn. These controls require their own matched behavioral gate; do
-not add them to the service environment merely because a single evaluation
+not adopt them as the ordinary profile merely because a single evaluation
 improves.
 
-1. Restart manually, then wait for the endpoint:
+1. Stop Qwen3.6, run the staged launcher manually, then wait for the endpoint:
 
 #+begin_src sh
-sudo systemctl restart llamacpp.service
-systemctl status --no-pager llamacpp.service
-journalctl -u llamacpp.service -n 120 --no-pager
+sudo systemctl stop llamacpp.service
+"$HOME/llama-cpp/scripts/serve-qwen38.sh"
+# In another terminal:
 curl --fail --silent http://127.0.0.1:8000/v1/models
 #+end_src
 
-The service starts with vision enabled at 32,768 tokens, one parallel slot,
+The launcher starts with vision enabled at 32,768 tokens, one parallel slot,
 Flash Attention, =--ubatch-size 256=, a 1.5 GiB =--fit= reserve, and a
 1,024-token minimum per image.  The launcher defaults to a loopback listener
-with localhost-only CORS.  It refuses any broader bind without an API key (set
-=LLAMA_API_KEY= or =LLAMA_API_KEY_FILE= in the service environment; never put
-the key in the tracked launcher).  Confirm the log reports full GPU offload,
+with localhost-only CORS. It refuses any broader bind without an API key (set
+=LLAMA_API_KEY= or =LLAMA_API_KEY_FILE= in the launcher environment; never put
+the key in the tracked launcher). Confirm the log reports full GPU offload,
 the projector, the intended context, and no fallback to CPU.  A startup that
 fits only by lowering context or GPU layers does not pass.  Run the image smoke
 and vision eval first.
@@ -98,23 +93,19 @@ and vision eval first.
    with varied prefill batch shapes:
 
 #+begin_src sh
-sudo systemctl set-environment ENABLE_VISION=0 CTX_SIZE=100000 KV_TYPE_K=q8_0 KV_TYPE_V=q8_0
-sudo systemctl restart llamacpp.service
-# Repeat the startup checks and candidate panel.
-sudo systemctl unset-environment ENABLE_VISION CTX_SIZE KV_TYPE_K KV_TYPE_V
+ENABLE_VISION=0 CTX_SIZE=100000 KV_TYPE_K=q8_0 KV_TYPE_V=q8_0 \
+  "$HOME/llama-cpp/scripts/serve-qwen38.sh"
 #+end_src
 
-Watch =nvidia-smi= and the service journal for CUDA OOM or restart cycles.
+Watch =nvidia-smi= and the launcher output for CUDA OOM or exit failures.
 
 3. Only after that passes, restart with the text-only 131,072-token/Q4 profile
    that matches Qwen3.6. Run both the existing 128k direct gate and the new
    near-full 130k direct gate:
 
 #+begin_src sh
-sudo systemctl set-environment CTX_SIZE=131072 KV_TYPE_K=q4_0 KV_TYPE_V=q4_0
-sudo systemctl restart llamacpp.service
-# Repeat the startup checks, the 128k and 130k direct fills, and the matched eval panel.
-sudo systemctl unset-environment CTX_SIZE KV_TYPE_K KV_TYPE_V
+ENABLE_VISION=0 CTX_SIZE=131072 KV_TYPE_K=q4_0 KV_TYPE_V=q4_0 \
+  "$HOME/llama-cpp/scripts/serve-qwen38.sh"
 #+end_src
 
 The Q4 cache is how 128k retains prefill workspace margin on a 24 GiB GPU.
@@ -124,21 +115,19 @@ model's growing context competes with the long-context budget.
 
 * Vision context growth
 
-The initial service already loads the projector and starts with its 32k smoke
-tier.  Do not raise vision context beyond 32k until the projector's VRAM cost,
+The initial launcher loads the projector and starts with its 32k smoke tier.
+Do not raise vision context beyond 32k until the projector's VRAM cost,
 full offload, and image-understanding eval quality are measured.  Text 128k
 and vision 128k are separate admission tiers on this GPU, not a promised
 combined configuration.
 
 * Rollback
 
-If launch, smoke, deep fill, or any candidate row fails, restore Qwen3.6
-immediately:
+If launch, smoke, deep fill, or any candidate row fails, stop the manual
+launcher and restore Qwen3.6 immediately:
 
 #+begin_src sh
-sudo rm /etc/systemd/system/llamacpp.service.d/qwen38.conf
-sudo systemctl daemon-reload
-sudo systemctl restart llamacpp.service
+sudo systemctl start llamacpp.service
 curl --fail --silent http://127.0.0.1:8000/v1/models
 #+end_src
 
