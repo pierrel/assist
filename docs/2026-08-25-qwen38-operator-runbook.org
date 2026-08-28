@@ -73,7 +73,7 @@ improves.
 
 #+begin_src sh
 sudo systemctl stop llamacpp.service
-"$HOME/llama-cpp/scripts/serve-qwen38.sh"
+LLAMA_ROOT="$HOME/llama-cpp" "$HOME/llama-cpp/scripts/serve-qwen38.sh"
 # In another terminal:
 curl --fail --silent http://127.0.0.1:8000/v1/models
 #+end_src
@@ -81,9 +81,9 @@ curl --fail --silent http://127.0.0.1:8000/v1/models
 The launcher starts with vision enabled at 32,768 tokens, one parallel slot,
 Flash Attention, =--ubatch-size 256=, a 1.5 GiB =--fit= reserve, and a
 1,024-token minimum per image.  The launcher defaults to a loopback listener
-with localhost-only CORS. It refuses any broader bind without an API key (set
-=LLAMA_API_KEY= or =LLAMA_API_KEY_FILE= in the launcher environment; never put
-the key in the tracked launcher). Confirm the log reports full GPU offload,
+with localhost-only CORS. It refuses any broader bind without an API-key file
+(set =LLAMA_API_KEY_FILE= in the launcher environment; never put a key in the
+tracked launcher or process arguments). Confirm the log reports full GPU offload,
 the projector, the intended context, and no fallback to CPU.  A startup that
 fits only by lowering context or GPU layers does not pass.  Run the image smoke
 and vision eval first.
@@ -94,7 +94,7 @@ and vision eval first.
 
 #+begin_src sh
 ENABLE_VISION=0 CTX_SIZE=100000 KV_TYPE_K=q8_0 KV_TYPE_V=q8_0 \
-  "$HOME/llama-cpp/scripts/serve-qwen38.sh"
+  LLAMA_ROOT="$HOME/llama-cpp" "$HOME/llama-cpp/scripts/serve-qwen38.sh"
 #+end_src
 
 Watch =nvidia-smi= and the launcher output for CUDA OOM or exit failures.
@@ -105,7 +105,7 @@ Watch =nvidia-smi= and the launcher output for CUDA OOM or exit failures.
 
 #+begin_src sh
 ENABLE_VISION=0 CTX_SIZE=131072 KV_TYPE_K=q4_0 KV_TYPE_V=q4_0 \
-  "$HOME/llama-cpp/scripts/serve-qwen38.sh"
+  LLAMA_ROOT="$HOME/llama-cpp" "$HOME/llama-cpp/scripts/serve-qwen38.sh"
 #+end_src
 
 The Q4 cache is how 128k retains prefill workspace margin on a 24 GiB GPU.
