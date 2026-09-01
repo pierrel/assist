@@ -564,8 +564,9 @@ def _capture_card_placeholder(tid: str, summary: dict) -> str:
     capture_id = summary.get("capture_id")
     if not isinstance(capture_id, str):
         return ""
-    status = html.escape(str(summary.get("status", "queued")))
-    pending = "1" if status in _CAPTURE_PENDING else "0"
+    raw_status = str(summary.get("status", "queued"))
+    status = html.escape(raw_status.replace("_", " "))
+    pending = "1" if raw_status in _CAPTURE_PENDING else "0"
     return (f'<article id="capture-{html.escape(capture_id)}" class="capture-card" '
             f'data-capture-id="{html.escape(capture_id)}" data-capture-pending="{pending}">'
             f'<strong>Judged live capture</strong><div>{status}</div></article>')

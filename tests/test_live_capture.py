@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from time import monotonic, sleep
 
@@ -73,6 +74,18 @@ def test_store_rejects_a_symlinked_capture_file(tmp_path: Path):
 
     with pytest.raises(ValueError, match="regular file"):
         store.get_for_thread("thread-a", capture_id)
+
+
+def test_store_quota_does_not_follow_symlinks(tmp_path: Path):
+    threads = tmp_path / "threads"
+    threads.mkdir()
+    store = CaptureStore(tmp_path / "captures", threads_root=threads)
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"x" * 10_000)
+    before = store._store_bytes()
+    (tmp_path / "captures" / "outside-link").symlink_to(outside)
+
+    assert store._store_bytes() == before
 
 
 def test_store_refuses_capture_root_inside_thread_root(tmp_path: Path):
@@ -196,6 +209,18 @@ def test_only_one_worker_can_own_a_capture_store(tmp_path: Path):
             second.start()
     finally:
         first.stop()
+
+
+def test_worker_submit_deduplicates_concurrent_notifications(tmp_path: Path):
+    threads = tmp_path / "threads"
+    threads.mkdir()
+    store = CaptureStore(tmp_path / "captures", threads_root=threads)
+    worker = CaptureWorker(store, model_factory=_Model)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(lambda _: worker.submit("thread-a", "capture-a"), range(32)))
+
+    assert worker._queue.qsize() == 1
 
 
 def test_worker_start_releases_ownership_when_recovery_scan_fails(tmp_path: Path, monkeypatch):
