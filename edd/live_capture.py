@@ -177,7 +177,12 @@ class CaptureStore:
         return self._read_json(self._index)
 
     def _store_bytes(self) -> int:
-        return sum(path.stat().st_size for path in self.root.rglob("*") if path.is_file())
+        total = 0
+        for path in self.root.rglob("*"):
+            st = path.lstat()
+            if stat.S_ISREG(st.st_mode):
+                total += st.st_size
+        return total
 
     def create(
         self, *, thread_id: str, reason: str, scope: Literal["last_3", "entire"],
@@ -412,6 +417,7 @@ class CaptureWorker:
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
         self._seen: set[tuple[str, str]] = set()
+        self._seen_lock = threading.Lock()
         self._lock_file: Any | None = None
 
     def start(self) -> None:
@@ -433,7 +439,8 @@ class CaptureWorker:
             self._thread = threading.Thread(target=self._run, name="assist-capture-worker", daemon=True)
             self._thread.start()
         except BaseException:
-            self._seen.clear()
+            with self._seen_lock:
+                self._seen.clear()
             fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
             self._lock_file.close()
             self._lock_file = None
@@ -453,7 +460,9 @@ class CaptureWorker:
 
     def submit(self, thread_id: str, capture_id: str) -> None:
         item = (thread_id, capture_id)
-        if item not in self._seen:
+        with self._seen_lock:
+            if item in self._seen:
+                return
             self._seen.add(item)
             try:
                 self._queue.put_nowait(item)
@@ -515,7 +524,8 @@ class CaptureWorker:
             if item is None:
                 return
             thread_id, capture_id = item
-            self._seen.discard(item)
+            with self._seen_lock:
+                self._seen.discard(item)
             try:
                 self._process(thread_id, capture_id)
             except Exception:
