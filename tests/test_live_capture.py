@@ -311,11 +311,13 @@ def test_worker_stop_interrupts_queue_wait_before_starting_a_model_call(tmp_path
 def test_safe_markdown_rejects_script_events_and_javascript_urls():
     output = render_markdown(
         '<script>steal()</script><a onclick="steal()" href=" javascript:steal()">x</a>'
+        '<a href="java\nscript:steal()">y</a>'
     )
 
     assert "<script" not in output
     assert "onclick" not in output
     assert "javascript:" not in output
+    assert "href=" not in output
 
 
 def test_store_rejects_excess_records_before_building_a_transcript(tmp_path: Path, monkeypatch):
