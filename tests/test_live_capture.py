@@ -13,6 +13,8 @@ from langchain.messages import AIMessage, HumanMessage
 from assist.safe_markdown import render_markdown
 from assist.visible_conversation import (
     CONTINUATION_RIDER,
+    INTERJECTION_FRAME,
+    INTERJECTION_GUIDE,
     VisibleRecord,
     select_completed_turns,
     visible_records,
@@ -39,6 +41,20 @@ def test_projection_selects_last_completed_turns_and_excludes_host_frames():
 
     assert [record.text for record in selected] == ["first", "one", "second", "two"]
     assert all(record.capture_eligible for record in selected)
+
+
+def test_projection_keeps_a_mid_turn_interjection_with_its_original_prompt():
+    records = visible_records([
+        HumanMessage(content="Find a nearby cafe"),
+        HumanMessage(content=INTERJECTION_FRAME + "Make it quiet." + INTERJECTION_GUIDE),
+        AIMessage(content="Here is a quiet cafe nearby."),
+    ])
+
+    selected = select_completed_turns(records)
+
+    assert [record.text for record in selected] == [
+        "Find a nearby cafe", "Make it quiet.", "Here is a quiet cafe nearby.",
+    ]
 
 
 def test_store_keeps_immutable_transcript_and_binds_reads_to_thread(tmp_path: Path):

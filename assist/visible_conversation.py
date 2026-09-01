@@ -132,8 +132,13 @@ def select_completed_turns(
         if record.role == "user":
             if current is not None and has_assistant:
                 completed.append(current)
-            current = [record]
-            has_assistant = False
+                current = [record]
+                has_assistant = False
+            elif current is not None and record.source_kind == "interjection":
+                current.append(record)
+            else:
+                current = [record]
+                has_assistant = False
         elif record.role == "assistant" and current is not None:
             current.append(record)
             has_assistant = True
