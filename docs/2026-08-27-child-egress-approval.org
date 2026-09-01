@@ -1,0 +1,68 @@
+#+title: Design — Child egress approval waits
+#+date: <2026-08-27>
+
+State: Implemented locally; live validation deferred until production is idle
+
+* Problem
+
+The egress approval system is scoped to a visible thread, but an async child
+has its own checkpoint and Run.  A child that encounters a blocked host must
+not keep retrying, turn its failure into a new main-agent task, or be resumed
+by an unrelated approval.  In the careers scan this gap encouraged repeated
+shell diagnostics after =read_url= could not reach JavaScript-backed job
+boards or their public APIs.
+
+* Decision
+
+Keep the existing exact-host, exact-port, visible-thread grant and approval
+card.  Add an optional child waiter to an egress request.  A child request
+records its visible parent thread as the grant owner and its current hidden Run
+as a waiter, then interrupts at the tool boundary.  The child Run becomes
+=awaiting_approval=, releases its sandbox and the model slot, and has no
+completion wake.
+
+When the last pending card in a visible thread is resolved, the stored request
+state is the authority.  Each stored waiter whose exact Run is still awaiting
+approval receives one new child resume Run.  The resumed graph re-enters the
+same tool call, observes the persisted approval or decline, and then either
+continues with the approved grant or returns an honest partial result.  A
+normal main-agent request retains its existing one resolution turn.  Multiple
+children may wait on one host request; cancelling or deleting one cannot
+resume another.
+
+Execution and egress are one capability. Every configured Assist web profile
+whose backend exposes =execute= automatically receives the egress tools and
+the egress skill, including research workers and their synchronous
+subagents. An embedder without Assist's approval-card/store/proxy contract
+does not receive a nonfunctional imitation. A browser for JavaScript-only
+sites remains a separate follow-up.
+
+* Security and liveness
+
+- The browser POST still identifies only visible =tid=, host, port, and CSRF
+  token.  It never names a child Run.  The store returns only waiters recorded
+  under that already-authorized request.
+- A child cannot choose the visible origin thread or its Run id: the web
+  executor injects both as private run configuration.  The proxy continues to
+  enforce the visible thread binding from its client map.
+- The approval is consumed from durable request state, not an approve value
+  supplied by the browser.  A late, duplicate, cancelled, deleted, or terminal
+  waiter is skipped.
+- =awaiting_approval= is deliberately neither runnable nor production-busy.
+  Startup recovery leaves it parked; only a stored resolution may create a
+  successor.  It keeps task-retention accounting active, however, so many
+  parked tasks cannot evade the per-parent cap.
+- Approval and route handling retain the existing threadpool boundaries.  The
+  actual graph resume remains a background scheduler job, never work awaited
+  by the HTTP redirect.
+
+* Validation
+
+Unit coverage pins: a child request records the parent-thread scope and exact
+waiter; approval and decline each create one resume only; duplicate actions,
+another child's waiter, cancellation, and startup recovery cannot resume the
+wrong task; every execution-capable research profile has the egress skill and
+tools; and the visible card stays on the parent thread. Existing egress and
+async-task suites remain the regression set. A real-model flow is deferred
+until the currently active production child has stopped, and runs through
+shared model admission.

@@ -348,7 +348,8 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
                  gated_sources: Iterable[str] | None = None,
                  registered_tools: Iterable[str] | None = None,
                  tool_definitions: Iterable[
-                     BaseTool | dict[str, Any] | Callable] = ()):
+                     BaseTool | dict[str, Any] | Callable] = (),
+                 skill_names: Iterable[str] | None = None):
         super().__init__(backend=backend, sources=sources)
         self._bundled_sources = frozenset(bundled_sources)
         self._gated_sources = frozenset(
@@ -359,6 +360,8 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
             name: value for value in tool_definitions
             if (name := _tool_name(value)) is not None
         }
+        self._skill_names = (None if skill_names is None
+                             else frozenset(skill_names))
         if self._gated_sources:
             self.system_prompt_template = SMALL_MODEL_SKILLS_PROMPT
             self.tools = [_make_load_skill_tool(self)]
@@ -519,7 +522,8 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
             })
             skill = deepagents_skills._skill_metadata_from_response(  # noqa: SLF001
                 response, directory, path)
-            if skill is not None:
+            if skill is not None and (self._skill_names is None
+                                      or skill["name"] in self._skill_names):
                 metadata.append(skill)
                 try:
                     raw = response.content.decode("utf-8")

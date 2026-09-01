@@ -63,7 +63,9 @@ where reliability is harder than with frontier APIs.
   tasks return a task ID immediately, then wake the conversation with a
   follow-up when each result is ready. You can keep messaging the main
   thread meanwhile; it can list, check, update, or cancel outstanding tasks
-  without interrupting an in-flight model or tool call. A delegate is the same
+  without interrupting an in-flight model or tool call. A research task that
+  needs a blocked sandbox host pauses for the thread's normal exact-host
+  approval card and resumes only after your decision. A delegate is the same
   Assist construction with synchronous specialists but no self-delegation or
   web-supervisor tools.
 

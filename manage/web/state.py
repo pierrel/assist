@@ -39,6 +39,7 @@ from assist.backlog import MessageBacklog
 from assist.run_service import RunService
 from assist.egress.store import EgressStore, approvals_dir_is_safe
 from assist.egress.tools import egress_tools
+from assist.agent import set_execution_egress_tools
 from assist.sandbox_manager import _load_egress_allowlist
 from assist.geo.catalog import Catalog
 from assist.geo.proposals import ProposalStore
@@ -185,8 +186,9 @@ _egress_tools = (egress_tools(EGRESS_STORE, EGRESS_BASE_HOSTS,
 
 set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE)
               + notify_tools(lambda tid: _mark_urgent(tid))
-              + _geo_tools + _egress_tools + email_tools() + [get_location]
+              + _geo_tools + email_tools() + [get_location]
               + frequency_tools(FREQUENCY_STORE))
+set_execution_egress_tools(_egress_tools)
 set_web_triage_tools(reply_tools())
 set_web_interrupt_on(EMAIL_INTERRUPT_ON)
 set_web_triage_interrupt_on(REPLY_INTERRUPT_ON)

@@ -8,11 +8,19 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
+from langgraph.types import Command
 
-from assist.egress.store import (APPROVALS_SUBDIR, EgressRequest, EgressStore,
+from assist.egress.store import (APPROVALS_SUBDIR, EgressRequest, EgressStore, EgressWaiter,
                                  PROJECTION_FILE, REVOKED_ONLY, request_key)
+from assist.egress.store import resolution_prompt
 from assist.egress import tools as egress_tools_mod
-from assist.egress.tools import egress_tools, _parse_host_port
+from assist.egress.tools import (EGRESS_ORIGIN_THREAD_ID, EGRESS_WAITER_RUN_ID,
+                                 EGRESS_WAITER_THREAD_ID, egress_tools,
+                                 _parse_host_port)
 from assist.egress.client_map import record_client, forget_client
 
 
@@ -64,6 +72,24 @@ def test_decline_is_persistent_and_projects_nothing(tmp_path):
     assert _projection(tmp_path) == {}
     # double-resolve (double-click) is a no-op
     assert st.resolve(request_key("t1", "api.example.com", 443), "hour") is None
+
+
+def test_child_waiters_share_one_card_and_consume_once(tmp_path):
+    st = _store(tmp_path)
+    key = request_key("t1", "api.example.com", 443)
+    st.add_pending(_req())
+    first = EgressWaiter("sub-one", "run-one")
+    second = EgressWaiter("sub-two", "run-two")
+    assert st.wait_for_resolution(key, first).waiters == (first,)
+    assert st.wait_for_resolution(key, first).waiters == (first,)
+    assert st.wait_for_resolution(key, second).waiters == (first, second)
+    assert st.has_waiter("t1", first)
+    st.resolve(key, "decline")
+    assert st.resolved_waiters("t1") == [first, second]
+    assert st.remove_waiter("t1", first)
+    assert st.resolved_waiters("t1") == [second]
+    assert st.remove_waiter("t1", second)
+    assert st.resolved_waiters("t1") == []
 
 
 def test_expired_grant_pruned_on_mutation(tmp_path):
@@ -161,6 +187,109 @@ def test_tools_without_thread_are_inert(tmp_path, monkeypatch):
     request, list_hosts, remove = egress_tools(st, frozenset())
     assert "no active thread" in request("a.example.com", 443, "t").lower()
     assert st.all() == []
+
+
+def test_child_request_uses_parent_scope_and_parks_exact_run(tmp_path, monkeypatch):
+    st = _store(tmp_path)
+    waiter = EgressWaiter("sub-research", "run-123")
+    monkeypatch.setattr(egress_tools_mod, "_origin_thread_id", lambda: "parent")
+    monkeypatch.setattr(egress_tools_mod, "_child_waiter", lambda: waiter)
+    paused = []
+    monkeypatch.setattr(egress_tools_mod, "interrupt", lambda value: paused.append(value))
+    request, _, _ = egress_tools(st, frozenset())
+
+    request("api.example.com", 443, "fetch the public API")
+
+    rec = st.get(request_key("parent", "api.example.com", 443))
+    assert rec is not None and rec.waiters == (waiter,) and not rec.dispatch_main
+    assert paused == [{"egress_request": rec.key}]
+    st.resolve(rec.key, "hour")
+    assert resolution_prompt(st.take_undispatched("parent")) is None
+
+
+def test_child_manages_the_parent_egress_scope(tmp_path, monkeypatch):
+    st = _store(tmp_path)
+    monkeypatch.setattr(egress_tools_mod, "_origin_thread_id", lambda: "parent")
+    request, list_hosts, remove = egress_tools(st, frozenset())
+    request("api.example.com", 443, "fetch the public API")
+    st.resolve(request_key("parent", "api.example.com", 443), "hour")
+
+    assert "api.example.com:443" in list_hosts()
+    assert "Removed" in remove("api.example.com", 443)
+    assert st.for_thread("parent") == []
+
+
+def test_main_request_joining_child_card_keeps_main_resolution(tmp_path, monkeypatch):
+    """One card may park a child and retain the visible main continuation."""
+    st = _store(tmp_path)
+    waiter = EgressWaiter("sub-research", "run-123")
+    monkeypatch.setattr(egress_tools_mod, "_origin_thread_id", lambda: "parent")
+    monkeypatch.setattr(egress_tools_mod, "_child_waiter", lambda: waiter)
+    monkeypatch.setattr(egress_tools_mod, "interrupt", lambda _: None)
+    request, _, _ = egress_tools(st, frozenset())
+
+    request("api.example.com", 443, "fetch the public API")
+    monkeypatch.setattr(egress_tools_mod, "_child_waiter", lambda: None)
+    assert "already awaiting" in request(
+        "api.example.com", 443, "summarize the public API"
+    )
+
+    key = request_key("parent", "api.example.com", 443)
+    assert st.get(key).dispatch_main is True
+    assert st.get(key).main_task == "summarize the public API"
+    st.resolve(key, "hour")
+    batch = st.take_undispatched("parent")
+    assert [rec.host for rec in batch] == ["api.example.com"]
+    assert "summarize the public API" in resolution_prompt(batch)
+    assert "fetch the public API" not in resolution_prompt(batch)
+
+
+def test_resolved_waiters_wait_for_the_thread_card_batch(tmp_path):
+    st = _store(tmp_path)
+    waiter = EgressWaiter("sub-research", "run-123")
+    first = request_key("parent", "a.example.com", 443)
+    st.add_pending(EgressRequest(
+        host="a.example.com", port=443, task="first", origin_tid="parent",
+        waiters=(waiter,)))
+    st.add_pending(EgressRequest(
+        host="b.example.com", port=443, task="second", origin_tid="parent"))
+
+    st.resolve(first, "hour")
+    assert st.resolved_waiters("parent") == []
+    st.resolve(request_key("parent", "b.example.com", 443), "decline")
+    assert st.resolved_waiters("parent") == [waiter]
+
+
+@pytest.mark.parametrize(("decision", "expected"), [
+    ("hour", "already approved"),
+    ("decline", "already DECLINED"),
+])
+def test_child_request_interrupts_then_resumes_from_stored_resolution(
+        tmp_path, decision, expected):
+    st = _store(tmp_path)
+    request, _, _ = egress_tools(st, frozenset())
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", ToolNode([request]))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+    graph = graph.compile(checkpointer=InMemorySaver())
+    cfg = {"configurable": {
+        "thread_id": "sub-research",
+        EGRESS_ORIGIN_THREAD_ID: "parent",
+        EGRESS_WAITER_THREAD_ID: "sub-research",
+        EGRESS_WAITER_RUN_ID: "run-123",
+    }}
+    message = AIMessage(content="", tool_calls=[{
+        "name": "request_egress",
+        "args": {"host": "api.example.com", "port": 443, "task": "fetch API"},
+        "id": "call-1", "type": "tool_call",
+    }])
+
+    graph.invoke({"messages": [message]}, cfg)
+    assert graph.get_state(cfg).interrupts
+    st.resolve(request_key("parent", "api.example.com", 443), decision)
+    result = graph.invoke(Command(resume={"type": "approve"}), cfg)
+    assert expected in result["messages"][-1].content
 
 
 # --- client map ---------------------------------------------------------------

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from fastapi import HTTPException
 
 from assist.run_service import (
-    InvalidRunTransition,
+    AWAITING_APPROVAL_STATUSES, InvalidRunTransition,
     NONTERMINAL_STATUSES,
     TERMINAL_STATUSES,
 )
@@ -23,6 +23,7 @@ from manage.web.threads import (
     _RUN_ADMISSION_LOCK,
     _create_run,
     _dispatch_pending_after,
+    _remove_egress_waiter,
     _require_deep_thread,
     _runs,
 )
@@ -51,7 +52,7 @@ class WebAgentProtocolService:
             (candidate for candidate in reversed(runs)
              if candidate.status != "pending"), None)
         return (latest_nonpending is not None
-                and latest_nonpending.status == "interrupted")
+                and latest_nonpending.status in {"interrupted", "awaiting_approval"})
 
     @staticmethod
     def _task_snapshot(thread_id: str, runs: list) -> dict | None:
@@ -63,11 +64,13 @@ class WebAgentProtocolService:
         description = next(
             (candidate.text for candidate in reversed(runs) if candidate.text),
             "")
+        status = ("awaiting_approval" if latest.status == "awaiting_approval"
+                  else "running" if active else latest.status)
         return {
             "task_id": thread_id,
             "agent_name": latest.assistant_id,
             "description": description,
-            "status": "running" if active else latest.status,
+            "status": status,
             "run_id": latest.id,
             "work_id": latest.work_id,
             "parent_thread_id": first.parent_thread_id,
@@ -99,7 +102,7 @@ class WebAgentProtocolService:
                         latest_by_task[child.thread_id] = child
                 active_count = sum(
                     child.status in NONTERMINAL_STATUSES
-                    or child.status == "interrupted"
+                    or child.status in {"interrupted", "awaiting_approval"}
                     for child in latest_by_task.values())
                 if (not existing
                         and active_count >= self.MAX_ACTIVE_TASKS_PER_PARENT):
@@ -165,7 +168,7 @@ class WebAgentProtocolService:
             tasks.sort(key=lambda value: value["created_at"])
             active = [value for value in tasks
                       if value["status"] in NONTERMINAL_STATUSES
-                      or value["status"] == "running"]
+                      or value["status"] in {"running", "awaiting_approval"}]
             terminal = [value for value in tasks if value not in active]
             shown = active + terminal[-self.MAX_LISTED_TERMINAL_TASKS:]
             for value in shown:
@@ -207,6 +210,11 @@ class WebAgentProtocolService:
                 return replay
             interrupt = multitask_strategy == "interrupt"
             active = self._task_active(runs)
+            waiting = bool(runs and runs[-1].status in AWAITING_APPROVAL_STATUSES)
+            if interrupt and waiting:
+                cancelled = _runs().cancel(thread_id, runs[-1].id)
+                _remove_egress_waiter(cancelled)
+                active = False
             if (interrupt and runs and not active
                     and runs[-1].status in TERMINAL_STATUSES):
                 raise HTTPException(status_code=409, detail="Task already completed")
@@ -214,7 +222,8 @@ class WebAgentProtocolService:
                 if not active:
                     for candidate in runs:
                         if candidate.status == "pending":
-                            _runs().cancel_pending(thread_id, candidate.id)
+                            cancelled = _runs().cancel_pending(thread_id, candidate.id)
+                            _remove_egress_waiter(cancelled)
             delegate_user_urls: tuple[str, ...] = ()
             if assistant_id == "delegate-agent":
                 owner_urls: dict[str, set[str | None]] = {}
@@ -270,14 +279,22 @@ class WebAgentProtocolService:
                 return existing_marker
             for candidate in logical:
                 if candidate.status == "pending":
-                    _runs().cancel_pending(thread_id, candidate.id)
+                    cancelled = _runs().cancel_pending(thread_id, candidate.id)
+                    _remove_egress_waiter(cancelled)
             if running is None:
                 interrupted = [candidate for candidate in logical
                                if candidate.status == "interrupted"]
+                waiting = [candidate for candidate in logical
+                           if candidate.status == "awaiting_approval"]
                 for candidate in interrupted:
-                    _runs().cancel(thread_id, candidate.id)
-                result = interrupted[-1] if interrupted else run
-                if interrupted:
+                    cancelled = _runs().cancel(thread_id, candidate.id)
+                    _remove_egress_waiter(cancelled)
+                for candidate in waiting:
+                    cancelled = _runs().cancel(thread_id, candidate.id)
+                    _remove_egress_waiter(cancelled)
+                result = (waiting[-1] if waiting else interrupted[-1]
+                          if interrupted else run)
+                if waiting or interrupted:
                     result = _runs().get(thread_id, result.id)
                 elif run.status == "pending":
                     result = _runs().get(thread_id, run.id)

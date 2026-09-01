@@ -21,13 +21,15 @@ internet is fine; that host just isn't approved.
    can proceed without the host, proceed without it and don't request it.
 2. If it IS required: call `request_egress(host, port, task)`.
    - `host` is the exact DNS hostname (from the failed command's URL).
-   - `task` must be a complete instruction for your future self — after the
-     user approves, a follow-up turn runs with exactly that text.
+   - `task` must be a complete instruction for an ordinary agent's future
+     follow-up. An async child instead parks here and that exact child resumes
+     after the user decides.
    - If you already know you need several hosts, request them ALL now: the
      follow-up runs once, after the user resolves every request.
-3. Tell the user in your answer: which host, why, and that an approval card
-   is waiting in this thread. Then finish your answer. Do NOT retry the
-   blocked command until the approval arrives.
+3. An ordinary agent tells the user which host and why, then finishes its
+   answer. An async child pauses at the request and has no user-facing reply;
+   the visible parent thread owns the approval card. Neither retries the
+   blocked command until approval arrives.
 4. If the user declines, do not ask again for that host — proceed without
    it and say what that means for the result.
 
