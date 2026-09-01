@@ -75,6 +75,9 @@ def test_store_keeps_immutable_transcript_and_binds_reads_to_thread(tmp_path: Pa
     with pytest.raises(FileNotFoundError):
         store.get_for_thread("thread-b", capture_id)
     assert (tmp_path / "captures" / capture_id / "request.json").stat().st_mode & 0o077 == 0
+    newest = store.create(thread_id="thread-a", reason="A later capture.",
+                          scope="last_3", records=_records())
+    assert store.latest_for_threads()["thread-a"]["capture_id"] == newest["request"]["capture_id"]
 
 
 def test_store_rejects_a_symlinked_capture_file(tmp_path: Path):
@@ -262,6 +265,20 @@ def test_worker_start_releases_ownership_when_recovery_scan_fails(tmp_path: Path
     assert worker._lock_file is None
 
 
+def test_worker_refuses_a_symlinked_lock_file(tmp_path: Path):
+    threads = tmp_path / "threads"
+    threads.mkdir()
+    store = CaptureStore(tmp_path / "captures", threads_root=threads)
+    outside = tmp_path / "outside"
+    outside.write_text("leave me alone")
+    (store.root / "worker.lock").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="owner-only regular file"):
+        CaptureWorker(store, model_factory=_Model).start()
+
+    assert outside.read_text() == "leave me alone"
+
+
 def test_worker_stop_interrupts_queue_wait_before_starting_a_model_call(tmp_path: Path, monkeypatch):
     import edd.live_capture as captures
 
@@ -328,7 +345,11 @@ def test_capture_route_snapshots_raw_messages_and_scopes_fragment_to_thread(tmp_
 
     class FakeThread:
         def get_raw_messages(self):
-            return [HumanMessage(content="question"), AIMessage(content="answer")]
+            return [
+                HumanMessage(content="question"),
+                HumanMessage(content=INTERJECTION_FRAME + "also this" + INTERJECTION_GUIDE),
+                AIMessage(content="answer"),
+            ]
 
     class FakeManager:
         def get(self, tid, **kwargs):
@@ -356,6 +377,11 @@ def test_capture_route_snapshots_raw_messages_and_scopes_fragment_to_thread(tmp_
     assert response.headers["cache-control"] == "no-store"
     capture_id = response.json()["capture_id"]
     assert worker.submitted == [("t1", capture_id)]
+    capture = store.get_for_thread("t1", capture_id)
+    assert capture["request"]["turn_range"] == [1, 1]
+    assert [record["text"] for record in capture["transcript"]["records"]] == [
+        "question", "also this", "answer",
+    ]
     fragment = client.get(f"/thread/t1/capture/{capture_id}")
     assert fragment.status_code == 200
     assert fragment.headers["cache-control"] == "no-store"

@@ -273,6 +273,19 @@ class CaptureStore:
             index = self._index_value()
             return list(index.get("threads", {}).get(thread_id, []))
 
+    def latest_for_threads(self) -> dict[str, dict[str, Any]]:
+        """Return the newest capture summary for each thread in one index read."""
+        with self._lock:
+            threads = self._index_value().get("threads", {})
+            if not isinstance(threads, dict):
+                return {}
+            return {
+                thread_id: dict(entries[0])
+                for thread_id, entries in threads.items()
+                if isinstance(thread_id, str) and isinstance(entries, list)
+                and entries and isinstance(entries[0], dict)
+            }
+
     def update_result(self, thread_id: str, capture_id: str, result: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             current = self.get_for_thread(thread_id, capture_id)
@@ -424,8 +437,18 @@ class CaptureWorker:
         if self._thread is not None:
             return
         lock_path = self.store.root / "worker.lock"
-        self._lock_file = lock_path.open("a+")
-        os.chmod(lock_path, 0o600)
+        fd = -1
+        try:
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            lock_stat = os.fstat(fd)
+            if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_uid != os.getuid() \
+                    or lock_stat.st_mode & 0o077:
+                raise ValueError("capture worker lock must be an owner-only regular file")
+            self._lock_file = os.fdopen(fd, "a+")
+        except (OSError, ValueError) as error:
+            if self._lock_file is None and fd >= 0:
+                os.close(fd)
+            raise ValueError("capture worker lock must be an owner-only regular file") from error
         try:
             fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as error:
