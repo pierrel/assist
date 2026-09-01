@@ -18,6 +18,9 @@ _VOID_TAGS = frozenset({"br", "hr"})
 
 def _safe_href(value: str) -> str | None:
     value = value.strip()
+    if any(character.isspace() or ord(character) < 0x20 or ord(character) == 0x7f
+           for character in value):
+        return None
     parsed = urlparse(value)
     if parsed.scheme.lower() not in {"", "http", "https", "mailto"}:
         return None
