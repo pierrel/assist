@@ -1,10 +1,9 @@
 """
 EDD (Eval-Driven Development) Module
 
-This module provides tools for capturing conversations and generating test cases
-to enable systematic improvement through evaluation.
+This module provides evaluation harnesses and private judged live captures.
 """
 
-from edd.capture import capture_conversation
+from edd.live_capture import CaptureStore, CaptureWorker
 
-__all__ = ['capture_conversation']
+__all__ = ["CaptureStore", "CaptureWorker"]
