@@ -387,6 +387,7 @@ after the operator swaps the model on the serving host).
 | `ASSIST_API_KEY`     | API key. Falls back to `OPENAI_API_KEY`, then to `"EMPTY"` (which vLLM accepts and real OpenAI rejects). | `"EMPTY"`             |
 | `ASSIST_DOMAINS`     | Git repositories, comma-separated                                                                        | None                  |
 | `ASSIST_THREADS_DIR` | Data storage location                                                                                    | `/tmp/assist_threads` |
+| `ASSIST_CAPTURES_DIR` | Private judged-live-capture storage, outside thread data and never forwarded to sandboxes              | sibling `assist_captures` |
 | `ASSIST_PORT`        | Server port                                                                                              | `8000`                |
 
 See [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md) for complete reference.
@@ -416,6 +417,7 @@ configuration and keeps the in-app urgent behavior without sending SMS.
 ### Local Development
 - Configuration: `.dev.env` (gitignored)
 - Data: `ASSIST_THREADS_DIR` (default: `/tmp/assist_threads`)
+- Live captures: `ASSIST_CAPTURES_DIR` (default: sibling `assist_captures`; owner-only private snapshots)
 - Model: Your local model endpoint
 - Domains: Your local git repositories (optional)
 - Sandbox: Docker container per turn for isolated command execution

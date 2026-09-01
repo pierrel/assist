@@ -23,6 +23,7 @@ from typing import Dict
 
 from fastapi import FastAPI
 from starlette.concurrency import run_in_threadpool
+import anyio
 
 from assist.domain_manager import DomainManager
 from assist.env import load_dev_env
@@ -51,6 +52,7 @@ from assist.thread_engine import read_thread_engine
 from assist.pi_preview import PiPreviewPolicy
 from assist.location import LocationStore, get_location
 from assist.frequency import FrequencyDecisionStore, frequency_tools
+from edd.live_capture import CaptureStore, CaptureWorker
 
 
 def _configure_logging() -> None:
@@ -106,6 +108,15 @@ load_dev_env()
 
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = ThreadManager(ROOT)
+CAPTURES_DIR = os.getenv(
+    "ASSIST_CAPTURES_DIR", os.path.join(os.path.dirname(os.path.abspath(ROOT)), "assist_captures"))
+CAPTURE_STORE = CaptureStore(CAPTURES_DIR, threads_root=ROOT)
+CAPTURE_WORKER = CaptureWorker(CAPTURE_STORE)
+CAPTURE_CSRF = secrets.token_urlsafe(32)
+# Capture filesystem work must never wait behind ordinary request handlers in
+# Starlette's shared threadpool.  This limiter is used by capture routes and the
+# lifespan stop path only.
+CAPTURE_THREAD_LIMITER = anyio.CapacityLimiter(2)
 PI_PREVIEW = PiPreviewPolicy(ROOT)
 LOCATION_STORE = LocationStore(ROOT)
 FREQUENCY_STORE = FrequencyDecisionStore(ROOT)
@@ -724,6 +735,10 @@ async def lifespan(app: FastAPI):
     # scheduled/SMS response's badge survives a restart.
     load_unseen_cache()
     load_urgent_cache()
+    # Worker ownership and recovery scan touch the private capture filesystem.
+    # Keep them out of the single-worker event loop just like shutdown below.
+    await anyio.to_thread.run_sync(
+        CAPTURE_WORKER.start, limiter=CAPTURE_THREAD_LIMITER)
     # Start the schedule poll loop + the serial worker that drains recovery jobs.
     start_scheduler()
     try:
@@ -734,6 +749,11 @@ async def lifespan(app: FastAPI):
             stop_scheduler()
         except Exception:
             logging.getLogger(__name__).warning("scheduler shutdown failed", exc_info=True)
+        try:
+            await anyio.to_thread.run_sync(
+                CAPTURE_WORKER.stop, limiter=CAPTURE_THREAD_LIMITER)
+        except Exception:
+            logging.getLogger(__name__).warning("capture worker shutdown failed", exc_info=True)
         # Clean up Docker sandbox containers
         try:
             SandboxManager.cleanup_all()

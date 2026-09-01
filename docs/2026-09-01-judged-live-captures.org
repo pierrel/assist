@@ -1,0 +1,266 @@
+#+title: Design — Judged live conversation captures
+#+date: 2026-09-01
+#+startup: overview
+
+* State
+
+Design reviewed.  Ready to implement.
+
+* Problem
+
+The web Capture Conversation button reports only that a background job started.
+Its old capture path attempts to synthesize a test and prompt recommendation in
+the deployed code tree.  It neither produces a durable private trace nor uses
+the outcome judge, and its current =Thread= attribute assumption is invalid.
+
+Pierre needs a low-friction way to turn a notably good or bad real interaction
+into inspectable outcome-eval evidence: choose the recent conversation (initially
+the last three completed user turns, or the whole visible conversation), explain
+why it was captured, then see a pass, partial, or fail judgment of what actually
+happened.  The result must not make ordinary use wait or turn private live
+conversations into tracked source fixtures.
+
+* V1 decision
+
+Replace the old synthetic-test capture flow with a judged live-capture flow.
+
+1. The Deep-Agents thread page offers =Capture interaction= once the current
+   visible turn is complete.  Pi preview explicitly remains unavailable in V1
+   because its independent transcript/trace contract is not part of this change.
+   The modal requires:
+   - Pierre's free-text reason, stored and displayed verbatim;
+   - a scope: =Last 3 completed turns= (default) or =Entire visible conversation=.
+2. The POST snapshots the selected *visible* user and assistant records before
+   returning.  A completed turn begins at a human user message and ends at the
+   last assistant result before the next human message; collapsed tool-call rows,
+   incomplete current work, and host-generated continuation frames are excluded.
+3. A private capture store writes immutable request and transcript files.  A
+   single background worker first uses a bounded structured interpreter to turn
+   Pierre's reason and the transcript into a bounded list of observable
+   requested and forbidden criterion *descriptions*.  The interpreter cannot
+   select or alter evidence; its criteria are visibly subordinate to Pierre's
+   original reason.  Its strict schema requires at least one requested criterion
+   and permits only bounded description strings; when the reason cannot support
+   one it produces =needs_clarification= rather than inventing a generic goal.
+   The worker deterministically assigns every selected record
+   to every criterion, constructs the complete =OutcomeObservation=, and asks
+   the existing =OutcomeJudge= to grade it.  Only the judge selects verdict
+   citations.
+4. The capture form submits in place.  It closes the modal, inserts the initial
+   card, and preserves the compose box's value, selection, and focus.  The
+   worker stores interpreter and judge provenance plus the verdict.  The thread
+   stays open and shows a compact capture card: queued, interpreting, judging,
+   failed, or the overall verdict with concise rationale, confidence, and cited
+   record numbers.  The card polls a same-origin rendered fragment while
+   pending, so the verdict arrives where Pierre captured it without refreshing
+   or abandoning a draft message.  An expandable V1 detail identifies the
+   captured scope and turn range, Pierre's verbatim reason, interpreter
+   criteria, cited excerpts, and final provenance, clearly distinguishing source
+   evidence from derived evaluation data.
+
+* Storage and lifecycle
+
+Capture data is private product data, not repository data or a child of the
+thread directory.  =ASSIST_CAPTURES_DIR= configures a sibling durable directory
+to =ASSIST_THREADS_DIR= when unset.  Each opaque capture identifier owns:
+
+#+begin_example
+<ASSIST_CAPTURES_DIR>/<capture-id>/
+  request.json       # immutable thread id, scope, reason, timestamps
+  transcript.json    # immutable selected visible records and capture provenance
+  result.json        # status, criteria, observation, model provenance, verdict/error
+#+end_example
+
+The store creates its root at mode 0700 and files at mode 0600.  It validates
+opaque identifiers, resolves and validates the root outside the thread root,
+rejects symlinks, verifies restrictive ownership/modes, and writes every JSON
+update through an exclusive same-directory temporary file plus rename and
+directory sync.  Every lookup is through =get_for_thread(tid, capture_id)= or
+=list_for_thread(tid)=; a capture ID alone never authorizes a read.  A compact
+store-owned index supplies per-thread status without making web code scan or
+join arbitrary capture paths.
+The separate root deliberately lets a useful capture survive deleting the chat
+that originated it.  Retention and promotion are later product decisions, not
+hidden automatic deletion or source-control actions in V1.
+
+The default scope is bounded by turn count.  Whole-conversation capture is
+measured against the configured exact snapshot bound *before* a transcript is
+written.  If it is too large, no full transcript is retained: the small request
+and terminal rejection explain that it needs a shorter range.  It never silently
+truncates evidence and claims to have judged the whole interaction.
+The resulting card offers one action to capture the last three completed turns
+with the original reason, so the whole-conversation limit is not a dead end.
+Independent bounds apply before any transcript write: reason bytes, record
+count, per-record bytes, snapshot bytes, total store bytes, and queued/recovered
+work.  A rejected oversize request stores only a small request/result explaining
+the limit.  It never silently truncates a record or accumulates an unbounded
+recovery backlog.
+
+Capture provenance is immutable: source thread ID, UTC capture time, projection
+and observation-schema versions, selected scope and turn ordinals, exact
+canonical transcript bytes and digest, and the deployed source revision when it
+is available.  The interpreter and judge each record their prompt hash and
+served model name.  This is evidence for a later explicit promotion or
+investigation, not a promise that the captured interaction is replayable.
+
+The shared =VisibleRecord= projection is the sole persisted-message view used
+by capture selection and the web renderer.  Each record has a stable source ID,
+original order, role, normalized visible text, source kind, and explicit
+capture-eligibility membership.  It gives host continuation/task frames their
+existing display semantics but excludes them from capture.  Ordinary user
+interjections retain their visible user content.  A render directive produces a
+visible =rendered-artifact-unavailable= evidence marker rather than copying its
+workspace artifact or exposing the directive as judge evidence.  Transient page
+status and an incomplete active turn are deliberately outside this projection.
+
+* Concurrency and recovery
+
+The capture POST performs only validation and snapshot persistence off the
+asyncio loop.  It never invokes a model.  A dedicated one-at-a-time capture
+worker, not FastAPI's shared background-task threadpool, owns interpretation
+and judging.  It acquires and releases =THREAD_QUEUE= separately around each
+model call as =user_priority=False= background work, so an ordinary user turn
+can run between them and a queued capture cannot consume request workers.
+Capture calls are direct fixed-schema chat-model calls, never a =Thread= or
+DeepAgents graph: no checkpointer, sandbox, tools, skills, domain, or workspace
+is available.  Each uses a capture-specific strict read timeout and small output
+budget, with its HTTP response deadline demonstrably below its explicit queue
+hold cap.  An in-flight direct request is not preemptible, so the bounded request
+is the construction that limits an arriving user's wait; the capture queue must
+never force-release it before that client deadline.  A timeout is terminal and
+the client closes the request before the worker leaves the queue hold.
+
+The single worker is the only result writer; same-directory atomic rename keeps
+readers safe without an additional store transition lock.  It uses a distinct
+unique =capture:<id>= queue identity, never the source thread identity, and
+always drains its non-resumable queue-hold record in =finally=.  Its process-local
+queue is notification only.  Its app-lifespan =start=, =stop=, and =recover=
+operations scan the durable store and safely reconstruct missing notifications.
+The worker runs only the incomplete phase: =queued → interpreting=; durable
+criteria and canonical observation → =judging=; durable verdict → terminal.
+Thus a restart never reinterprets a capture with stored criteria or overwrites
+a downstream result.  Model, storage, and judge failures become a visible
+=failed= capture with a short safe error, never a false success or a stuck page.
+
+A store-backed phase claim and a process-lifetime exclusive worker lock establish
+one worker owner; they are ownership guards, not general transition locking.
+App startup performs recovery through a capture-private
+thread limiter only after acquiring that ownership.  Shutdown closes capture
+admission, asks the worker to stop, and waits through that same off-loop limiter
+before closing =MANAGER=; it never joins a worker from the asyncio event loop.
+This prevents restart recovery from judging alongside a still-live old worker.
+
+The source thread's entry in the thread list carries a durable capture-pending,
+completed, or failed marker, so a result remains discoverable after Pierre moves
+to another conversation.  Capture creation is disabled while the thread has an
+unfinished turn; the modal also states its exact selected completed-turn range.
+Snapshot creation, fragment/status reads, recovery scanning, and worker stop
+all use a capture-private AnyIO capacity limiter.  No checkpoint, filesystem,
+store, or rendering work runs inline in an =async def=, and the browser poller
+permits only one in-flight fragment request.
+
+* Trust boundary
+
+The reason, transcript, interpreter criteria, and judge rationale are untrusted
+content.  They are JSON data to both model prompts' untrusted-data boundaries
+and HTML-escaped in the web page.  Capture IDs and thread IDs are validated
+before they reach paths.  Request text and selected evidence are bounded.  A
+same-origin CSRF token protects the model-consuming POST.  The capture root
+must be outside the thread root and is not forwarded into sandboxes.  V1 stores
+visible records only: raw tool results, secrets, domains, and filesystem copies
+are not captured by default.
+
+Assistant Markdown must be made safe before this route receives a CSRF token or
+private capture fragment: a reflected page/model response cannot run script,
+event handlers, or unsafe URL schemes in the thread page.  CSRF remains a
+cross-origin defense, not a defense against same-origin script injection.  All
+capture UI fields render as escaped plain text, have no-store responses, and
+remain bound to the source thread route rather than exposing a global capture
+URL.
+
+The safe Markdown boundary is shared by ordinary assistant/tool/review Markdown
+segments.  It permits the existing display vocabulary but drops raw HTML,
+event-handler attributes, and non-HTTP(S)/mailto links; trusted server-generated
+render embeds remain outside that sanitizer.  The capture root is excluded from
+the sandbox's otherwise broad =ASSIST_*= environment forwarding.  Capture POST
+and fragment responses send =Cache-Control: no-store= and a restrictive referrer
+policy; fragments remain addressed as =/thread/<tid>/capture/<capture-id>=, so a
+capture ID cannot become a global authorization key.
+
+* Future seam, deliberately not V1
+
+The saved capture has enough immutable provenance to support a later explicit
+=Promote to replay eval= workflow and an explicit =Investigate= development
+thread.  Neither occurs automatically.  A replay requires a separately reviewed
+fixture and starting-state contract; a judged live capture only grades the
+interaction that already occurred.  A future investigation may recommend a
+behavior or judge change, but cannot change code, deploy, or rewrite a judge to
+make its originating capture pass.
+
+* Retired capture path
+
+The old code-writing capture agent, its filesystem-capable prompt, synthetic
+capture test, and prompt-census scenario are removed rather than retained beside
+the new flow.  Two meanings for =Capture Conversation= would be unsafe and
+misleading.  The V1 interpreter is not an agent: it has one fixed structured
+output and no filesystem capability.
+
+* Verification plan
+
+1. Extract one pure persisted-message projection used by both web rendering and
+   capture selection.  It consumes raw checkpoint messages once, assigns stable
+   record IDs/order, applies the page's continuation/interjection display rules,
+   and selects only complete logical human turns.  Store tests cover path
+   validation, atomic records, transcript immutability, selected logical turns,
+   rendered-artifact-unavailable markers, whole-scope and quota limits,
+   recoverable status, and malformed data.
+2. Worker tests use fixed interpreter and judge models to prove queue/status
+   transitions, restart recovery, canonical evidence ownership, provenance
+   persistence, and safe failure reporting without using a real model.
+3. Route and rendered-page tests exercise the actual capture form and result
+   card, including in-place submission without composer-draft loss, an active
+   unfinished turn, hostile reason/rationale HTML, CSRF, the whole-scope
+   last-three recovery action, and a contended model queue without blocking the
+   event loop.  They reject mismatched opaque IDs, invalid CSRF, weak/symlinked
+   storage roots, and malicious size/recovery backlog.  They also prove hostile
+   assistant Markdown cannot execute/read a capture token.  The thread-list
+   marker and expandable evidence detail are rendered from durable state.  The
+   modal has dialog semantics, focus handling, Escape/cancel behavior, bounded
+   scrolling, and touch-sized controls.
+   They exhaust the shared AnyIO pool while asserting capture create/poll still
+   returns promptly, and hold a bounded capture model call while proving a user
+   turn cannot overlap it or wait beyond the documented capture deadline.
+4. A new real-model eval supplies synthetic positive and negative captures to
+   the interpreter then existing judge and validates the expected verdict.  Its
+   baseline and candidate follow the Assist N=3/N=5/N=10 cadence; adjacent
+   judge rows form the safety panel.
+
+* Design-review decisions
+
+All required Phase-1 lenses reviewed this design.
+
+- Simplicity: accepted the narrow fixed-schema interpreter, deterministic
+  evidence attachment, a single shared visible-record projection, and one
+  dedicated worker.  Rejected a second synthetic-test meaning for Capture.
+- Agentic/framework fit: accepted direct tool-free bounded model calls rather
+  than a DeepAgents thread; durable phase boundaries make restart recovery
+  idempotent and preserve the original live evidence.
+- User intention and UX: accepted a verbatim free-text reason with no forced
+  good/bad polarity, in-place results that preserve drafts, discoverable
+  thread-list state, and a one-action shorter-range recovery from an oversized
+  whole capture.
+- Clean interfaces: accepted store-owned per-thread lookup/index APIs and a
+  source-thread-bound fragment route.  Capture never depends on a global ID or
+  raw checkpoint representation.
+- Threat model: accepted all explicit size/quota and path/ownership boundaries,
+  transcript prompt-injection tests, and the safe Markdown boundary before
+  exposing this sensitive POST.  Raw transcript/tool artifacts never become
+  capture data.
+- Event-loop liveness: accepted a private off-loop limiter, lifecycle ownership
+  lock, strict model deadline below queue hold, and no use of FastAPI's shared
+  background pool.  A raw model call is bounded but not force-preempted.
+
+Deferred deliberately: explicit promotion to replay evals, automatic
+investigation/development threads, retention policy, render-artifact copying,
+and Pi transcript capture.  Each needs its own reviewed contract rather than
+being smuggled into the first useful live-capture loop.

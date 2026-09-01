@@ -83,7 +83,6 @@ from manage.web.review import (  # noqa: E402,F401
     render_review_page,
 )
 from manage.web.threads import (  # noqa: E402,F401
-    _capture_conversation,
     _initialize_thread,
     _process_message,
     render_index,

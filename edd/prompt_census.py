@@ -58,7 +58,6 @@ REQUIRED_PATHS = {
     "nested-report-critique",
     "receptionist",
     "thread-description",
-    "capture",
 }
 EXPECTED_PATHS_BY_SCENARIO = {
     "web-main-core": ("main", "main", "main", "main"),
@@ -78,7 +77,6 @@ EXPECTED_PATHS_BY_SCENARIO = {
         "research-lead", "nested-report-critique", "research-lead"),
     "receptionist": ("receptionist",),
     "thread-description": ("thread-description",),
-    "capture": ("capture",),
 }
 EXPECTED_CALL_COUNTS = {
     scenario: len(paths)
@@ -1100,7 +1098,6 @@ def _instrument(trace: CensusTrace) -> Iterator[None]:
     import assist.middleware.context_rider_middleware as rider_mod
     import assist.middleware.prompt_composition as composition_mod
     import assist.middleware.skills_middleware as assist_skills_mod
-    import edd.agent as capture_agent_mod
     from deepagents import create_deep_agent as real_create_deep_agent
 
     def prompt_renderer(package: str, original: Callable) -> Callable:
@@ -1213,12 +1210,7 @@ def _instrument(trace: CensusTrace) -> Iterator[None]:
             web_main_prompt_mod, "base_prompt_for",
             prompt_renderer("assist", web_main_prompt_mod.base_prompt_for)))
         stack.enter_context(patch.object(
-            capture_agent_mod, "base_prompt_for",
-            prompt_renderer("edd", capture_agent_mod.base_prompt_for)))
-        stack.enter_context(patch.object(
             assist_agent_mod, "create_deep_agent", constructor("assist.agent template")))
-        stack.enter_context(patch.object(
-            capture_agent_mod, "create_deep_agent", constructor("edd.capture template")))
         yield
 
 
@@ -1484,44 +1476,6 @@ def _invoke_description(trace: CensusTrace) -> dict[str, Any]:
         trace.add_constructor_prompt(prompt, "assist.thread-description template")
         description = thread.description()
     return {"description": description}
-
-
-def _invoke_capture(trace: CensusTrace, root: Path) -> dict[str, Any]:
-    from edd.capture import capture_conversation
-
-    class SyntheticThread:
-        thread_id = "synthetic-capture-thread"
-
-        def __init__(self, threads_root: Path):
-            self.threads_root = str(threads_root)
-
-        def get_messages(self):
-            return [
-                {"role": "user", "content": "SYNTHETIC CAPTURE USER REQUEST"},
-                {"role": "assistant", "content": "SYNTHETIC CAPTURE RESPONSE"},
-            ]
-
-        def description(self):
-            return "synthetic capture description"
-
-    work = root / "capture"
-    work.mkdir()
-    threads_root = work / "thread"
-    (threads_root / "domain").mkdir(parents=True)
-    (threads_root / "domain" / "synthetic.txt").write_text(
-        "SYNTHETIC CAPTURE DOMAIN\n", encoding="utf-8")
-    with _scenario("capture"), \
-            patch("edd.capture.select_chat_model",
-                  return_value=RecordingChatModel(
-                      trace, enable_thinking=None)), \
-            patch("edd.capture.sanitize_dirname",
-                  return_value="synthetic-capture-output"):
-        capture_conversation(
-            SyntheticThread(threads_root),
-            "SYNTHETIC CAPTURE REASON",
-            str(work / "improvements"),
-        )
-    return {}
 
 
 def _invoke_async_return_contract() -> dict[str, str]:
@@ -1828,9 +1782,6 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
     "assist/templates/receptionist_system.md.j2": {
         "f2bfbc35fb540f64c385b74c7bf590517b80bc5ee9abd660eb3ad736bb3adb8e",
     },
-    "edd/templates/capture_agent.md.j2": {
-        "2cbb0976855311a174129a93d87801f4abe5404404422f46a14b2cb786f4ec7a",
-    },
 }
 
 _REFERENCED_TEMPLATE_LOCATORS = {
@@ -1843,7 +1794,6 @@ _REFERENCED_TEMPLATE_LOCATORS = {
     "assist/templates/deepagents/sub_critique.txt.j2",
     "assist/templates/deepagents/sub_research.txt.j2",
     "assist/templates/receptionist_system.md.j2",
-    "edd/templates/capture_agent.md.j2",
 }
 
 _CLAIM_SPECS = (
@@ -1899,16 +1849,6 @@ _CLAIM_SPECS = (
      "- open_thread —"),
     ("assist.receptionist template", "positive", "new_thread",
      "- new_thread —"),
-    ("edd.capture template", "positive", "read_file", "- `read_file(path)`"),
-    ("edd.capture template", "positive", "write_file", "- `write_file(path, content)`"),
-    ("edd.capture template", "positive", "ls", "- `ls(path)`"),
-    ("edd.capture template", "positive", "glob", "- `glob(pattern)`"),
-    ("edd.capture template", "argument-relative", "read_file",
-     "All paths are **relative to your working directory**"),
-    ("edd.capture template", "argument-relative", "write_file",
-     "All paths are **relative to your working directory**"),
-    ("edd.capture template", "argument-relative", "ls",
-     "All paths are **relative to your working directory**"),
 )
 
 
@@ -2173,8 +2113,6 @@ _TOOL_RESULT_METADATA = {
     "synthetic-call-nested-report-critique": ("task", "success"),
 }
 
-_DECLARED_CAPTURE_TASK_SHA256 = \
-    "dc6155e1863f23b35006efd98f0a5e2ea0c1b392650567596cd7c86a6c6af402"
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "cc620d39b33cd54ff979628d26d25600b5ac97c7bae551a29b67337756901bb0"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
@@ -2429,10 +2367,9 @@ def _assert_closed_artifact_shapes(artifact: dict[str, Any]) -> None:
         payload = call["provider_payload"]
         payload_keys = {"messages", "model", "stream", "temperature"}
         expected_extra_body = None
-        if call["path"] != "capture":
-            payload_keys.add("extra_body")
-            expected_extra_body = {
-                "chat_template_kwargs": {"enable_thinking": False}}
+        payload_keys.add("extra_body")
+        expected_extra_body = {
+            "chat_template_kwargs": {"enable_thinking": False}}
         if call["visible_tools"]:
             payload_keys.add("tools")
         _assert_keys(payload, payload_keys, "provider payload")
@@ -2608,13 +2545,8 @@ def _assert_declared_inputs(artifact: dict[str, Any]) -> None:
         raise AssertionError("Pi worker tool declaration digest drifted")
     for call in artifact["calls"]:
         messages = call["provider_payload"].get("messages", [])
-        if call["scenario"] == "capture":
-            if len(messages) != 2 or messages[1].get("role") != "user" \
-                    or _sha(messages[1].get("content")) != \
-                    _DECLARED_CAPTURE_TASK_SHA256:
-                raise AssertionError("capture application task drifted")
-        elif messages[1:] != _expected_message_history(
-                    call["scenario"], call["call_index"]):
+        if messages[1:] != _expected_message_history(
+                call["scenario"], call["call_index"]):
             raise AssertionError(
                 f"{call['scenario']}:{call['call_index']} provider history drifted")
 
@@ -2679,7 +2611,6 @@ def _assert_declared_inputs(artifact: dict[str, Any]) -> None:
             "nested-report-critique": {"tool_messages"},
             "receptionist": set(),
             "thread-description": {"description"},
-            "capture": set(),
             "async-task-return-contract": {"launch", "checked"},
     }
     if set(artifact["observations"]) != set(expected_observation_keys):
@@ -2907,7 +2838,7 @@ def _assert_source_links(artifact: dict[str, Any]) -> None:
                         f"Deep Agents base prompt source drifted in "
                         f"{call['scenario']}")
             else:
-                package = "edd" if span["owner"] == "edd.capture template" else "assist"
+                package = "assist"
                 if source is None or source["kind"] != "template" \
                         or not source["locator"].startswith(f"{package}/templates/") \
                         or _sha(text) != source["rendered_sha256"] \
@@ -3120,8 +3051,7 @@ def _skill_tool_owners(source_manifest: list[dict[str, Any]], *,
 def _tool_classification(path: str, name: str, origin: str) -> str:
     fixed = {"context", "research-lead", "research-leaf",
              "nested-research-worker", "nested-fact-check",
-             "nested-report-critique", "receptionist", "thread-description",
-             "capture"}
+             "nested-report-critique", "receptionist", "thread-description"}
     if path in fixed:
         return "fixed-role tool"
     if origin.startswith("deepagents") or name == "load_skill" \
@@ -3656,7 +3586,6 @@ def _capture_census() -> dict[str, Any]:
                         trace, root, leaf=False, scenario=scenario)
                 observations["receptionist"] = _invoke_receptionist(trace)
                 observations["thread-description"] = _invoke_description(trace)
-                observations["capture"] = _invoke_capture(trace, root)
                 observations["async-task-return-contract"] = \
                     _invoke_async_return_contract()
         finally:

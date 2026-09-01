@@ -224,6 +224,8 @@ def test_pi_page_offers_deep_continuation_when_preview_is_disabled(
     assert 'name="summary"' in page
     assert 'name="text" required' in page
     assert 'name="text" required placeholder="Type your message..." disabled' in page
+    assert 'id="capture-form"' not in page
+    assert "if (captureForm) captureForm.addEventListener" in page
 
 
 def test_continue_pi_in_deep_creates_independent_deep_thread(

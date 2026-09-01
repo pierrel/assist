@@ -166,8 +166,9 @@ def _validate_citations(citations: tuple[str, ...], allowed: set[str]) -> None:
 class OutcomeJudge:
     """Make one structured local-model call for one closed observation."""
 
-    def __init__(self, model: Any | None = None):
+    def __init__(self, model: Any | None = None, *, max_tokens: int = _OUTPUT_TOKENS):
         self._model = model
+        self._max_tokens = max_tokens
         self._prompt = _PROMPT_PATH.read_text()
         self._prompt_sha256 = hashlib.sha256(self._prompt.encode()).hexdigest()
 
@@ -192,7 +193,7 @@ class OutcomeJudge:
                     "schema": OutcomeVerdict.model_json_schema(),
                 },
             },
-            max_tokens=_OUTPUT_TOKENS,
+            max_tokens=self._max_tokens,
             seed=0,
         )
         payload = json.dumps(observation.model_dump(mode="json"), sort_keys=True)
