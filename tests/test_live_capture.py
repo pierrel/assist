@@ -95,6 +95,15 @@ def test_store_refuses_capture_root_inside_thread_root(tmp_path: Path):
         CaptureStore(threads / "captures", threads_root=threads)
 
 
+def test_store_refuses_capture_root_containing_thread_root(tmp_path: Path):
+    captures = tmp_path / "captures"
+    threads = captures / "threads"
+    threads.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="outside"):
+        CaptureStore(captures, threads_root=threads)
+
+
 def test_rejected_capture_cannot_bypass_the_store_quota(tmp_path: Path, monkeypatch):
     import edd.live_capture as captures
 
