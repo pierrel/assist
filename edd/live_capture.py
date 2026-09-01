@@ -109,7 +109,7 @@ class CaptureStore:
     def __init__(self, root: str | os.PathLike[str], *, threads_root: str | os.PathLike[str]) -> None:
         self.root = Path(root).expanduser().resolve()
         thread_root = Path(threads_root).expanduser().resolve()
-        if self.root == thread_root or thread_root in self.root.parents:
+        if self.root == thread_root or thread_root in self.root.parents or self.root in thread_root.parents:
             raise ValueError("capture root must be outside the thread root")
         self._lock = threading.RLock()
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
