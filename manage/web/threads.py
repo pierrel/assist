@@ -249,6 +249,7 @@ def _thread_status_rank(tid: str, stage: str) -> int:
 
 def render_index() -> str:
     items = []
+    captures_by_thread = CAPTURE_STORE.latest_for_threads()
     for tid in MANAGER.list():
         title = _thread_title(tid)
         try:
@@ -329,9 +330,9 @@ def render_index() -> str:
                 ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
                 ' margin-right:.4rem;">unmerged</span>'
             )
-        captures = CAPTURE_STORE.list_for_thread(tid)
-        if captures:
-            capture_status = str(captures[0].get("status", "queued")).replace("_", " ")
+        capture = captures_by_thread.get(tid)
+        if capture:
+            capture_status = str(capture.get("status", "queued")).replace("_", " ")
             badge += (
                 '<span style="font-size:.7rem; color:#6b7280; background:#fafafa;'
                 ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
@@ -4617,8 +4618,14 @@ def _create_live_capture(tid: str, reason: str, scope: str) -> dict:
     records = select_completed_turns(projection, whole_conversation=scope == "entire")
     if not records:
         raise ValueError("Capture needs at least one completed user turn and assistant response")
-    completed_starts = [record.id for record in completed if record.role == "user"]
-    selected_starts = {record.id for record in records if record.role == "user"}
+    completed_starts = [
+        record.id for record in completed
+        if record.role == "user" and record.source_kind != "interjection"
+    ]
+    selected_starts = {
+        record.id for record in records
+        if record.role == "user" and record.source_kind != "interjection"
+    }
     selected_ordinals = [index for index, record_id in enumerate(completed_starts, start=1)
                          if record_id in selected_starts]
     if not selected_ordinals:
