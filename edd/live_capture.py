@@ -196,20 +196,22 @@ class CaptureStore:
             raise ValueError("capture reason is too large")
         if turn_range[0] < 1 or turn_range[1] < turn_range[0]:
             raise ValueError("invalid capture turn range")
-        transcript = {
-            "projection_version": CAPTURE_PROJECTION_VERSION,
-            "observation_schema_version": CAPTURE_OBSERVATION_VERSION,
-            "records": [_record_json(record) for record in records],
-        }
-        transcript_bytes = _json_bytes(transcript)
         with self._lock:
             stored = self._store_bytes()
             if stored + _REJECTED_CAPTURE_RESERVATION_BYTES > MAX_STORE_BYTES:
                 raise CaptureStorageFull("private capture storage is full")
             if len(records) > MAX_RECORDS:
                 return self._create_rejected(thread_id, reason, scope, turn_range, "too many visible records")
+            if any(len(record.text) > MAX_RECORD_BYTES for record in records):
+                return self._create_rejected(thread_id, reason, scope, turn_range, "a visible record is too large")
             if any(len(record.text.encode()) > MAX_RECORD_BYTES for record in records):
                 return self._create_rejected(thread_id, reason, scope, turn_range, "a visible record is too large")
+            transcript = {
+                "projection_version": CAPTURE_PROJECTION_VERSION,
+                "observation_schema_version": CAPTURE_OBSERVATION_VERSION,
+                "records": [_record_json(record) for record in records],
+            }
+            transcript_bytes = _json_bytes(transcript)
             if len(transcript_bytes) > MAX_SNAPSHOT_BYTES:
                 return self._create_rejected(thread_id, reason, scope, turn_range, "selected conversation is too large")
             if stored + len(transcript_bytes) + _RESULT_RESERVATION_BYTES > MAX_STORE_BYTES:

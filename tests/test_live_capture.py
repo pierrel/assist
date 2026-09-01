@@ -309,11 +309,28 @@ def test_worker_stop_interrupts_queue_wait_before_starting_a_model_call(tmp_path
 
 
 def test_safe_markdown_rejects_script_events_and_javascript_urls():
-    output = render_markdown('<script>steal()</script><a onclick="steal()" href="javascript:steal()">x</a>')
+    output = render_markdown(
+        '<script>steal()</script><a onclick="steal()" href=" javascript:steal()">x</a>'
+    )
 
     assert "<script" not in output
     assert "onclick" not in output
     assert "javascript:" not in output
+
+
+def test_store_rejects_excess_records_before_building_a_transcript(tmp_path: Path, monkeypatch):
+    import edd.live_capture as captures
+
+    threads = tmp_path / "threads"
+    threads.mkdir()
+    store = CaptureStore(tmp_path / "captures", threads_root=threads)
+    monkeypatch.setattr(captures, "_record_json", lambda _record: pytest.fail("should not serialize"))
+
+    capture = store.create(thread_id="thread-a", reason="Reason with an outcome.",
+                           scope="last_3", records=_records() * (captures.MAX_RECORDS + 1))
+
+    assert capture["result"]["status"] == "needs_shorter_scope"
+    assert capture["result"]["error"] == "too many visible records"
 
 
 def test_shorter_scope_card_keeps_hostile_reason_out_of_an_event_handler(tmp_path: Path, monkeypatch):
