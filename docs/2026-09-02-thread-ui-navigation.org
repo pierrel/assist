@@ -1,0 +1,50 @@
+State: Implemented and locally verified; awaiting deployment and PR review
+
+* Problem
+
+Long threads render every persisted display record into one page.  This makes
+the page heavy and lets wide markdown content force the whole UI to scroll
+horizontally.  Useful earlier replies also get buried in the conversation.
+
+* Solution
+
+The thread page will render a fixed most-recent window of complete visible user
+turns, newest first.  A button at the visual bottom fetches and appends the
+strictly older window below it through an opaque oldest-turn cursor.  The initial page
+keeps current pending, queue, status, approval, and Pi trace state; history
+fragments render persisted conversation records only.
+
+Assistant replies receive stable identities from their persisted message ID;
+Pi replies use their durable Run ID.  The browser stores only an ordered,
+bounded list of those identities and the already-rendered response content in
+localStorage, scoped to the thread.  Pins therefore survive reloads in that
+browser but never enter Assist storage.  The pinned section is a collapsed
+block immediately after file changes.  Removing a pin changes localStorage
+only and leaves the original reply in the thread.
+
+Judged-capture evidence remains private backend storage, but it is not part of
+the server-rendered thread or thread-list projection.  The browser separately
+keeps a bounded per-thread list of rendered capture cards and their IDs.  A
+pending card may poll until its result is available; completed cards rehydrate
+directly from browser storage.  Dismissal deletes that browser-local record, so the card never returns in
+that browser while the backend evidence remains intact.
+
+The thread shell and flexible children are width-contained rather than merely
+clipping a wide child.  Ordinary prose wraps; markdown tables, pre/code blocks,
+and existing diff rows own their horizontal scrolling.  Markdown media and
+embeds remain within the message width.
+
+* Boundaries and verification
+
+The history cursor is untrusted: the route validates it against one fresh
+same-thread projection, uses a fixed server page size, and performs
+checkpoint/Pi reads and rendering in the thread pool with a bounded limiter.
+The current checkpoint format is a monolithic conversation snapshot, so each
+page request still reads that snapshot before returning only the selected HTML;
+the browser DOM and response body are bounded, but checkpoint I/O is not.
+No request changes server state.  Browser-local pins and completed capture
+cards are restored only from that browser's stored rendered content.
+
+Deterministic web tests cover complete-turn windows, anchored cursor behavior
+when new turns arrive, assistant pin eligibility, history-only rendering, and
+the inner-overflow markup.  No model behavior or LLM eval changes are involved.

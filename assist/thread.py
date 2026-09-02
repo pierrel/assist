@@ -39,19 +39,21 @@ def _messages_to_dicts(raw: list, *, split_tool_call_content: bool = False) -> l
     HumanMessage is ``"user"``."""
     msgs: list[dict] = []
     for m in raw:
+        message_id = getattr(m, "id", None)
+        identity = {"message_id": message_id} if isinstance(message_id, str) else {}
         if isinstance(m, HumanMessage):
-            msgs.append({"role": "user", "content": m.content})
+            msgs.append({"role": "user", "content": m.content, **identity})
         elif isinstance(m, AIMessage):
             calls = getattr(m, "tool_calls", None)
             if calls:
                 msgs.append({"role": "tools",
                              "content": _render_calls(
                                  calls, None if split_tool_call_content else m.content),
-                             "names": [tool_call_label(c) for c in calls]})
+                             "names": [tool_call_label(c) for c in calls], **identity})
                 if split_tool_call_content and m.content:
-                    msgs.append({"role": "assistant", "content": m.content})
+                    msgs.append({"role": "assistant", "content": m.content, **identity})
             elif m.content:
-                msgs.append({"role": "assistant", "content": m.content})
+                msgs.append({"role": "assistant", "content": m.content, **identity})
     return msgs
 
 
