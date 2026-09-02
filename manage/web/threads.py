@@ -1404,13 +1404,14 @@ def render_thread(
             function dismissCapture(button) {{
               var card=button.closest('[data-capture-id]');
               var token=document.querySelector('#capture-form input[name=csrf_token]');
-              if (!card || !token) return;
+              if (!card) return;
+              var csrfToken=token ? token.value : '{CAPTURE_CSRF}';
               var id=card.getAttribute('data-capture-id');
               hiddenCaptures[id]=true;
               button.disabled=true;
               fetch('/thread/{tid}/capture/' + encodeURIComponent(id) + '/dismiss', {{
                 method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}},
-                body:'csrf_token=' + encodeURIComponent(token.value), credentials:'same-origin', cache:'no-store'
+                body:'csrf_token=' + encodeURIComponent(csrfToken), credentials:'same-origin', cache:'no-store'
               }}).then(function(r){{
                 if(r.status !== 204) throw new Error('Could not hide capture');
                 var fresh=document.getElementById('capture-' + id); if(fresh) fresh.remove();
