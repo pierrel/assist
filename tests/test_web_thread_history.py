@@ -1,6 +1,8 @@
 """Thread history windows and browser-local response-pin render contracts."""
 import re
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from manage.web import state
@@ -55,13 +57,14 @@ def test_history_fragment_marker_is_valid_inside_an_html_comment():
     assert "--" not in marker
 
 
-def test_checkpoint_messages_without_langchain_ids_still_page():
+@pytest.mark.parametrize("message_id", [None, "unsafe/value"])
+def test_checkpoint_messages_without_a_safe_langchain_id_still_page(message_id):
     from assist.thread import _messages_to_dicts
     from langchain_core.messages import AIMessage, HumanMessage
 
     raw = [message for number in range(12) for message in (
-        HumanMessage(content=f"question {number}", id=None),
-        AIMessage(content=f"answer {number}", id=None),
+        HumanMessage(content=f"question {number}", id=message_id),
+        AIMessage(content=f"answer {number}", id=message_id),
     )]
     messages = _messages_to_dicts(raw, split_tool_call_content=True,
                                   include_message_ids=True)

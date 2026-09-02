@@ -530,8 +530,9 @@ def test_pending_capture_fragment_retries_after_a_transient_failure():
     assert "error.status=r.status" in page
     assert "if(error.status === 404) { if(card) card.remove(); return; }" in page
     assert "if(card && card.getAttribute('data-capture-pending') === '1' && capturePollFailures[id] < 3)" in page
+    assert "if (!saveCaptures(items)) { showCaptureNotice('Could not save dismissal.'); return; }" in page
+    assert page.index("if (!saveCaptures(items))") < page.index("hiddenCaptures[id]=true;")
     assert "hiddenCaptures[id]=true;" in page
-    assert "saveCaptures(savedCaptures().filter" in page
     assert "card.remove();" in page
 
 
@@ -543,7 +544,7 @@ def test_capture_visibility_is_browser_local_without_the_capture_form(monkeypatc
 
     assert 'id="capture-form"' not in pi_page
     assert "assist:captures:" in pi_page
-    assert "saveCaptures(savedCaptures().filter" in pi_page
+    assert "function showCaptureNotice(message)" in pi_page
     assert "/dismiss" not in pi_page
 
 

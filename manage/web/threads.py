@@ -1367,6 +1367,7 @@ def render_thread(
           {status_banner}
           {geo_banner}
           {egress_banner}
+          <div id="captureNotice" role="status" aria-live="polite"></div>
           <section id="captureCards" aria-live="polite"></section>
           {"<div class='success-msg'>Merged to main and pushed to origin!</div>" if merged else ""}
           {"<div class='success-msg'>Review submitted. The agent will respond in this thread.</div>" if reviewed else ""}
@@ -1425,6 +1426,7 @@ def render_thread(
             function savedCaptures() {{ try {{ var items=JSON.parse(localStorage.getItem(captureStorageKey)||'[]'); return Array.isArray(items) ? items.filter(function(item){{ return item && typeof item.id === 'string' && /^[A-Za-z0-9_.:-]{{1,200}}$/.test(item.id) && typeof item.card === 'string'; }}).slice(0, 20) : []; }} catch (_) {{ return []; }} }}
             function saveCaptures(items) {{ try {{ localStorage.setItem(captureStorageKey, JSON.stringify(items)); return true; }} catch (_) {{ return false; }} }}
             function rememberCapture(id, card) {{ var items=savedCaptures().filter(function(item){{ return item.id !== id; }}); items.unshift({{id:id, card:card}}); saveCaptures(items.slice(0, 20)); }}
+            function showCaptureNotice(message) {{ var notice=document.getElementById('captureNotice'); if (notice) notice.textContent=message; }}
             function showCaptureModal() {{
               var modal = document.getElementById('captureModal');
               if (!modal) return;
@@ -1474,8 +1476,9 @@ def render_thread(
               var card=button.closest('[data-capture-id]');
               if (!card) return;
               var id=card.getAttribute('data-capture-id');
+              var items=savedCaptures().filter(function(item) {{ return item.id !== id; }});
+              if (!saveCaptures(items)) {{ showCaptureNotice('Could not save dismissal.'); return; }}
               hiddenCaptures[id]=true;
-              saveCaptures(savedCaptures().filter(function(item) {{ return item.id !== id; }}));
               card.remove();
             }}
             var pinStorageKey = 'assist:pins:' + {json.dumps(tid)};

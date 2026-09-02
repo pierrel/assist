@@ -1,5 +1,6 @@
 import contextvars
 import logging
+import re
 from datetime import datetime
 from typing import Any, Callable, List, Iterator, Mapping
 
@@ -15,6 +16,8 @@ from assist.thread_queue import THREAD_QUEUE
 from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
+
+_WEB_MESSAGE_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,200}")
 
 def render_tool_calls(message: AIMessage) -> str:
     """The tool-call text line for a message's calls, or "" when it has none.
@@ -49,7 +52,8 @@ def _messages_to_dicts(
     msgs: list[dict] = []
     for index, m in enumerate(raw):
         message_id = getattr(m, "id", None)
-        identity = ({"message_id": message_id if isinstance(message_id, str)
+        identity = ({"message_id": message_id if (isinstance(message_id, str)
+                                                   and _WEB_MESSAGE_ID_RE.fullmatch(message_id))
                      else f"message:{index}"} if include_message_ids else {})
         if isinstance(m, HumanMessage):
             msgs.append({"role": "user", "content": m.content, **identity})
