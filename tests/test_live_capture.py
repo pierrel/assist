@@ -98,6 +98,20 @@ def test_dismissals_choose_the_newest_visible_capture(tmp_path: Path):
         == older["request"]["capture_id"]
 
 
+def test_store_skips_malformed_index_entries_during_pending_recovery(tmp_path: Path):
+    store = CaptureStore(tmp_path / "captures", threads_root=tmp_path / "threads")
+    valid_id = "a" * 20
+    (store.root / "index.json").write_text(json.dumps({
+        "threads": {"thread-a": [None, {"status": "queued"},
+                                 {"status": "queued", "capture_id": 3},
+                                 {"status": "queued", "capture_id": "../bad"},
+                                 {"status": "queued", "capture_id": valid_id}],
+                    "thread-b": "not-a-list"},
+    }))
+
+    assert store.pending() == [("thread-a", valid_id)]
+
+
 def test_store_rejects_a_symlinked_capture_file(tmp_path: Path):
     threads = tmp_path / "threads"
     threads.mkdir()
@@ -494,6 +508,23 @@ def test_dismissed_capture_does_not_render_after_a_thread_refresh(tmp_path: Path
 
     assert capture["request"]["capture_id"] not in page
     assert "capture:" not in web_threads.render_index()
+
+
+def test_pending_capture_fragment_retries_after_a_transient_failure():
+    from manage.web.threads import render_thread
+
+    page = render_thread("t1", None)
+
+    assert ".catch(function(error){" in page
+    assert "if(capturePolls[id] || hiddenCaptures[id]) return;" in page
+    assert "if(hiddenCaptures[id]) return;" in page
+    assert "capturePollFailures[id] < 3" in page
+    assert "1200 * capturePollFailures[id]" in page
+    assert "error.status=r.status" in page
+    assert "if(error.status === 404) { if(card) card.remove(); return; }" in page
+    assert "if(card && card.getAttribute('data-capture-pending') === '1' && capturePollFailures[id] < 3)" in page
+    assert "hiddenCaptures[id]=true;" in page
+    assert "var fresh=document.getElementById('capture-' + id); if(fresh) fresh.remove();" in page
 
 
 def test_capture_backlog_becomes_a_visible_terminal_failure(tmp_path: Path, monkeypatch):

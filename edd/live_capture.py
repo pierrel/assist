@@ -308,10 +308,20 @@ class CaptureStore:
     def pending(self) -> list[tuple[str, str]]:
         with self._lock:
             pending: list[tuple[str, str]] = []
-            for thread_id, entries in self._index_value().get("threads", {}).items():
+            threads = self._index_value().get("threads", {})
+            if not isinstance(threads, dict):
+                return pending
+            for thread_id, entries in threads.items():
+                if not isinstance(thread_id, str) or not isinstance(entries, list):
+                    continue
                 for entry in entries:
-                    if entry.get("status") in {"queued", "interpreting", "judging"}:
-                        pending.append((thread_id, entry["capture_id"]))
+                    if not isinstance(entry, dict):
+                        continue
+                    capture_id = entry.get("capture_id")
+                    if (entry.get("status") in {"queued", "interpreting", "judging"}
+                            and isinstance(capture_id, str)
+                            and _ID_RE.fullmatch(capture_id)):
+                        pending.append((thread_id, capture_id))
             return pending[:MAX_RECOVERY]
 
 

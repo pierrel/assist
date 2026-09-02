@@ -1356,7 +1356,7 @@ def render_thread(
               document.getElementById('titleEdit').style.display = 'none';
               document.getElementById('titleView').style.display = 'flex';
             }}
-            var capturePolls = {{}};
+            var capturePolls = {{}}, hiddenCaptures = {{}}, capturePollFailures = {{}};
             function showCaptureModal() {{
               var modal = document.getElementById('captureModal');
               if (!modal) return;
@@ -1371,16 +1371,28 @@ def render_thread(
               document.getElementById('text').focus();
             }}
             function loadCaptureCard(id) {{
-              if(capturePolls[id]) return;
+              if(capturePolls[id] || hiddenCaptures[id]) return;
               capturePolls[id] = true;
               fetch('/thread/{tid}/capture/' + encodeURIComponent(id), {{credentials:'same-origin', cache:'no-store'}})
-                .then(function(r){{ if(!r.ok) throw new Error('Could not load capture'); return r.text(); }})
+                .then(function(r){{
+                  if(r.ok) return r.text();
+                  var error=new Error('Could not load capture'); error.status=r.status; throw error;
+                }})
                 .then(function(markup){{
+                  if(hiddenCaptures[id]) return;
+                  delete capturePollFailures[id];
                   var old=document.getElementById('capture-' + id); if(old) old.outerHTML=markup;
                   var fresh=document.getElementById('capture-' + id);
                   if(fresh && fresh.getAttribute('data-capture-pending') === '1') setTimeout(function(){{ loadCaptureCard(id); }}, 1200);
                 }})
-                .catch(function(){{}}).finally(function(){{ capturePolls[id] = false; }});
+                .catch(function(error){{
+                  var card=document.getElementById('capture-' + id);
+                  if(error.status === 404) {{ if(card) card.remove(); return; }}
+                  capturePollFailures[id] = (capturePollFailures[id] || 0) + 1;
+                  if(card && card.getAttribute('data-capture-pending') === '1' && capturePollFailures[id] < 3) {{
+                    setTimeout(function(){{ loadCaptureCard(id); }}, 1200 * capturePollFailures[id]);
+                  }}
+                }}).finally(function(){{ capturePolls[id] = false; }});
             }}
             function captureLastThree(button) {{
               var lastThree = document.querySelector('#captureModal input[value=last_3]');
@@ -1393,12 +1405,18 @@ def render_thread(
               var card=button.closest('[data-capture-id]');
               var token=document.querySelector('#capture-form input[name=csrf_token]');
               if (!card || !token) return;
+              var id=card.getAttribute('data-capture-id');
+              hiddenCaptures[id]=true;
               button.disabled=true;
-              fetch('/thread/{tid}/capture/' + encodeURIComponent(card.getAttribute('data-capture-id')) + '/dismiss', {{
+              fetch('/thread/{tid}/capture/' + encodeURIComponent(id) + '/dismiss', {{
                 method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}},
                 body:'csrf_token=' + encodeURIComponent(token.value), credentials:'same-origin', cache:'no-store'
-              }}).then(function(r){{ if(r.status !== 204) throw new Error('Could not hide capture'); card.remove(); }})
-                .catch(function(){{ button.disabled=false; button.textContent='Could not hide'; }});
+              }}).then(function(r){{
+                if(r.status !== 204) throw new Error('Could not hide capture');
+                var fresh=document.getElementById('capture-' + id); if(fresh) fresh.remove();
+              }}).catch(function(){{
+                delete hiddenCaptures[id]; button.disabled=false; button.textContent='Could not hide';
+              }});
             }}
             document.querySelectorAll('[data-capture-id]').forEach(function(el){{ loadCaptureCard(el.getAttribute('data-capture-id')); }});
             var captureForm = document.getElementById('capture-form');
