@@ -3237,7 +3237,10 @@ async def thread_history(tid: str, before: str) -> JSONResponse:
             rf"<!-- {re.escape(marker)}-start -->(.*?)<!-- {re.escape(marker)}-end -->", page, re.S)
         if fragment is None:
             raise HTTPException(status_code=404, detail="History page not found")
-        cursor = re.search(r'data-history-cursor="([A-Za-z0-9_.:-]{1,200})"', fragment.group(1))
+        cursor = re.search(
+            r'<div id="threadMessages" data-history-cursor="([A-Za-z0-9_.:-]{1,200})"',
+            fragment.group(1),
+        )
         return {"html": fragment.group(1), "before": cursor.group(1) if cursor else None}
 
     return JSONResponse(await anyio.to_thread.run_sync(

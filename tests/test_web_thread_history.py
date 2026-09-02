@@ -168,9 +168,10 @@ def test_history_render_omits_current_busy_placeholder(tmp_path, monkeypatch):
 
 def test_history_route_validates_cursor_and_returns_the_next_window(tmp_path, monkeypatch):
     (tmp_path / "t").mkdir()
+    messages = [message for number in range(1, 13) for message in _turn(number)]
+    messages[2]["content"] = 'text data-history-cursor="bogus"'
     monkeypatch.setattr(state.MANAGER, "thread_dir", lambda tid: str(tmp_path / tid))
-    monkeypatch.setattr(state.MANAGER, "get", lambda tid, sandbox_backend=None: _Chat(
-        [message for number in range(1, 13) for message in _turn(number)]))
+    monkeypatch.setattr(state.MANAGER, "get", lambda tid, sandbox_backend=None: _Chat(messages))
     monkeypatch.setattr(threads, "_thread_title", lambda tid: "Thread")
     diff_calls = []
 
