@@ -64,7 +64,7 @@ class CaptureCriterion(_ClosedModel):
 
 
 class CaptureStorageFull(ValueError):
-    """The private store cannot safely persist another capture card."""
+    """The private store cannot safely persist another capture."""
 
 
 def _validated_calibration(calibration: dict[str, Any]) -> dict[str, str]:

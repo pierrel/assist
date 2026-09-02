@@ -29,6 +29,8 @@ Replace the old synthetic-test capture flow with a judged live-capture flow.
    because its independent transcript/trace contract is not part of this change.
    The modal requires:
    - Pierre's free-text reason, stored and displayed verbatim;
+   - Pierre's private pass/fail assessment and rationale, stored only as
+     calibration evidence and never supplied to the interpreter or judge;
    - a scope: =Last 3 completed turns= (default) or =Entire visible conversation=.
 2. The POST snapshots the selected *visible* user and assistant records before
    returning.  A completed turn begins at a human user message and ends at the
@@ -66,7 +68,7 @@ to =ASSIST_THREADS_DIR= when unset.  Each opaque capture identifier owns:
 
 #+begin_example
 <ASSIST_CAPTURES_DIR>/<capture-id>/
-  request.json       # immutable thread id, scope, reason, timestamps
+  request.json       # immutable thread id, scope, reason, calibration, timestamps
   transcript.json    # immutable selected visible records and capture provenance
   result.json        # status, criteria, observation, model provenance, verdict/error
 #+end_example
@@ -90,10 +92,10 @@ and terminal rejection explain that it needs a shorter range.  It never silently
 truncates evidence and claims to have judged the whole interaction.
 The resulting card offers one action to capture the last three completed turns
 with the original reason, so the whole-conversation limit is not a dead end.
-Independent bounds apply before any transcript write: reason bytes, record
-count, per-record bytes, snapshot bytes, total store bytes, and queued/recovered
-work.  A rejected oversize request stores only a small request/result explaining
-the limit.  It never silently truncates a record or accumulates an unbounded
+Independent bounds apply before any transcript write: reason and calibration
+reason bytes, record count, per-record bytes, snapshot bytes, total store bytes,
+and queued/recovered work.  A rejected oversize request stores only a small
+request/result explaining the limit.  It never silently truncates a record or accumulates an unbounded
 recovery backlog.
 
 Capture provenance is immutable: source thread ID, UTC capture time, projection
@@ -150,13 +152,12 @@ admission, asks the worker to stop, and waits through that same off-loop limiter
 before closing =MANAGER=; it never joins a worker from the asyncio event loop.
 This prevents restart recovery from judging alongside a still-live old worker.
 
-The source thread's entry in the thread list carries a durable capture-pending,
-completed, or failed marker, so a result remains discoverable after Pierre moves
-to another conversation.  Capture creation is disabled while the thread has an
+Capture cards are browser-local and absent from server-rendered thread and
+thread-list state.  Capture creation is disabled while the thread has an
 unfinished turn; the modal also states its exact selected completed-turn range.
-Pierre can hide a capture card for the current app session.  That in-memory UI
-projection survives page reloads but resets on restart; it neither deletes nor
-changes the stored capture, and a hidden pending capture still completes.
+The browser stores rendered cards in =localStorage=, so dismissal removes a card
+from that browser permanently without deleting or changing the stored capture.
+A dismissed pending capture still completes privately.
 Snapshot creation, fragment/status reads, recovery scanning, and worker stop
 all use a capture-private AnyIO capacity limiter.  No checkpoint, filesystem,
 store, or rendering work runs inline in an =async def=, and the browser poller
@@ -166,8 +167,9 @@ permits only one in-flight fragment request.
 
 The reason, transcript, interpreter criteria, and judge rationale are untrusted
 content.  They are JSON data to both model prompts' untrusted-data boundaries
-and HTML-escaped in the web page.  Capture IDs and thread IDs are validated
-before they reach paths.  Request text and selected evidence are bounded.  A
+and HTML-escaped in the web page.  Calibration is private stored evidence and
+never crosses either model boundary or appears in the card.  Capture IDs and
+thread IDs are validated before they reach paths.  Request text and selected evidence are bounded.  A
 same-origin CSRF token protects the model-consuming POST.  The capture root
 must be outside the thread root and is not forwarded into sandboxes.  V1 stores
 visible records only: raw tool results, secrets, domains, and filesystem copies
@@ -248,10 +250,11 @@ All required Phase-1 lenses reviewed this design.
 - Agentic/framework fit: accepted direct tool-free bounded model calls rather
   than a DeepAgents thread; durable phase boundaries make restart recovery
   idempotent and preserve the original live evidence.
-- User intention and UX: accepted a verbatim free-text reason with no forced
-  good/bad polarity, in-place results that preserve drafts, discoverable
-  thread-list state, and a one-action shorter-range recovery from an oversized
-  whole capture.
+- User intention and UX: the calibration amendment adds a required private
+  pass/fail assessment and rationale while keeping the independent-judge reason
+  distinct, in-place results that preserve drafts, browser-local permanent
+  dismissal, and a one-action shorter-range recovery from an oversized whole
+  capture.
 - Clean interfaces: accepted store-owned per-thread lookup/index APIs and a
   source-thread-bound fragment route.  Capture never depends on a global ID or
   raw checkpoint representation.

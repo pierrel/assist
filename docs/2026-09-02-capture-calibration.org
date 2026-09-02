@@ -4,7 +4,7 @@
 
 * State
 
-Design accepted for implementation.  This amendment extends the judged live
+Implemented and locally reviewed.  This amendment extends the judged live
 capture design; it does not introduce replay evaluation or automatic
 calibration.
 
