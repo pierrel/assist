@@ -1734,6 +1734,7 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
     "assist/templates/deepagents/context_agent.md.j2": {
         "29cca4088f56e56eee0a685e794de8a6ff0c63526231839f2f24e246adb9ec70",
         "e79b9a545fec4ed27d3b2917b674f6999a1869eb4bbea713416304f0c22bac74",
+        "544fdce3cf8084eb70eec781450180af0c9c0960f05578d7895ba01c31d2cc6c",
     },
     "assist/templates/deepagents/describe_system.md.j2": {
         "07d7647a62ac9a4f482a82d8a2e8d2e2bb2f8a41fb8f4c377e6944d63678bff7",
@@ -1744,6 +1745,7 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
     },
     "assist/templates/deepagents/fact_checker.md.j2": {
         "c8853dc566ad691ea9406fc2c42dcb01298ba24193fd0f81a3b8677205d0afef",
+        "785c3a84e6a66ed8a13b60e29a390eac24e9af85d6d241d280b69aaad6e55c8f",
     },
     "assist/templates/deepagents/general_instructions.md.j2": {
         "0f5dba480391779b384f36cf38e152fef197871bbc7f52868f29e1c355ac02ab",
@@ -1768,17 +1770,23 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "5e41a2e0e12c8cb62da92ede1db5c8990a6a7d27f8f02736675b0f26d0d8c5f4",
         "90d3e8f74362feee69e13ac6bcc58b615c739b2df9caf3d77df15ed2e41ec426",
         "b5ce8b1576b167a58c55a98f914a14e1d65490554fcf9ccd99b40b4af24e65c9",
+        "1e29940e8056a59bc3c600963ffe9a3c045c04703a4aaf07db7a165a17941552",
+        "9c836d4083d013349f5a97e3c6b1e4164f43450d16b3dc49a16938c47ffc239f",
+        "9f613e0e20df7c7f66f7f6628b6c085ff35fa54d7495b1b2c703fa7d5470e449",
     },
     "assist/templates/deepagents/research_instructions.txt.j2": {
         "379e55c61addf130f00a29a6221f16de89964e23b5c1e98cf9746f38211fb071",
         "85dec6ea05cfaa2aed2cd943ff5144107a729b71be04042a78c2ed7458c0e1fe",
+        "1eb422252324557261eba5948883bfe01d116c80f13b485b60ec922c3ddc72c6",
     },
     "assist/templates/deepagents/sub_critique.txt.j2": {
         "b3d00837be3dbfac3158e9b47d0fa64612b8255248eea5fbb19a095075d5b801",
+        "eb8fadd6b3a275dbc4c3fa86ad34b2c7a312d3e74651a61255c75a8c9b7e59a6",
     },
     "assist/templates/deepagents/sub_research.txt.j2": {
         "ea51549d2bae79ee031b6b5a8fdc0872708a6f7536303f5f1ba68512c0db3415",
         "2adcfe28db08132dd20a8f37cecfeb303605be6d9ba0378db78a4b239c246eb1",
+        "5a1e784f8c29d0b5c3e291da6490fff8a78595355b478806a5025cf9efc25e58",
     },
     "assist/templates/receptionist_system.md.j2": {
         "f2bfbc35fb540f64c385b74c7bf590517b80bc5ee9abd660eb3ad736bb3adb8e",
@@ -2117,7 +2125,7 @@ _TOOL_RESULT_METADATA = {
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "aa148c9f2cd1a1d933047a5d6ab0451777832eb1af259f92891624b938da489f"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "d2cdd5a3b7d45c19fca38d947085b8c691b08197e25f9d9dede190ed6e05471f"
+    "fec3352037cb982f2a274e88f489fd08fd52d03b6fc4a489f8c21a6c670aaba2"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:

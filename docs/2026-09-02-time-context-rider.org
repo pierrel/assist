@@ -1,0 +1,85 @@
+#+title: Per-turn time context rider
+
+* Goal
+
+Make the time a normal Assist web turn sees come from the same per-turn,
+browser-supplied ContextRider that carries the web request's private location
+configuration.  Remove the independent UTC clock rendered while static agent
+and specialist prompts are constructed.
+
+* Observed baseline
+
+The normal Deep and Pi web-main prompts already have no static clock.  Web
+submission builds a tz-aware ContextRider from the browser's send timestamp and
+timezone, passes it through the durable Run configuration, sets the sandbox TZ,
+and ContextRiderMiddleware appends its local-time prose to the model's current
+system message.  The old static clock remains in seven non-web general and
+specialist template files.  It is UTC and is rendered when the agent is built,
+so it can be stale before the first model call and disagree with the user zone.
+
+* Plan
+
+1. Delete the =Current date/time= line from every legacy/general and specialist
+   template.  Keep the generic Jinja clock helper for now: it is inert once no
+   template uses it, and deleting its prompt-census fixture plumbing is unrelated
+   to the user-visible source-of-truth change.
+2. Keep ContextRider as the only model-visible ordinary-web time source.  Do not
+   copy its timestamp into persisted graph state or into child/specialist prompts;
+   the existing middleware injection is ephemeral and location's scoped privacy
+   boundary remains intact.
+3. Pin the resulting prompt and rider behavior with deterministic tests.  Add a
+   natural real-model time-skill row that supplies a browser-shaped local rider,
+   asks naturally for the current date, and requires the current time skill and
+   sandbox =date= to produce the local-date answer.
+4. Compare the current static-clock baseline and the candidate at N=3 on the
+   affected natural row, then run candidate confidence N=5 and final stability
+   N=10 if there is no regression.  Include adjacent established time-skill rows
+   in the candidate panel.
+
+* Design review record
+
+The bounded design passes confirmed the minimum design: delete the duplicated
+static text and retain the existing ContextRider dataflow.  No new route, I/O,
+tool, persistence, or prompt injection surface is introduced.  The generic
+Jinja helper is intentionally left inert because deleting its unrelated census
+fixture plumbing would not improve the user-visible source of truth.  The
+independent final-diff review found no in-scope issue: it verified all seven
+template removals, the existing web-main rider injection, the browser-shaped
+real-model row, and the focused deterministic checks.
+
+* Risks and decisions
+
+- A non-web/legacy caller without a rider loses the old static UTC hint.  This is
+  intentional: it is not current at invocation time and the time skill already
+  requires =date= for current-date questions.  A caller that needs local time
+  supplies ContextRider, as the web path does.
+- Specialist prompts do not receive the rider today, just as they do not receive
+  private location configuration.  Passing personal time through a delegated
+  task would be a separate product and privacy decision, not part of this move.
+- The time string is a user-controlled browser value but is parsed as a timezone
+  aware datetime and an IANA timezone before it can reach the prompt; free-form
+  location labels are never rendered.
+
+* Evaluation record
+
+The natural row uses a normal general-agent construction and asks: “What date
+is it here?”  Its setup supplies =ContextRider(sent_at=now,
+tz=Pacific/Kiritimati)=, starts the sandbox with that same zone, and leaves the
+model no hard-coded answer.  A pass requires loading the existing =time= skill,
+running Unix =date=, and naming the weekday, month, and day reported by that
+sandbox.  The non-web construction is intentional: it is the prompt path that
+formerly contained the static UTC line, while the rider and sandbox pieces are
+the same ones an ordinary browser turn uses.
+
+| Stage | Result |
+|-------+--------|
+| Static-clock baseline | 3/3 |
+| Candidate | 3/3 |
+| Candidate confidence | 5/5 |
+| Candidate stability | 10/10 |
+
+All trials passed without a tool-choice, command, or answer-quality failure.
+The adjacent established time-skill panel passed 5/5: weekday-of-date, relative
+date, current-date, this local-rider row, and non-date non-loading.  Prompt
+census passed 48 deterministic tests after its declared rendered-template and
+transition fingerprints were advanced to this reviewed prompt change.
