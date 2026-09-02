@@ -488,7 +488,6 @@ def test_capture_fragment_keeps_persisted_evidence_after_local_dismissal(tmp_pat
     client = TestClient(web_threads.app)
 
     assert client.get(f"/thread/t1/capture/{capture_id}").status_code == 200
-    assert client.get(f"/thread/t1/capture/{capture_id}").status_code == 200
     assert {path.name: path.read_bytes() for path in (store.root / capture_id).iterdir()} == files
     assert (store.root / "index.json").read_bytes() == index_before
     assert store.update_result("t1", capture_id, {"status": "failed", "error": "later"})[

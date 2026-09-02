@@ -769,7 +769,8 @@ def render_thread(
         # (e.g. a retry / empty-response recovery emits two).
         _window_start = next((index for index, message in enumerate(persisted_msgs)
                               if msgs and message is msgs[0]), 0)
-        _ord = _human_ordinal(persisted_msgs[:_window_start])
+        _ord = sum(1 for index in range(_window_start)
+                   if persisted_msgs[index].get("role") == "user")
         _last = None
         for _i, _m in enumerate(msgs):
             _r = _m.get("role")
