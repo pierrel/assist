@@ -53,6 +53,25 @@ def _interjection_text(text: str) -> str:
     return inner[:cut] if cut != -1 else inner
 
 
+def visible_user_source_kind(message: Mapping[str, object]) -> str | None:
+    """The visible source kind for a web user message, if it is one."""
+    if _as_text(message.get("role")) != "user":
+        return None
+    text = _as_text(message.get("content"))
+    if text.startswith(CONTINUATION_RIDER):
+        return "continuation"
+    if text.startswith(TASK_COMPLETION_RIDER):
+        return "task"
+    if text.startswith(INTERJECTION_FRAME):
+        return "interjection"
+    return "user"
+
+
+def is_visible_turn_start(message: Mapping[str, object]) -> bool:
+    """Whether a web message begins a normal user conversation turn."""
+    return visible_user_source_kind(message) == "user"
+
+
 def visible_records(raw: Iterable[object]) -> list[VisibleRecord]:
     """Project checkpoint messages into the human-visible record contract."""
     records: list[VisibleRecord] = []
@@ -99,15 +118,16 @@ def visible_records_from_dicts(
     for order, message in enumerate(messages, start=1):
         role = _as_text(message.get("role"))
         text = _as_text(message.get("content"))
-        if role == "user" and text.startswith(CONTINUATION_RIDER):
+        user_kind = visible_user_source_kind(message)
+        if user_kind == "continuation":
             role, text, kind, eligible = "assistant", text[len(CONTINUATION_RIDER):], "continuation", False
-        elif role == "user" and text.startswith(TASK_COMPLETION_RIDER):
+        elif user_kind == "task":
             role, text, kind, eligible = "assistant", text[len(TASK_COMPLETION_RIDER):], "task", False
-        elif role == "user" and text.startswith(INTERJECTION_FRAME):
+        elif user_kind == "interjection":
             text, kind, eligible = _interjection_text(text), "interjection", True
         elif role == "assistant":
             text, kind, eligible = (_assistant_text(text) if capture_safe else text), "assistant", True
-        elif role == "user":
+        elif user_kind == "user":
             kind, eligible = "user", True
         else:
             kind, eligible = "tool", False

@@ -5,6 +5,11 @@ import pytest
 
 from fastapi.testclient import TestClient
 
+from assist.visible_conversation import (
+    CONTINUATION_RIDER,
+    INTERJECTION_FRAME,
+    TASK_COMPLETION_RIDER,
+)
 from manage.web import state
 from manage.web import threads
 
@@ -37,6 +42,37 @@ def test_history_windows_keep_complete_turns_and_use_an_anchored_cursor():
     later = messages + _turn(13)
     anchored, _ = threads._turn_page(later, cursor)
     assert anchored == older
+
+
+def test_history_paging_does_not_normalize_the_entire_thread(monkeypatch):
+    messages = [message for number in range(1, 13) for message in _turn(number)]
+    monkeypatch.setattr(threads, "visible_records_from_dicts", lambda _: (_ for _ in ()).throw(
+        AssertionError("history paging must not build visible records")))
+
+    newest, cursor = threads._turn_page(messages)
+
+    assert cursor == "u3"
+    assert newest[0]["content"] == "question 3"
+
+
+def test_history_paging_keeps_control_frames_with_their_turn():
+    messages = _turn(1) + [
+        {"role": "user", "content": CONTINUATION_RIDER + "continue", "message_id": "c1"},
+        {"role": "user", "content": TASK_COMPLETION_RIDER + "done", "message_id": "t1"},
+        {"role": "user", "content": INTERJECTION_FRAME + "more", "message_id": "i1"},
+    ] + [message for number in range(2, 13) for message in _turn(number)]
+
+    newest, cursor = threads._turn_page(messages)
+    older, older_cursor = threads._turn_page(messages, cursor)
+
+    assert [message["content"] for message in newest if message["role"] == "user"] == [
+        f"question {number}" for number in range(3, 13)
+    ]
+    assert [message["content"] for message in older if message["role"] == "user"] == [
+        "question 1", CONTINUATION_RIDER + "continue", TASK_COMPLETION_RIDER + "done",
+        INTERJECTION_FRAME + "more", "question 2",
+    ]
+    assert older_cursor is None
 
 
 def test_history_cursor_rejects_unknown_or_malformed_identity():

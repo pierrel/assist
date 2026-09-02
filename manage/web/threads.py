@@ -73,6 +73,7 @@ from assist.visible_conversation import (
     INTERJECTION_FRAME as _INTERJECTION_FRAME,
     INTERJECTION_GUIDE as _INTERJECTION_GUIDE,
     TASK_COMPLETION_RIDER as _TASK_COMPLETION_RIDER,
+    is_visible_turn_start,
     select_completed_turns,
     visible_records,
     visible_records_from_dicts,
@@ -663,9 +664,10 @@ def _turn_page(messages: list[dict], before: str | None = None) -> tuple[list[di
     renderer reverses these records, so each window remains newest-first and an
     older window appends at the visual bottom.
     """
-    records = visible_records_from_dicts(messages)
-    starts = [index for index, record in enumerate(records)
-              if record.source_kind == "user"]
+    # This only needs turn boundaries.  Avoid constructing a VisibleRecord for every
+    # message here: rendering below still normalizes the selected window, not the
+    # entire persisted history.
+    starts = [index for index, message in enumerate(messages) if is_visible_turn_start(message)]
     if not starts:
         return messages, None
     selected_end = len(starts)
