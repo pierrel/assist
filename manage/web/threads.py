@@ -965,11 +965,13 @@ def render_thread(
     # shows twice with contradicting badges. (Residual: an identical text
     # sent again while the first is on screen hides its queued bubble until
     # the first is claimed — cosmetic, self-resolving.)
-    _journal_entries = [PendingMessage(
-        thread_id=run.thread_id, text=run.text or "", sender=run.sender,
-        rider=run.rider, enqueued_at=run.created_at, origin=run.origin, id=run.id)
-        for run in _runs().peek(tid)
-        if run.status == "pending" and run.text]
+    _journal_entries = []
+    if history_before is None:
+        _journal_entries = [PendingMessage(
+            thread_id=run.thread_id, text=run.text or "", sender=run.sender,
+            rider=run.rider, enqueued_at=run.created_at, origin=run.origin, id=run.id)
+            for run in _runs().peek(tid)
+            if run.status == "pending" and run.text]
     for r in ([r for r in _journal_entries
                if r.origin is None and r.text not in seen_interjections]
               if history_before is None else []):

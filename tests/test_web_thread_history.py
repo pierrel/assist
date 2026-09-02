@@ -180,6 +180,10 @@ def test_history_route_validates_cursor_and_returns_the_next_window(tmp_path, mo
             return []
 
     monkeypatch.setattr(threads, "_get_domain_manager", lambda tid: _DiffManager())
+    monkeypatch.setattr(threads, "_runs", lambda: type("Runs", (), {
+        "peek": lambda self, tid: (_ for _ in ()).throw(
+            AssertionError("history must not read pending runs")),
+    })())
     state._set_status("t", "ready")
     client = TestClient(threads.app)
 
