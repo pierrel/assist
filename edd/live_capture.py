@@ -275,17 +275,16 @@ class CaptureStore:
             index = self._index_value()
             return list(index.get("threads", {}).get(thread_id, []))
 
-    def latest_for_threads(self) -> dict[str, dict[str, Any]]:
-        """Return the newest capture summary for each thread in one index read."""
+    def list_for_threads(self) -> dict[str, list[dict[str, Any]]]:
+        """Return copied per-thread summaries in one index read."""
         with self._lock:
             threads = self._index_value().get("threads", {})
             if not isinstance(threads, dict):
                 return {}
             return {
-                thread_id: dict(entries[0])
+                thread_id: [dict(entry) for entry in entries if isinstance(entry, dict)]
                 for thread_id, entries in threads.items()
                 if isinstance(thread_id, str) and isinstance(entries, list)
-                and entries and isinstance(entries[0], dict)
             }
 
     def update_result(self, thread_id: str, capture_id: str, result: dict[str, Any]) -> dict[str, Any]:

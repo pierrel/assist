@@ -4,7 +4,7 @@
 
 * State
 
-Design reviewed.  Ready to implement.
+Implemented and locally reviewed.
 
 * Problem
 
@@ -154,6 +154,9 @@ The source thread's entry in the thread list carries a durable capture-pending,
 completed, or failed marker, so a result remains discoverable after Pierre moves
 to another conversation.  Capture creation is disabled while the thread has an
 unfinished turn; the modal also states its exact selected completed-turn range.
+Pierre can hide a capture card for the current app session.  That in-memory UI
+projection survives page reloads but resets on restart; it neither deletes nor
+changes the stored capture, and a hidden pending capture still completes.
 Snapshot creation, fragment/status reads, recovery scanning, and worker stop
 all use a capture-private AnyIO capacity limiter.  No checkpoint, filesystem,
 store, or rendering work runs inline in an =async def=, and the browser poller

@@ -98,6 +98,7 @@ from assist.geo.tools import DEGRADATION_WARNING, _fmt_size
 from manage.web.state import (
     BUSY_STAGES,
     CAPTURE_CSRF,
+    CAPTURE_DISMISSALS,
     CAPTURE_STORE,
     CAPTURE_THREAD_LIMITER,
     CAPTURE_WORKER,
@@ -249,7 +250,7 @@ def _thread_status_rank(tid: str, stage: str) -> int:
 
 def render_index() -> str:
     items = []
-    captures_by_thread = CAPTURE_STORE.latest_for_threads()
+    captures_by_thread = CAPTURE_DISMISSALS.latest_visible(CAPTURE_STORE.list_for_threads())
     for tid in MANAGER.list():
         title = _thread_title(tid)
         try:
@@ -570,7 +571,14 @@ def _capture_card_placeholder(tid: str, summary: dict) -> str:
     pending = "1" if raw_status in _CAPTURE_PENDING else "0"
     return (f'<article id="capture-{html.escape(capture_id)}" class="capture-card" '
             f'data-capture-id="{html.escape(capture_id)}" data-capture-pending="{pending}">'
-            f'<strong>Judged live capture</strong><div>{status}</div></article>')
+            f'<strong>Judged live capture</strong><div>{status}</div>{_capture_dismiss_button()}</article>')
+
+
+def _capture_dismiss_button() -> str:
+    return ('<button class="btn btn-secondary" type="button" '
+            'onclick="dismissCapture(this)" '
+            'aria-label="Hide this capture for this session; it remains stored">'
+            'Hide for this session</button>')
 
 
 def _capture_card_html(capture: dict) -> str:
@@ -635,7 +643,7 @@ def _capture_card_html(capture: dict) -> str:
                  f'onclick="captureLastThree(this)">Capture last 3 turns</button>')
     return (f'<article id="capture-{html.escape(capture_id)}" class="capture-card" '
             f'data-capture-id="{html.escape(capture_id)}" data-capture-pending="{pending}">'
-            f'<strong>Judged live capture</strong>{body}</article>')
+            f'<strong>Judged live capture</strong>{body}{_capture_dismiss_button()}</article>')
 
 
 def render_thread(
@@ -657,7 +665,8 @@ def render_thread(
     stage = status.get("stage", "ready")
     busy = stage in BUSY_STAGES
     capture_cards = "".join(
-        _capture_card_placeholder(tid, item) for item in (capture_summaries or [])
+        _capture_card_placeholder(tid, item)
+        for item in CAPTURE_DISMISSALS.visible_for_thread(tid, capture_summaries or [])
     )
     is_init = stage in INIT_STAGES
     title = _thread_title(tid)
@@ -1379,6 +1388,17 @@ def render_thread(
               lastThree.checked=true;
               document.getElementById('reason').value=button.getAttribute('data-capture-reason') || '';
               showCaptureModal();
+            }}
+            function dismissCapture(button) {{
+              var card=button.closest('[data-capture-id]');
+              var token=document.querySelector('#capture-form input[name=csrf_token]');
+              if (!card || !token) return;
+              button.disabled=true;
+              fetch('/thread/{tid}/capture/' + encodeURIComponent(card.getAttribute('data-capture-id')) + '/dismiss', {{
+                method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}},
+                body:'csrf_token=' + encodeURIComponent(token.value), credentials:'same-origin', cache:'no-store'
+              }}).then(function(r){{ if(r.status !== 204) throw new Error('Could not hide capture'); card.remove(); }})
+                .catch(function(){{ button.disabled=false; button.textContent='Could not hide'; }});
             }}
             document.querySelectorAll('[data-capture-id]').forEach(function(el){{ loadCaptureCard(el.getAttribute('data-capture-id')); }});
             var captureForm = document.getElementById('capture-form');
@@ -4646,6 +4666,22 @@ def _create_live_capture(tid: str, reason: str, scope: str) -> dict:
     return capture
 
 
+def _dismiss_live_capture(tid: str, capture_id: str) -> None:
+    """Validate ownership before changing only the app-memory card projection."""
+    CAPTURE_STORE.get_for_thread(tid, capture_id)
+    CAPTURE_DISMISSALS.dismiss(tid, capture_id)
+
+
+def _visible_live_capture(tid: str, capture_id: str) -> dict:
+    """Load a source-bound capture unless its card is hidden for this app session."""
+    if CAPTURE_DISMISSALS.is_dismissed(tid, capture_id):
+        raise FileNotFoundError("capture is hidden")
+    capture = CAPTURE_STORE.get_for_thread(tid, capture_id)
+    if CAPTURE_DISMISSALS.is_dismissed(tid, capture_id):
+        raise FileNotFoundError("capture is hidden")
+    return capture
+
+
 @app.post("/thread/{tid}/capture")
 async def capture_thread(
     tid: str, reason: str = Form(...), scope: str = Form("last_3"),
@@ -4675,12 +4711,27 @@ async def capture_thread(
 async def capture_fragment(tid: str, capture_id: str) -> HTMLResponse:
     try:
         capture = await anyio.to_thread.run_sync(
-            CAPTURE_STORE.get_for_thread, tid, capture_id,
+            _visible_live_capture, tid, capture_id,
             limiter=CAPTURE_THREAD_LIMITER)
     except (FileNotFoundError, ValueError) as error:
         raise HTTPException(status_code=404, detail="Capture not found") from error
     return HTMLResponse(
         _capture_card_html(capture),
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "same-origin"},
+    )
+
+
+@app.post("/thread/{tid}/capture/{capture_id}/dismiss")
+async def dismiss_capture(tid: str, capture_id: str, csrf_token: str = Form(...)) -> Response:
+    if not hmac.compare_digest(csrf_token, CAPTURE_CSRF):
+        raise HTTPException(status_code=403, detail="invalid capture form")
+    try:
+        await anyio.to_thread.run_sync(
+            _dismiss_live_capture, tid, capture_id, limiter=CAPTURE_THREAD_LIMITER)
+    except (FileNotFoundError, ValueError) as error:
+        raise HTTPException(status_code=404, detail="Capture not found") from error
+    return Response(
+        status_code=204,
         headers={"Cache-Control": "no-store", "Referrer-Policy": "same-origin"},
     )
 

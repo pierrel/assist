@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
@@ -77,7 +78,24 @@ def test_store_keeps_immutable_transcript_and_binds_reads_to_thread(tmp_path: Pa
     assert (tmp_path / "captures" / capture_id / "request.json").stat().st_mode & 0o077 == 0
     newest = store.create(thread_id="thread-a", reason="A later capture.",
                           scope="last_3", records=_records())
-    assert store.latest_for_threads()["thread-a"]["capture_id"] == newest["request"]["capture_id"]
+    assert store.list_for_threads()["thread-a"][0]["capture_id"] == newest["request"]["capture_id"]
+
+
+def test_dismissals_choose_the_newest_visible_capture(tmp_path: Path):
+    from manage.web.state import CaptureDismissals
+
+    threads = tmp_path / "threads"
+    threads.mkdir()
+    store = CaptureStore(tmp_path / "captures", threads_root=threads)
+    older = store.create(thread_id="thread-a", reason="Older capture.",
+                         scope="last_3", records=_records())
+    newer = store.create(thread_id="thread-a", reason="Newer capture.",
+                         scope="last_3", records=_records())
+    dismissals = CaptureDismissals()
+    dismissals.dismiss("thread-a", newer["request"]["capture_id"])
+
+    assert dismissals.latest_visible(store.list_for_threads())["thread-a"]["capture_id"] \
+        == older["request"]["capture_id"]
 
 
 def test_store_rejects_a_symlinked_capture_file(tmp_path: Path):
@@ -350,6 +368,7 @@ def test_shorter_scope_card_keeps_hostile_reason_out_of_an_event_handler(tmp_pat
     output = _capture_card_html(capture)
 
     assert "captureLastThree(this)" in output
+    assert "Hide for this session" in output
     assert 'data-capture-reason="x&quot; onclick=&quot;steal()"' in output
     assert "onclick=\"steal()" not in output
     assert "turns 1–1" in output
@@ -409,6 +428,72 @@ def test_capture_route_snapshots_raw_messages_and_scopes_fragment_to_thread(tmp_
     assert client.post("/thread/t1/capture", data={
         "reason": "no", "scope": "last_3", "csrf_token": "wrong",
     }).status_code == 403
+
+
+def test_dismiss_capture_hides_only_its_process_local_card(tmp_path: Path, monkeypatch):
+    from manage.web import threads as web_threads
+    from manage.web.state import CaptureDismissals
+
+    threads_root = tmp_path / "threads"
+    threads_root.mkdir()
+    store = CaptureStore(tmp_path / "captures", threads_root=threads_root)
+    capture = store.create(thread_id="t1", reason="Keep the evidence.",
+                           scope="last_3", records=_records())
+    capture_id = capture["request"]["capture_id"]
+    files = {
+        path.name: path.read_bytes()
+        for path in (store.root / capture_id).iterdir()
+    }
+    index_before = (store.root / "index.json").read_bytes()
+    monkeypatch.setattr(web_threads, "CAPTURE_STORE", store)
+    monkeypatch.setattr(web_threads, "CAPTURE_DISMISSALS", CaptureDismissals())
+    client = TestClient(web_threads.app)
+
+    assert client.get(f"/thread/t1/capture/{capture_id}").status_code == 200
+    assert client.post(f"/thread/t1/capture/{capture_id}/dismiss", data={
+        "csrf_token": "wrong",
+    }).status_code == 403
+    assert client.post(f"/thread/other/capture/{capture_id}/dismiss", data={
+        "csrf_token": web_threads.CAPTURE_CSRF,
+    }).status_code == 404
+
+    response = client.post(f"/thread/t1/capture/{capture_id}/dismiss", data={
+        "csrf_token": web_threads.CAPTURE_CSRF,
+    })
+
+    assert response.status_code == 204
+    assert response.headers["cache-control"] == "no-store"
+    assert client.get(f"/thread/t1/capture/{capture_id}").status_code == 404
+    assert {path.name: path.read_bytes() for path in (store.root / capture_id).iterdir()} == files
+    assert (store.root / "index.json").read_bytes() == index_before
+    assert store.update_result("t1", capture_id, {"status": "failed", "error": "later"})[
+        "result"]["error"] == "later"
+
+
+def test_dismissed_capture_does_not_render_after_a_thread_refresh(tmp_path: Path, monkeypatch):
+    from manage import web
+    from manage.web import state
+    from manage.web import threads as web_threads
+    from manage.web.state import CaptureDismissals
+
+    tid = "t1"
+    threads_root = tmp_path / "threads"
+    (threads_root / tid).mkdir(parents=True)
+    monkeypatch.setattr(web.MANAGER, "root_dir", str(threads_root))
+    state.DESCRIPTION_CACHE[tid] = "Dismissal test"
+    state._set_status(tid, "initializing")
+    store = CaptureStore(tmp_path / "captures", threads_root=threads_root)
+    capture = store.create(thread_id=tid, reason="Keep it stored.",
+                           scope="last_3", records=_records())
+    dismissals = CaptureDismissals()
+    dismissals.dismiss(tid, capture["request"]["capture_id"])
+    monkeypatch.setattr(web_threads, "CAPTURE_STORE", store)
+    monkeypatch.setattr(web_threads, "CAPTURE_DISMISSALS", dismissals)
+
+    page = asyncio.run(web_threads.get_thread(tid))
+
+    assert capture["request"]["capture_id"] not in page
+    assert "capture:" not in web_threads.render_index()
 
 
 def test_capture_backlog_becomes_a_visible_terminal_failure(tmp_path: Path, monkeypatch):
