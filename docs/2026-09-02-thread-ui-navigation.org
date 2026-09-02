@@ -14,8 +14,9 @@ strictly older window below it through an opaque oldest-turn cursor.  The initia
 keeps current pending, queue, status, approval, and Pi trace state; history
 fragments render persisted conversation records only.
 
-Assistant replies receive stable identities from their persisted message ID;
-Pi replies use their durable Run ID.  The browser stores only an ordered,
+Assistant replies receive a stable checkpoint message identity (the persisted
+message ID where available, otherwise its checkpoint position); Pi replies use
+their durable Run ID.  The browser stores only an ordered,
 bounded list of those identities and the already-rendered response content in
 localStorage, scoped to the thread.  Pins therefore survive reloads in that
 browser but never enter Assist storage.  The pinned section is a collapsed

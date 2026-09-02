@@ -920,8 +920,8 @@ def render_thread(
                          f'{html.escape(_format_elapsed(badge_at[_i]))}</span>')
             response_id = (_message_id(m) if role == "assistant" and
                            record.source_kind == "assistant" else None)
-            pin = (f'<button class="pin-response" type="button" data-response-id="{html.escape(response_id, quote=True)}" '
-                   f'onclick="pinResponse(this)">Pin</button>') if response_id else ""
+            pin = ('<button class="pin-response" type="button" '
+                   'onclick="pinResponse(this)">Pin</button>') if response_id else ""
             response_attr = (f' data-response-id="{html.escape(response_id, quote=True)}"'
                              if response_id else "")
             bubble = (f'<div class="msg {cls}"{response_attr}><div class="role">{role}{badge}{pin}</div>'
@@ -1418,7 +1418,7 @@ def render_thread(
             var capturePolls = {{}}, hiddenCaptures = {{}}, capturePollFailures = {{}};
             var captureStorageKey = 'assist:captures:' + {json.dumps(tid)};
             function savedCaptures() {{ try {{ var items=JSON.parse(localStorage.getItem(captureStorageKey)||'[]'); return Array.isArray(items) ? items.filter(function(item){{ return item && typeof item.id === 'string' && /^[A-Za-z0-9_.:-]{{1,200}}$/.test(item.id) && typeof item.card === 'string'; }}).slice(0, 20) : []; }} catch (_) {{ return []; }} }}
-            function saveCaptures(items) {{ localStorage.setItem(captureStorageKey, JSON.stringify(items)); }}
+            function saveCaptures(items) {{ try {{ localStorage.setItem(captureStorageKey, JSON.stringify(items)); return true; }} catch (_) {{ return false; }} }}
             function rememberCapture(id, card) {{ var items=savedCaptures().filter(function(item){{ return item.id !== id; }}); items.unshift({{id:id, card:card}}); saveCaptures(items.slice(0, 20)); }}
             function showCaptureModal() {{
               var modal = document.getElementById('captureModal');
@@ -1484,7 +1484,7 @@ def render_thread(
               }}
               catch (_) {{ return []; }}
             }}
-            function writePins(ids) {{ localStorage.setItem(pinStorageKey, JSON.stringify(ids)); }}
+            function writePins(ids) {{ try {{ localStorage.setItem(pinStorageKey, JSON.stringify(ids)); return true; }} catch (_) {{ return false; }} }}
             function pinMarkupKey(id) {{ return pinStorageKey + ':' + id; }}
             function showPinNotice(message) {{
               var notice = document.getElementById('pinNotice'); if (notice) notice.textContent = message;
@@ -1504,22 +1504,25 @@ def render_thread(
               section.innerHTML = '<details><summary>Pinned responses (<span id="pinCount">' + ids.length + '</span>)</summary><div id="pinnedResponseCards"></div></' + 'details>';
               var cards = document.getElementById('pinnedResponseCards');
               ids.forEach(function(id) {{
-                var content = localStorage.getItem(pinMarkupKey(id));
+                var content; try {{ content = localStorage.getItem(pinMarkupKey(id)); }} catch (_) {{ content = null; }}
                 if (content === null) {{ unpinResponse(id, true); return; }}
                 cards.insertAdjacentHTML('beforeend', '<article class="msg assistant pinned-response" data-response-id="' + id + '"><div class="role">assistant <button class="pin-response" type="button" onclick="unpinResponse(\'' + id + '\')">Remove pin</button></div><div class="content">' + content + '</div></article>');
               }}); refreshPinButtons();
             }}
             function pinResponse(button) {{
-              try {{ var ids = readPins(), id = button.getAttribute('data-response-id');
-                var content = button.closest('[data-response-id]').querySelector('.content').innerHTML;
+              try {{ var ids = readPins(), card = button.closest('.msg[data-response-id]'), id = card && card.getAttribute('data-response-id');
+                var content = card && card.querySelector('.content').innerHTML;
                 if (!id || ids.indexOf(id) !== -1) return;
                 if (ids.length >= 50) {{ showPinNotice('You can pin up to 50 responses.'); return; }}
-                localStorage.setItem(pinMarkupKey(id), content); ids.push(id); writePins(ids); renderPins();
+                localStorage.setItem(pinMarkupKey(id), content); ids.push(id);
+                if (!writePins(ids)) {{ localStorage.removeItem(pinMarkupKey(id)); throw new Error('storage unavailable'); }}
+                renderPins();
                 document.querySelector('#pinnedResponses details').open = true; }}
               catch (_) {{ showPinNotice('Pins are unavailable in this browser.'); }}
             }}
             function unpinResponse(id, quiet) {{
-              try {{ localStorage.removeItem(pinMarkupKey(id)); writePins(readPins().filter(function(item) {{ return item !== id; }})); renderPins(); }}
+              try {{ if (!writePins(readPins().filter(function(item) {{ return item !== id; }}))) throw new Error('storage unavailable');
+                localStorage.removeItem(pinMarkupKey(id)); renderPins(); }}
               catch (_) {{ if (!quiet) showPinNotice('Pins are unavailable in this browser.'); }}
             }}
             function loadOlderMessages(button) {{

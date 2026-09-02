@@ -46,6 +46,25 @@ def test_history_cursor_rejects_unknown_or_malformed_identity():
             assert False, cursor
 
 
+def test_checkpoint_messages_without_langchain_ids_still_page():
+    from assist.thread import _messages_to_dicts
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    raw = [message for number in range(12) for message in (
+        HumanMessage(content=f"question {number}", id=None),
+        AIMessage(content=f"answer {number}", id=None),
+    )]
+    messages = _messages_to_dicts(raw, split_tool_call_content=True,
+                                  include_message_ids=True)
+
+    newest, cursor = threads._turn_page(messages)
+
+    assert cursor == "message:4"
+    assert [message["content"] for message in newest if message["role"] == "user"] == [
+        f"question {number}" for number in range(2, 12)
+    ]
+
+
 class _Chat:
     def __init__(self, messages):
         self.messages = messages
@@ -67,10 +86,15 @@ def test_rendered_assistant_is_pinnable_but_tools_are_not(tmp_path, monkeypatch)
 
     assert 'data-response-id="a1"' in html
     assert 'data-response-id="u1"' not in html
+    assert 'class="pin-response" type="button" data-response-id=' not in html
     assert html.count('>Pin</button>') == 1
     assert "assist:pins:" in html
     assert "You can pin up to 50 responses." in html
     assert "saveCaptures(items.slice(0, 20))" in html
+    assert "function saveCaptures(items) { try { localStorage.setItem" in html
+    assert "button.closest('.msg[data-response-id]')" in html
+    assert "if (!writePins(ids)) { localStorage.removeItem(pinMarkupKey(id)); throw new Error('storage unavailable'); }" in html
+    assert "if (!writePins(readPins().filter(function(item) { return item !== id; }))) throw new Error('storage unavailable');" in html
     assert 'id="loadMore"><button' not in html
     assert "overflow-x: clip" in html
     assert ".msg pre, .msg .content table" in html

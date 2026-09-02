@@ -27,7 +27,12 @@ def render_tool_calls(message: AIMessage) -> str:
     return _render_calls(calls, getattr(message, "content", None))
 
 
-def _messages_to_dicts(raw: list, *, split_tool_call_content: bool = False) -> list[dict]:
+def _messages_to_dicts(
+    raw: list,
+    *,
+    split_tool_call_content: bool = False,
+    include_message_ids: bool = False,
+) -> list[dict]:
     """Convert checkpointer messages to the role/content dicts the web UI renders.
 
     Pure (no agent/state access) so it's unit-testable. An AIMessage's tool calls
@@ -36,11 +41,16 @@ def _messages_to_dicts(raw: list, *, split_tool_call_content: bool = False) -> l
     projection keeps that content in the tools line for existing non-web consumers.
     A message with content and no tool calls is an ``"assistant"`` message (its
     content may carry a ```render block the web layer turns into a file embed); a
-    HumanMessage is ``"user"``."""
+    HumanMessage is ``"user"``.  The web projection additionally needs stable
+    identities for its history cursor and browser-local pins.  SQLite checkpoints
+    commonly restore messages without LangChain ``id`` values, so use the immutable
+    message position as a fallback.  The ordinary projection deliberately keeps its
+    longstanding role/content-only shape."""
     msgs: list[dict] = []
-    for m in raw:
+    for index, m in enumerate(raw):
         message_id = getattr(m, "id", None)
-        identity = {"message_id": message_id} if isinstance(message_id, str) else {}
+        identity = ({"message_id": message_id if isinstance(message_id, str)
+                     else f"message:{index}"} if include_message_ids else {})
         if isinstance(m, HumanMessage):
             msgs.append({"role": "user", "content": m.content, **identity})
         elif isinstance(m, AIMessage):
@@ -347,7 +357,8 @@ class Thread:
         """Return the web-only message projection with tool-call prose visible."""
         state = self.agent.get_state(self.runconfig)
         return _messages_to_dicts(
-            state.values.get("messages", []), split_tool_call_content=True)
+            state.values.get("messages", []), split_tool_call_content=True,
+            include_message_ids=True)
 
 
     def get_raw_messages(self) -> List[AnyMessage]:
