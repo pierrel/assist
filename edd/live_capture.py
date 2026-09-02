@@ -251,7 +251,15 @@ class CaptureStore:
             result["transcript_bytes"] = len(transcript_bytes)
         self._write_json(directory / "result.json", result)
         index = self._index_value()
-        index.setdefault("threads", {}).setdefault(thread_id, []).insert(0, {
+        threads = index.get("threads")
+        if not isinstance(threads, dict):
+            threads = {}
+            index["threads"] = threads
+        entries = threads.get(thread_id)
+        if not isinstance(entries, list):
+            entries = []
+            threads[thread_id] = entries
+        entries.insert(0, {
             "capture_id": capture_id, "status": status, "updated_at": created_at,
         })
         self._write_json(self._index, index)
