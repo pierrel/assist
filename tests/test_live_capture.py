@@ -30,6 +30,10 @@ def _records() -> tuple[VisibleRecord, ...]:
     )
 
 
+def _calibration() -> dict[str, str]:
+    return {"verdict": "pass", "reason": "Recorded assessment."}
+
+
 def test_projection_selects_last_completed_turns_and_excludes_host_frames():
     records = visible_records([
         HumanMessage(content="first"), AIMessage(content="one"),
@@ -66,6 +70,7 @@ def test_store_keeps_immutable_transcript_and_binds_reads_to_thread(tmp_path: Pa
     created = store.create(
         thread_id="thread-a", reason="It found the requested fact.",
         scope="last_3", records=_records(), source_revision="abc",
+        calibration={"verdict": "pass", "reason": "It gave the right fact."},
     )
     capture_id = created["request"]["capture_id"]
     before = (tmp_path / "captures" / capture_id / "transcript.json").read_bytes()
@@ -73,12 +78,49 @@ def test_store_keeps_immutable_transcript_and_binds_reads_to_thread(tmp_path: Pa
 
     assert (tmp_path / "captures" / capture_id / "transcript.json").read_bytes() == before
     assert store.get_for_thread("thread-a", capture_id)["request"]["reason"].startswith("It found")
+    assert store.get_for_thread("thread-a", capture_id)["request"]["calibration"] == {
+        "verdict": "pass", "reason": "It gave the right fact.",
+    }
     with pytest.raises(FileNotFoundError):
         store.get_for_thread("thread-b", capture_id)
     assert (tmp_path / "captures" / capture_id / "request.json").stat().st_mode & 0o077 == 0
     newest = store.create(thread_id="thread-a", reason="A later capture.",
-                          scope="last_3", records=_records())
+                          scope="last_3", records=_records(), calibration=_calibration())
     assert store.list_for_threads()["thread-a"][0]["capture_id"] == newest["request"]["capture_id"]
+
+
+@pytest.mark.parametrize("calibration, message", [
+    ([], "object"),
+    ({"verdict": "partial", "reason": "Maybe."}, "verdict"),
+    ({"verdict": "pass", "reason": ""}, "reason"),
+    ({"verdict": "pass", "reason": "x" * 8_001}, "too large"),
+])
+def test_store_validates_private_calibration_evidence(
+    tmp_path: Path, calibration: dict[str, str], message: str,
+):
+    store = CaptureStore(tmp_path / "captures", threads_root=tmp_path / "threads")
+
+    with pytest.raises(ValueError, match=message):
+        store.create(thread_id="thread-a", reason="The answer should be correct.",
+                     scope="last_3", records=_records(), calibration=calibration)
+
+
+def test_store_requires_calibration_for_new_captures_but_reads_legacy_requests(tmp_path: Path):
+    store = CaptureStore(tmp_path / "captures", threads_root=tmp_path / "threads")
+
+    with pytest.raises(TypeError, match="calibration"):
+        store.create(thread_id="thread-a", reason="The answer should be correct.",
+                     scope="last_3", records=_records())
+
+    capture = store.create(thread_id="thread-a", reason="The answer should be correct.",
+                           scope="last_3", records=_records(), calibration=_calibration())
+    request_path = store.root / capture["request"]["capture_id"] / "request.json"
+    request = json.loads(request_path.read_text())
+    request.pop("calibration")
+    request_path.write_text(json.dumps(request))
+
+    assert "calibration" not in store.get_for_thread(
+        "thread-a", capture["request"]["capture_id"])["request"]
 
 
 
@@ -101,7 +143,7 @@ def test_store_skips_malformed_index_entries_when_listing_and_updating(tmp_path:
     threads.mkdir()
     store = CaptureStore(tmp_path / "captures", threads_root=threads)
     capture = store.create(thread_id="thread-a", reason="Keep the result update.",
-                           scope="last_3", records=_records())
+                           scope="last_3", records=_records(), calibration=_calibration())
     capture_id = capture["request"]["capture_id"]
     summary = store.list_for_thread("thread-a")[0]
     (store.root / "index.json").write_text(json.dumps({
@@ -121,7 +163,7 @@ def test_store_replaces_malformed_index_thread_shapes_when_creating(tmp_path: Pa
         (store.root / "index.json").write_text(json.dumps({"threads": malformed_threads}))
 
         capture = store.create(thread_id="thread-a", reason="Store this safely.",
-                               scope="last_3", records=_records())
+                               scope="last_3", records=_records(), calibration=_calibration())
 
         assert store.list_for_thread("thread-a")[0]["capture_id"] == capture["request"]["capture_id"]
 
@@ -131,7 +173,7 @@ def test_store_rejects_a_symlinked_capture_file(tmp_path: Path):
     threads.mkdir()
     store = CaptureStore(tmp_path / "captures", threads_root=threads)
     created = store.create(thread_id="thread-a", reason="Reason with an outcome.",
-                           scope="last_3", records=_records())
+                           scope="last_3", records=_records(), calibration=_calibration())
     capture_id = created["request"]["capture_id"]
     path = tmp_path / "captures" / capture_id / "result.json"
     path.unlink()
@@ -180,7 +222,7 @@ def test_rejected_capture_cannot_bypass_the_store_quota(tmp_path: Path, monkeypa
 
     with pytest.raises(CaptureStorageFull):
         store.create(thread_id="thread-a", reason="Reason with an outcome.",
-                     scope="entire", records=_records())
+                     scope="entire", records=_records(), calibration=_calibration())
 
     assert {path.name for path in (tmp_path / "captures").iterdir()} == before
 
@@ -197,7 +239,7 @@ def test_store_full_capture_is_failed_not_a_shorter_scope_request(tmp_path: Path
     )
 
     capture = store.create(thread_id="thread-a", reason="Reason with an outcome.",
-                           scope="entire", records=_records())
+                           scope="entire", records=_records(), calibration=_calibration())
 
     assert capture["result"]["status"] == "failed"
     assert capture["result"]["error"] == "private capture storage is full"
@@ -210,7 +252,7 @@ def test_result_update_cannot_grow_past_the_store_quota(tmp_path: Path, monkeypa
     threads.mkdir()
     store = CaptureStore(tmp_path / "captures", threads_root=threads)
     capture = store.create(thread_id="thread-a", reason="Reason with an outcome.",
-                           scope="last_3", records=_records())
+                           scope="last_3", records=_records(), calibration=_calibration())
     capture_id = capture["request"]["capture_id"]
     original = store.get_for_thread("thread-a", capture_id)["result"]
     monkeypatch.setattr(captures, "MAX_STORE_BYTES", store._store_bytes())
@@ -247,12 +289,21 @@ class _Model:
         }))
 
 
+class _RecordingModel(_Model):
+    def __init__(self):
+        self.requests = []
+
+    def invoke(self, messages):
+        self.requests.append(messages)
+        return super().invoke(messages)
+
+
 def test_worker_interprets_then_judges_one_private_capture(tmp_path: Path):
     threads = tmp_path / "threads"
     threads.mkdir()
     store = CaptureStore(tmp_path / "captures", threads_root=threads)
     capture = store.create(thread_id="thread-a", reason="It found the requested fact.",
-                           scope="last_3", records=_records())
+                           scope="last_3", records=_records(), calibration=_calibration())
     capture_id = capture["request"]["capture_id"]
     worker = CaptureWorker(store, model_factory=_Model)
     worker.start()
@@ -269,6 +320,31 @@ def test_worker_interprets_then_judges_one_private_capture(tmp_path: Path):
     assert result["status"] == "pass"
     assert result["interpreter"]["model"] == "fake-local"
     assert result["judge"]["model"] == "fake-local"
+
+
+def test_worker_never_sends_private_calibration_to_models(tmp_path: Path):
+    threads = tmp_path / "threads"
+    threads.mkdir()
+    store = CaptureStore(tmp_path / "captures", threads_root=threads)
+    capture = store.create(
+        thread_id="thread-a", reason="It found the requested fact.", scope="last_3",
+        records=_records(),
+        calibration={"verdict": "fail", "reason": "PRIVATE CALIBRATION REASON"},
+    )
+    model = _RecordingModel()
+    worker = CaptureWorker(store, model_factory=lambda: model)
+    worker.start()
+    worker.submit("thread-a", capture["request"]["capture_id"])
+    deadline = monotonic() + 3
+    while monotonic() < deadline:
+        if store.get_for_thread("thread-a", capture["request"]["capture_id"])["result"]["status"] == "pass":
+            break
+        sleep(0.01)
+    worker.stop()
+
+    sent = "\n".join(str(message.content) for request in model.requests for message in request)
+    assert "PRIVATE CALIBRATION REASON" not in sent
+    assert '"verdict": "fail"' not in sent
 
 
 def test_only_one_worker_can_own_a_capture_store(tmp_path: Path):
@@ -341,7 +417,7 @@ def test_worker_stop_interrupts_queue_wait_before_starting_a_model_call(tmp_path
     threads.mkdir()
     store = CaptureStore(tmp_path / "captures", threads_root=threads)
     capture = store.create(thread_id="thread-a", reason="Reason with an outcome.",
-                           scope="last_3", records=_records())
+                           scope="last_3", records=_records(), calibration=_calibration())
     worker = CaptureWorker(store, model_factory=_Model)
     monkeypatch.setattr(captures, "THREAD_QUEUE", BusyQueue())
     monkeypatch.setattr(captures, "CAPTURE_QUEUE_POLL_TIMEOUT_S", 0.01)
@@ -375,7 +451,8 @@ def test_store_rejects_excess_records_before_building_a_transcript(tmp_path: Pat
     monkeypatch.setattr(captures, "_record_json", lambda _record: pytest.fail("should not serialize"))
 
     capture = store.create(thread_id="thread-a", reason="Reason with an outcome.",
-                           scope="last_3", records=_records() * (captures.MAX_RECORDS + 1))
+                           scope="last_3", records=_records() * (captures.MAX_RECORDS + 1),
+                           calibration=_calibration())
 
     assert capture["result"]["status"] == "needs_shorter_scope"
     assert capture["result"]["error"] == "too many visible records"
@@ -391,7 +468,7 @@ def test_shorter_scope_card_keeps_hostile_reason_out_of_an_event_handler(tmp_pat
     monkeypatch.setattr(captures, "MAX_SNAPSHOT_BYTES", 1)
     reason = 'x" onclick="steal()'
     capture = store.create(thread_id="thread-a", reason=reason,
-                           scope="entire", records=_records())
+                           scope="entire", records=_records(), calibration=_calibration())
 
     output = _capture_card_html(capture)
 
@@ -407,7 +484,7 @@ def test_capture_card_labels_an_unknown_stored_scope_as_unavailable(tmp_path: Pa
 
     store = CaptureStore(tmp_path / "captures", threads_root=tmp_path / "threads")
     capture = store.create(thread_id="thread-a", reason="Preserve the actual range.",
-                           scope="last_3", records=_records())
+                           scope="last_3", records=_records(), calibration=_calibration())
     for scope in ("unexpected", [], {}):
         capture["request"]["scope"] = scope
 
@@ -448,6 +525,7 @@ def test_capture_route_snapshots_raw_messages_and_scopes_fragment_to_thread(tmp_
 
     response = client.post("/thread/t1/capture", data={
         "reason": "It answered the question.", "scope": "last_3",
+        "calibration_verdict": "pass", "calibration_reason": "It answered correctly.",
         "csrf_token": web_threads.CAPTURE_CSRF,
     })
 
@@ -457,6 +535,9 @@ def test_capture_route_snapshots_raw_messages_and_scopes_fragment_to_thread(tmp_
     assert worker.submitted == [("t1", capture_id)]
     capture = store.get_for_thread("t1", capture_id)
     assert capture["request"]["turn_range"] == [1, 1]
+    assert capture["request"]["calibration"] == {
+        "verdict": "pass", "reason": "It answered correctly.",
+    }
     assert [record["text"] for record in capture["transcript"]["records"]] == [
         "question", "also this", "answer",
     ]
@@ -466,8 +547,27 @@ def test_capture_route_snapshots_raw_messages_and_scopes_fragment_to_thread(tmp_
     assert "It answered the question." in fragment.text
     assert client.get(f"/thread/other/capture/{capture_id}").status_code == 404
     assert client.post("/thread/t1/capture", data={
-        "reason": "no", "scope": "last_3", "csrf_token": "wrong",
+        "reason": "no", "scope": "last_3", "calibration_verdict": "fail",
+        "calibration_reason": "It was wrong.", "csrf_token": "wrong",
     }).status_code == 403
+    assert client.post("/thread/t1/capture", data={
+        "reason": "no", "scope": "last_3", "calibration_verdict": "partial",
+        "calibration_reason": "It was mixed.", "csrf_token": web_threads.CAPTURE_CSRF,
+    }).status_code == 400
+    assert client.post("/thread/t1/capture", data={
+        "reason": "no", "scope": "last_3", "csrf_token": web_threads.CAPTURE_CSRF,
+    }).status_code == 422
+
+
+def test_capture_form_requires_a_separate_private_assessment():
+    from manage.web.threads import render_thread
+
+    page = render_thread("t1", None)
+
+    assert 'name="calibration_verdict" value="pass" required' in page
+    assert 'name="calibration_verdict" value="fail" required' in page
+    assert 'name="calibration_reason" required maxlength="8000"' in page
+    assert "kept separate from the judge" in page
 
 
 def test_capture_fragment_keeps_persisted_evidence_after_local_dismissal(tmp_path: Path, monkeypatch):
@@ -477,7 +577,7 @@ def test_capture_fragment_keeps_persisted_evidence_after_local_dismissal(tmp_pat
     threads_root.mkdir()
     store = CaptureStore(tmp_path / "captures", threads_root=threads_root)
     capture = store.create(thread_id="t1", reason="Keep the evidence.",
-                           scope="last_3", records=_records())
+                           scope="last_3", records=_records(), calibration=_calibration())
     capture_id = capture["request"]["capture_id"]
     files = {
         path.name: path.read_bytes()
@@ -507,7 +607,7 @@ def test_capture_never_renders_from_backend_after_a_thread_refresh(tmp_path: Pat
     state._set_status(tid, "initializing")
     store = CaptureStore(tmp_path / "captures", threads_root=threads_root)
     capture = store.create(thread_id=tid, reason="Keep it stored.",
-                           scope="last_3", records=_records())
+                           scope="last_3", records=_records(), calibration=_calibration())
     monkeypatch.setattr(web_threads, "CAPTURE_STORE", store)
 
     page = asyncio.run(web_threads.get_thread(tid))
@@ -570,7 +670,10 @@ def test_capture_backlog_becomes_a_visible_terminal_failure(tmp_path: Path, monk
     monkeypatch.setattr(web_threads, "_require_deep_thread", lambda tid: None)
     monkeypatch.setattr(web_threads, "_get_status", lambda tid: {"stage": "ready"})
 
-    capture = web_threads._create_live_capture("t1", "It answered the question.", "last_3")
+    capture = web_threads._create_live_capture(
+        "t1", "It answered the question.", "last_3",
+        {"verdict": "fail", "reason": "It did not answer correctly."},
+    )
 
     assert capture["result"]["status"] == "failed"
     assert capture["result"]["error"] == "capture queue is full"

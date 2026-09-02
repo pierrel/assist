@@ -1,0 +1,84 @@
+#+title: Capture calibration evidence
+#+date: 2026-09-02
+#+startup: overview
+
+* State
+
+Design accepted for implementation.  This amendment extends the judged live
+capture design; it does not introduce replay evaluation or automatic
+calibration.
+
+* Decision
+
+Each new capture records two distinct user-authored inputs:
+
+1. =reason= states what the existing independent interpreter should turn into
+   observable judging criteria.
+2. =calibration= records Pierre's own =pass= or =fail= assessment and a reason
+   for that assessment.  It is retained as private evidence for later offline
+   calibration work.
+
+The modal makes the distinction explicit: an independent-judge reason, then
+Pierre's own pass/fail assessment and rationale.  Capture requires all three.
+The score card continues to show the independent judge's result only; it does
+not add a second visible score.  The separate pending UI PR supplies its
+browser-local persistence and permanent dismissal, and this branch deliberately
+does not alter that overlap.
+
+* Storage and trust boundary
+
+=request.json= gains a bounded =calibration= object:
+
+#+begin_example
+{
+  "reason": "what the independent judge should assess",
+  "calibration": {"verdict": "pass", "reason": "why I think it passed"}
+}
+#+end_example
+
+The object is private capture evidence, owner-only like the existing request,
+transcript, and result.  It is not copied into the transcript, criteria,
+observation, index, result card, interpreter payload, judge payload, model
+logs, or sandbox environment.  The worker's only model input remains the
+pre-existing capture =reason= plus the canonical transcript; the judge still
+receives only the deterministic observation derived from those two inputs.
+Thus Pierre's calibration cannot steer its independent score by construction.
+
+The existing capture store may contain records without =calibration=.  They are
+still readable and judgeable because processing never reads calibration data;
+the new create path requires it.  No migration or deletion is needed.
+
+* Implementation plan
+
+1. Extend =CaptureStore.create= and its bounded request serialization in
+   =edd/live_capture.py=.  Validate exactly =pass= or =fail= and a nonempty,
+   bounded calibration rationale before allocating any capture directory.  Pass
+   the object through rejected-capture request writes too, preserving the
+   evidence when a snapshot cannot be judged.
+2. Extend =_create_live_capture= and the capture POST form in
+   =manage/web/threads.py=.  The route accepts and validates the new form
+   fields off the event loop, while the card/polling/dismissal path stays
+   unchanged.
+3. Add store, worker-boundary, route, and rendered-form tests.  The boundary
+   test inspects model requests and proves neither user verdict nor calibration
+   reason is present in interpreter or judge input.
+4. Keep this branch based on current =main=.  It deliberately overlaps the
+   pending browser-local-capture UI PR only in the capture form and route;
+   after that PR lands, integrate the two focused changes before deployment.
+   Run the normal local review, tests, and Copilot process here, but leave
+   deployment coordinated by the parent lane because Pierre is currently
+   testing the UI work.
+
+* Design review constraint
+
+The requested delegated design review could not run: all four available agent
+slots were already occupied by the controller and the three parallel tasks.
+The implementation therefore receives the complete local review lenses before
+it is presented for external review.
+
+* Deliberately out of scope
+
+Comparing calibration evidence with judge results, retraining or changing the
+judge, promotion to replay evals, and automatic code-change recommendations are
+offline/future work.  This change only preserves the independently collected
+pair of assessments.

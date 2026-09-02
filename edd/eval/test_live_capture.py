@@ -51,6 +51,7 @@ def test_judged_live_capture(
     capture = store.create(
         thread_id=case_id, reason=reason, scope="last_3", turn_range=(1, 1),
         records=tuple(VisibleRecord(**record) for record in records),
+        calibration={"verdict": expected, "reason": "Synthetic calibration evidence."},
     )
     capture_id = capture["request"]["capture_id"]
     worker = CaptureWorker(store)
