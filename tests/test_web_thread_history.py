@@ -136,6 +136,14 @@ def test_history_route_validates_cursor_and_returns_the_next_window(tmp_path, mo
     monkeypatch.setattr(state.MANAGER, "get", lambda tid, sandbox_backend=None: _Chat(
         [message for number in range(1, 13) for message in _turn(number)]))
     monkeypatch.setattr(threads, "_thread_title", lambda tid: "Thread")
+    diff_calls = []
+
+    class _DiffManager:
+        def main_diff(self):
+            diff_calls.append(True)
+            return []
+
+    monkeypatch.setattr(threads, "_get_domain_manager", lambda tid: _DiffManager())
     state._set_status("t", "ready")
     client = TestClient(threads.app)
 
@@ -145,5 +153,6 @@ def test_history_route_validates_cursor_and_returns_the_next_window(tmp_path, mo
     assert "question 1" in response.json()["html"]
     assert "question 3" not in response.json()["html"]
     assert response.json()["before"] is None
+    assert not diff_calls
     assert client.get("/thread/t/history", params={"before": "unknown"}).status_code == 404
     assert client.get("/thread/t/history", params={"before": "bad/value"}).status_code == 404

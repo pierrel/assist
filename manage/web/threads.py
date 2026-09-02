@@ -805,7 +805,7 @@ def render_thread(
     # top-of-page block, separate from the message bubbles, so the per-file
     # collapse stack and the Merge / Review buttons sit together.
     diffs: list[Change] = []
-    if not is_init and not is_pi:
+    if history_before is None and not is_init and not is_pi:
         try:
             dm = _get_domain_manager(tid)
             if dm:

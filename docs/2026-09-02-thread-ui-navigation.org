@@ -1,5 +1,3 @@
-State: Implemented and locally verified; awaiting deployment and PR review
-
 * Problem
 
 Long threads render every persisted display record into one page.  This makes
