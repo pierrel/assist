@@ -1,4 +1,6 @@
 """Thread history windows and browser-local response-pin render contracts."""
+import re
+
 from fastapi.testclient import TestClient
 
 from manage.web import state
@@ -44,6 +46,13 @@ def test_history_cursor_rejects_unknown_or_malformed_identity():
             pass
         else:
             assert False, cursor
+
+
+def test_history_fragment_marker_is_valid_inside_an_html_comment():
+    marker = threads._history_marker()
+
+    assert re.fullmatch(r"[0-9a-f]{48}", marker)
+    assert "--" not in marker
 
 
 def test_checkpoint_messages_without_langchain_ids_still_page():

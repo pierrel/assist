@@ -232,6 +232,11 @@ HISTORY_TURN_LIMIT = 10
 _HISTORY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,200}")
 _HISTORY_FRAGMENT_LIMITER = anyio.CapacityLimiter(2)
 
+
+def _history_marker() -> str:
+    """Return an HTML-comment-safe delimiter for one history fragment."""
+    return secrets.token_hex(24)
+
 # Thread-list ordering rank (lower sorts first). Per Pierre: STATUS first — urgent,
 # then any busy stage except queued (processing / paused / initializing / cloning /
 # starting_sandbox), then queued (waiting for a slot), then "new" (an unopened
@@ -3214,7 +3219,7 @@ async def thread_history(tid: str, before: str) -> JSONResponse:
 
     def render_history() -> dict:
         chat, pi_messages, pi_traces, trace_unavailable = _thread_messages_for_fragment(tid)
-        marker = secrets.token_urlsafe(24)
+        marker = _history_marker()
         try:
             page = render_thread(tid, chat, pi_messages=pi_messages, pi_traces=pi_traces,
                                  pi_trace_unavailable=trace_unavailable, history_before=before,
