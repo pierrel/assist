@@ -112,6 +112,25 @@ def test_store_skips_malformed_index_entries_during_pending_recovery(tmp_path: P
     assert store.pending() == [("thread-a", valid_id)]
 
 
+def test_store_skips_malformed_index_entries_when_listing_and_updating(tmp_path: Path):
+    threads = tmp_path / "threads"
+    threads.mkdir()
+    store = CaptureStore(tmp_path / "captures", threads_root=threads)
+    capture = store.create(thread_id="thread-a", reason="Keep the result update.",
+                           scope="last_3", records=_records())
+    capture_id = capture["request"]["capture_id"]
+    summary = store.list_for_thread("thread-a")[0]
+    (store.root / "index.json").write_text(json.dumps({
+        "threads": {"thread-a": [None, summary], "thread-b": "not-a-list"},
+    }))
+
+    assert store.list_for_thread("thread-a") == [summary]
+    assert store.list_for_thread("thread-b") == []
+    assert store.update_result("thread-a", capture_id, {"status": "failed"})[
+        "result"]["status"] == "failed"
+    assert store.list_for_thread("thread-a")[0]["status"] == "failed"
+
+
 def test_store_rejects_a_symlinked_capture_file(tmp_path: Path):
     threads = tmp_path / "threads"
     threads.mkdir()

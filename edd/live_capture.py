@@ -272,8 +272,13 @@ class CaptureStore:
 
     def list_for_thread(self, thread_id: str) -> list[dict[str, Any]]:
         with self._lock:
-            index = self._index_value()
-            return list(index.get("threads", {}).get(thread_id, []))
+            threads = self._index_value().get("threads", {})
+            if not isinstance(threads, dict):
+                return []
+            entries = threads.get(thread_id, [])
+            if not isinstance(entries, list):
+                return []
+            return [dict(entry) for entry in entries if isinstance(entry, dict)]
 
     def list_for_threads(self) -> dict[str, list[dict[str, Any]]]:
         """Return copied per-thread summaries in one index read."""
@@ -297,11 +302,14 @@ class CaptureStore:
                 raise CaptureStorageFull("private capture storage is full")
             self._write_json(result_path, result)
             index = self._index_value()
-            entries = index.get("threads", {}).get(thread_id, [])
-            for entry in entries:
-                if entry.get("capture_id") == capture_id:
-                    entry["status"] = result["status"]
-                    entry["updated_at"] = result["updated_at"]
+            threads = index.get("threads", {})
+            if isinstance(threads, dict):
+                entries = threads.get(thread_id, [])
+                if isinstance(entries, list):
+                    for entry in entries:
+                        if isinstance(entry, dict) and entry.get("capture_id") == capture_id:
+                            entry["status"] = result["status"]
+                            entry["updated_at"] = result["updated_at"]
             self._write_json(self._index, index)
             return {**current, "result": result}
 
