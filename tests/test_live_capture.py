@@ -527,6 +527,17 @@ def test_pending_capture_fragment_retries_after_a_transient_failure():
     assert "var fresh=document.getElementById('capture-' + id); if(fresh) fresh.remove();" in page
 
 
+def test_capture_dismissal_has_a_csrf_fallback_without_the_capture_form(monkeypatch):
+    from manage.web import threads as web_threads
+
+    monkeypatch.setattr(web_threads, "_is_pi_thread", lambda tid: True)
+    pi_page = web_threads.render_thread("pi-source", None, pi_messages=[])
+
+    assert 'id="capture-form"' not in pi_page
+    assert "var csrfToken=token ? token.value : '" in pi_page
+    assert "body:'csrf_token=' + encodeURIComponent(csrfToken)" in pi_page
+
+
 def test_capture_backlog_becomes_a_visible_terminal_failure(tmp_path: Path, monkeypatch):
     from manage.web import threads as web_threads
 
