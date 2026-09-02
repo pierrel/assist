@@ -160,7 +160,7 @@ changes the stored capture, and a hidden pending capture still completes.
 Snapshot creation, fragment/status reads, recovery scanning, and worker stop
 all use a capture-private AnyIO capacity limiter.  No checkpoint, filesystem,
 store, or rendering work runs inline in an =async def=, and the browser poller
-permits only one in-flight fragment request.
+permits only one in-flight fragment request per card.
 
 * Trust boundary
 
