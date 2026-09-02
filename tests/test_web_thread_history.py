@@ -143,6 +143,11 @@ def test_rendered_assistant_is_pinnable_but_tools_are_not(tmp_path, monkeypatch)
     assert "button.closest('.msg[data-response-id]')" in html
     assert "if (!writePins(ids)) { localStorage.removeItem(pinMarkupKey(id)); throw new Error('storage unavailable'); }" in html
     assert "if (!writePins(readPins().filter(function(item) { return item !== id; }))) throw new Error('storage unavailable');" in html
+    assert 'onclick="unpinResponse(&quot;\' + id + \'&quot;)"' in html
+    assert "window.addEventListener('DOMContentLoaded', renderPins);" in html
+    assert html.index("window.addEventListener('DOMContentLoaded', renderPins);") < html.index(
+        'id="pinnedResponses"'
+    )
     assert 'id="loadMore"><button' not in html
     assert "overflow-x: clip" in html
     assert ".msg pre, .msg .content table" in html

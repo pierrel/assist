@@ -1519,7 +1519,7 @@ def render_thread(
               ids.forEach(function(id) {{
                 var content; try {{ content = localStorage.getItem(pinMarkupKey(id)); }} catch (_) {{ content = null; }}
                 if (content === null) {{ unpinResponse(id, true); return; }}
-                cards.insertAdjacentHTML('beforeend', '<article class="msg assistant pinned-response" data-response-id="' + id + '"><div class="role">assistant <button class="pin-response" type="button" onclick="unpinResponse(\'' + id + '\')">Remove pin</button></div><div class="content">' + content + '</div></article>');
+                cards.insertAdjacentHTML('beforeend', '<article class="msg assistant pinned-response" data-response-id="' + id + '"><div class="role">assistant <button class="pin-response" type="button" onclick="unpinResponse(&quot;' + id + '&quot;)">Remove pin</button></div><div class="content">' + content + '</div></article>');
               }}); refreshPinButtons();
             }}
             function pinResponse(button) {{
@@ -1549,7 +1549,8 @@ def render_thread(
                   else {{ messages.removeAttribute('data-history-cursor'); document.getElementById('loadMore').remove(); }} refreshPinButtons(); }})
                 .catch(function(error) {{ button.disabled=false; button.textContent='Retry loading older messages'; showPinNotice(error.message); }});
             }}
-            renderPins();
+            // The pinned-response shell follows this script in the page.
+            window.addEventListener('DOMContentLoaded', renderPins);
             savedCaptures().forEach(function(item){{
               document.getElementById('captureCards').insertAdjacentHTML('beforeend', item.card);
               var card=document.getElementById('capture-' + item.id);
