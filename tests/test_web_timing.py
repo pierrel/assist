@@ -114,6 +114,22 @@ def test_badge_lands_on_the_correct_assistant_bubble(thread_env):
     assert html.index("2m 5s") < html.index("ANSWER-TWO") < html.index("14s") < html.index("ANSWER-ONE")
 
 
+def test_badges_keep_their_absolute_turn_ordinal_in_a_history_window(thread_env):
+    messages = [message for number in range(1, 13) for message in (
+        {"role": "user", "content": f"QUESTION-{number}", "message_id": f"u{number}"},
+        {"role": "assistant", "content": f"ANSWER-{number}", "message_id": f"a{number}"},
+    )]
+    st._set_status("t1", "ready")
+    st._append_timing("t1", 11, 111)
+    st._append_timing("t1", 12, 222)
+
+    html = render_thread("t1", _FakeThread(messages))
+
+    assert ">QUESTION-1<" not in html and ">QUESTION-2<" not in html
+    assert html.index("3m 42s") < html.index("ANSWER-12")
+    assert html.index("1m 51s") < html.index("ANSWER-11")
+
+
 def test_badge_ordinal_counts_a_review_submission_as_a_user_turn(thread_env):
     # A review submission renders as a "user" bubble (different render branch, same role),
     # so the ordinal count must include it and the badge must land on ITS reply — the

@@ -398,6 +398,16 @@ class TestMessagesToDicts:
         assert out == [{"role": "user", "content": "hi"},
                        {"role": "assistant", "content": "hello"}]
 
+    def test_web_projection_falls_back_to_checkpoint_position_for_identity(self):
+        from assist.thread import _messages_to_dicts
+        from langchain_core.messages import HumanMessage
+
+        out = _messages_to_dicts(
+            [HumanMessage(content="hi"), self._ai(content="hello")],
+            split_tool_call_content=True, include_message_ids=True)
+
+        assert [message["message_id"] for message in out] == ["message:0", "message:1"]
+
     def test_render_tool_calls_empty_when_no_calls(self):
         from assist.thread import render_tool_calls
         assert render_tool_calls(self._ai(content="hello, no tools")) == ""

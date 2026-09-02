@@ -420,7 +420,8 @@ configuration and keeps the in-app urgent behavior without sending SMS.
 - Configuration: `.dev.env` (gitignored)
 - Data: `ASSIST_THREADS_DIR` (default: `/tmp/assist_threads`)
 - Live captures: `ASSIST_CAPTURES_DIR` (default: sibling `assist_captures`; owner-only private snapshots)
-- Capture cards can be hidden for the current app session without altering their private stored evidence; they reappear after a restart.
+- Thread pages start with the ten most recent user turns; load older turns on demand.
+- Pins and capture cards are browser-local. Dismissing a capture removes it from that browser while preserving its private stored evidence.
 - Model: Your local model endpoint
 - Domains: Your local git repositories (optional)
 - Sandbox: Docker container per turn for isolated command execution

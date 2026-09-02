@@ -365,6 +365,27 @@ def test_pi_activity_renders_between_a_user_turn_and_its_reply(pi_threads_root) 
     assert page.index("Done") < page.index("Pi activity: read") < page.index("Check the workspace")
 
 
+def test_paged_pi_thread_ignores_trace_events_outside_its_window(pi_threads_root) -> None:
+    tid = threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
+    messages = [message for number in range(12) for message in (
+        {"role": "user", "content": f"Question {number}", "run_id": f"run-{number}",
+         "message_id": f"pi:run-{number}"},
+        {"role": "assistant", "content": f"Answer {number}", "run_id": f"run-{number}",
+         "message_id": f"pi:answer-{number}"},
+    )]
+    page = threads.render_thread(
+        tid, None, pi_messages=messages,
+        pi_traces=[
+            PiTraceEvent("run-0", 1, 1, "tool", "old", "completed"),
+            PiTraceEvent("run-11", 1, 1, "tool", "current", "started"),
+            PiTraceEvent("run-11", 2, 1, "tool", "current", "completed"),
+        ],
+    )
+
+    assert "Pi activity: current" in page
+    assert "Activity unavailable" not in page
+
+
 def test_terminal_pi_turn_without_a_trace_is_unavailable(pi_threads_root) -> None:
     tid = threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
     run = threads._runs().create(tid, "main", "Check the workspace")

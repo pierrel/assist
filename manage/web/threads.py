@@ -73,6 +73,7 @@ from assist.visible_conversation import (
     INTERJECTION_FRAME as _INTERJECTION_FRAME,
     INTERJECTION_GUIDE as _INTERJECTION_GUIDE,
     TASK_COMPLETION_RIDER as _TASK_COMPLETION_RIDER,
+    is_visible_turn_start,
     select_completed_turns,
     visible_records,
     visible_records_from_dicts,
@@ -98,7 +99,6 @@ from assist.geo.tools import DEGRADATION_WARNING, _fmt_size
 from manage.web.state import (
     BUSY_STAGES,
     CAPTURE_CSRF,
-    CAPTURE_DISMISSALS,
     CAPTURE_STORE,
     CAPTURE_THREAD_LIMITER,
     CAPTURE_WORKER,
@@ -229,6 +229,14 @@ async def _invalid_thread_id(request, exc):
 
 
 _MD_EXTENSIONS = ["fenced_code", "tables"]
+HISTORY_TURN_LIMIT = 10
+_HISTORY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,200}")
+_HISTORY_FRAGMENT_LIMITER = anyio.CapacityLimiter(2)
+
+
+def _history_marker() -> str:
+    """Return an HTML-comment-safe delimiter for one history fragment."""
+    return secrets.token_hex(24)
 
 # Thread-list ordering rank (lower sorts first). Per Pierre: STATUS first — urgent,
 # then any busy stage except queued (processing / paused / initializing / cloning /
@@ -250,7 +258,6 @@ def _thread_status_rank(tid: str, stage: str) -> int:
 
 def render_index() -> str:
     items = []
-    captures_by_thread = CAPTURE_DISMISSALS.latest_visible(CAPTURE_STORE.list_for_threads())
     for tid in MANAGER.list():
         title = _thread_title(tid)
         try:
@@ -330,14 +337,6 @@ def render_index() -> str:
                 '<span style="font-size:.7rem; color:#6b7280; background:#fafafa;'
                 ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
                 ' margin-right:.4rem;">unmerged</span>'
-            )
-        capture = captures_by_thread.get(tid)
-        if capture:
-            capture_status = str(capture.get("status", "queued")).replace("_", " ")
-            badge += (
-                '<span style="font-size:.7rem; color:#6b7280; background:#fafafa;'
-                ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
-                f' margin-right:.4rem;">capture: {html.escape(capture_status)}</span>'
             )
         items.append((
             _thread_status_rank(tid, stage),
@@ -577,8 +576,8 @@ def _capture_card_placeholder(tid: str, summary: dict) -> str:
 def _capture_dismiss_button() -> str:
     return ('<button class="btn btn-secondary" type="button" '
             'onclick="dismissCapture(this)" '
-            'aria-label="Hide this capture for this session; it remains stored">'
-            'Hide for this session</button>')
+            'aria-label="Dismiss this capture in this browser; it remains stored">'
+            'Dismiss</button>')
 
 
 def _capture_card_html(capture: dict) -> str:
@@ -651,6 +650,43 @@ def _capture_card_html(capture: dict) -> str:
             f'<strong>Judged live capture</strong>{body}{_capture_dismiss_button()}</article>')
 
 
+def _message_id(message: dict) -> str | None:
+    value = message.get("message_id")
+    return value if isinstance(value, str) and _HISTORY_ID_RE.fullmatch(value) else None
+
+
+def _turn_page(messages: list[dict], before: str | None = None) -> tuple[list[dict], str | None]:
+    """Return chronological source records for one most-recent display window.
+
+    The cursor is the durable ID of the oldest returned user turn.  Re-reading a
+    fresh checkpoint and selecting ranges strictly before that ID cannot shift
+    when newer turns arrive between two Load older messages clicks.  The page
+    renderer reverses these records, so each window remains newest-first and an
+    older window appends at the visual bottom.
+    """
+    # This only needs turn boundaries.  Avoid constructing a VisibleRecord for every
+    # message here: rendering below still normalizes the selected window, not the
+    # entire persisted history.
+    starts = [index for index, message in enumerate(messages) if is_visible_turn_start(message)]
+    if not starts:
+        return messages, None
+    selected_end = len(starts)
+    if before is not None:
+        for index, start in enumerate(starts):
+            if _message_id(messages[start]) == before:
+                selected_end = index
+                break
+        else:
+            raise ValueError("unknown history cursor")
+    selected_starts = starts[max(0, selected_end - HISTORY_TURN_LIMIT):selected_end]
+    if not selected_starts:
+        return [], None
+    start = selected_starts[0]
+    end = starts[selected_end] if selected_end < len(starts) else len(messages)
+    cursor = _message_id(messages[start]) if start > 0 else None
+    return messages[start:end], cursor
+
+
 def render_thread(
     tid: str,
     chat: Thread | None,
@@ -658,10 +694,11 @@ def render_thread(
     pi_traces: list | None = None,
     pi_trace_unavailable: bool = False,
     captured: bool = False,
-    capture_summaries: list[dict] | None = None,
     merged: bool = False,
     reviewed: bool = False,
     pushed: bool = False,
+    history_before: str | None = None,
+    history_marker: str = "thread-history",
 ) -> str:
     # Local import to avoid circular dependency with review.py at module load.
     from manage.web.review import _REVIEW_HEADER
@@ -669,10 +706,6 @@ def render_thread(
     status = _get_status(tid)
     stage = status.get("stage", "ready")
     busy = stage in BUSY_STAGES
-    capture_cards = "".join(
-        _capture_card_placeholder(tid, item)
-        for item in CAPTURE_DISMISSALS.visible_for_thread(tid, capture_summaries or [])
-    )
     is_init = stage in INIT_STAGES
     title = _thread_title(tid)
     try:
@@ -712,21 +745,21 @@ def render_thread(
     msgs: list[dict] = [] if is_init else (pi_messages if pi_messages is not None
                                             else ([] if chat is None else
                                                   getattr(chat, "get_web_messages", chat.get_messages)()))
+    persisted_msgs = msgs
+    msgs, history_cursor = _turn_page(persisted_msgs, history_before)
     trace_by_run = {}
-    trace_run_ids = set()
     if is_pi and pi_traces is not None:
         user_run_ids = {message.get("run_id") for message in msgs if message.get("role") == "user"}
         for event in pi_traces:
-            trace_run_ids.add(event.run_id)
-            trace_by_run.setdefault(event.run_id, []).append(event)
-        pi_trace_unavailable = pi_trace_unavailable or not trace_run_ids.issubset(user_run_ids)
+            if event.run_id in user_run_ids:
+                trace_by_run.setdefault(event.run_id, []).append(event)
     pi_run_status = {run.id: run.status for run in _runs().list(tid)} if is_pi else {}
 
     # Completed-turn elapsed badges: map each turn's CONCLUDING assistant bubble (the last
     # assistant strictly before the next user bubble) to its recorded elapsed seconds.
-    # Built over the PERSISTED messages here — before the pending bubble is appended below,
-    # and the append doesn't shift these indices. Keyed by the same user-bubble ordinal the
-    # write side records (_human_ordinal). dict miss → pre-feature/errored turn → no badge.
+    # The selected window's first message is a reference from persisted_msgs, so its
+    # identity gives the write-side user ordinal that precedes this page.  That keeps
+    # timing keys absolute while the rendered list is a most-recent window.
     _timings = _get_timings(tid)
     badge_at: dict[int, int] = {}
     if _timings:
@@ -734,7 +767,10 @@ def render_thread(
         # content-only assistant before the next user. Tracking the last index per turn (vs
         # marking every assistant) avoids a double-badge when a turn has >1 content assistant
         # (e.g. a retry / empty-response recovery emits two).
-        _ord = 0
+        _window_start = next((index for index, message in enumerate(persisted_msgs)
+                              if msgs and message is msgs[0]), 0)
+        _ord = sum(1 for index in range(_window_start)
+                   if persisted_msgs[index].get("role") == "user")
         _last = None
         for _i, _m in enumerate(msgs):
             _r = _m.get("role")
@@ -762,7 +798,7 @@ def render_thread(
     # whitespace the stripped `pending` won't (review submissions from
     # `_format_review_message` end with a newline), and an exact `==` would
     # miss the match and render a duplicate bubble while the turn runs.
-    if busy and pending and not any(
+    if history_before is None and busy and pending and not any(
         m.get("role") == "user" and (m.get("content") or "").strip() == pending
         for m in msgs
     ):
@@ -772,7 +808,7 @@ def render_thread(
     # top-of-page block, separate from the message bubbles, so the per-file
     # collapse stack and the Merge / Review buttons sit together.
     diffs: list[Change] = []
-    if not is_init and not is_pi:
+    if history_before is None and not is_init and not is_pi:
         try:
             dm = _get_domain_manager(tid)
             if dm:
@@ -890,7 +926,13 @@ def render_thread(
                          f'this reply" style="margin-left:.5rem; color:#9ca3af; '
                          f'font-size:.75rem; font-weight:normal;">'
                          f'{html.escape(_format_elapsed(badge_at[_i]))}</span>')
-            bubble = (f'<div class="msg {cls}"><div class="role">{role}{badge}</div>'
+            response_id = (_message_id(m) if role == "assistant" and
+                           record.source_kind == "assistant" else None)
+            pin = ('<button class="pin-response" type="button" '
+                   'onclick="pinResponse(this)">Pin</button>') if response_id else ""
+            response_attr = (f' data-response-id="{html.escape(response_id, quote=True)}"'
+                             if response_id else "")
+            bubble = (f'<div class="msg {cls}"{response_attr}><div class="role">{role}{badge}{pin}</div>'
                       f'<div class="content">{content_html}</div></div>')
         if is_pi and role == "user":
             run_id = m.get("run_id")
@@ -903,7 +945,7 @@ def render_thread(
         rendered.append(bubble)
     if is_pi and pi_trace_unavailable:
         rendered.insert(0, '<div class="msg tools"><div class="content">Activity unavailable</div></div>')
-    if busy:
+    if busy and history_before is None:
         rendered.insert(
             0,
             '<div class="msg assistant placeholder">'
@@ -924,19 +966,29 @@ def render_thread(
     # shows twice with contradicting badges. (Residual: an identical text
     # sent again while the first is on screen hides its queued bubble until
     # the first is claimed — cosmetic, self-resolving.)
-    _journal_entries = [PendingMessage(
-        thread_id=run.thread_id, text=run.text or "", sender=run.sender,
-        rider=run.rider, enqueued_at=run.created_at, origin=run.origin, id=run.id)
-        for run in _runs().peek(tid)
-        if run.status == "pending" and run.text]
-    for r in [r for r in _journal_entries
-              if r.origin is None and r.text not in seen_interjections]:
+    _journal_entries = []
+    if history_before is None:
+        _journal_entries = [PendingMessage(
+            thread_id=run.thread_id, text=run.text or "", sender=run.sender,
+            rider=run.rider, enqueued_at=run.created_at, origin=run.origin, id=run.id)
+            for run in _runs().peek(tid)
+            if run.status == "pending" and run.text]
+    for r in ([r for r in _journal_entries
+               if r.origin is None and r.text not in seen_interjections]
+              if history_before is None else []):
         rendered.insert(0, (
             '<div class="msg user" style="opacity:.8;"><div class="role">user'
             '<span style="margin-left:.5rem; color:#9ca3af; font-size:.75rem;'
             'font-weight:normal;">queued</span></div><div class="content">'
             f'{html.escape(r.text).replace(chr(10), "<br/>")}</div></div>'))
-    body = "\n".join(rendered) or "<p><em>No messages yet.</em></p>"
+    rendered_body = "\n".join(rendered) or "<p><em>No messages yet.</em></p>"
+    cursor_attr = (f' data-history-cursor="{html.escape(history_cursor, quote=True)}"'
+                   if history_cursor else "")
+    body = (f'<!-- {history_marker}-start --><div id="threadMessages"{cursor_attr}>'
+            f'{rendered_body}</div><!-- {history_marker}-end -->')
+    load_more_html = (f'<div id="loadMore"><button class="btn btn-secondary" type="button" '
+                      f'onclick="loadOlderMessages(this)">Load older messages</button></div>'
+                      if history_cursor and history_before is None else "")
 
     # Status banner (in-thread: keeps the fuller STAGE_LABELS sentence). While busy, a live
     # elapsed timer counts from the turn's submit — server emits the baseline, JS ticks it.
@@ -1186,13 +1238,25 @@ def render_thread(
         {_FAVICON_LINKS}
         <style>
           :root {{ --pad: 1rem; }}
+          html, body {{ max-width: 100%; overflow-x: clip; }}
           body {{ font-family: sans-serif; margin: 0; -webkit-tap-highlight-color: rgba(0,0,0,0.05); }}
-          .container {{ max-width: 800px; margin: 0 auto; padding: var(--pad); }}
+          .container {{ max-width: 800px; min-width: 0; margin: 0 auto; padding: var(--pad); box-sizing: border-box; }}
           /* inline-flex centers the back-link text vertically inside
              the 44 px min-height; inline-block leaves the text floating
              at the top of the box. */
           .nav a {{ display: inline-flex; align-items: center; padding: .6rem .8rem; min-height: 44px; border-radius: 6px; color: #171717; text-decoration: underline; touch-action: manipulation; }}
-          .msg {{ margin: .6rem 0; padding: .6rem .8rem; border-radius: 8px; max-width: 100%; word-wrap: break-word; overflow-wrap: anywhere; }}
+          .msg {{ margin: .6rem 0; padding: .6rem .8rem; border-radius: 8px; max-width: 100%; box-sizing: border-box; word-wrap: break-word; overflow-wrap: anywhere; }}
+          .nav, #titleView {{ min-width: 0; }}
+          #titleView h2 {{ min-width: 0; overflow-wrap: anywhere; }}
+          .msg pre, .msg .content table {{ display: block; max-width: 100%; overflow-x: auto; box-sizing: border-box; }}
+          .msg pre {{ white-space: pre; }}
+          .msg .content img, .msg .content video, .msg .content svg, .msg .content canvas {{ max-width: 100%; height: auto; }}
+          .msg .content iframe {{ max-width: 100%; }}
+          .show-file, .show-map {{ max-width: 100%; box-sizing: border-box; }}
+          .pin-response {{ margin-left: .5rem; padding: .15rem .4rem; border: 1px solid #e5e7eb; border-radius: 4px; background: #fff; color: #171717; cursor: pointer; font-size: .75rem; }}
+          .pinned-responses {{ margin: .6rem 0; }}
+          .pinned-responses summary {{ cursor: pointer; color: #6b7280; }}
+          #loadMore {{ margin: .8rem 0; }}
           .msg.user {{ background: #ffffff; border: 1px solid #e5e7eb; }}
           .msg.assistant {{ background: #fafafa; border: 1px solid #e5e7eb; }}
           /* Non-response (tool-call) turns: a subtle collapsed <details> so they
@@ -1308,7 +1372,8 @@ def render_thread(
           {status_banner}
           {geo_banner}
           {egress_banner}
-          <section id="captureCards" aria-live="polite">{capture_cards}</section>
+          <div id="captureNotice" role="status" aria-live="polite"></div>
+          <section id="captureCards" aria-live="polite"></section>
           {"<div class='success-msg'>Merged to main and pushed to origin!</div>" if merged else ""}
           {"<div class='success-msg'>Review submitted. The agent will respond in this thread.</div>" if reviewed else ""}
           {conflict_banner_html}
@@ -1362,6 +1427,11 @@ def render_thread(
               document.getElementById('titleView').style.display = 'flex';
             }}
             var capturePolls = {{}}, hiddenCaptures = {{}}, capturePollFailures = {{}};
+            var captureStorageKey = 'assist:captures:' + {json.dumps(tid)};
+            function savedCaptures() {{ try {{ var items=JSON.parse(localStorage.getItem(captureStorageKey)||'[]'); return Array.isArray(items) ? items.filter(function(item){{ return item && typeof item.id === 'string' && /^[A-Za-z0-9_.:-]{{1,200}}$/.test(item.id) && typeof item.card === 'string'; }}).slice(0, 20) : []; }} catch (_) {{ return []; }} }}
+            function saveCaptures(items) {{ try {{ localStorage.setItem(captureStorageKey, JSON.stringify(items)); return true; }} catch (_) {{ return false; }} }}
+            function rememberCapture(id, card) {{ var items=savedCaptures().filter(function(item){{ return item.id !== id; }}); items.unshift({{id:id, card:card}}); saveCaptures(items.slice(0, 20)); }}
+            function showCaptureNotice(message) {{ var notice=document.getElementById('captureNotice'); if (notice) notice.textContent=message; }}
             function showCaptureModal() {{
               var modal = document.getElementById('captureModal');
               if (!modal) return;
@@ -1387,6 +1457,7 @@ def render_thread(
                   if(hiddenCaptures[id]) return;
                   delete capturePollFailures[id];
                   var old=document.getElementById('capture-' + id); if(old) old.outerHTML=markup;
+                  rememberCapture(id, markup);
                   var fresh=document.getElementById('capture-' + id);
                   if(fresh && fresh.getAttribute('data-capture-pending') === '1') setTimeout(function(){{ loadCaptureCard(id); }}, 1200);
                 }})
@@ -1408,23 +1479,83 @@ def render_thread(
             }}
             function dismissCapture(button) {{
               var card=button.closest('[data-capture-id]');
-              var token=document.querySelector('#capture-form input[name=csrf_token]');
               if (!card) return;
-              var csrfToken=token ? token.value : '{CAPTURE_CSRF}';
               var id=card.getAttribute('data-capture-id');
+              var items=savedCaptures().filter(function(item) {{ return item.id !== id; }});
+              if (!saveCaptures(items)) {{ showCaptureNotice('Could not save dismissal.'); return; }}
               hiddenCaptures[id]=true;
-              button.disabled=true;
-              fetch('/thread/{tid}/capture/' + encodeURIComponent(id) + '/dismiss', {{
-                method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}},
-                body:'csrf_token=' + encodeURIComponent(csrfToken), credentials:'same-origin', cache:'no-store'
-              }}).then(function(r){{
-                if(r.status !== 204) throw new Error('Could not hide capture');
-                var fresh=document.getElementById('capture-' + id); if(fresh) fresh.remove();
-              }}).catch(function(){{
-                delete hiddenCaptures[id]; button.disabled=false; button.textContent='Could not hide';
+              card.remove();
+            }}
+            var pinStorageKey = 'assist:pins:' + {json.dumps(tid)};
+            function readPins() {{
+              try {{
+                var value = JSON.parse(localStorage.getItem(pinStorageKey) || '[]');
+                if (!Array.isArray(value)) return [];
+                return value.filter(function(id) {{
+                  return typeof id === 'string' && /^[A-Za-z0-9_.:-]{{1,200}}$/.test(id);
+                }}).slice(0, 50);
+              }}
+              catch (_) {{ return []; }}
+            }}
+            function writePins(ids) {{ try {{ localStorage.setItem(pinStorageKey, JSON.stringify(ids)); return true; }} catch (_) {{ return false; }} }}
+            function pinMarkupKey(id) {{ return pinStorageKey + ':' + id; }}
+            function showPinNotice(message) {{
+              var notice = document.getElementById('pinNotice'); if (notice) notice.textContent = message;
+            }}
+            function refreshPinButtons() {{
+              var ids = readPins();
+              document.querySelectorAll('[data-response-id]').forEach(function(card) {{
+                var id = card.getAttribute('data-response-id');
+                var button = card.querySelector('.pin-response');
+                if (button && !card.classList.contains('pinned-response')) {{ button.textContent = ids.indexOf(id) === -1 ? 'Pin' : 'Pinned'; button.disabled = ids.indexOf(id) !== -1; }}
               }});
             }}
-            document.querySelectorAll('[data-capture-id]').forEach(function(el){{ loadCaptureCard(el.getAttribute('data-capture-id')); }});
+            function renderPins() {{
+              var ids = readPins(), section = document.getElementById('pinnedResponses');
+              section.hidden = ids.length === 0;
+              if (!ids.length) {{ section.replaceChildren(); refreshPinButtons(); return; }}
+              section.innerHTML = '<details><summary>Pinned responses (<span id="pinCount">' + ids.length + '</span>)</summary><div id="pinnedResponseCards"></div></' + 'details>';
+              var cards = document.getElementById('pinnedResponseCards');
+              ids.forEach(function(id) {{
+                var content; try {{ content = localStorage.getItem(pinMarkupKey(id)); }} catch (_) {{ content = null; }}
+                if (content === null) {{ unpinResponse(id, true); return; }}
+                cards.insertAdjacentHTML('beforeend', '<article class="msg assistant pinned-response" data-response-id="' + id + '"><div class="role">assistant <button class="pin-response" type="button" onclick="unpinResponse(&quot;' + id + '&quot;)">Remove pin</button></div><div class="content">' + content + '</div></article>');
+              }}); refreshPinButtons();
+            }}
+            function pinResponse(button) {{
+              try {{ var ids = readPins(), card = button.closest('.msg[data-response-id]'), id = card && card.getAttribute('data-response-id');
+                var content = card && card.querySelector('.content').innerHTML;
+                if (!id || ids.indexOf(id) !== -1) return;
+                if (ids.length >= 50) {{ showPinNotice('You can pin up to 50 responses.'); return; }}
+                localStorage.setItem(pinMarkupKey(id), content); ids.push(id);
+                if (!writePins(ids)) {{ localStorage.removeItem(pinMarkupKey(id)); throw new Error('storage unavailable'); }}
+                renderPins();
+                document.querySelector('#pinnedResponses details').open = true; }}
+              catch (_) {{ showPinNotice('Pins are unavailable in this browser.'); }}
+            }}
+            function unpinResponse(id, quiet) {{
+              try {{ if (!writePins(readPins().filter(function(item) {{ return item !== id; }}))) throw new Error('storage unavailable');
+                localStorage.removeItem(pinMarkupKey(id)); renderPins(); }}
+              catch (_) {{ if (!quiet) showPinNotice('Pins are unavailable in this browser.'); }}
+            }}
+            function loadOlderMessages(button) {{
+              var messages = document.getElementById('threadMessages'), before = messages.getAttribute('data-history-cursor'); if (!before) return;
+              button.disabled = true; button.textContent = 'Loading…';
+              fetch('/thread/{tid}/history?before=' + encodeURIComponent(before), {{credentials:'same-origin', cache:'no-store'}})
+                .then(function(r) {{ return r.json().then(function(v) {{ if (!r.ok) throw new Error(v.detail || 'Could not load older messages'); return v; }}); }})
+                .then(function(v) {{ var holder=document.createElement('div'); holder.innerHTML=v.html; var older=holder.querySelector('#threadMessages');
+                  if (!older) throw new Error('Could not load older messages'); messages.insertAdjacentHTML('beforeend', older.innerHTML);
+                  if (v.before) {{ messages.setAttribute('data-history-cursor', v.before); button.disabled=false; button.textContent='Load older messages'; }}
+                  else {{ messages.removeAttribute('data-history-cursor'); document.getElementById('loadMore').remove(); }} refreshPinButtons(); }})
+                .catch(function(error) {{ button.disabled=false; button.textContent='Retry loading older messages'; showPinNotice(error.message); }});
+            }}
+            // The pinned-response shell follows this script in the page.
+            window.addEventListener('DOMContentLoaded', renderPins);
+            savedCaptures().forEach(function(item){{
+              document.getElementById('captureCards').insertAdjacentHTML('beforeend', item.card);
+              var card=document.getElementById('capture-' + item.id);
+              if(card && card.getAttribute('data-capture-pending') === '1') loadCaptureCard(item.id);
+            }});
             var captureForm = document.getElementById('capture-form');
             if (captureForm) captureForm.addEventListener('submit', function(event) {{
               event.preventDefault();
@@ -1433,7 +1564,7 @@ def render_thread(
               error.style.display='none';
               fetch(form.action, {{method:'POST', body:new FormData(form), credentials:'same-origin', cache:'no-store'}})
                 .then(function(r){{ return r.json().then(function(v){{ if(!r.ok) throw new Error(v.detail || 'Could not capture interaction'); return v; }}); }})
-                .then(function(v){{ document.getElementById('captureCards').insertAdjacentHTML('afterbegin', v.card); hideCaptureModal(); composer.value=draft; composer.focus(); composer.setSelectionRange(start,end); loadCaptureCard(v.capture_id); }})
+                .then(function(v){{ rememberCapture(v.capture_id, v.card); document.getElementById('captureCards').insertAdjacentHTML('afterbegin', v.card); hideCaptureModal(); composer.value=draft; composer.focus(); composer.setSelectionRange(start,end); loadCaptureCard(v.capture_id); }})
                 .catch(function(e){{ error.textContent=e.message; error.style.display='block'; }});
             }});
             // Close modal when clicking outside
@@ -1447,9 +1578,10 @@ def render_thread(
           </script>
           <hr/>
           {diff_block_html}
-          <div>
-            {body}
-          </div>
+          <section id="pinnedResponses" class="pinned-responses" hidden></section>
+          <div id="pinNotice" role="status" aria-live="polite"></div>
+          {body}
+          {load_more_html}
         </div>
         {_PULL_TO_REFRESH_SCRIPT}
       </body>
@@ -3029,9 +3161,6 @@ async def get_thread(
     reviewed: int = 0,
     pushed: int = 0,
 ) -> str:
-    capture_summaries = await anyio.to_thread.run_sync(
-        CAPTURE_STORE.list_for_thread, tid, limiter=CAPTURE_THREAD_LIMITER)
-
     def load_and_render() -> str:
         if not os.path.isdir(MANAGER.thread_dir(tid)):
             raise HTTPException(status_code=404, detail="Thread not found")
@@ -3048,7 +3177,8 @@ async def get_thread(
             raise HTTPException(status_code=409, detail="Thread engine is unavailable") from error
         if stage not in INIT_STAGES and is_pi:
             _backfill_pi_description(tid)
-            pi_messages = [{"role": message.role, "content": message.text, "run_id": message.run_id}
+            pi_messages = [{"role": message.role, "content": message.text, "run_id": message.run_id,
+                            "message_id": f"pi:{message.run_id}"}
                            for message in _PI_CONVERSATIONS.get_messages(MANAGER.thread_dir(tid))]
             try:
                 pi_traces = _PI_TRACES.get_events(MANAGER.thread_dir(tid))
@@ -3063,9 +3193,61 @@ async def get_thread(
         return render_thread(
             tid, chat, pi_messages=pi_messages, pi_traces=pi_traces,
             pi_trace_unavailable=pi_trace_unavailable, captured=bool(captured), merged=bool(merged),
-            capture_summaries=capture_summaries, reviewed=bool(reviewed), pushed=bool(pushed))
+            reviewed=bool(reviewed), pushed=bool(pushed))
 
     return await run_in_threadpool(load_and_render)
+
+
+def _thread_messages_for_fragment(tid: str) -> tuple[Thread | None, list[dict] | None, list | None, bool]:
+    """Load the persisted conversation needed by a history fragment."""
+    if not os.path.isdir(MANAGER.thread_dir(tid)):
+        raise HTTPException(status_code=404, detail="Thread not found")
+    stage = _get_status(tid).get("stage", "ready")
+    if stage in INIT_STAGES:
+        return None, [], [], False
+    if _is_pi_thread(tid):
+        messages = [{"role": message.role, "content": message.text, "run_id": message.run_id,
+                     "message_id": f"pi:{message.run_id}"}
+                    for message in _PI_CONVERSATIONS.get_messages(MANAGER.thread_dir(tid))]
+        try:
+            traces = _PI_TRACES.get_events(MANAGER.thread_dir(tid))
+            unavailable = False
+        except PiTraceError:
+            traces, unavailable = [], True
+        return None, messages, traces, unavailable
+    try:
+        return MANAGER.get(tid, sandbox_backend=None), None, None, False
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Thread not found") from error
+
+
+@app.get("/thread/{tid}/history")
+async def thread_history(tid: str, before: str) -> JSONResponse:
+    if not _HISTORY_ID_RE.fullmatch(before):
+        raise HTTPException(status_code=404, detail="History page not found")
+
+    def render_history() -> dict:
+        chat, pi_messages, pi_traces, trace_unavailable = _thread_messages_for_fragment(tid)
+        marker = _history_marker()
+        try:
+            page = render_thread(tid, chat, pi_messages=pi_messages, pi_traces=pi_traces,
+                                 pi_trace_unavailable=trace_unavailable, history_before=before,
+                                 history_marker=marker)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail="History page not found") from error
+        fragment = re.search(
+            rf"<!-- {re.escape(marker)}-start -->(.*?)<!-- {re.escape(marker)}-end -->", page, re.S)
+        if fragment is None:
+            raise HTTPException(status_code=404, detail="History page not found")
+        cursor = re.search(
+            r'<div id="threadMessages" data-history-cursor="([A-Za-z0-9_.:-]{1,200})"',
+            fragment.group(1),
+        )
+        return {"html": fragment.group(1), "before": cursor.group(1) if cursor else None}
+
+    return JSONResponse(await anyio.to_thread.run_sync(
+        render_history, limiter=_HISTORY_FRAGMENT_LIMITER),
+                        headers={"Cache-Control": "no-store", "Referrer-Policy": "same-origin"})
 
 
 @app.get("/thread/{tid}/status")
@@ -4690,22 +4872,6 @@ def _create_live_capture(tid: str, reason: str, scope: str) -> dict:
     return capture
 
 
-def _dismiss_live_capture(tid: str, capture_id: str) -> None:
-    """Validate ownership before changing only the app-memory card projection."""
-    CAPTURE_STORE.get_for_thread(tid, capture_id)
-    CAPTURE_DISMISSALS.dismiss(tid, capture_id)
-
-
-def _visible_live_capture(tid: str, capture_id: str) -> dict:
-    """Load a source-bound capture unless its card is hidden for this app session."""
-    if CAPTURE_DISMISSALS.is_dismissed(tid, capture_id):
-        raise FileNotFoundError("capture is hidden")
-    capture = CAPTURE_STORE.get_for_thread(tid, capture_id)
-    if CAPTURE_DISMISSALS.is_dismissed(tid, capture_id):
-        raise FileNotFoundError("capture is hidden")
-    return capture
-
-
 @app.post("/thread/{tid}/capture")
 async def capture_thread(
     tid: str, reason: str = Form(...), scope: str = Form("last_3"),
@@ -4735,27 +4901,12 @@ async def capture_thread(
 async def capture_fragment(tid: str, capture_id: str) -> HTMLResponse:
     try:
         capture = await anyio.to_thread.run_sync(
-            _visible_live_capture, tid, capture_id,
+            CAPTURE_STORE.get_for_thread, tid, capture_id,
             limiter=CAPTURE_THREAD_LIMITER)
     except (FileNotFoundError, ValueError) as error:
         raise HTTPException(status_code=404, detail="Capture not found") from error
     return HTMLResponse(
         _capture_card_html(capture),
-        headers={"Cache-Control": "no-store", "Referrer-Policy": "same-origin"},
-    )
-
-
-@app.post("/thread/{tid}/capture/{capture_id}/dismiss")
-async def dismiss_capture(tid: str, capture_id: str, csrf_token: str = Form(...)) -> Response:
-    if not hmac.compare_digest(csrf_token, CAPTURE_CSRF):
-        raise HTTPException(status_code=403, detail="invalid capture form")
-    try:
-        await anyio.to_thread.run_sync(
-            _dismiss_live_capture, tid, capture_id, limiter=CAPTURE_THREAD_LIMITER)
-    except (FileNotFoundError, ValueError) as error:
-        raise HTTPException(status_code=404, detail="Capture not found") from error
-    return Response(
-        status_code=204,
         headers={"Cache-Control": "no-store", "Referrer-Policy": "same-origin"},
     )
 
