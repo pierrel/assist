@@ -113,6 +113,50 @@ CAPTURES_DIR = os.getenv(
 CAPTURE_STORE = CaptureStore(CAPTURES_DIR, threads_root=ROOT)
 CAPTURE_WORKER = CaptureWorker(CAPTURE_STORE)
 CAPTURE_CSRF = secrets.token_urlsafe(32)
+
+
+class CaptureDismissals:
+    """Process-local card visibility, deliberately separate from capture data."""
+
+    def __init__(self) -> None:
+        self._items: set[tuple[str, str]] = set()
+        self._lock = threading.Lock()
+
+    def dismiss(self, thread_id: str, capture_id: str) -> None:
+        with self._lock:
+            self._items.add((thread_id, capture_id))
+
+    def is_dismissed(self, thread_id: str, capture_id: str) -> bool:
+        with self._lock:
+            return (thread_id, capture_id) in self._items
+
+    def visible_for_thread(self, thread_id: str, summaries: list[dict]) -> list[dict]:
+        with self._lock:
+            return [
+                summary for summary in summaries
+                if (thread_id, str(summary.get("capture_id", ""))) not in self._items
+            ]
+
+    def latest_visible(self, summaries: dict[str, list[dict]]) -> dict[str, dict]:
+        with self._lock:
+            visible: dict[str, dict] = {}
+            for thread_id, entries in summaries.items():
+                if not isinstance(thread_id, str) or not isinstance(entries, list):
+                    continue
+                for summary in entries:
+                    if not isinstance(summary, dict):
+                        continue
+                    if (thread_id, str(summary.get("capture_id", ""))) not in self._items:
+                        visible[thread_id] = summary
+                        break
+            return visible
+
+    def forget_thread(self, thread_id: str) -> None:
+        with self._lock:
+            self._items = {item for item in self._items if item[0] != thread_id}
+
+
+CAPTURE_DISMISSALS = CaptureDismissals()
 # Capture filesystem work must never wait behind ordinary request handlers in
 # Starlette's shared threadpool.  This limiter is used by capture routes and the
 # lifespan stop path only.
@@ -395,6 +439,7 @@ def _evict_caches(tid: str) -> None:
     DESCRIPTION_CACHE.pop(tid, None)
     _UNSEEN.discard(tid)  # the marker file went with the dir; drop the set entry too
     _URGENT.discard(tid)  # same for the urgent flag
+    CAPTURE_DISMISSALS.forget_thread(tid)
 
 
 # --- Thread status tracking ----------------------------------------------
