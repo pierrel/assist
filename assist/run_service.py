@@ -93,7 +93,13 @@ class Run:
 
     @staticmethod
     def from_dict(value: dict) -> "Run":
-        if value.get("status") not in _STATUSES:
+        status = value.get("status")
+        # ``awaiting_approval`` was a parked legacy run state.  The current
+        # protocol removed that lifecycle, so retain the durable record as a
+        # terminal cancellation instead of making every startup reject it.
+        if status == "awaiting_approval":
+            status = "cancelled"
+        if status not in _STATUSES:
             raise ValueError(f"invalid run status: {value.get('status')!r}")
         if value.get("mode", "turn") not in _MODES:
             raise ValueError(f"invalid run mode: {value.get('mode')!r}")
@@ -103,7 +109,7 @@ class Run:
             text=(str(value["text"]) if value.get("text") is not None else None),
             id=str(value["id"]),
             work_id=str(value.get("work_id") or value["id"]),
-            status=value["status"],
+            status=status,
             mode=value.get("mode", "turn"),
             parent_thread_id=value.get("parent_thread_id") or None,
             parent_run_id=value.get("parent_run_id") or None,

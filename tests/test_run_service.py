@@ -25,6 +25,16 @@ def test_create_is_durable_acceptance_commit(service, tmp_path):
     assert service.get("t1", run.id).rider == {"tz": "UTC"}
 
 
+def test_legacy_awaiting_approval_run_loads_as_cancelled(service, tmp_path):
+    run = service.create("t1", "general-agent", "old approval")
+    path = tmp_path / "t1" / "runs.json"
+    stored = json.loads(path.read_text())
+    stored[0]["status"] = "awaiting_approval"
+    path.write_text(json.dumps(stored))
+
+    assert service.get("t1", run.id).status == "cancelled"
+
+
 def test_visible_run_keeps_private_location_across_a_successor(service, tmp_path):
     location = {"lat": 37.7749, "lon": -122.4194,
                 "observed_at": "2026-08-15T20:00:00+00:00"}
