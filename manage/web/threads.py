@@ -606,7 +606,12 @@ def _capture_card_html(capture: dict) -> str:
         range_detail = f"turns {turn_range[0]}–{turn_range[1]}"
     else:
         range_detail = "turn range unavailable"
-    scope = "Last 3 completed turns" if request.get("scope") == "last_3" else "Entire visible conversation"
+    scope_value = request.get("scope")
+    scope = {
+        "last_3": "Last 3 completed turns",
+        "entire": "Entire visible conversation",
+    }.get(scope_value, "Capture scope unavailable") if isinstance(scope_value, str) \
+        else "Capture scope unavailable"
     details = [f'<p><strong>Your reason:</strong> {html.escape(str(request.get("reason", "")))}</p>',
                f'<p><strong>Range:</strong> {html.escape(scope)} ({html.escape(range_detail)})</p>']
     if criteria or verdict:

@@ -131,6 +131,17 @@ def test_store_skips_malformed_index_entries_when_listing_and_updating(tmp_path:
     assert store.list_for_thread("thread-a")[0]["status"] == "failed"
 
 
+def test_store_replaces_malformed_index_thread_shapes_when_creating(tmp_path: Path):
+    store = CaptureStore(tmp_path / "captures", threads_root=tmp_path / "threads")
+    for malformed_threads in ("not-a-map", {"thread-a": "not-a-list"}):
+        (store.root / "index.json").write_text(json.dumps({"threads": malformed_threads}))
+
+        capture = store.create(thread_id="thread-a", reason="Store this safely.",
+                               scope="last_3", records=_records())
+
+        assert store.list_for_thread("thread-a")[0]["capture_id"] == capture["request"]["capture_id"]
+
+
 def test_store_rejects_a_symlinked_capture_file(tmp_path: Path):
     threads = tmp_path / "threads"
     threads.mkdir()
@@ -405,6 +416,18 @@ def test_shorter_scope_card_keeps_hostile_reason_out_of_an_event_handler(tmp_pat
     assert 'data-capture-reason="x&quot; onclick=&quot;steal()"' in output
     assert "onclick=\"steal()" not in output
     assert "turns 1–1" in output
+
+
+def test_capture_card_labels_an_unknown_stored_scope_as_unavailable(tmp_path: Path):
+    from manage.web.threads import _capture_card_html
+
+    store = CaptureStore(tmp_path / "captures", threads_root=tmp_path / "threads")
+    capture = store.create(thread_id="thread-a", reason="Preserve the actual range.",
+                           scope="last_3", records=_records())
+    for scope in ("unexpected", [], {}):
+        capture["request"]["scope"] = scope
+
+        assert "Capture scope unavailable" in _capture_card_html(capture)
 
 
 def test_capture_route_snapshots_raw_messages_and_scopes_fragment_to_thread(tmp_path: Path, monkeypatch):
