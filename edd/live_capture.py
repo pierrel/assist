@@ -45,7 +45,10 @@ CAPTURE_QUEUE_HOLD_TIMEOUT_S = 120.0
 CAPTURE_QUEUE_POLL_TIMEOUT_S = 1.0
 CAPTURE_MODEL_WALL_TIMEOUT_S = 110.0
 CAPTURE_OUTPUT_TOKENS = 1_024
-_REJECTED_CAPTURE_RESERVATION_BYTES = MAX_REASON_BYTES + MAX_CALIBRATION_REASON_BYTES + 4_096
+# JSON escapes one ASCII control byte as a six-byte ``\\u0000`` sequence.
+# Reserve that worst case before creating a rejected capture, whose request has
+# no transcript and therefore cannot be checked against the normal snapshot cap.
+_REJECTED_CAPTURE_RESERVATION_BYTES = 6 * (MAX_REASON_BYTES + MAX_CALIBRATION_REASON_BYTES) + 4_096
 # A judged result retains the canonical observation as well as the immutable
 # transcript.  Reserve for that duplicate evidence, criterion ID lists, and
 # bounded model output before admitting the snapshot.

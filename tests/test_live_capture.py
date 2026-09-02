@@ -227,6 +227,25 @@ def test_rejected_capture_cannot_bypass_the_store_quota(tmp_path: Path, monkeypa
     assert {path.name for path in (tmp_path / "captures").iterdir()} == before
 
 
+def test_rejected_capture_reserves_json_escaped_calibration_evidence(tmp_path: Path, monkeypatch):
+    import edd.live_capture as captures
+
+    threads = tmp_path / "threads"
+    threads.mkdir()
+    store = CaptureStore(tmp_path / "captures", threads_root=threads)
+    before = {path.name for path in store.root.iterdir()}
+    monkeypatch.setattr(captures, "MAX_STORE_BYTES", store._store_bytes() + 50_000)
+
+    with pytest.raises(CaptureStorageFull):
+        store.create(
+            thread_id="thread-a", reason="\0" * captures.MAX_REASON_BYTES,
+            scope="entire", records=_records(),
+            calibration={"verdict": "fail", "reason": "\0" * captures.MAX_CALIBRATION_REASON_BYTES},
+        )
+
+    assert {path.name for path in store.root.iterdir()} == before
+
+
 def test_store_full_capture_is_failed_not_a_shorter_scope_request(tmp_path: Path, monkeypatch):
     import edd.live_capture as captures
 

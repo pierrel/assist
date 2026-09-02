@@ -21,9 +21,9 @@ Each new capture records two distinct user-authored inputs:
 The modal makes the distinction explicit: an independent-judge reason, then
 Pierre's own pass/fail assessment and rationale.  Capture requires all three.
 The score card continues to show the independent judge's result only; it does
-not add a second visible score.  The separate pending UI PR supplies its
-browser-local persistence and permanent dismissal, and this branch deliberately
-does not alter that overlap.
+not add a second visible score.  The merged UI work supplies browser-local
+persistence and permanent dismissal; this change preserves that card, polling,
+and dismissal path.
 
 * Storage and trust boundary
 
@@ -62,12 +62,10 @@ the new create path requires it.  No migration or deletion is needed.
 3. Add store, worker-boundary, route, and rendered-form tests.  The boundary
    test inspects model requests and proves neither user verdict nor calibration
    reason is present in interpreter or judge input.
-4. Keep this branch based on current =main=.  It deliberately overlaps the
-   pending browser-local-capture UI PR only in the capture form and route;
-   after that PR lands, integrate the two focused changes before deployment.
-   Run the normal local review, tests, and Copilot process here, but leave
-   deployment coordinated by the parent lane because Pierre is currently
-   testing the UI work.
+4. Keep this branch based on current =main= and change only the capture form,
+   route, and private storage contract.  Run the normal local review, tests,
+   and Copilot process here, but leave deployment coordinated by the parent
+   lane because Pierre is currently testing the UI work.
 
 * Design review constraint
 
