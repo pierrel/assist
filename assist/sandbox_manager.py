@@ -377,7 +377,7 @@ class SandboxManager:
                 sandbox_env.update({
                     k: _rewrite_localhost(v)
                     for k, v in os.environ.items()
-                    if k.startswith("ASSIST_")
+                    if k.startswith("ASSIST_") and k != "ASSIST_CAPTURES_DIR"
                 })
             # Persistent /tmp: a host dir SIBLING of work_dir, bind-mounted at the
             # container's /tmp so it survives the per-turn container teardown (the

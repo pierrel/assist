@@ -3,8 +3,7 @@
 Every producer commits a durable Run through ``_create_run``; dispatch queues carry
 only its id to ``_execute_run``. That executor claims the ticket and calls the private
 synchronous ``_process_message`` turn implementation. This module also owns
-``_initialize_thread`` (first-turn clone + sandbox boot), and
-``_capture_conversation`` (capture-this-thread side-quest).
+``_initialize_thread`` (first-turn clone + sandbox boot).
 """
 from __future__ import annotations
 
@@ -68,6 +67,16 @@ from assist.schedule.scheduler import Scheduler
 from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
 from assist.thread import Thread
+from assist.safe_markdown import render_markdown
+from assist.visible_conversation import (
+    CONTINUATION_RIDER as _CONTINUATION_RIDER,
+    INTERJECTION_FRAME as _INTERJECTION_FRAME,
+    INTERJECTION_GUIDE as _INTERJECTION_GUIDE,
+    TASK_COMPLETION_RIDER as _TASK_COMPLETION_RIDER,
+    select_completed_turns,
+    visible_records,
+    visible_records_from_dicts,
+)
 from assist.thread_manager import InvalidThreadId
 from assist.thread_engine import ThreadEngineError, read_thread_engine
 from assist.pi_conversation import PI_HISTORY_LIMIT, PiConversationError, PiConversationStore
@@ -78,6 +87,7 @@ from assist.web_main_prompt import (WebMainPromptError, WebMainPromptUnavailable
 from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
                                  ThreadHoldExpired, ThreadPauseRequested,
                                  active_handle)
+from edd.live_capture import CaptureStorageFull
 
 from manage.web.app import app
 from manage.web.diff import _DIFF_CSS, _render_inline_diffs
@@ -87,6 +97,11 @@ from assist.geo.seed import seed_registry
 from assist.geo.tools import DEGRADATION_WARNING, _fmt_size
 from manage.web.state import (
     BUSY_STAGES,
+    CAPTURE_CSRF,
+    CAPTURE_DISMISSALS,
+    CAPTURE_STORE,
+    CAPTURE_THREAD_LIMITER,
+    CAPTURE_WORKER,
     DESCRIPTION_CACHE,
     DOMAIN_MANAGERS,
     DOMAINS,
@@ -235,6 +250,7 @@ def _thread_status_rank(tid: str, stage: str) -> int:
 
 def render_index() -> str:
     items = []
+    captures_by_thread = CAPTURE_DISMISSALS.latest_visible(CAPTURE_STORE.list_for_threads())
     for tid in MANAGER.list():
         title = _thread_title(tid)
         try:
@@ -314,6 +330,14 @@ def render_index() -> str:
                 '<span style="font-size:.7rem; color:#6b7280; background:#fafafa;'
                 ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
                 ' margin-right:.4rem;">unmerged</span>'
+            )
+        capture = captures_by_thread.get(tid)
+        if capture:
+            capture_status = str(capture.get("status", "queued")).replace("_", " ")
+            badge += (
+                '<span style="font-size:.7rem; color:#6b7280; background:#fafafa;'
+                ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
+                f' margin-right:.4rem;">capture: {html.escape(capture_status)}</span>'
             )
         items.append((
             _thread_status_rank(tid, stage),
@@ -534,6 +558,99 @@ _ELAPSED_TICKER_SCRIPT = """<script>
 </script>"""
 
 
+_CAPTURE_PENDING = frozenset({"queued", "interpreting", "judging"})
+
+
+def _capture_card_placeholder(tid: str, summary: dict) -> str:
+    """Small durable placeholder; its private detail is fetched by thread route."""
+    capture_id = summary.get("capture_id")
+    if not isinstance(capture_id, str):
+        return ""
+    raw_status = str(summary.get("status", "queued"))
+    status = html.escape(raw_status.replace("_", " "))
+    pending = "1" if raw_status in _CAPTURE_PENDING else "0"
+    return (f'<article id="capture-{html.escape(capture_id)}" class="capture-card" '
+            f'data-capture-id="{html.escape(capture_id)}" data-capture-pending="{pending}">'
+            f'<strong>Judged live capture</strong><div>{status}</div>{_capture_dismiss_button()}</article>')
+
+
+def _capture_dismiss_button() -> str:
+    return ('<button class="btn btn-secondary" type="button" '
+            'onclick="dismissCapture(this)" '
+            'aria-label="Hide this capture for this session; it remains stored">'
+            'Hide for this session</button>')
+
+
+def _capture_card_html(capture: dict) -> str:
+    """Render one private capture result, always scoped to its source thread."""
+    request = capture["request"]
+    result = capture["result"]
+    capture_id = str(request["capture_id"])
+    status = str(result.get("status", "queued"))
+    pending = "1" if status in _CAPTURE_PENDING else "0"
+    body = f"<div>{html.escape(status.replace('_', ' '))}</div>"
+    if result.get("error"):
+        body += f'<div class="error-msg">{html.escape(str(result["error"]))}</div>'
+    if status == "needs_clarification":
+        body += f'<div>{html.escape(str(result.get("clarification") or "Say what outcome you expected, then capture again."))}</div>'
+    verdict = result.get("verdict")
+    if isinstance(verdict, dict):
+        body += (f'<div><strong>{html.escape(str(verdict.get("overall", status)))}</strong>: '
+                 f'{html.escape(str(verdict.get("rationale", "")))}</div>')
+    criteria = result.get("criteria")
+    transcript = capture.get("transcript") or {}
+    records = {str(item.get("id")): str(item.get("text", ""))
+               for item in transcript.get("records", []) if isinstance(item, dict)}
+    turn_range = request.get("turn_range", [])
+    if isinstance(turn_range, list) and len(turn_range) == 2:
+        range_detail = f"turns {turn_range[0]}–{turn_range[1]}"
+    else:
+        range_detail = "turn range unavailable"
+    scope_value = request.get("scope")
+    scope = {
+        "last_3": "Last 3 completed turns",
+        "entire": "Entire visible conversation",
+    }.get(scope_value, "Capture scope unavailable") if isinstance(scope_value, str) \
+        else "Capture scope unavailable"
+    details = [f'<p><strong>Your reason:</strong> {html.escape(str(request.get("reason", "")))}</p>',
+               f'<p><strong>Range:</strong> {html.escape(scope)} ({html.escape(range_detail)})</p>']
+    if criteria or verdict:
+        if isinstance(criteria, dict):
+            requested = criteria.get("requested", [])
+            if requested:
+                details.append("<p><strong>Derived criteria:</strong></p><ul>" + "".join(
+                    f'<li>{html.escape(str(item.get("description", "")))}</li>'
+                    for item in requested if isinstance(item, dict)) + "</ul>")
+        if isinstance(verdict, dict):
+            cited = verdict.get("rationale_evidence_ids", [])
+            if cited:
+                details.append("<p><strong>Cited evidence:</strong></p><ul>" + "".join(
+                    f'<li>{html.escape(evidence_id)}: {html.escape(records.get(str(evidence_id), "[unavailable]"))}</li>'
+                    for evidence_id in cited) + "</ul>")
+            details.append(f'<p><small>Confidence: {html.escape(str(verdict.get("confidence", "")))}</small></p>')
+    provenance = []
+    if request.get("source_revision"):
+        provenance.append(f'Source revision: {html.escape(str(request["source_revision"]))}')
+    if result.get("transcript_sha256"):
+        provenance.append(f'Transcript SHA-256: {html.escape(str(result["transcript_sha256"]))}')
+    if result.get("transcript_bytes"):
+        provenance.append(f'Transcript bytes: {html.escape(str(result["transcript_bytes"]))}')
+    for label, key in (("Interpreter", "interpreter"), ("Judge", "judge")):
+        value = result.get(key)
+        if isinstance(value, dict):
+            provenance.append(f'{label}: {html.escape(str(value.get("model", "unknown")))}; prompt {html.escape(str(value.get("prompt_sha256", "unknown")))}')
+    if provenance:
+        details.append("<p><strong>Provenance:</strong><br/><small>" + "<br/>".join(provenance) + "</small></p>")
+    body += "<details><summary>Evidence and criteria</summary>" + "".join(details) + "</details>"
+    if status == "needs_shorter_scope":
+        body += (f'<button class="btn btn-secondary" type="button" '
+                 f'data-capture-reason="{html.escape(str(request.get("reason", "")), quote=True)}" '
+                 f'onclick="captureLastThree(this)">Capture last 3 turns</button>')
+    return (f'<article id="capture-{html.escape(capture_id)}" class="capture-card" '
+            f'data-capture-id="{html.escape(capture_id)}" data-capture-pending="{pending}">'
+            f'<strong>Judged live capture</strong>{body}{_capture_dismiss_button()}</article>')
+
+
 def render_thread(
     tid: str,
     chat: Thread | None,
@@ -541,6 +658,7 @@ def render_thread(
     pi_traces: list | None = None,
     pi_trace_unavailable: bool = False,
     captured: bool = False,
+    capture_summaries: list[dict] | None = None,
     merged: bool = False,
     reviewed: bool = False,
     pushed: bool = False,
@@ -551,6 +669,10 @@ def render_thread(
     status = _get_status(tid)
     stage = status.get("stage", "ready")
     busy = stage in BUSY_STAGES
+    capture_cards = "".join(
+        _capture_card_placeholder(tid, item)
+        for item in CAPTURE_DISMISSALS.visible_for_thread(tid, capture_summaries or [])
+    )
     is_init = stage in INIT_STAGES
     title = _thread_title(tid)
     try:
@@ -704,60 +826,52 @@ def render_thread(
         </div>
         """
 
+    # The same normalized records later selected by a live capture drive the
+    # persisted-message display here.  Pending/status bubbles are appended only
+    # after this projection and therefore can never be captured as evidence.
+    visible = visible_records_from_dicts(msgs)
     rendered = []
     seen_interjections: set = set()
     for _i in range(len(msgs) - 1, -1, -1):
         m = msgs[_i]
-        role = html.escape(m.get("role", ""))
-        raw = str(m.get("content", ""))
-        if role == "assistant":
-            # Markdown, with any ```render blocks lifted into inline file embeds.
-            content_html = _render_assistant_content(tid, raw)
-        elif role == "tools":
-            content_html = markdown.markdown(raw, extensions=_MD_EXTENSIONS)
-        elif role == "user" and raw.startswith(_REVIEW_HEADER):
-            # Review submissions are markdown-formatted (headers, fenced
-            # blocks).  Render them as such so the user sees the same
-            # structure the agent receives, instead of escaped backticks.
-            content_html = markdown.markdown(raw, extensions=_MD_EXTENSIONS)
-        elif role == "user" and raw.startswith(_CONTINUATION_RIDER):
-            # A continuation self-message: AGENT-authored (the marker prefix is
-            # its durable attribution) — it must never render as words the user
-            # wrote, transiently (the pending bubble) or in the persisted
-            # history. Styled as a compact agent-note instead.
-            task_txt = html.escape(" ".join(
-                raw[len(_CONTINUATION_RIDER):].split())[:500])
+        record = visible[_i]
+        role = html.escape(record.role)
+        raw = record.text
+        if record.source_kind == "continuation":
+            task_txt = html.escape(" ".join(raw.split())[:500])
             bubble = (f'<div class="msg continuation" style="opacity:.75; '
                       f'font-size:.85rem;"><div class="role">assistant '
                       f'(background)</div><div class="content">↻ following up: '
                       f'{task_txt}</div></div>')
             rendered.append(bubble)
             continue
-        elif role == "user" and raw.startswith(_TASK_COMPLETION_RIDER):
-            task_txt = html.escape(" ".join(
-                raw[len(_TASK_COMPLETION_RIDER):].split())[:500])
+        elif record.source_kind == "task":
+            task_txt = html.escape(" ".join(raw.split())[:500])
             bubble = (f'<div class="msg continuation" style="opacity:.75; '
                       f'font-size:.85rem;"><div class="role">assistant '
                       f'(task)</div><div class="content">✓ {task_txt}</div></div>')
             rendered.append(bubble)
             continue
-        elif role == "user" and raw.startswith(_INTERJECTION_FRAME):
-            # A consumed interjection: the durable copy carries the frame +
-            # steering guidance; show only the USER's words, badged so they can
-            # see the running turn saw it (US-4). rfind: the real guide is the
-            # appended one, even if the user's text quotes the guide string.
-            inner = raw[len(_INTERJECTION_FRAME):]
-            cut = inner.rfind(_INTERJECTION_GUIDE)
-            user_txt = inner[:cut] if cut != -1 else inner
-            seen_interjections.add(user_txt)
+        elif record.source_kind == "interjection":
+            seen_interjections.add(raw)
             bubble = (f'<div class="msg user"><div class="role">user'
                       f'<span style="margin-left:.5rem; color:#9ca3af; '
                       f'font-size:.75rem; font-weight:normal;">seen mid-turn'
                       f'</span></div><div class="content">'
-                      f'{html.escape(user_txt).replace(chr(10), "<br/>")}'
+                      f'{html.escape(raw).replace(chr(10), "<br/>")}'
                       f'</div></div>')
             rendered.append(bubble)
             continue
+        if role == "assistant":
+            # Markdown, with any ```render blocks lifted into inline file embeds.
+            content_html = _render_assistant_content(tid, raw)
+        elif role == "tools":
+            content_html = render_markdown(raw, extensions=_MD_EXTENSIONS)
+        elif role == "user" and raw.startswith(_REVIEW_HEADER):
+            # Review submissions are markdown-formatted (headers, fenced
+            # blocks).  Render them as such so the user sees the same
+            # structure the agent receives, instead of escaped backticks.
+            content_html = render_markdown(raw, extensions=_MD_EXTENSIONS)
         else:
             # Human/user content is plain text with basic escaping
             content_html = html.escape(raw).replace("\n", "<br/>")
@@ -1043,6 +1157,7 @@ def render_thread(
     except ThreadEngineError:
         pi_read_only = True
     form_disabled = "disabled" if is_init or pi_read_only else ""
+    capture_disabled = "disabled" if busy or is_init or pi_read_only else ""
     form_note = ("Thread is being set up, please wait..." if is_init else
                  "Pi preview is unavailable; this thread is read-only." if pi_read_only else
                  "If you close or refresh, your message will still be processed.")
@@ -1118,7 +1233,7 @@ def render_thread(
           .approval-actions {{ display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .5rem; }}
           .success-msg {{ background: #fafafa; border: 1px solid #e5e7eb; border-left: 3px solid #15803d; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #171717; }}
           .modal {{ display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); }}
-          .modal-content {{ background: #fff; margin: 10% auto; padding: 1.5rem; width: min(95%, 500px); border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); box-sizing: border-box; }}
+          .modal-content {{ background: #fff; margin: 10% auto; padding: 1.5rem; width: min(95%, 500px); max-height:80vh; overflow:auto; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); box-sizing: border-box; }}
           .modal-content h3 {{ margin-top: 0; }}
           .modal-content textarea {{ width: 100%; min-height: 100px; padding: .6rem; border: 1px solid #e5e7eb; border-radius: 4px; font-family: inherit; font-size: 16px; box-sizing: border-box; }}
           .modal-content label {{ display: block; margin-bottom: .5rem; font-weight: 500; }}
@@ -1193,7 +1308,7 @@ def render_thread(
           {status_banner}
           {geo_banner}
           {egress_banner}
-          {"<div class='success-msg'>Conversation capture started! This will complete in the background.</div>" if captured else ""}
+          <section id="captureCards" aria-live="polite">{capture_cards}</section>
           {"<div class='success-msg'>Merged to main and pushed to origin!</div>" if merged else ""}
           {"<div class='success-msg'>Review submitted. The agent will respond in this thread.</div>" if reviewed else ""}
           {conflict_banner_html}
@@ -1205,22 +1320,29 @@ def render_thread(
             {_RIDER_HIDDEN_INPUTS}
             <div class="button-group">
               <button class="btn" type="submit" {form_disabled}>Send</button>
-              {"" if is_pi else f'<button class="btn btn-secondary" type="button" onclick="showCaptureModal()" {form_disabled}>Capture Conversation</button>'}
+              {"" if is_pi else f'<button class="btn btn-secondary" type="button" onclick="showCaptureModal()" {capture_disabled}>Capture interaction</button>'}
             </div>
             <div style="font-size:.85rem; color:#6b7280; margin-top:.4rem;">{form_note}</div>
           </form>
           {pi_continuation_html}
 
           {"" if is_pi else f'''<!-- Capture Modal -->
-          <div id="captureModal" class="modal">
-            <div class="modal-content">
-              <h3>Capture Conversation</h3>
-              <p>Save this conversation for future testing and replay.</p>
-              <form action="/thread/{tid}/capture" method="post">
+          <div id="captureModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="capture-title" aria-hidden="true">
+            <div class="modal-content" tabindex="-1">
+              <h3 id="capture-title">Capture interaction</h3>
+              <p>Keep a private snapshot and judge what happened. This does not replay it or change the system.</p>
+              <form id="capture-form" action="/thread/{tid}/capture" method="post">
+                <input type="hidden" name="csrf_token" value="{html.escape(CAPTURE_CSRF)}"/>
                 <label for="reason">Why are you capturing this conversation?</label>
-                <textarea id="reason" name="reason" required placeholder="e.g., Good example of authentication bug handling"></textarea>
+                <textarea id="reason" name="reason" required maxlength="8000" placeholder="What surprised you, or what went wrong?"></textarea>
+                <fieldset style="border:0;padding:0;margin:.7rem 0;">
+                  <legend>Conversation range</legend>
+                  <label><input type="radio" name="scope" value="last_3" checked/> Last 3 completed turns</label><br/>
+                  <label><input type="radio" name="scope" value="entire"/> Entire visible conversation</label>
+                </fieldset>
+                <div id="capture-error" role="alert" style="display:none"></div>
                 <div class="button-group">
-                  <button class="btn" type="submit">Save</button>
+                  <button class="btn" type="submit">Capture and judge</button>
                   <button class="btn btn-secondary" type="button" onclick="hideCaptureModal()">Cancel</button>
                 </div>
               </form>
@@ -1239,19 +1361,89 @@ def render_thread(
               document.getElementById('titleEdit').style.display = 'none';
               document.getElementById('titleView').style.display = 'flex';
             }}
+            var capturePolls = {{}}, hiddenCaptures = {{}}, capturePollFailures = {{}};
             function showCaptureModal() {{
-              document.getElementById('captureModal').style.display = 'block';
+              var modal = document.getElementById('captureModal');
+              if (!modal) return;
+              modal.style.display = 'block';
+              modal.setAttribute('aria-hidden', 'false');
+              document.getElementById('reason').focus();
             }}
             function hideCaptureModal() {{
-              document.getElementById('captureModal').style.display = 'none';
+              var modal = document.getElementById('captureModal');
+              if (!modal) return;
+              modal.style.display = 'none'; modal.setAttribute('aria-hidden', 'true');
+              document.getElementById('text').focus();
             }}
+            function loadCaptureCard(id) {{
+              if(capturePolls[id] || hiddenCaptures[id]) return;
+              capturePolls[id] = true;
+              fetch('/thread/{tid}/capture/' + encodeURIComponent(id), {{credentials:'same-origin', cache:'no-store'}})
+                .then(function(r){{
+                  if(r.ok) return r.text();
+                  var error=new Error('Could not load capture'); error.status=r.status; throw error;
+                }})
+                .then(function(markup){{
+                  if(hiddenCaptures[id]) return;
+                  delete capturePollFailures[id];
+                  var old=document.getElementById('capture-' + id); if(old) old.outerHTML=markup;
+                  var fresh=document.getElementById('capture-' + id);
+                  if(fresh && fresh.getAttribute('data-capture-pending') === '1') setTimeout(function(){{ loadCaptureCard(id); }}, 1200);
+                }})
+                .catch(function(error){{
+                  var card=document.getElementById('capture-' + id);
+                  if(error.status === 404) {{ if(card) card.remove(); return; }}
+                  capturePollFailures[id] = (capturePollFailures[id] || 0) + 1;
+                  if(card && card.getAttribute('data-capture-pending') === '1' && capturePollFailures[id] < 3) {{
+                    setTimeout(function(){{ loadCaptureCard(id); }}, 1200 * capturePollFailures[id]);
+                  }}
+                }}).finally(function(){{ capturePolls[id] = false; }});
+            }}
+            function captureLastThree(button) {{
+              var lastThree = document.querySelector('#captureModal input[value=last_3]');
+              if (!lastThree) return;
+              lastThree.checked=true;
+              document.getElementById('reason').value=button.getAttribute('data-capture-reason') || '';
+              showCaptureModal();
+            }}
+            function dismissCapture(button) {{
+              var card=button.closest('[data-capture-id]');
+              var token=document.querySelector('#capture-form input[name=csrf_token]');
+              if (!card) return;
+              var csrfToken=token ? token.value : '{CAPTURE_CSRF}';
+              var id=card.getAttribute('data-capture-id');
+              hiddenCaptures[id]=true;
+              button.disabled=true;
+              fetch('/thread/{tid}/capture/' + encodeURIComponent(id) + '/dismiss', {{
+                method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}},
+                body:'csrf_token=' + encodeURIComponent(csrfToken), credentials:'same-origin', cache:'no-store'
+              }}).then(function(r){{
+                if(r.status !== 204) throw new Error('Could not hide capture');
+                var fresh=document.getElementById('capture-' + id); if(fresh) fresh.remove();
+              }}).catch(function(){{
+                delete hiddenCaptures[id]; button.disabled=false; button.textContent='Could not hide';
+              }});
+            }}
+            document.querySelectorAll('[data-capture-id]').forEach(function(el){{ loadCaptureCard(el.getAttribute('data-capture-id')); }});
+            var captureForm = document.getElementById('capture-form');
+            if (captureForm) captureForm.addEventListener('submit', function(event) {{
+              event.preventDefault();
+              var form=event.currentTarget, error=document.getElementById('capture-error');
+              var composer=document.getElementById('text'), draft=composer.value, start=composer.selectionStart, end=composer.selectionEnd;
+              error.style.display='none';
+              fetch(form.action, {{method:'POST', body:new FormData(form), credentials:'same-origin', cache:'no-store'}})
+                .then(function(r){{ return r.json().then(function(v){{ if(!r.ok) throw new Error(v.detail || 'Could not capture interaction'); return v; }}); }})
+                .then(function(v){{ document.getElementById('captureCards').insertAdjacentHTML('afterbegin', v.card); hideCaptureModal(); composer.value=draft; composer.focus(); composer.setSelectionRange(start,end); loadCaptureCard(v.capture_id); }})
+                .catch(function(e){{ error.textContent=e.message; error.style.display='block'; }});
+            }});
             // Close modal when clicking outside
             window.onclick = function(event) {{
               const modal = document.getElementById('captureModal');
-              if (event.target == modal) {{
+              if (modal && event.target == modal) {{
                 hideCaptureModal();
               }}
             }}
+            if (captureForm) window.addEventListener('keydown', function(event) {{ if(event.key === 'Escape') hideCaptureModal(); }});
           </script>
           <hr/>
           {diff_block_html}
@@ -1325,10 +1517,8 @@ _SUPERSEDE_RIDER = (
 # transient AND persisted), the DERIVED chain-cap count (trailing prefixed human messages
 # in the checkpoint ARE the chain history — no counter file), and recovery exact-match
 # fidelity (the _SUPERSEDE_RIDER pattern).
-_CONTINUATION_RIDER = "[Continuing my earlier work — background follow-up] "
 # Durable history/checkpoint marker. Keep the legacy token so pre-PR messages
 # remain system-authored when rendered or recovered; it is stripped from the UI.
-_TASK_COMPLETION_RIDER = "[Background task finished] "
 CHAIN_CAP = 5
 
 # Mid-turn interjection framing (design: docs/2026-07-20-mid-turn-interjection-design.org).
@@ -1336,12 +1526,6 @@ CHAIN_CAP = 5
 # durable render key (strip-and-badge, like the rider above) and the model's
 # attribution. The GUIDE carries ALL steering (the middleware is only a
 # delivery channel); eval-owned wording.
-_INTERJECTION_FRAME = "[Mid-turn message from the user — sent while you were working] "
-_INTERJECTION_GUIDE = (
-    "\n\n(This message arrived mid-turn. The user's latest word wins: if it "
-    "changes what they want, redirect your remaining work now; if it adds "
-    "scope, fold it in. If it asks you to stop, do no further work and reply "
-    "with a brief account of what you already completed.")
 # One string, four error exits — the interjection unit test greps it, so the
 # copies would be sync-load-bearing if inlined.
 _REJOURNAL_NOTE = " Your mid-turn message will be retried as its own turn."
@@ -2689,27 +2873,6 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     _notify_turn_observers(tid, _terminal[0], origin, _terminal[1], event_id)
 
 
-def _capture_conversation(tid: str, reason: str) -> None:
-    """Background task to capture a conversation."""
-    try:
-        thread = MANAGER.get(tid)
-    except FileNotFoundError:
-        logging.error(f"Thread {tid} not found for capture")
-        return
-
-    # Get repo root (navigate up from manage/web/threads.py to repo root)
-    current_file = os.path.abspath(__file__)
-    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
-    improvements_dir = os.path.join(repo_root, "improvements")
-
-    from edd.capture import capture_conversation
-    try:
-        capture_path = capture_conversation(thread, reason, improvements_dir)
-        logging.info(f"Conversation captured successfully to {capture_path}")
-    except Exception as e:
-        logging.error(f"Failed to capture conversation for thread {tid}: {e}", exc_info=True)
-
-
 # --- Routes -------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
@@ -2866,6 +3029,9 @@ async def get_thread(
     reviewed: int = 0,
     pushed: int = 0,
 ) -> str:
+    capture_summaries = await anyio.to_thread.run_sync(
+        CAPTURE_STORE.list_for_thread, tid, limiter=CAPTURE_THREAD_LIMITER)
+
     def load_and_render() -> str:
         if not os.path.isdir(MANAGER.thread_dir(tid)):
             raise HTTPException(status_code=404, detail="Thread not found")
@@ -2897,7 +3063,7 @@ async def get_thread(
         return render_thread(
             tid, chat, pi_messages=pi_messages, pi_traces=pi_traces,
             pi_trace_unavailable=pi_trace_unavailable, captured=bool(captured), merged=bool(merged),
-            reviewed=bool(reviewed), pushed=bool(pushed))
+            capture_summaries=capture_summaries, reviewed=bool(reviewed), pushed=bool(pushed))
 
     return await run_in_threadpool(load_and_render)
 
@@ -4324,10 +4490,10 @@ def _render_assistant_content(tid: str, raw: str) -> str:
         if embed is None:
             continue  # leave the fence in place -> markdown renders it as code
         map_rendered = map_rendered or btype == "map"
-        out.append(markdown.markdown(raw[last:m.start()], extensions=_MD_EXTENSIONS))
+        out.append(render_markdown(raw[last:m.start()], extensions=_MD_EXTENSIONS))
         out.append(embed)
         last = m.end()
-    out.append(markdown.markdown(raw[last:], extensions=_MD_EXTENSIONS))
+    out.append(render_markdown(raw[last:], extensions=_MD_EXTENSIONS))
     return "".join(out)
 
 
@@ -4421,7 +4587,7 @@ def show_file_view(tid: str, path: str, lines: str = "", pages: str = ""):
         if rng:
             src = "\n".join(all_lines[rng[0] - 1:rng[1]])
     if ext == ".md":
-        body = markdown.markdown(src, extensions=_MD_EXTENSIONS)
+        body = render_markdown(src, extensions=_MD_EXTENSIONS)
     elif ext == ".org":
         body = _org_to_html(src)
     else:
@@ -4483,29 +4649,114 @@ async def rename_thread(tid: str, description: str = Form("")):
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
+def _create_live_capture(tid: str, reason: str, scope: str) -> dict:
+    """Take the canonical completed-turn snapshot; called off the event loop."""
+    _require_deep_thread(tid)
+    if _get_status(tid).get("stage") in BUSY_STAGES:
+        raise ValueError("Wait for the current response before capturing it")
+    if scope not in {"last_3", "entire"}:
+        raise ValueError("invalid capture range")
+    thread = MANAGER.get(tid, sandbox_backend=None)
+    projection = visible_records(thread.get_raw_messages())
+    completed = select_completed_turns(projection, whole_conversation=True)
+    records = select_completed_turns(projection, whole_conversation=scope == "entire")
+    if not records:
+        raise ValueError("Capture needs at least one completed user turn and assistant response")
+    completed_starts = [
+        record.id for record in completed
+        if record.role == "user" and record.source_kind != "interjection"
+    ]
+    selected_starts = {
+        record.id for record in records
+        if record.role == "user" and record.source_kind != "interjection"
+    }
+    selected_ordinals = [index for index, record_id in enumerate(completed_starts, start=1)
+                         if record_id in selected_starts]
+    if not selected_ordinals:
+        raise ValueError("Capture needs at least one completed user turn and assistant response")
+    capture = CAPTURE_STORE.create(
+        thread_id=tid, reason=reason, scope=scope, records=records,
+        turn_range=(selected_ordinals[0], selected_ordinals[-1]),
+        source_revision=os.getenv("ASSIST_SOURCE_REVISION"),
+    )
+    if capture["result"]["status"] == "queued":
+        try:
+            CAPTURE_WORKER.submit(tid, capture["request"]["capture_id"])
+        except RuntimeError:
+            capture = CAPTURE_STORE.update_result(
+                tid, capture["request"]["capture_id"], {
+                    "status": "failed", "error": "capture queue is full",
+                })
+    return capture
+
+
+def _dismiss_live_capture(tid: str, capture_id: str) -> None:
+    """Validate ownership before changing only the app-memory card projection."""
+    CAPTURE_STORE.get_for_thread(tid, capture_id)
+    CAPTURE_DISMISSALS.dismiss(tid, capture_id)
+
+
+def _visible_live_capture(tid: str, capture_id: str) -> dict:
+    """Load a source-bound capture unless its card is hidden for this app session."""
+    if CAPTURE_DISMISSALS.is_dismissed(tid, capture_id):
+        raise FileNotFoundError("capture is hidden")
+    capture = CAPTURE_STORE.get_for_thread(tid, capture_id)
+    if CAPTURE_DISMISSALS.is_dismissed(tid, capture_id):
+        raise FileNotFoundError("capture is hidden")
+    return capture
+
+
 @app.post("/thread/{tid}/capture")
-async def capture_thread(tid: str, background_tasks: BackgroundTasks, reason: str = Form(...)):
-    await run_in_threadpool(_require_deep_thread, tid)
+async def capture_thread(
+    tid: str, reason: str = Form(...), scope: str = Form("last_3"),
+    csrf_token: str = Form(...),
+):
+    if not hmac.compare_digest(csrf_token, CAPTURE_CSRF):
+        raise HTTPException(status_code=403, detail="invalid capture form")
     try:
-        thread = MANAGER.get(tid)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Thread not found")
+        capture = await anyio.to_thread.run_sync(
+            _create_live_capture, tid, reason, scope, limiter=CAPTURE_THREAD_LIMITER)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Thread not found") from error
+    except CaptureStorageFull as error:
+        raise HTTPException(status_code=507, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    capture_id = capture["request"]["capture_id"]
+    return JSONResponse(
+        {"capture_id": capture_id, "card": _capture_card_placeholder(tid, {
+            "capture_id": capture_id, "status": capture["result"]["status"],
+        })},
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "same-origin"},
+    )
 
-    # Validate thread has messages before queuing
+
+@app.get("/thread/{tid}/capture/{capture_id}", response_class=HTMLResponse)
+async def capture_fragment(tid: str, capture_id: str) -> HTMLResponse:
     try:
-        messages = thread.get_messages()
-        if not messages:
-            raise HTTPException(status_code=400, detail="Cannot capture empty conversation")
-    except Exception:
-        pass  # Let the background task handle it
+        capture = await anyio.to_thread.run_sync(
+            _visible_live_capture, tid, capture_id,
+            limiter=CAPTURE_THREAD_LIMITER)
+    except (FileNotFoundError, ValueError) as error:
+        raise HTTPException(status_code=404, detail="Capture not found") from error
+    return HTMLResponse(
+        _capture_card_html(capture),
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "same-origin"},
+    )
 
-    # Queue the capture as a background task
-    background_tasks.add_task(_capture_conversation, tid, reason)
 
-    # Return immediately
-    return RedirectResponse(
-        url=f"/thread/{tid}?captured=1",
-        status_code=303
+@app.post("/thread/{tid}/capture/{capture_id}/dismiss")
+async def dismiss_capture(tid: str, capture_id: str, csrf_token: str = Form(...)) -> Response:
+    if not hmac.compare_digest(csrf_token, CAPTURE_CSRF):
+        raise HTTPException(status_code=403, detail="invalid capture form")
+    try:
+        await anyio.to_thread.run_sync(
+            _dismiss_live_capture, tid, capture_id, limiter=CAPTURE_THREAD_LIMITER)
+    except (FileNotFoundError, ValueError) as error:
+        raise HTTPException(status_code=404, detail="Capture not found") from error
+    return Response(
+        status_code=204,
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "same-origin"},
     )
 
 

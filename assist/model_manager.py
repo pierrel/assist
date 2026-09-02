@@ -288,6 +288,7 @@ def _build_openai_chat_model(
     base_url: str,
     api_key: str,
     enable_thinking: bool | None = None,
+    request_timeout: httpx.Timeout | None = None,
 ) -> BaseChatModel:
     """Create a ``ChatOpenAI`` instance with the cache-buster callback.
 
@@ -314,7 +315,7 @@ def _build_openai_chat_model(
         # in one place gives uniform logging and predictable bounds
         # on per-call wall-clock.
         "max_retries": 0,
-        "timeout": _build_request_timeout(),
+        "timeout": request_timeout or _build_request_timeout(),
         "callbacks": [_ModelNotFoundCacheBuster()],
         "base_url": base_url,
         "api_key": api_key,
@@ -363,6 +364,30 @@ def select_chat_model(
     )
     llm.profile = {"max_input_tokens": config.context_len}
     return llm
+
+
+def select_capture_model() -> BaseChatModel:
+    """Build a short, tool-free model client for judged live captures.
+
+    Capture calls are raw synchronous model requests, unlike a normal Assist
+    graph call, so they must not inherit its generously long 600-second read
+    timeout.  The non-streaming endpoint is bounded by this response deadline;
+    the capture worker's queue hold is deliberately longer.
+    """
+    timeout_s = env_float("ASSIST_CAPTURE_LLM_RESPONSE_TIMEOUT_S", 90.0)
+    if timeout_s <= 0 or timeout_s >= 120.0:
+        raise ValueError("ASSIST_CAPTURE_LLM_RESPONSE_TIMEOUT_S must be 0 < seconds < 120")
+    config = current_model_config()
+    timeout = httpx.Timeout(
+        connect=min(10.0, timeout_s), read=timeout_s,
+        write=min(30.0, timeout_s), pool=min(10.0, timeout_s),
+    )
+    model = _build_openai_chat_model(
+        config.model, temperature=0.0, base_url=config.url, api_key=config.api_key,
+        enable_thinking=False, request_timeout=timeout,
+    )
+    model.profile = {"max_input_tokens": config.context_len}
+    return model
 
 
 def select_assistant_model(

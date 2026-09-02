@@ -96,8 +96,6 @@ def test_final_provider_tools_are_the_visible_tools(census):
     assert main["provider_payload"]["temperature"] == 0.1
     assert main["provider_payload"]["extra_body"] == {
         "chat_template_kwargs": {"enable_thinking": False}}
-    capture = _call(census, "capture")
-    assert "extra_body" not in capture["provider_payload"]
 
 
 def test_bundled_schema_disclosure_and_load_evidence_are_observed(census):
@@ -306,19 +304,6 @@ def test_same_class_tool_name_collision_fails(census):
                 r"web-main-core:0: duplicate tool candidate `travel`.*"
                 r"assist\.tools, assist\.embedder_tools")):
         _recomputed_capabilities(census, tool_nodes=nodes)
-
-
-def test_unmatched_tool_node_name_collision_fails(census):
-    bad = copy.deepcopy(census)
-    node = next(node for node in bad["tool_nodes"]
-                if node["scenario"] == "capture")
-    node["candidates"].append(copy.deepcopy(node["candidates"][0]))
-
-    with pytest.raises(
-            AssertionError, match=(
-                rf"capture:tool-node:{node['index']}: duplicate tool candidate "
-                rf"`{re.escape(node['candidates'][0]['name'])}`")):
-        prompt_census._assert_semantic_views(bad)
 
 
 def test_every_prompt_transition_is_observed_and_attributed(census):
@@ -610,7 +595,7 @@ def test_enforcement_is_exercised_not_inferred(census):
     assert "URL was a guess" in leaf["tool_messages"][0]["content"]
 
 
-def test_fixed_role_delegate_and_capture_input_boundaries(census):
+def test_fixed_role_delegate_input_boundaries(census):
     receptionist = _call(census, "receptionist")
     assert receptionist["visible_tools"] == [
         "list_threads", "open_thread", "new_thread"]
@@ -623,13 +608,6 @@ def test_fixed_role_delegate_and_capture_input_boundaries(census):
     assert "task" in delegate["visible_tools"]
     assert not ({"start_async_task", "get_async_task_status", "get_async_task_result"}
                 & set(delegate["visible_tools"]))
-
-    capture = _call(census, "capture")
-    capture_task = capture["provider_payload"]["messages"][1]["content"]
-    assert "You are an expert test case generator" in capture_task
-    assert "SYNTHETIC CAPTURE REASON" in capture_task
-    assert "SYNTHETIC CAPTURE USER REQUEST" in capture_task
-
 
 def test_skill_source_precedence_matches_listing_and_load(census):
     built_in = census["observations"]["skill-precedence-built-in"]
@@ -668,9 +646,6 @@ def test_expected_audit_findings_are_reported_not_hidden(census):
         ("contradictory-capability-claims", "context-read-only:2"),
         ("denied-capability-claim", "context-read-only:2"),
         ("denied-capability-claim", "context-read-only:2"),
-        ("argument-contract-mismatch", "capture:0"),
-        ("argument-contract-mismatch", "capture:0"),
-        ("argument-contract-mismatch", "capture:0"),
         ("prompt-flattening", "web-main-full:0"),
     ]
     assert not any(
@@ -1318,9 +1293,9 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     # historical rows below deliberately retain their original P0-P2b3 values.
     assert len(current_prompt) == 26_161
     assert len(schemas) == 18_554
-    assert len(census["calls"]) == 30
-    assert len(census["tool_nodes"]) == 38
-    assert len(census["findings"]) == 23
+    assert len(census["calls"]) == 29
+    assert len(census["tool_nodes"]) == 37
+    assert len(census["findings"]) == 20
     # M3 records this checkout's exact source commit in each engine profile, so
     # both artifact size and fingerprint deliberately vary with capture source
     # and dirty state. The structural and historical assertions remain stable.
