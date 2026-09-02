@@ -8,12 +8,15 @@ derived from `date` itself (not hard-coded) so the eval is year-independent.
 
 Prompts deliberately avoid the SKILL.md EXAMPLES verbatim (probe generalization).
 """
+from datetime import datetime, timezone
 import re
 import shlex
 import tempfile
 from unittest import TestCase
 
 from assist.agent import create_agent, AgentHarness
+from assist.checkpoint_rollback import invoke_with_rollback
+from assist.context_rider import CONTEXT_RIDER_KEY, ContextRider
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
@@ -90,6 +93,33 @@ class TestTimeAgent(TestCase):
     def test_today(self):
         agent = self._agent()
         reply = str(self._ask(agent, "Remind me what the date is right now.") or "").lower()
+        self.assertTrue(skill_was_loaded(agent, "time"), "time skill should load")
+        self.assertTrue(self._ran_date(agent), "agent should run the date command")
+        self._asserts_full_date(reply, "today")
+
+    def test_general_agent_uses_a_browser_rider_for_local_date(self):
+        """A normal current-date question uses the per-message local time source."""
+        rider = ContextRider(
+            sent_at=datetime.now(timezone.utc), tz="Pacific/Kiritimati")
+        SandboxManager.cleanup(self.workspace)
+        self.sandbox = SandboxManager.get_sandbox_backend(
+            self.workspace, tz=rider.tz)
+        if self.sandbox is None:
+            self.skipTest("Docker sandbox unavailable — is Docker running and "
+                          "assist-sandbox built?")
+        # This construction uses the template that formerly carried the static
+        # UTC clock, while exercising the rider injection and sandbox-TZ path a
+        # browser turn uses.
+        agent = AgentHarness(create_agent(
+            self.model, self.workspace, sandbox_backend=self.sandbox))
+        response = invoke_with_rollback(
+            agent.agent,
+            {"messages": [{"role": "user", "content": "What date is it here?"}]},
+            {"configurable": {"thread_id": agent.thread_id,
+                                CONTEXT_RIDER_KEY: rider},
+             "recursion_limit": 5000},
+        )
+        reply = str(response["messages"][-1].content or "").lower()
         self.assertTrue(skill_was_loaded(agent, "time"), "time skill should load")
         self.assertTrue(self._ran_date(agent), "agent should run the date command")
         self._asserts_full_date(reply, "today")
