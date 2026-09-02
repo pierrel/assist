@@ -746,20 +746,18 @@ def render_thread(
     persisted_msgs = msgs
     msgs, history_cursor = _turn_page(persisted_msgs, history_before)
     trace_by_run = {}
-    trace_run_ids = set()
     if is_pi and pi_traces is not None:
         user_run_ids = {message.get("run_id") for message in msgs if message.get("role") == "user"}
         for event in pi_traces:
-            trace_run_ids.add(event.run_id)
-            trace_by_run.setdefault(event.run_id, []).append(event)
-        pi_trace_unavailable = pi_trace_unavailable or not trace_run_ids.issubset(user_run_ids)
+            if event.run_id in user_run_ids:
+                trace_by_run.setdefault(event.run_id, []).append(event)
     pi_run_status = {run.id: run.status for run in _runs().list(tid)} if is_pi else {}
 
     # Completed-turn elapsed badges: map each turn's CONCLUDING assistant bubble (the last
     # assistant strictly before the next user bubble) to its recorded elapsed seconds.
-    # Built over the PERSISTED messages here — before the pending bubble is appended below,
-    # and the append doesn't shift these indices. Keyed by the same user-bubble ordinal the
-    # write side records (_human_ordinal). dict miss → pre-feature/errored turn → no badge.
+    # The selected window's first message is a reference from persisted_msgs, so its
+    # identity gives the write-side user ordinal that precedes this page.  That keeps
+    # timing keys absolute while the rendered list is a most-recent window.
     _timings = _get_timings(tid)
     badge_at: dict[int, int] = {}
     if _timings:
@@ -767,7 +765,9 @@ def render_thread(
         # content-only assistant before the next user. Tracking the last index per turn (vs
         # marking every assistant) avoids a double-badge when a turn has >1 content assistant
         # (e.g. a retry / empty-response recovery emits two).
-        _ord = 0
+        _window_start = next((index for index, message in enumerate(persisted_msgs)
+                              if msgs and message is msgs[0]), 0)
+        _ord = _human_ordinal(persisted_msgs[:_window_start])
         _last = None
         for _i, _m in enumerate(msgs):
             _r = _m.get("role")
