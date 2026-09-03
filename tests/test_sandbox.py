@@ -148,7 +148,7 @@ class TestDockerSandboxBackend(TestCase):
             resp = self.sandbox.execute("curl https://example.com")
 
         self.assertIn("throttled locally by Assist", resp.output)
-        self.assertIn("before it contacted the remote host", resp.output)
+        self.assertIn("a request from this sandbox before it contacted the remote host", resp.output)
         self.assertIn("neither an external outage nor an egress-approval denial", resp.output)
         self.assertIn("at least 8 seconds", resp.output)
 

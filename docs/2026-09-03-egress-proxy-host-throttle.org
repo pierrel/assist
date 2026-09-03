@@ -57,13 +57,16 @@ all of that metadata, even while returning a successful process exit. The
 trusted sandbox host boundary gives every command a fresh proxy credential and
 uses Docker's command-start log cursor. It accepts only a newly emitted
 throttle event matching both that sandbox container's egress-network IP and
-the credential's hashed correlation marker. It then prepends one centralized
-explanation: Assist stopped the request before the remote host was contacted,
-this is neither an outage nor an approval denial, and the agent must use
-existing evidence or another allowed source instead of immediately retrying or
+the marker's hash. It then prepends one centralized explanation: Assist
+stopped a request from the sandbox before the remote host was contacted, this
+is neither an outage nor an approval denial, and the agent must use existing
+evidence or another allowed source instead of immediately retrying or
 requesting egress approval. The trusted event preserves the precise bounded
 =Retry-After= value. An origin 429, arbitrary command output, and an event
-from another sandbox never receive a false local-provenance claim.
+from another sandbox never receive a false local-provenance claim. A command
+can deliberately leave a same-UID background process that reads and reuses a
+later command's proxy marker, so the agent-visible wording truthfully describes
+a sandbox request rather than promising that the foreground shell caused it.
 
 * Threat model and containment
 

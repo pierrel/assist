@@ -151,8 +151,8 @@ class DockerSandboxBackend(BaseSandbox):
         self._native_agent_dir = native_agent_dir
         self._run_ids: tuple[int, int] | None = None
         # A sandbox can receive parallel tool calls. Keep one command's
-        # proxy-log snapshot, execution, and result attribution indivisible so
-        # a sibling cannot claim its local-throttle event.
+        # proxy-log cursor, execution, and result attribution indivisible so a
+        # sibling cannot claim its local-throttle event.
         self._execute_lock = threading.Lock()
 
     def _proxy_logs_since(self, started_at: float) -> bytes | None:
