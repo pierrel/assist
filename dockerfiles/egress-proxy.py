@@ -122,11 +122,13 @@ class HostThrottle:
                 # host, each further attempt advances the backoff rather than
                 # promising a futile one-second retry forever.
                 if next_allowed > now:
+                    self._states[host] = (next_allowed, now, count)
                     raise HostThrottleBusy(retry_after)
                 interval_s = self._intervals_s[min(count, len(self._intervals_s) - 1)]
                 self._states[host] = (now + interval_s, now, count + 1)
                 raise HostThrottleBusy(int(interval_s))
             if next_allowed > now:
+                self._states[host] = (next_allowed, now, count)
                 raise HostThrottleBusy(retry_after)
             self._active_hosts.add(host)
             interval_s = self._intervals_s[min(count, len(self._intervals_s) - 1)]

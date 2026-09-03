@@ -418,6 +418,24 @@ def test_proxy_throttle_resets_after_a_quiet_period(proxy_mod):
     assert exc.value.retry_after_s == 2
 
 
+def test_proxy_throttle_counts_denied_attempts_as_non_quiet(proxy_mod):
+    now = [100.0]
+    throttle = proxy_mod.HostThrottle(clock=lambda: now[0])
+
+    throttle.admit("example.com").release()
+    now[0] += 1
+    with pytest.raises(proxy_mod.HostThrottleBusy):
+        throttle.admit("example.com")
+
+    # A denial is traffic. It keeps the backoff at the second interval until
+    # five quiet minutes have elapsed after that attempt.
+    now[0] += proxy_mod.HOST_IDLE_RESET_S - 1
+    throttle.admit("example.com").release()
+    with pytest.raises(proxy_mod.HostThrottleBusy) as exc:
+        throttle.admit("example.com")
+    assert exc.value.retry_after_s == 4
+
+
 def test_proxy_throttle_allows_independent_hosts(proxy_mod):
     throttle = proxy_mod.HostThrottle(clock=lambda: 100.0)
     throttle.admit("first.example").release()

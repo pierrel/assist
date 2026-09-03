@@ -31,6 +31,10 @@ resets only after five quiet minutes.  An extra request gets a local =429
 Retry-After= response without an upstream socket.  It does not create a
 sleeping proxy thread or wait while holding a lock.
 
+A rejected attempt is still traffic: it refreshes the five-minute quiet-period
+clock without reducing or resetting the current backoff. Repeated retries
+therefore cannot make a busy host look idle and regain the initial interval.
+
 If an admitted connection remains active beyond its current wait window, the
 next contention attempt advances the same sequence instead of repeatedly
 promising a one-second retry that cannot succeed while that connection remains
