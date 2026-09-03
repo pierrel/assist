@@ -132,10 +132,8 @@ class TestDockerSandboxBackend(TestCase):
             "NetworkSettings": {"Networks": {
                 "assist-egress-network": {"IPAddress": "172.30.0.2"}}}}
         proxy = self.container.client.containers.get.return_value
-        proxy.logs.side_effect = [
-            b"before\n",
-            b"before\negress-proxy: THROTTLE client=172.30.0.2 host=example.com retry after 8s\n",
-        ]
+        proxy.logs.return_value = (
+            b"egress-proxy: THROTTLE client=172.30.0.2 host=example.com retry after 8s\n")
         self.container.exec_run.return_value = (0, b"429")
 
         resp = self.sandbox.execute("curl https://example.com")
@@ -150,10 +148,8 @@ class TestDockerSandboxBackend(TestCase):
             "NetworkSettings": {"Networks": {
                 "assist-egress-network": {"IPAddress": "172.30.0.2"}}}}
         proxy = self.container.client.containers.get.return_value
-        proxy.logs.side_effect = [
-            b"before\n",
-            b"before\negress-proxy: THROTTLE client=172.30.0.2 host=example.com retry after 8s\n",
-        ]
+        proxy.logs.return_value = (
+            b"egress-proxy: THROTTLE client=172.30.0.2 host=example.com retry after 8s\n")
         self.container.exec_run.return_value = (1, b"Proxy error: 429 Too Many Requests\n")
 
         resp = self.sandbox.execute("curl http://example.com")
@@ -165,15 +161,29 @@ class TestDockerSandboxBackend(TestCase):
             "NetworkSettings": {"Networks": {
                 "assist-egress-network": {"IPAddress": "172.30.0.2"}}}}
         proxy = self.container.client.containers.get.return_value
-        proxy.logs.side_effect = [
-            b"before\n",
-            b"before\negress-proxy: THROTTLE client=172.30.0.2 host=example.com retry after 999999s\n",
-        ]
+        proxy.logs.return_value = (
+            b"egress-proxy: THROTTLE client=172.30.0.2 host=example.com retry after 999999s\n")
         self.container.exec_run.return_value = (1, b"Proxy error: 429 Too Many Requests\n")
 
         resp = self.sandbox.execute("curl http://example.com")
 
         self.assertIn("at least 60 seconds", resp.output)
+
+    def test_execute_proxy_throttle_survives_a_busy_proxy_log(self):
+        self.container.attrs = {
+            "NetworkSettings": {"Networks": {
+                "assist-egress-network": {"IPAddress": "172.30.0.2"}}}}
+        proxy = self.container.client.containers.get.return_value
+        proxy.logs.return_value = (
+            b"unrelated event\n" * 101
+            + b"egress-proxy: THROTTLE client=172.30.0.2 host=example.com retry after 8s\n")
+        self.container.exec_run.return_value = (1, b"Proxy error: 429 Too Many Requests\n")
+
+        with patch("assist.sandbox.time.time", return_value=123.5):
+            resp = self.sandbox.execute("curl http://example.com")
+
+        self.assertIn("throttled locally by Assist", resp.output)
+        proxy.logs.assert_called_once_with(since=123.5)
 
     def test_execute_origin_429_is_not_mislabelled_as_local_throttle(self):
         self.container.exec_run.return_value = (

@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import threading
+import time
 
 from deepagents.backends.sandbox import BaseSandbox
 from deepagents.backends.protocol import (
@@ -150,34 +151,31 @@ class DockerSandboxBackend(BaseSandbox):
         # a sibling cannot claim its local-throttle event.
         self._execute_lock = threading.Lock()
 
-    def _proxy_log_tail(self) -> bytes | None:
-        """Read a small trusted proxy-log snapshot, never affecting execution.
+    def _proxy_logs_since(self, started_at: float) -> bytes | None:
+        """Read trusted proxy events produced after one command began.
 
         The proxy is the only component that knows it rejected a request before
-        an upstream connection. Its append-only Docker log lets this backend
-        preserve that fact even for clients that hide HTTP status metadata.
+        an upstream connection. Docker's timestamp cursor avoids a fixed log
+        tail: a busy proxy cannot push this command's event out of view.
         """
         try:
             logs = self.container.client.containers.get(
-                "assist-egress-proxy").logs(tail=100)
+                "assist-egress-proxy").logs(since=started_at)
             return logs if isinstance(logs, bytes) else None
         except Exception:
             return None
 
-    def _local_throttle_retry_after(self, previous_proxy_logs: bytes | None) -> int | None:
-        """Return a confirmed local-throttle delay from this command's log delta."""
-        if previous_proxy_logs is None:
-            return None
-        current_proxy_logs = self._proxy_log_tail()
-        if (current_proxy_logs is None
-                or not current_proxy_logs.startswith(previous_proxy_logs)):
+    def _local_throttle_retry_after(self, command_started_at: float) -> int | None:
+        """Return a confirmed local-throttle delay from this command's events."""
+        current_proxy_logs = self._proxy_logs_since(command_started_at)
+        if current_proxy_logs is None:
             return None
         try:
             client_ip = self.container.attrs["NetworkSettings"]["Networks"][
                 "assist-egress-network"]["IPAddress"]
         except (KeyError, TypeError, AttributeError):
             return None
-        for line in reversed(current_proxy_logs[len(previous_proxy_logs):].decode(
+        for line in reversed(current_proxy_logs.decode(
                 "utf-8", errors="replace").splitlines()):
             match = _THROTTLE_LOG.search(line)
             if match and match.group(1) == client_ip:
@@ -310,7 +308,7 @@ class DockerSandboxBackend(BaseSandbox):
             f"timeout --kill-after={EXEC_KILL_GRACE_SECONDS}s "
             f"{EXEC_TIMEOUT_SECONDS}s bash -c {shlex.quote(command)}"
         )
-        proxy_logs_before = self._proxy_log_tail()
+        command_started_at = time.time()
         try:
             exit_code, output_bytes = self.container.exec_run(
                 ["bash", "-c", bounded],
@@ -346,7 +344,7 @@ class DockerSandboxBackend(BaseSandbox):
             output = _TIMEOUT_GUIDANCE.format(timeout=EXEC_TIMEOUT_SECONDS) + (
                 output if output else "(no output)"
             )
-        elif (retry_after := self._local_throttle_retry_after(proxy_logs_before)) is not None:
+        elif (retry_after := self._local_throttle_retry_after(command_started_at)) is not None:
             output = egress_throttled_guidance(retry_after) + output
         elif exit_code != 0 and _looks_like_egress_denial(output):
             # The egress proxy denied a host. curl discards CONNECT response

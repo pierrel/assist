@@ -256,6 +256,14 @@ EOF
 
 probe() { docker exec "$SANDBOX2" curl -s -o /dev/null -w "%{http_code}" --max-time 8 "$1" 2>/dev/null; }
 
+# A successful base-allowlist request is deliberately throttled for the next
+# connection. This retry path honors the proxy's Retry-After response while
+# still proving that malformed approval state cannot disable a base host.
+retrying_probe() {
+    docker exec "$SANDBOX2" curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
+        --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 70 "$1" 2>/dev/null
+}
+
 s1=$(probe https://example.com/)
 case "$s1" in 2*|3*) echo "ok  (8) approved example.com reachable ($s1)";;
     *) echo "FAIL: approved example.com not reachable ($s1)"; docker logs "$PROXY" | tail -20; exit 1;; esac
@@ -278,7 +286,7 @@ case "$s5" in 2*|3*) echo "FAIL: private-resolving approved host reachable ($s5)
 
 echo "{corrupt" > "$APPROVALS_DIR/approved-hosts.json"
 s6=$(probe https://example.com/)
-s7=$(probe https://pypi.org/)
+s7=$(retrying_probe https://pypi.org/)
 case "$s6" in 2*|3*) echo "FAIL: corrupt approvals still grants ($s6)"; exit 1;; esac
 case "$s7" in 2*|3*) echo "ok (13) corrupt approvals: base allowed, grants denied";;
     *) echo "FAIL: corrupt approvals broke the BASE allowlist ($s7)"; exit 1;; esac
