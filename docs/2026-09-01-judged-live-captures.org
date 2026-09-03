@@ -139,8 +139,10 @@ operations scan the durable store and safely reconstruct missing notifications.
 The worker runs only the incomplete phase: =queued → interpreting=; durable
 criteria and canonical observation → =judging=; durable verdict → terminal.
 Thus a restart never reinterprets a capture with stored criteria or overwrites
-a downstream result.  Model, storage, and judge failures become a visible
-=failed= capture with a short safe error, never a false success or a stuck page.
+a downstream result, except that a legacy =needs_clarification= result which
+violates the current criteria contract is reinterpreted.  Model, storage, and
+judge failures become a visible =failed= capture with a short safe error, never
+a false success or a stuck page.
 
 A store-backed phase claim and a process-lifetime exclusive worker lock establish
 one worker owner; they are ownership guards, not general transition locking.

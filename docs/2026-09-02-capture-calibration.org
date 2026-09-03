@@ -67,6 +67,27 @@ the new create path requires it.  No migration or deletion is needed.
    and Copilot process here, but leave deployment coordinated by the parent
    lane because Pierre is currently testing the UI work.
 
+* Interpreter clarification follow-up
+
+The first live capture reason named a concrete temporal sequence and a
+correction, yet the interpreter returned =needs_clarification= without a
+question.  The follow-up keeps the calibration boundary unchanged.  It broadens
+the existing interpreter guidance to derive criteria from evolving state,
+temporal continuity, and corrections; it does not add rider data, replay, or
+calibration to either model input.
+
+=needs_clarification= is valid only with one nonempty question and no requested
+or forbidden criteria.  A stored terminal clarification that violates this
+contract is derived invalid data, not a completed judgment: recovery clears
+only that derived data and reinterprets the immutable reason and transcript.
+The reset preserves transcript provenance.  It also recognizes the short crash
+window where the queued result is durable before the index summary updates.
+
+The natural regression uses a synthetic previous Day 2 followed by Day 3, with
+an initial 19m immediately corrected to 10m.  It requires criteria, the normal
+observation, and a judge result.  Its calibration remains private and absent
+from both model payloads.
+
 * Design review constraint
 
 The requested delegated design review could not run: all four available agent

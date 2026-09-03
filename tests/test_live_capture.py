@@ -21,7 +21,7 @@ from assist.visible_conversation import (
     select_completed_turns,
     visible_records,
 )
-from edd.live_capture import CaptureStorageFull, CaptureStore, CaptureWorker
+from edd.live_capture import CaptureCriteria, CaptureStorageFull, CaptureStore, CaptureWorker
 
 
 def _records() -> tuple[VisibleRecord, ...]:
@@ -140,7 +140,8 @@ def test_store_skips_malformed_index_entries_during_pending_recovery(tmp_path: P
         "threads": {"thread-a": [None, {"status": "queued"},
                                  {"status": "queued", "capture_id": 3},
                                  {"status": "queued", "capture_id": "../bad"},
-                                 {"status": "queued", "capture_id": valid_id}],
+                                 {"status": "queued", "capture_id": valid_id},
+                                 {"status": "needs_clarification", "capture_id": "b" * 20}],
                     "thread-b": "not-a-list"},
     }))
 
@@ -324,6 +325,65 @@ class _RecordingModel(_Model):
     def invoke(self, messages):
         self.requests.append(messages)
         return super().invoke(messages)
+
+
+@pytest.mark.parametrize("criteria", [
+    {"status": "needs_clarification", "requested": [], "forbidden": [], "clarification": None},
+    {"status": "needs_clarification", "requested": [], "forbidden": [], "clarification": "  "},
+    {"status": "needs_clarification", "requested": [{"description": "Name the fact"}], "forbidden": [], "clarification": "Which fact?"},
+    {"status": "needs_clarification", "requested": [], "forbidden": [{"description": "Name a different fact"}], "clarification": "Which fact?"},
+])
+def test_clarification_requires_a_specific_question_without_criteria(criteria: dict[str, object]):
+    with pytest.raises(ValueError):
+        CaptureCriteria.model_validate(criteria)
+
+
+def test_worker_reinterprets_a_legacy_empty_clarification_and_judges_it(tmp_path: Path):
+    threads = tmp_path / "threads"
+    threads.mkdir()
+    store = CaptureStore(tmp_path / "captures", threads_root=threads)
+    capture = store.create(thread_id="thread-a", reason="It found the requested fact.",
+                           scope="last_3", records=_records(), calibration=_calibration())
+    capture_id = capture["request"]["capture_id"]
+    store.update_result("thread-a", capture_id, {
+        "status": "needs_clarification", "clarification": None,
+        "criteria": {"status": "needs_clarification", "requested": [], "forbidden": [], "clarification": None},
+    })
+    model = _RecordingModel()
+    worker = CaptureWorker(store, model_factory=lambda: model)
+    worker.start()
+    deadline = monotonic() + 3
+    while monotonic() < deadline:
+        if store.get_for_thread("thread-a", capture_id)["result"]["status"] == "pass":
+            break
+        sleep(0.01)
+    worker.stop()
+
+    result = store.get_for_thread("thread-a", capture_id)["result"]
+    assert result["status"] == "pass"
+    assert result["criteria"]["status"] == "criteria"
+    assert len(model.requests) == 2
+
+
+def test_pending_recovers_a_retry_after_its_result_writes_before_its_index(tmp_path: Path):
+    threads = tmp_path / "threads"
+    threads.mkdir()
+    store = CaptureStore(tmp_path / "captures", threads_root=threads)
+    capture = store.create(thread_id="thread-a", reason="It found the requested fact.",
+                           scope="last_3", records=_records(), calibration=_calibration())
+    capture_id = capture["request"]["capture_id"]
+    store.update_result("thread-a", capture_id, {
+        "status": "needs_clarification", "clarification": None,
+        "criteria": {"status": "needs_clarification", "requested": [], "forbidden": [], "clarification": None},
+    })
+    result_path = store.root / capture_id / "result.json"
+    stale_result = store.get_for_thread("thread-a", capture_id)["result"]
+    store._write_json(result_path, {
+        "status": "queued", "transcript_sha256": stale_result["transcript_sha256"],
+        "transcript_bytes": stale_result["transcript_bytes"], "updated_at": "now",
+    })
+
+    assert store.pending() == [("thread-a", capture_id)]
 
 
 def test_worker_interprets_then_judges_one_private_capture(tmp_path: Path):

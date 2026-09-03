@@ -92,11 +92,25 @@ class CaptureCriteria(_ClosedModel):
     def validate_criteria(self) -> "CaptureCriteria":
         if self.status == "criteria" and not self.requested:
             raise ValueError("criteria need a requested outcome")
-        if self.status == "needs_clarification" and self.requested:
-            raise ValueError("clarification cannot include requested outcomes")
+        if self.status == "needs_clarification":
+            if self.requested or self.forbidden:
+                raise ValueError("clarification cannot include criteria")
+            if not self.clarification or not self.clarification.strip():
+                raise ValueError("clarification needs a specific question")
         if len(self.requested) > 4 or len(self.forbidden) > 4:
             raise ValueError("criteria are bounded")
         return self
+
+
+def _invalid_clarification_result(result: dict[str, Any]) -> bool:
+    """Identify legacy terminal clarifications that violate the current contract."""
+    if result.get("status") != "needs_clarification":
+        return False
+    try:
+        criteria = CaptureCriteria.model_validate(result["criteria"])
+    except (KeyError, TypeError, ValueError):
+        return True
+    return criteria.status != "needs_clarification"
 
 
 @dataclass(frozen=True)
@@ -331,10 +345,12 @@ class CaptureStore:
                 if isinstance(thread_id, str) and isinstance(entries, list)
             }
 
-    def update_result(self, thread_id: str, capture_id: str, result: dict[str, Any]) -> dict[str, Any]:
+    def update_result(
+        self, thread_id: str, capture_id: str, result: dict[str, Any], *, replace: bool = False,
+    ) -> dict[str, Any]:
         with self._lock:
             current = self.get_for_thread(thread_id, capture_id)
-            result = {**current["result"], **result, "updated_at": _utc_now()}
+            result = {**({} if replace else current["result"]), **result, "updated_at": _utc_now()}
             result_path = self._path(capture_id, "result.json")
             new_bytes = len(_json_bytes(result))
             if self._store_bytes() - result_path.stat().st_size + new_bytes > MAX_STORE_BYTES:
@@ -352,6 +368,16 @@ class CaptureStore:
             self._write_json(self._index, index)
             return {**current, "result": result}
 
+    def retry_interpretation(self, thread_id: str, capture_id: str) -> dict[str, Any]:
+        """Discard invalid derived data while retaining immutable transcript provenance."""
+        current = self.get_for_thread(thread_id, capture_id)
+        result = {
+            key: current["result"][key]
+            for key in ("transcript_sha256", "transcript_bytes")
+            if key in current["result"]
+        }
+        return self.update_result(thread_id, capture_id, {"status": "queued", **result}, replace=True)
+
     def pending(self) -> list[tuple[str, str]]:
         with self._lock:
             pending: list[tuple[str, str]] = []
@@ -365,10 +391,18 @@ class CaptureStore:
                     if not isinstance(entry, dict):
                         continue
                     capture_id = entry.get("capture_id")
-                    if (entry.get("status") in {"queued", "interpreting", "judging"}
-                            and isinstance(capture_id, str)
-                            and _ID_RE.fullmatch(capture_id)):
+                    if not isinstance(capture_id, str) or not _ID_RE.fullmatch(capture_id):
+                        continue
+                    if entry.get("status") in {"queued", "interpreting", "judging"}:
                         pending.append((thread_id, capture_id))
+                    elif entry.get("status") == "needs_clarification":
+                        try:
+                            result = self._read_json(self._path(capture_id, "result.json"))
+                        except (FileNotFoundError, ValueError):
+                            continue
+                        incomplete = result.get("status") in {"queued", "interpreting", "judging"}
+                        if incomplete or _invalid_clarification_result(result):
+                            pending.append((thread_id, capture_id))
             return pending[:MAX_RECOVERY]
 
 
@@ -620,6 +654,9 @@ class CaptureWorker:
     def _process(self, thread_id: str, capture_id: str) -> None:
         current = self.store.get_for_thread(thread_id, capture_id)
         result = current["result"]
+        if _invalid_clarification_result(result):
+            current = self.store.retry_interpretation(thread_id, capture_id)
+            result = current["result"]
         if result["status"] in {"pass", "partial", "fail", "failed", "needs_shorter_scope", "needs_clarification"}:
             return
         transcript = current["transcript"]
