@@ -14,7 +14,9 @@ backend explicitly constructed for a container with that private main-agent moun
 
 import logging
 import os
+import re
 import shlex
+import threading
 
 from deepagents.backends.sandbox import BaseSandbox
 from deepagents.backends.protocol import (
@@ -29,7 +31,10 @@ from deepagents.backends.protocol import (
 )
 from docker.errors import NotFound as DockerNotFound
 
-from assist.egress.guidance import EGRESS_DENIED_GUIDANCE
+from assist.egress.guidance import (
+    EGRESS_DENIED_GUIDANCE,
+    egress_throttled_guidance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +67,10 @@ def _looks_like_egress_denial(output: str) -> bool:
     low = output.lower()
     return (("403" in low or "forbidden" in low)
             and ("proxy" in low or "tunnel" in low))
+
+
+_THROTTLE_LOG = re.compile(
+    r"egress-proxy: THROTTLE client=(\S+) host=\S+ retry after (\d+)s")
 
 
 _TIMEOUT_GUIDANCE = (
@@ -136,6 +145,44 @@ class DockerSandboxBackend(BaseSandbox):
         self._strip_prefixes = strip_prefixes
         self._native_agent_dir = native_agent_dir
         self._run_ids: tuple[int, int] | None = None
+        # A sandbox can receive parallel tool calls. Keep one command's
+        # proxy-log snapshot, execution, and result attribution indivisible so
+        # a sibling cannot claim its local-throttle event.
+        self._execute_lock = threading.Lock()
+
+    def _proxy_log_tail(self) -> bytes | None:
+        """Read a small trusted proxy-log snapshot, never affecting execution.
+
+        The proxy is the only component that knows it rejected a request before
+        an upstream connection. Its append-only Docker log lets this backend
+        preserve that fact even for clients that hide HTTP status metadata.
+        """
+        try:
+            logs = self.container.client.containers.get(
+                "assist-egress-proxy").logs(tail=100)
+            return logs if isinstance(logs, bytes) else None
+        except Exception:
+            return None
+
+    def _local_throttle_retry_after(self, previous_proxy_logs: bytes | None) -> int | None:
+        """Return a confirmed local-throttle delay from this command's log delta."""
+        if previous_proxy_logs is None:
+            return None
+        current_proxy_logs = self._proxy_log_tail()
+        if (current_proxy_logs is None
+                or not current_proxy_logs.startswith(previous_proxy_logs)):
+            return None
+        try:
+            client_ip = self.container.attrs["NetworkSettings"]["Networks"][
+                "assist-egress-network"]["IPAddress"]
+        except (KeyError, TypeError, AttributeError):
+            return None
+        for line in reversed(current_proxy_logs[len(previous_proxy_logs):].decode(
+                "utf-8", errors="replace").splitlines()):
+            match = _THROTTLE_LOG.search(line)
+            if match and match.group(1) == client_ip:
+                return min(60, max(1, int(match.group(2))))
+        return None
 
     @property
     def native_agent_dir(self) -> bool:
@@ -254,10 +301,16 @@ class DockerSandboxBackend(BaseSandbox):
         partial output so the model can recover and try a different
         approach instead of just seeing a generic "Error".
         """
+        with self._execute_lock:
+            return self._execute_locked(command)
+
+    def _execute_locked(self, command: str) -> ExecuteResponse:
+        """Run one command while its proxy-log attribution is exclusive."""
         bounded = (
             f"timeout --kill-after={EXEC_KILL_GRACE_SECONDS}s "
             f"{EXEC_TIMEOUT_SECONDS}s bash -c {shlex.quote(command)}"
         )
+        proxy_logs_before = self._proxy_log_tail()
         try:
             exit_code, output_bytes = self.container.exec_run(
                 ["bash", "-c", bounded],
@@ -293,6 +346,8 @@ class DockerSandboxBackend(BaseSandbox):
             output = _TIMEOUT_GUIDANCE.format(timeout=EXEC_TIMEOUT_SECONDS) + (
                 output if output else "(no output)"
             )
+        elif (retry_after := self._local_throttle_retry_after(proxy_logs_before)) is not None:
+            output = egress_throttled_guidance(retry_after) + output
         elif exit_code != 0 and _looks_like_egress_denial(output):
             # The egress proxy denied a host. curl discards CONNECT response
             # bodies on the HTTPS path, so the agent would otherwise see an

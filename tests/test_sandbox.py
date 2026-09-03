@@ -126,6 +126,70 @@ class TestDockerSandboxBackend(TestCase):
         self.assertEqual(resp.exit_code, 1)
         self.assertIn("not found", resp.output)
 
+    def test_execute_proxy_throttle_returns_truthful_guidance(self):
+        """A bare client result still has trusted local throttle provenance."""
+        self.container.attrs = {
+            "NetworkSettings": {"Networks": {
+                "assist-egress-network": {"IPAddress": "172.30.0.2"}}}}
+        proxy = self.container.client.containers.get.return_value
+        proxy.logs.side_effect = [
+            b"before\n",
+            b"before\negress-proxy: THROTTLE client=172.30.0.2 host=example.com retry after 8s\n",
+        ]
+        self.container.exec_run.return_value = (0, b"429")
+
+        resp = self.sandbox.execute("curl https://example.com")
+
+        self.assertIn("throttled locally by Assist", resp.output)
+        self.assertIn("before it contacted the remote host", resp.output)
+        self.assertIn("neither an external outage nor an egress-approval denial", resp.output)
+        self.assertIn("at least 8 seconds", resp.output)
+
+    def test_execute_proxy_throttle_preserves_retry_after_header(self):
+        self.container.attrs = {
+            "NetworkSettings": {"Networks": {
+                "assist-egress-network": {"IPAddress": "172.30.0.2"}}}}
+        proxy = self.container.client.containers.get.return_value
+        proxy.logs.side_effect = [
+            b"before\n",
+            b"before\negress-proxy: THROTTLE client=172.30.0.2 host=example.com retry after 8s\n",
+        ]
+        self.container.exec_run.return_value = (1, b"Proxy error: 429 Too Many Requests\n")
+
+        resp = self.sandbox.execute("curl http://example.com")
+
+        self.assertIn("at least 8 seconds", resp.output)
+
+    def test_execute_proxy_throttle_clamps_untrusted_retry_after_text(self):
+        self.container.attrs = {
+            "NetworkSettings": {"Networks": {
+                "assist-egress-network": {"IPAddress": "172.30.0.2"}}}}
+        proxy = self.container.client.containers.get.return_value
+        proxy.logs.side_effect = [
+            b"before\n",
+            b"before\negress-proxy: THROTTLE client=172.30.0.2 host=example.com retry after 999999s\n",
+        ]
+        self.container.exec_run.return_value = (1, b"Proxy error: 429 Too Many Requests\n")
+
+        resp = self.sandbox.execute("curl http://example.com")
+
+        self.assertIn("at least 60 seconds", resp.output)
+
+    def test_execute_origin_429_is_not_mislabelled_as_local_throttle(self):
+        self.container.exec_run.return_value = (
+            1, b"HTTP/1.1 429 Too Many Requests\nServer: nginx proxy\nRetry-After: 30\n")
+
+        resp = self.sandbox.execute("curl https://example.com")
+
+        self.assertNotIn("throttled locally by Assist", resp.output)
+
+    def test_execute_unrelated_429_text_does_not_get_network_guidance(self):
+        self.container.exec_run.return_value = (0, b"the 429th record\n")
+
+        resp = self.sandbox.execute("echo 'the 429th record'")
+
+        self.assertNotIn("Network request received HTTP 429", resp.output)
+
     def test_execute_timeout_returns_guidance(self):
         """Exit 124 = coreutils `timeout` SIGTERM'd; surface adjustment hints."""
         self.container.exec_run.return_value = (124, b"some partial output\n")

@@ -172,6 +172,7 @@ echo "ok  (3) raw TCP to 1.1.1.1:443  blocked"
 #     per RFC 4343.  The proxy lowercases before comparing.  Probes
 #     that the comparison is consistent between client and allowlist.
 status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
+    --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 70 \
     https://Pypi.Org/ 2>/dev/null)
 if ! upstream_reached "$status"; then
     echo "FAIL: mixed-case Pypi.Org did not reach upstream (status=$status, "
@@ -184,6 +185,7 @@ echo "ok  (4) mixed-case https://Pypi.Org  allowed (status=$status)"
 #     ASSIST_MODEL_URL traffic uses.  pypi over plain HTTP returns
 #     301-to-https; we just need to see that we reached upstream.
 status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
+    --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 70 \
     --proxy "$HTTP_PROXY" http://pypi.org/ 2>/dev/null)
 if ! upstream_reached "$status"; then
     echo "FAIL: HTTP-via-proxy to pypi.org did not reach upstream (status=$status)"
