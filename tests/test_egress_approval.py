@@ -397,7 +397,7 @@ def test_proxy_throttle_exponentially_spaces_repeated_host(proxy_mod):
     throttle = proxy_mod.HostThrottle(clock=lambda: now[0])
 
     for interval in (2, 4, 8, 16, 60):
-        throttle.admit("example.com").release()
+        throttle.admit("example.com")
         with pytest.raises(proxy_mod.HostThrottleBusy) as exc:
             throttle.admit("example.com")
         assert exc.value.retry_after_s == interval
@@ -409,10 +409,10 @@ def test_proxy_throttle_resets_after_a_quiet_period(proxy_mod):
     throttle = proxy_mod.HostThrottle(clock=lambda: now[0])
 
     for interval in (2, 4, 8):
-        throttle.admit("example.com").release()
+        throttle.admit("example.com")
         now[0] += interval
     now[0] += proxy_mod.HOST_IDLE_RESET_S
-    throttle.admit("example.com").release()
+    throttle.admit("example.com")
     with pytest.raises(proxy_mod.HostThrottleBusy) as exc:
         throttle.admit("example.com")
     assert exc.value.retry_after_s == 2
@@ -422,7 +422,7 @@ def test_proxy_throttle_counts_denied_attempts_as_non_quiet(proxy_mod):
     now = [100.0]
     throttle = proxy_mod.HostThrottle(clock=lambda: now[0])
 
-    throttle.admit("example.com").release()
+    throttle.admit("example.com")
     now[0] += 1
     with pytest.raises(proxy_mod.HostThrottleBusy):
         throttle.admit("example.com")
@@ -430,7 +430,7 @@ def test_proxy_throttle_counts_denied_attempts_as_non_quiet(proxy_mod):
     # A denial is traffic. It keeps the backoff at the second interval until
     # five quiet minutes have elapsed after that attempt.
     now[0] += proxy_mod.HOST_IDLE_RESET_S - 1
-    throttle.admit("example.com").release()
+    throttle.admit("example.com")
     with pytest.raises(proxy_mod.HostThrottleBusy) as exc:
         throttle.admit("example.com")
     assert exc.value.retry_after_s == 4
@@ -438,8 +438,8 @@ def test_proxy_throttle_counts_denied_attempts_as_non_quiet(proxy_mod):
 
 def test_proxy_throttle_allows_independent_hosts(proxy_mod):
     throttle = proxy_mod.HostThrottle(clock=lambda: 100.0)
-    throttle.admit("first.example").release()
-    throttle.admit("second.example").release()
+    throttle.admit("first.example")
+    throttle.admit("second.example")
 
 
 def test_proxy_throttle_rejects_concurrent_same_host_connections(proxy_mod):
@@ -449,35 +449,19 @@ def test_proxy_throttle_rejects_concurrent_same_host_connections(proxy_mod):
 
     def attempt(_unused):
         try:
-            return throttle.admit("example.com")
+            throttle.admit("example.com")
+            return "admitted"
         except proxy_mod.HostThrottleBusy as exc:
             return exc
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(attempt, range(4)))
 
-    admitted = [result for result in results
-                if isinstance(result, proxy_mod.HostAdmission)]
+    admitted = [result for result in results if result == "admitted"]
     denied = [result for result in results
               if isinstance(result, proxy_mod.HostThrottleBusy)]
     assert len(admitted) == 1
-    admitted[0].release()
     assert [result.retry_after_s for result in denied] == [2, 2, 2]
-
-
-def test_proxy_throttle_escalates_when_a_long_connection_stays_active(proxy_mod):
-    now = [100.0]
-    throttle = proxy_mod.HostThrottle(clock=lambda: now[0])
-    admission = throttle.admit("example.com")
-
-    now[0] += 3
-    for interval in (4, 8, 16, 60):
-        with pytest.raises(proxy_mod.HostThrottleBusy) as exc:
-            throttle.admit("example.com")
-        assert exc.value.retry_after_s == interval
-        now[0] += interval
-
-    admission.release()
 
 
 def test_proxy_throttle_keeps_the_local_model_bridge_unthrottled(
@@ -491,14 +475,13 @@ def test_proxy_throttle_keeps_the_local_model_bridge_unthrottled(
 def test_proxy_connect_throttles_before_opening_upstream(proxy_mod, monkeypatch):
     calls = []
     upstream = object()
-    admission = object()
     monkeypatch.setattr(
-        proxy_mod, "admit_host", lambda host: calls.append(("admit", host)) or admission)
+        proxy_mod, "admit_host", lambda host: calls.append(("admit", host)))
     monkeypatch.setattr(
         proxy_mod.socket, "create_connection",
         lambda target, timeout: calls.append(("connect", target, timeout)) or upstream)
 
-    assert proxy_mod.connect_upstream("example.com", 443, None) == (upstream, admission)
+    assert proxy_mod.connect_upstream("example.com", 443, None) is upstream
     assert calls == [
         ("admit", "example.com"),
         ("connect", ("example.com", 443), 10),

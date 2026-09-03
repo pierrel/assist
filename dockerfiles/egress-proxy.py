@@ -44,10 +44,9 @@ User-approved grants (docs/2026-07-21-egress-approval-hitl.org):
   guidance prose lives here).
 
 Host throttling:
-  Every allowed remote hostname has at most one active upstream connection
-  and receives new connections on a fixed 2s, 4s, 8s, 16s, then 60s
-  backoff across all sandbox turns. Excess requests receive a local HTTP 429
-  before reaching the host. The local model bridge
+  Every allowed remote hostname receives new connections on a fixed 2s, 4s,
+  8s, 16s, then 60s backoff across all sandbox turns. Excess requests receive
+  a local HTTP 429 before reaching the host. The local model bridge
   ``host.docker.internal`` is excluded: it is not remote egress and normal
   model execution opens many connections through that name.  CONNECT remains
   opaque TLS forwarding, so this controls new connections rather than claiming
@@ -105,9 +104,8 @@ class HostThrottle:
         self._clock = clock
         self._lock = threading.Lock()
         self._states: dict[str, tuple[float, float, int]] = {}
-        self._active_hosts: set[str] = set()
 
-    def admit(self, host: str) -> "HostAdmission":
+    def admit(self, host: str) -> None:
         """Reserve one connection or raise without creating a waiting thread."""
         now = self._clock()
         with self._lock:
@@ -116,29 +114,12 @@ class HostThrottle:
             if now - last_request >= HOST_IDLE_RESET_S:
                 next_allowed, count = now, 0
             retry_after = max(1, math.ceil(next_allowed - now))
-            if host in self._active_hosts:
-                # The first active overlap keeps the current 2s start. If
-                # that window has passed but a long tunnel still owns the
-                # host, each further attempt advances the backoff rather than
-                # promising a futile one-second retry forever.
-                if next_allowed > now:
-                    self._states[host] = (next_allowed, now, count)
-                    raise HostThrottleBusy(retry_after)
-                interval_s = self._intervals_s[min(count, len(self._intervals_s) - 1)]
-                self._states[host] = (now + interval_s, now, count + 1)
-                raise HostThrottleBusy(int(interval_s))
             if next_allowed > now:
                 self._states[host] = (next_allowed, now, count)
                 raise HostThrottleBusy(retry_after)
-            self._active_hosts.add(host)
             interval_s = self._intervals_s[min(count, len(self._intervals_s) - 1)]
             self._states[host] = (now + interval_s, now, count + 1)
             self._prune(now)
-        return HostAdmission(self, host)
-
-    def release(self, host: str) -> None:
-        with self._lock:
-            self._active_hosts.discard(host)
 
     def _prune(self, now: float) -> None:
         if len(self._states) <= _THROTTLE_PRUNE_THRESHOLD:
@@ -147,17 +128,6 @@ class HostThrottle:
             host: state for host, state in self._states.items()
             if now - state[1] < HOST_IDLE_RESET_S
         }
-
-
-class HostAdmission:
-    """One admitted connection, released exactly when its pipe ends."""
-
-    def __init__(self, throttle: HostThrottle, host: str) -> None:
-        self._throttle = throttle
-        self._host = host
-
-    def release(self) -> None:
-        self._throttle.release(self._host)
 
 
 class HostThrottleBusy(Exception):
@@ -170,24 +140,18 @@ class HostThrottleBusy(Exception):
 HOST_THROTTLE = HostThrottle()
 
 
-def admit_host(host: str) -> HostAdmission | None:
+def admit_host(host: str) -> None:
     """Apply the shared remote-host admission boundary before connect."""
     if host in _UNTHROTTLED_HOSTS:
-        return None
-    return HOST_THROTTLE.admit(host)
+        return
+    HOST_THROTTLE.admit(host)
 
 
 def connect_upstream(host: str, port: int,
-                     approved_ip: str | None) -> tuple[socket.socket, HostAdmission | None]:
+                     approved_ip: str | None) -> socket.socket:
     """Admit then open one vetted upstream connection."""
-    admission = admit_host(host)
-    try:
-        upstream = socket.create_connection((approved_ip or host, port), timeout=10)
-    except Exception:
-        if admission is not None:
-            admission.release()
-        raise
-    return upstream, admission
+    admit_host(host)
+    return socket.create_connection((approved_ip or host, port), timeout=10)
 
 
 def deny(client: socket.socket, host: str, reason: str) -> None:
@@ -333,7 +297,6 @@ def read_request_head(client: socket.socket) -> tuple[str, bytes]:
 
 def handle(client: socket.socket, addr) -> None:
     upstream = None
-    admission = None
     try:
         client.settimeout(30)
         try:
@@ -369,7 +332,7 @@ def handle(client: socket.socket, addr) -> None:
                          "approved host resolves to private/reserved space")
                     return
             try:
-                upstream, admission = connect_upstream(host, port, approved_ip)
+                upstream = connect_upstream(host, port, approved_ip)
             except HostThrottleBusy as e:
                 throttle(client, addr[0], host, e.retry_after_s)
                 return
@@ -428,7 +391,7 @@ def handle(client: socket.socket, addr) -> None:
             new_request += h + "\r\n"
         new_request += "\r\n"
         try:
-            upstream, admission = connect_upstream(host, port, approved_ip)
+            upstream = connect_upstream(host, port, approved_ip)
         except HostThrottleBusy as e:
             throttle(client, addr[0], host, e.retry_after_s)
             return
@@ -455,8 +418,6 @@ def handle(client: socket.socket, addr) -> None:
                 upstream.close()
             except OSError:
                 pass
-        if admission is not None:
-            admission.release()
 
 
 def main() -> int:

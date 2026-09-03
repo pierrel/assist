@@ -24,8 +24,8 @@ use the proxy is a follow-up with a different transport and deployment design.
 
 The one long-lived =assist-egress-proxy= process owns a small in-memory
 =HostThrottle=.  Before opening an upstream socket, CONNECT and HTTP-proxy
-requests atomically admit the normalized hostname.  One host has at most one
-active connection and uses a fixed backoff sequence for successive starts:
+requests atomically admit the normalized hostname. One host uses a fixed
+backoff sequence for successive starts:
 2 seconds, 4, 8, 16, then 60 seconds on the fifth request.  The sequence
 resets only after five quiet minutes.  An extra request gets a local =429
 Retry-After= response without an upstream socket.  It does not create a
@@ -34,11 +34,6 @@ sleeping proxy thread or wait while holding a lock.
 A rejected attempt is still traffic: it refreshes the five-minute quiet-period
 clock without reducing or resetting the current backoff. Repeated retries
 therefore cannot make a busy host look idle and regain the initial interval.
-
-If an admitted connection remains active beyond its current wait window, the
-next contention attempt advances the same sequence instead of repeatedly
-promising a one-second retry that cannot succeed while that connection remains
-open. A first overlap still reports the initial 2-second window.
 
 The sequence is a fixed proxy boundary, not a per-tool/model knob.  It applies
 equally to the operator allowlist and a user-approved exact host:port grant.
@@ -74,11 +69,11 @@ from another sandbox never receive a false local-provenance claim.
 - Untrusted agent commands choose hostnames and can create many concurrent
   connections.  The proxy lowercases hostnames before the existing allowlist
   and throttle checks; all names use the same fixed per-host budget.
-- A host can be deliberately slow.  One active connection holds that host's
-  admission; extra requests fail locally rather than creating an unbounded
-  waiting-thread queue.  The escalating sequence limits a fresh burst while
-  preserving normal short navigation.  Other hosts continue normally.  The
-  existing upstream connect and tunnel-idle timeouts remain in force.
+- A host can be deliberately slow. The proxy never queues or sleeps a request:
+  an early start fails locally while the fixed sequence limits fresh starts.
+  Concurrent existing connections do not bypass that spacing. Other hosts
+  continue normally. The existing upstream connect and tunnel-idle timeouts
+  remain in force.
 - A long-lived proxy can observe many hostnames. Stale reservation entries are
   pruned after the map crosses a small threshold, preventing old hosts from
   accumulating indefinitely. Recent distinct hosts remain intentionally
