@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from time import monotonic, sleep
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -90,7 +91,6 @@ def test_store_keeps_immutable_transcript_and_binds_reads_to_thread(tmp_path: Pa
 
 
 @pytest.mark.parametrize("calibration, message", [
-    ([], "object"),
     ({"verdict": "partial", "reason": "Maybe."}, "verdict"),
     ({"verdict": "pass", "reason": ""}, "reason"),
     ({"verdict": "pass", "reason": "x" * 8_001}, "too large"),
@@ -103,6 +103,15 @@ def test_store_validates_private_calibration_evidence(
     with pytest.raises(ValueError, match=message):
         store.create(thread_id="thread-a", reason="The answer should be correct.",
                      scope="last_3", records=_records(), calibration=calibration)
+
+
+def test_store_rejects_non_object_calibration_evidence(tmp_path: Path):
+    store = CaptureStore(tmp_path / "captures", threads_root=tmp_path / "threads")
+
+    with pytest.raises(ValueError, match="object"):
+        store.create(thread_id="thread-a", reason="The answer should be correct.",
+                     scope="last_3", records=_records(),
+                     calibration=cast(dict[str, Any], []))
 
 
 def test_store_requires_calibration_for_new_captures_but_reads_legacy_requests(tmp_path: Path):
@@ -361,9 +370,30 @@ def test_worker_never_sends_private_calibration_to_models(tmp_path: Path):
         sleep(0.01)
     worker.stop()
 
-    sent = "\n".join(str(message.content) for request in model.requests for message in request)
-    assert "PRIVATE CALIBRATION REASON" not in sent
-    assert '"verdict": "fail"' not in sent
+    result = store.get_for_thread("thread-a", capture["request"]["capture_id"])["result"]
+    inputs = [
+        str(message.content)
+        for request in model.requests
+        for message in request
+        if isinstance(message, HumanMessage)
+    ]
+    assert len(inputs) == 2
+    interpreter_input = next(
+        message for message in inputs if message.startswith("BEGIN UNTRUSTED LIVE CAPTURE\n"))
+    judge_input = next(
+        message for message in inputs if message.startswith("BEGIN UNTRUSTED OUTCOME OBSERVATION\n"))
+    interpreter_payload = json.loads(
+        interpreter_input.removeprefix("BEGIN UNTRUSTED LIVE CAPTURE\n").removesuffix(
+            "\nEND UNTRUSTED LIVE CAPTURE"))
+    judge_payload = json.loads(
+        judge_input.removeprefix("BEGIN UNTRUSTED OUTCOME OBSERVATION\n").removesuffix(
+            "\nEND UNTRUSTED OUTCOME OBSERVATION"))
+
+    assert interpreter_payload == {
+        "reason": capture["request"]["reason"], "transcript": capture["transcript"],
+    }
+    assert judge_payload == result["observation"]
+    assert "PRIVATE CALIBRATION REASON" not in "\n".join(inputs)
 
 
 def test_only_one_worker_can_own_a_capture_store(tmp_path: Path):
