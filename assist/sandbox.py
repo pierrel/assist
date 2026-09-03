@@ -12,9 +12,11 @@ where the host bind mount lives. ``/agent`` passes through only on a
 backend explicitly constructed for a container with that private main-agent mount.
 """
 
+import hashlib
 import logging
 import os
 import re
+import secrets
 import shlex
 import threading
 import time
@@ -71,7 +73,9 @@ def _looks_like_egress_denial(output: str) -> bool:
 
 
 _THROTTLE_LOG = re.compile(
-    r"egress-proxy: THROTTLE client=(\S+) host=\S+ retry after (\d+)s")
+    r"egress-proxy: THROTTLE client=(\S+) host=\S+ retry after (\d+)s "
+    r"execution=([0-9a-f]{16})$")
+_EGRESS_PROXY_URL = "http://{token}@assist-egress-proxy:8888"
 
 
 _TIMEOUT_GUIDANCE = (
@@ -165,7 +169,8 @@ class DockerSandboxBackend(BaseSandbox):
         except Exception:
             return None
 
-    def _local_throttle_retry_after(self, command_started_at: float) -> int | None:
+    def _local_throttle_retry_after(self, command_started_at: float,
+                                    correlation: str) -> int | None:
         """Return a confirmed local-throttle delay from this command's events."""
         current_proxy_logs = self._proxy_logs_since(command_started_at)
         if current_proxy_logs is None:
@@ -178,7 +183,8 @@ class DockerSandboxBackend(BaseSandbox):
         for line in reversed(current_proxy_logs.decode(
                 "utf-8", errors="replace").splitlines()):
             match = _THROTTLE_LOG.search(line)
-            if match and match.group(1) == client_ip:
+            if (match and match.group(1) == client_ip
+                    and match.group(3) == correlation):
                 return min(60, max(1, int(match.group(2))))
         return None
 
@@ -309,11 +315,22 @@ class DockerSandboxBackend(BaseSandbox):
             f"{EXEC_TIMEOUT_SECONDS}s bash -c {shlex.quote(command)}"
         )
         command_started_at = time.time()
+        execution_token = "assist-exec-" + secrets.token_hex(16)
+        correlation = hashlib.sha256(execution_token.encode()).hexdigest()[:16]
+        proxy_url = _EGRESS_PROXY_URL.format(token=execution_token)
         try:
             exit_code, output_bytes = self.container.exec_run(
                 ["bash", "-c", bounded],
                 demux=False,
                 workdir=self.work_dir,
+                environment={
+                    "HTTPS_PROXY": proxy_url,
+                    "HTTP_PROXY": proxy_url,
+                    "https_proxy": proxy_url,
+                    "http_proxy": proxy_url,
+                    "ALL_PROXY": proxy_url,
+                    "all_proxy": proxy_url,
+                },
             )
         except DockerNotFound as e:
             # Container is gone (stopped, removed, daemon-restarted, TTL
@@ -344,7 +361,8 @@ class DockerSandboxBackend(BaseSandbox):
             output = _TIMEOUT_GUIDANCE.format(timeout=EXEC_TIMEOUT_SECONDS) + (
                 output if output else "(no output)"
             )
-        elif (retry_after := self._local_throttle_retry_after(command_started_at)) is not None:
+        elif (retry_after := self._local_throttle_retry_after(
+                command_started_at, correlation)) is not None:
             output = egress_throttled_guidance(retry_after) + output
         elif exit_code != 0 and _looks_like_egress_denial(output):
             # The egress proxy denied a host. curl discards CONNECT response

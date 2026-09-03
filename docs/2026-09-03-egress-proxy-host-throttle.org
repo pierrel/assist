@@ -54,9 +54,10 @@ and loop guards remain the complementary bounds.
 The proxy returns =429 Retry-After=, an =X-Assist-Egress-Result: throttled=
 header, and a truthful plaintext body for HTTP clients. Some clients discard
 all of that metadata, even while returning a successful process exit. The
-trusted sandbox host boundary takes a small before/after proxy-log snapshot for
-each command and accepts only a newly emitted throttle event matching that
-sandbox container's egress-network IP. It then prepends one centralized
+trusted sandbox host boundary gives every command a fresh proxy credential and
+uses Docker's command-start log cursor. It accepts only a newly emitted
+throttle event matching both that sandbox container's egress-network IP and
+the credential's hashed correlation marker. It then prepends one centralized
 explanation: Assist stopped the request before the remote host was contacted,
 this is neither an outage nor an approval denial, and the agent must use
 existing evidence or another allowed source instead of immediately retrying or

@@ -2,6 +2,8 @@
 functions, routes, render (docs/2026-07-21-egress-approval-hitl.org). The
 live-proxy half (real containers) lives in dockerfiles/test-sandbox-egress.sh.
 """
+import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -491,7 +493,7 @@ def test_proxy_connect_throttles_before_opening_upstream(proxy_mod, monkeypatch)
 def test_proxy_throttle_response_never_contacts_the_upstream(proxy_mod):
     client, peer = socket.socketpair()
     try:
-        proxy_mod.throttle(client, "172.30.0.2", "example.com", 8)
+        proxy_mod.throttle(client, "172.30.0.2", "example.com", 8, None)
         response = peer.recv(4096).decode()
     finally:
         client.close()
@@ -501,6 +503,18 @@ def test_proxy_throttle_response_never_contacts_the_upstream(proxy_mod):
     assert "X-Assist-Egress-Result: throttled\r\n" in response
     assert "Retry-After: 8\r\n" in response
     assert response.endswith("request stopped locally\n")
+
+
+def test_proxy_request_correlation_is_hashed_and_strict(proxy_mod):
+    token = "assist-exec-" + "a" * 32
+    header = "Proxy-Authorization: Basic " + base64.b64encode(
+        f"{token}:".encode()).decode()
+    assert proxy_mod.request_correlation(header) == hashlib.sha256(
+        token.encode()).hexdigest()[:16]
+    assert proxy_mod.request_correlation(
+        "Proxy-Authorization: Basic not-base64") is None
+    assert proxy_mod.request_correlation(
+        "Proxy-Authorization: Basic " + base64.b64encode(b"other:").decode()) is None
 
 
 # --- denial-signature matcher -------------------------------------------------

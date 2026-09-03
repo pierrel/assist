@@ -52,10 +52,13 @@ Host throttling:
   opaque TLS forwarding, so this controls new connections rather than claiming
   to inspect encrypted response rate-limit headers.
 """
+import base64
+import hashlib
 import ipaddress
 import json
 import math
 import os
+import re
 import select
 import socket
 import sys
@@ -79,6 +82,7 @@ _THROTTLE_PRUNE_THRESHOLD = 256
 # name.  It is not remote egress, and throttling it would serialize every
 # model call in a normal turn.
 _UNTHROTTLED_HOSTS = frozenset({"host.docker.internal"})
+_EXECUTION_TOKEN_RE = re.compile(r"assist-exec-[0-9a-f]{32}")
 
 
 def load_allowlist() -> frozenset[str]:
@@ -167,13 +171,40 @@ def deny(client: socket.socket, host: str, reason: str) -> None:
         pass
 
 
+def request_correlation(header_block: str) -> str | None:
+    """Return a hashed per-execution proxy marker, if one is well formed.
+
+    The sandbox host sets a fresh username in its proxy URL for every command.
+    Clients put it in Proxy-Authorization, which is visible before a CONNECT
+    tunnel starts. Hash it before logging: the log only needs a correlation
+    marker and must not retain the token itself.
+    """
+    for line in header_block.split("\r\n"):
+        name, separator, value = line.partition(":")
+        if not separator or name.strip().lower() != "proxy-authorization":
+            continue
+        scheme, separator, encoded = value.strip().partition(" ")
+        if scheme.lower() != "basic" or not separator:
+            return None
+        try:
+            username, _, _ = base64.b64decode(encoded, validate=True).decode(
+                "utf-8").partition(":")
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if _EXECUTION_TOKEN_RE.fullmatch(username):
+            return hashlib.sha256(username.encode()).hexdigest()[:16]
+        return None
+    return None
+
+
 def throttle(client: socket.socket, client_ip: str, host: str,
-             retry_after_s: int) -> None:
+             retry_after_s: int, correlation: str | None) -> None:
     """Return a local bounded-rate response without contacting the host."""
-    # The host backend reads only the NEW proxy log suffix for this container's
-    # egress-network IP. That is the trusted provenance signal for clients
-    # which discard both a standard 429 body and its headers.
-    log(f"THROTTLE client={client_ip} host={host} retry after {retry_after_s}s")
+    # The host backend reads timestamped proxy events matching both this
+    # container's egress-network IP and its fresh execution marker. That is
+    # trusted provenance for clients which discard a 429 body and headers.
+    log(f"THROTTLE client={client_ip} host={host} retry after {retry_after_s}s "
+        f"execution={correlation or '-'}")
     try:
         client.sendall(
             b"HTTP/1.1 429 Too Many Requests\r\n"
@@ -307,6 +338,7 @@ def handle(client: socket.socket, addr) -> None:
         if not head:
             return
         request_line, _, header_block = head.partition("\r\n")
+        correlation = request_correlation(header_block)
         parts = request_line.split(" ")
         if len(parts) != 3:
             deny(client, "<malformed>", f"bad request line: {request_line!r}")
@@ -334,7 +366,7 @@ def handle(client: socket.socket, addr) -> None:
             try:
                 upstream = connect_upstream(host, port, approved_ip)
             except HostThrottleBusy as e:
-                throttle(client, addr[0], host, e.retry_after_s)
+                throttle(client, addr[0], host, e.retry_after_s, correlation)
                 return
             except OSError as e:
                 deny(client, host, f"upstream connect failed: {e}")
@@ -380,7 +412,7 @@ def handle(client: socket.socket, addr) -> None:
             if not line:
                 continue
             name = line.split(":", 1)[0].strip().lower()
-            if name in ("proxy-connection", "connection"):
+            if name in ("proxy-connection", "proxy-authorization", "connection"):
                 continue
             kept_headers.append(line)
         new_request = f"{method} {path} HTTP/1.1\r\n"
@@ -393,7 +425,7 @@ def handle(client: socket.socket, addr) -> None:
         try:
             upstream = connect_upstream(host, port, approved_ip)
         except HostThrottleBusy as e:
-            throttle(client, addr[0], host, e.retry_after_s)
+            throttle(client, addr[0], host, e.retry_after_s, correlation)
             return
         except OSError as e:
             deny(client, host, f"upstream connect failed: {e}")
