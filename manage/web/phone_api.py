@@ -593,10 +593,11 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
 
 def _assistant_response(tid: str, response_id: str) -> str:
     """Read a pinned assistant response by its sealed write position."""
-    sealed = _checkpoint_position(_open_sealed_id(tid, response_id, "m") or (), with_role=True)
+    fields = _open_sealed_id(tid, response_id, "m")
+    sealed = _checkpoint_position(fields or (), with_role=True)
     if sealed is not None:
-        fields = _open_sealed_id(tid, response_id, "m")
-        assert fields is not None and fields[4] == "assistant"
+        if fields is None or fields[4] != "assistant":
+            raise HTTPException(status_code=404, detail="Assistant response not found")
         checkpoint_id, task_id, index, item_index = sealed
         saver = state.MANAGER.checkpointer
         with saver.cursor(transaction=False) as cursor:

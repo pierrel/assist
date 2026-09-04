@@ -411,10 +411,14 @@ def test_checkpoint_history_pages_message_writes_without_hydrating_graph_state(t
 
     response_id = next(message["id"] for message in newest["messages"]
                        if message["role"] == "assistant")
+    user_id = next(message["id"] for message in newest["messages"]
+                   if message["role"] == "user")
     pin = client.post("/api/v1/phone/threads/thread-a/pins", headers=_auth(),
                       json={"response_id": response_id})
     assert pin.status_code == 200
     assert pin.json()["text"] == "ok"
+    assert client.post("/api/v1/phone/threads/thread-a/pins", headers=_auth(),
+                       json={"response_id": user_id}).status_code == 404
 
     deleted = client.delete(f"/api/v1/phone/threads/thread-a/pins/{response_id}",
                             headers=_auth())
