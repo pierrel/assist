@@ -18,8 +18,7 @@ no-store=.
   that opaque, authenticated cursor. A returned =next_before= is the only
   valid next cursor; the client must not invent offsets. Deep Agent history is
   read from a capped suffix of LangGraph's append-only message writes, never by
-  restoring the complete graph state. Pin IDs likewise seal a single write
-  position, so pinning an old response does not scan the transcript.
+  restoring the complete graph state.
 - Each transcript record has a stable opaque id, role, text, kind, optional
   persisted timestamp, and =final= or =incomplete= state. Historic Deep Agent
   checkpoints do not store per-message timestamps, so that field is null
@@ -33,7 +32,7 @@ no-store=.
 - =GET /diff=, =GET /workspace=, and =GET /workspace/archive= expose the
   authoritative worktree only through safe relative paths. The scanner rejects
   root and nested symlinks and bounds entries and traversal nodes.
-- =GET/POST/DELETE /pins= manages durable pins by stable assistant response id.
+- Pins are client-local UI state. This API neither receives nor stores pins.
 
 * Bounds and failure semantics
 
