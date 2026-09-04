@@ -82,6 +82,11 @@ def test_thread_list_uses_stored_titles_and_supplies_chooser_metadata(tmp_path, 
     monkeypatch.setattr(state.MANAGER, "list", lambda: ["thread-a"])
     monkeypatch.setattr(state.MANAGER, "get",
                         lambda tid: (_ for _ in ()).throw(AssertionError("no model title")))
+    monkeypatch.setattr(state, "_get_status", lambda tid: {
+        "stage": "ready", "domain": "https://example.com/repo.git",
+    })
+    monkeypatch.setattr(phone_api, "_thread_workspace",
+                        lambda tid: (_ for _ in ()).throw(AssertionError("no Git worktree scan")))
 
     response = _client(monkeypatch).get("/api/v1/phone/threads", headers=_auth())
 
@@ -89,6 +94,8 @@ def test_thread_list_uses_stored_titles_and_supplies_chooser_metadata(tmp_path, 
     thread = response.json()["threads"][0]
     assert thread["description"] == "thread-a"
     assert thread["search_description"] == "thread-a"
+    assert thread["repo_key"] == phone_api._repo_key("https://example.com/repo.git")
+    assert thread["repo_label"] == "repo"
     assert isinstance(thread["activity_at"], float)
     assert len(thread["revision"]) == 24
 

@@ -637,12 +637,20 @@ def _assistant_response(tid: str, response_id: str) -> str:
     raise HTTPException(status_code=404, detail="Assistant response not found")
 
 
+def _thread_repo_summary(status: dict[str, Any]) -> tuple[str | None, str]:
+    """Return the persisted chooser label without inspecting a Git worktree."""
+    domain = status.get("domain")
+    if not isinstance(domain, str) or not domain:
+        return None, "No repository"
+    return _repo_key(domain), state._domain_label(domain)
+
+
 def _list_threads() -> dict[str, Any]:
     values: list[tuple[int, dict[str, Any]]] = []
     for tid in state.MANAGER.list()[:MAX_THREADS]:
         try:
             status = state._get_status(tid)
-            workspace = _thread_workspace(tid)
+            repo_key, repo_label = _thread_repo_summary(status)
             title = _stored_thread_title(tid)
             activity_at = os.stat(_thread_dir(tid)).st_mtime
             values.append((threads._thread_status_rank(tid, status.get("stage", "ready")), {
@@ -651,8 +659,8 @@ def _list_threads() -> dict[str, Any]:
                 "search_description": _normalized_search_title(title),
                 "harness": read_thread_engine(_thread_dir(tid)).name,
                 "status": status.get("stage", "ready"),
-                "repo_key": workspace["repo_key"],
-                "repo_label": workspace["repo_label"],
+                "repo_key": repo_key,
+                "repo_label": repo_label,
                 "unread": state._has_unseen_response(tid),
                 "activity_at": activity_at,
                 "revision": _thread_revision_cursor(tid),
