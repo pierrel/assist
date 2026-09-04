@@ -1,0 +1,48 @@
+#+title: Phone thread API contract
+
+* Scope
+
+The phone client uses the authenticated JSON API at =/api/v1/phone=. It is a
+machine interface, never an HTML compatibility layer. Set the distinct
+=ASSIST_PHONE_API_TOKEN= only in the ignored deployment environment, then send
+it as =Authorization: Bearer <token>=. Every response is =Cache-Control:
+no-store=.
+
+* Resources
+
+- =GET /threads= returns bounded chooser metadata: id, description,
+  search_description, repository, harness, lifecycle status, activity time,
+  unread flag, and revision cursor.
+- =GET /threads/{id}= returns the recent bounded transcript. =GET
+  /threads/{id}/history?before=<cursor>= returns records strictly older than
+  that opaque, authenticated cursor. A returned =next_before= is the only
+  valid next cursor; the client must not invent offsets. Deep Agent history is
+  read from a capped suffix of LangGraph's append-only message writes, never by
+  restoring the complete graph state. Pin IDs likewise seal a single write
+  position, so pinning an old response does not scan the transcript.
+- Each transcript record has a stable opaque id, role, text, kind, optional
+  persisted timestamp, and =final= or =incomplete= state. Historic Deep Agent
+  checkpoints do not store per-message timestamps, so that field is null
+  rather than guessed.
+- =POST /threads= creates the deterministic draft selected by an
+  =Idempotency-Key=. =POST /threads/{id}/messages= accepts one durable turn.
+  Both require a 16–128 character ASCII idempotency key; retrying the same
+  request returns the existing run and reusing a key for different input is
+  rejected. =GET /threads/{id}/runs/{run}= reads run status, =DELETE= cancels
+  only unclaimed work, and =GET .../events= is a bounded status SSE stream.
+- =GET /diff=, =GET /workspace=, and =GET /workspace/archive= expose the
+  authoritative worktree only through safe relative paths. The scanner rejects
+  root and nested symlinks and bounds entries and traversal nodes.
+- =GET/POST/DELETE /pins= manages durable pins by stable assistant response id.
+
+* Bounds and failure semantics
+
+Request bodies, response pages, SSE streams, archives, workspace traversal,
+phone-created threads, per-thread runs, and queued phone turns are bounded.
+Contention returns =429=. Server exception detail remains in server logs; the
+phone receives a generic failure state. A first-turn clone has a fixed hard
+deadline and runs on a dedicated initialization worker, never FastAPI's shared
+worker pool or the serial turn scheduler. At most two first-thread setups are
+durably admitted across browser, Pi-handoff, and phone routes; excess creation
+requests fail before creating a directory or Run. Its durable
+=initializing=/=cloning= state is replayed after restart.

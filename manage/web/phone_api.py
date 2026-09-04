@@ -8,6 +8,8 @@ single FastAPI event loop.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import hmac
 import io
@@ -18,17 +20,20 @@ import stat
 import subprocess
 import tarfile
 import threading
+import unicodedata
 from pathlib import Path
 from typing import Annotated, Any
 
 import anyio
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
+from langchain_core.messages import convert_to_messages
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from assist.domain_manager import current_branch
 from assist.phone_pins import MAX_PINS, create_pin, delete_pin, list_pins
-from assist.run_service import NONTERMINAL_STATUSES, TERMINAL_STATUSES, RunNotFound
+from assist.run_service import InvalidRunTransition, TERMINAL_STATUSES, RunNotFound
+from assist.thread import _messages_to_dicts
 from assist.thread_engine import ThreadEngineError, read_thread_engine
 from assist.visible_conversation import visible_records_from_dicts
 from manage.web import state
@@ -44,11 +49,24 @@ MAX_SNAPSHOT_MESSAGE_BYTES = 32 * 1024
 MAX_SNAPSHOT_BYTES = 256 * 1024
 MAX_DIFF_BYTES = 256 * 1024
 MAX_FILES = 1_000
+MAX_WORKSPACE_NODES = 2_000
+MAX_HISTORY_SCAN_WRITES = 1_024
+MAX_HISTORY_WRITE_BYTES = 1 * 1024 * 1024
+MAX_HISTORY_SCAN_BYTES = 4 * 1024 * 1024
 MAX_THREADS = 500
 MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
 MAX_ARCHIVE_FILE_BYTES = 4 * 1024 * 1024
+MAX_DESCRIPTION_CHARS = 120
+MAX_PHONE_THREADS = 200
+MAX_PHONE_RUNS_PER_THREAD = 200
+MAX_PHONE_PENDING_RUNS = 4
+MAX_PHONE_INITIALIZATIONS = 1
 _SSE_SLOTS = threading.BoundedSemaphore(4)
+_ARCHIVE_SLOTS = threading.BoundedSemaphore(1)
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_MESSAGE_SOURCE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,199}\Z")
+_HISTORY_CURSOR_RE = re.compile(r"(?:m-[0-9a-f]{32}|c-[A-Za-z0-9_-]{24,240})\Z")
+_SEALED_ID_RE = re.compile(r"[A-Za-z0-9_-]{24,240}\Z")
 _KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{15,127}\Z")
 _FILE_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_./-])([A-Za-z0-9][A-Za-z0-9._/-]{0,240}"
@@ -71,7 +89,7 @@ class _SendMessage(_StrictModel):
 
 
 class _CreatePin(_StrictModel):
-    response_id: Annotated[str, Field(min_length=1, max_length=128)]
+    response_id: Annotated[str, Field(min_length=1, max_length=256)]
 
 
 async def _validated_body(request: Request, model: type[_StrictModel]) -> _StrictModel:
@@ -123,6 +141,55 @@ def _repo_key(repo: str) -> str:
     return hashlib.sha256(repo.encode("utf-8")).hexdigest()[:20]
 
 
+def _stored_thread_title(tid: str) -> str:
+    """Return a bounded stored title without ever creating a model request."""
+    cached = state.DESCRIPTION_CACHE.get(tid)
+    if isinstance(cached, str):
+        return cached[:MAX_DESCRIPTION_CHARS]
+    try:
+        with open(os.path.join(_thread_dir(tid), "description.txt"), encoding="utf-8") as source:
+            title = source.read(MAX_DESCRIPTION_CHARS + 1).strip()
+    except OSError:
+        title = ""
+    if title:
+        title = title[:MAX_DESCRIPTION_CHARS]
+        state.DESCRIPTION_CACHE[tid] = title
+        return title
+    status = state._get_status(tid)
+    if status.get("stage") in threads.BUSY_STAGES:
+        pending = str(status.get("pending_message") or "").strip().splitlines()
+        if pending:
+            return pending[0][:MAX_DESCRIPTION_CHARS]
+        return "New thread"
+    return tid
+
+
+def _normalized_search_title(title: str) -> str:
+    """Drop only leading whitespace and pictographic symbols from TITLE."""
+    index = 0
+    while index < len(title):
+        category = unicodedata.category(title[index])
+        if title[index].isspace():
+            index += 1
+            continue
+        if category in {"So", "Sk"}:
+            index += 1
+            while index < len(title) and unicodedata.category(title[index]) == "Mn":
+                index += 1
+            continue
+        break
+    return title[index:]
+
+
+def _thread_revision_cursor(tid: str) -> str:
+    """Return an opaque list-cache invalidator from the thread directory metadata."""
+    try:
+        activity_ns = os.stat(_thread_dir(tid)).st_mtime_ns
+    except OSError:
+        activity_ns = 0
+    return hashlib.sha256(f"{tid}\0{activity_ns}".encode("utf-8")).hexdigest()[:24]
+
+
 def _domain_choices() -> list[dict[str, str]]:
     return [
         {"repo_key": _repo_key(domain), "label": state._domain_label(domain)}
@@ -153,40 +220,136 @@ def _thread_dir(tid: str) -> str:
 
 def _message_id(tid: str, message: dict, ordinal: int) -> str:
     """Return an opaque response identity without exposing checkpoint internals."""
+    position = message.get("_phone_checkpoint_position")
+    if (isinstance(position, tuple) and len(position) == 4
+            and all(isinstance(value, (str, int)) for value in position)):
+        return _seal_id(tid, "m", (*position, str(message.get("role", ""))))
     source = message.get("message_id")
-    if isinstance(source, str) and _ID_RE.fullmatch(source):
-        payload = f"{tid}\0{source}".encode("utf-8")
+    if isinstance(source, str) and _MESSAGE_SOURCE_ID_RE.fullmatch(source):
+        payload = f"{tid}\0{message.get('role', '')}\0{source}".encode("utf-8")
     else:
         payload = (f"{tid}\0{ordinal}\0{message.get('role', '')}\0"
                    f"{message.get('content', '')}").encode("utf-8")
     return "m-" + hashlib.sha256(payload).hexdigest()[:32]
 
 
-def _workspace_entries(tid: str, *, include_size: bool = True) -> list[dict[str, Any]]:
-    """List regular worktree entries with no host paths or symlink traversal."""
-    root = Path(state.MANAGER.thread_default_working_dir(tid)).resolve()
-    if not root.is_dir():
-        return []
+def _seal_id(tid: str, prefix: str, values: tuple[object, ...]) -> str:
+    """Seal a checkpoint position into an opaque, thread-bound phone token."""
+    secret = os.environ.get(PHONE_API_TOKEN_ENV)
+    if not secret:
+        raise HTTPException(status_code=503, detail="Phone API is not configured")
+    payload = json.dumps(values, separators=(",", ":")).encode("utf-8")
+    tag = hmac.new(secret.encode("utf-8"),
+                   tid.encode("utf-8") + b"\0" + prefix.encode("ascii") + b"\0" + payload,
+                   hashlib.sha256).digest()[:16]
+    return prefix + "-" + base64.urlsafe_b64encode(payload + tag).rstrip(b"=").decode("ascii")
+
+
+def _open_sealed_id(tid: str, value: str, prefix: str) -> tuple[object, ...] | None:
+    """Return a valid sealed phone token's fields, never accepting an offset."""
+    marker = prefix + "-"
+    if not value.startswith(marker) or not _SEALED_ID_RE.fullmatch(value[len(marker):]):
+        return None
+    encoded = value[len(marker):]
+    try:
+        raw = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+    except (ValueError, binascii.Error):
+        return None
+    if len(raw) <= 16:
+        return None
+    payload, tag = raw[:-16], raw[-16:]
+    secret = os.environ.get(PHONE_API_TOKEN_ENV)
+    if not secret:
+        return None
+    expected = hmac.new(secret.encode("utf-8"),
+                        tid.encode("utf-8") + b"\0" + prefix.encode("ascii") + b"\0" + payload,
+                        hashlib.sha256).digest()[:16]
+    if not hmac.compare_digest(tag, expected):
+        return None
+    try:
+        decoded = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(decoded, list):
+        return None
+    return tuple(decoded)
+
+
+def _checkpoint_position(values: tuple[object, ...], *, with_role: bool = False) -> tuple[str, str, int, int] | None:
+    """Validate one sealed checkpoint position before it reaches SQLite."""
+    expected = 5 if with_role else 4
+    if len(values) != expected:
+        return None
+    checkpoint_id, task_id, index, item_index = values[:4]
+    if (not isinstance(checkpoint_id, str) or not isinstance(task_id, str)
+            or len(checkpoint_id) > 128 or len(task_id) > 256
+            or not isinstance(index, int) or not isinstance(item_index, int)
+            or index < 0 or item_index < 0):
+        return None
+    if with_role and values[4] not in {"user", "assistant", "tools"}:
+        return None
+    return checkpoint_id, task_id, index, item_index
+
+
+def _message_timestamp(message: dict) -> str | None:
+    """Return an optional persisted message timestamp without inventing one."""
+    for key in ("timestamp", "created_at", "ts"):
+        value = message.get(key)
+        if isinstance(value, str) and len(value) <= 128:
+            return value
+    return None
+
+
+def _workspace_entries(tid: str, *, include_size: bool = True,
+                       with_truncation: bool = False) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], bool]:
+    """List a bounded regular-file workspace without following any symlink."""
+    root = state.MANAGER.thread_default_working_dir(tid)
     entries: list[dict[str, Any]] = []
-    for current, dirs, files in os.walk(root, followlinks=False):
-        dirs[:] = [name for name in dirs if name != ".git" and not (Path(current) / name).is_symlink()]
-        for name in files:
-            if name == ".git":
-                continue
-            path = Path(current) / name
-            if path.is_symlink() or not path.is_file():
-                continue
-            try:
-                relative = path.relative_to(root).as_posix()
-                size = path.stat().st_size
-            except OSError:
-                continue
-            entries.append({"path": relative, "type": "file", "size": size} if include_size
-                           else {"path": relative})
-            if len(entries) >= MAX_FILES:
-                return entries
+    truncated = False
+    try:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return (entries, truncated) if with_truncation else entries
+    try:
+        nodes = 0
+        for current, dirs, files, current_fd in os.fwalk(".", dir_fd=root_fd,
+                                                          follow_symlinks=False):
+            base = "" if current == "." else current.removeprefix("./")
+            safe_dirs = []
+            for name in dirs:
+                nodes += 1
+                if nodes > MAX_WORKSPACE_NODES:
+                    truncated = True
+                    break
+                try:
+                    mode = os.stat(name, dir_fd=current_fd, follow_symlinks=False).st_mode
+                except OSError:
+                    continue
+                if name != ".git" and stat.S_ISDIR(mode):
+                    safe_dirs.append(name)
+            dirs[:] = safe_dirs
+            if truncated:
+                break
+            for name in files:
+                nodes += 1
+                if nodes > MAX_WORKSPACE_NODES or len(entries) >= MAX_FILES:
+                    truncated = True
+                    break
+                try:
+                    metadata = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+                except OSError:
+                    continue
+                if name == ".git" or not stat.S_ISREG(metadata.st_mode):
+                    continue
+                relative = f"{base}/{name}" if base else name
+                entries.append({"path": relative, "type": "file", "size": metadata.st_size}
+                               if include_size else {"path": relative})
+            if truncated:
+                break
+    finally:
+        os.close(root_fd)
     entries.sort(key=lambda entry: entry["path"])
-    return entries
+    return (entries, truncated) if with_truncation else entries
 
 
 def _file_references(text: str, known_paths: set[str]) -> list[dict[str, str]]:
@@ -226,33 +389,134 @@ def _thread_workspace(tid: str) -> dict[str, Any]:
 
 
 def _thread_messages(tid: str) -> list[dict]:
+    """Legacy full projection for Pi threads and browser-compatible test fixtures."""
     chat, pi_messages, _, _ = threads._thread_messages_for_fragment(tid)
     return pi_messages if pi_messages is not None else (
         [] if chat is None else getattr(chat, "get_web_messages", chat.get_messages)())
 
 
-def _snapshot(tid: str, before: int = 0) -> dict[str, Any]:
+def _checkpoint_history(tid: str, before: tuple[str, str, int, int] | None) -> tuple[list[dict], bool]:
+    """Read a bounded suffix of root message writes without hydrating graph state.
+
+    LangGraph persists each new message as a ``writes`` row.  Reading that append
+    stream is intentionally separate from ``Thread.get_web_messages()``: the
+    latter restores the complete ``messages`` channel before its caller can page
+    it.  The phone path reads at most the declared number and bytes of writes.
+    """
+    saver = state.MANAGER.checkpointer
+    where = "thread_id = ? AND checkpoint_ns = '' AND channel = 'messages'"
+    params: list[object] = [tid]
+    if before is not None:
+        checkpoint_id, task_id, index, _item_index = before
+        where += (" AND (checkpoint_id < ? OR (checkpoint_id = ? AND "
+                  "(task_id < ? OR (task_id = ? AND idx <= ?))))")
+        params.extend([checkpoint_id, checkpoint_id, task_id, task_id, index])
+    query = ("SELECT checkpoint_id, task_id, idx, type, length(value) "
+             "FROM writes WHERE " + where +
+             " ORDER BY checkpoint_id DESC, task_id DESC, idx DESC LIMIT ?")
+    params.append(MAX_HISTORY_SCAN_WRITES + 1)
+    rows: list[tuple[str, str, int, str, int]] = []
+    with saver.cursor(transaction=False) as cursor:
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        has_more = len(rows) > MAX_HISTORY_SCAN_WRITES
+        rows = rows[:MAX_HISTORY_SCAN_WRITES]
+        newest_first: list[dict] = []
+        loaded_bytes = 0
+        for checkpoint_id, task_id, index, kind, value_size in rows:
+            if not isinstance(value_size, int) or value_size < 0:
+                continue
+            if value_size > MAX_HISTORY_WRITE_BYTES or loaded_bytes + value_size > MAX_HISTORY_SCAN_BYTES:
+                newest_first.append({
+                    "role": "assistant", "content": "[Message exceeds the mobile history limit.]",
+                    "message_id": f"checkpoint:{checkpoint_id}:{task_id}:{index}:oversize",
+                    "_phone_checkpoint_position": (checkpoint_id, task_id, index, 0),
+                })
+                has_more = True
+                continue
+            cursor.execute(
+                "SELECT value FROM writes WHERE thread_id = ? AND checkpoint_ns = '' "
+                "AND checkpoint_id = ? AND task_id = ? AND idx = ? AND channel = 'messages'",
+                (tid, checkpoint_id, task_id, index),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                continue
+            loaded_bytes += value_size
+            try:
+                value = saver.serde.loads_typed((kind, row[0]))
+                items = value if isinstance(value, list) else [value]
+                messages = convert_to_messages(items)
+            except Exception:
+                newest_first.append({
+                    "role": "assistant", "content": "[Message is unavailable on this device.]",
+                    "message_id": f"checkpoint:{checkpoint_id}:{task_id}:{index}:invalid",
+                    "_phone_checkpoint_position": (checkpoint_id, task_id, index, 0),
+                })
+                continue
+            for item_index in range(len(messages) - 1, -1, -1):
+                if (before is not None and checkpoint_id == before[0] and task_id == before[1]
+                        and index == before[2] and item_index >= before[3]):
+                    continue
+                projected = _messages_to_dicts(
+                    [messages[item_index]], split_tool_call_content=True,
+                    include_message_ids=False)
+                for message in reversed(projected):
+                    message["message_id"] = f"checkpoint:{checkpoint_id}:{task_id}:{index}:{item_index}"
+                    message["_phone_checkpoint_position"] = (checkpoint_id, task_id, index, item_index)
+                    newest_first.append(message)
+    newest_first.reverse()
+    return newest_first, has_more
+
+
+def _thread_history(tid: str, before: str | None) -> tuple[list[dict], bool, bool]:
+    """Return chronological phone history plus whether it is checkpoint-backed."""
+    # Pi conversations do not use the LangGraph write store.  They are small,
+    # local records and keep the legacy sealed-hash cursor until their own store
+    # gains the same append reader.
+    if threads._is_pi_thread(tid):
+        raw_messages = _thread_messages(tid)
+        if before is None:
+            return raw_messages, False, False
+        end = next((ordinal - 1 for ordinal, raw in enumerate(raw_messages, start=1)
+                    if _message_id(tid, raw, ordinal) == before), -1)
+        if end < 0:
+            raise HTTPException(status_code=409, detail="History cursor is no longer available")
+        return raw_messages[:end], False, False
+    if before is not None:
+        cursor = _checkpoint_position(_open_sealed_id(tid, before, "c") or ())
+        if cursor is None:
+            raise HTTPException(status_code=422, detail="Invalid history cursor")
+    else:
+        cursor = None
+    messages, has_more = _checkpoint_history(tid, cursor)
+    return messages, has_more, True
+
+
+def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
     _thread_dir(tid)
-    raw_messages = _thread_messages(tid)
-    if before < 0 or before > len(raw_messages):
+    if before is not None and not _HISTORY_CURSOR_RE.fullmatch(before):
         raise HTTPException(status_code=422, detail="Invalid history cursor")
-    end = len(raw_messages) - before
+    raw_messages, stored_has_more, checkpoint_backed = _thread_history(tid, before)
+    end = len(raw_messages)
     start = max(0, end - MAX_HISTORY_MESSAGES)
     selected = raw_messages[start:end]
     records = visible_records_from_dicts(selected)
     known_paths = {entry["path"] for entry in _workspace_entries(tid, include_size=False)}
+    status = state._get_status(tid)
     messages: list[dict[str, Any]] = []
     total_bytes = 0
     truncated = False
     covered_raw = 0
-    # `before` counts raw records from the newest end.  Consume this page from
-    # that same end, otherwise a byte cap advances the cursor past messages it
-    # never returned.  Reverse before responding so the transcript stays
-    # chronological.
+    last_consumed_raw: tuple[dict, int] | None = None
+    # Consume this page newest-first, otherwise a byte cap advances the cursor
+    # past messages it never returned. ``next_before`` is the oldest returned
+    # opaque checkpoint cursor, so an appended message cannot shift the next page.
     pairs = list(enumerate(zip(selected, records), start=start + 1))
     for ordinal, (raw, record) in reversed(pairs):
         if record.role not in {"user", "assistant"}:
             covered_raw += 1
+            last_consumed_raw = raw, ordinal
             continue
         encoded_text = record.text.encode("utf-8")
         available = min(MAX_SNAPSHOT_MESSAGE_BYTES, MAX_SNAPSHOT_BYTES - total_bytes)
@@ -270,32 +534,95 @@ def _snapshot(tid: str, before: int = 0) -> dict[str, Any]:
             "role": record.role,
             "text": text,
             "kind": record.source_kind,
+            "timestamp": _message_timestamp(raw),
+            "state": ("incomplete" if (before is None
+                      and record.role == "user"
+                      and status.get("stage") in threads.BUSY_STAGES
+                      and not any(later.role == "assistant"
+                                  for later in records[(ordinal - 1 - start) + 1:]))
+                      else "final"),
         }
         if record.role == "assistant" and record.source_kind == "assistant":
             item["file_refs"] = _file_references(text, known_paths)
         messages.append(item)
         covered_raw += 1
+        last_consumed_raw = raw, ordinal
     messages.reverse()
-    status = state._get_status(tid)
     revision = hashlib.sha256(json.dumps(
-        [(item["id"], item["role"]) for item in messages], separators=(",", ":")
+        [status.get("stage", "ready"),
+         *[(item["id"], item["role"], item["state"]) for item in messages]],
+        separators=(",", ":")
     ).encode("utf-8")).hexdigest()[:24]
+    has_older = start > 0 or covered_raw < len(selected) or stored_has_more
+    next_before = None
+    if has_older and last_consumed_raw is not None:
+        cursor_raw, cursor_ordinal = last_consumed_raw
+        next_before = (
+            _seal_id(tid, "c", tuple(cursor_raw["_phone_checkpoint_position"]))
+            if checkpoint_backed and "_phone_checkpoint_position" in cursor_raw
+            else _message_id(tid, cursor_raw, cursor_ordinal)
+        )
     return {
         "thread": {
             "id": tid,
-            "description": state._thread_title(tid),
+            "description": _stored_thread_title(tid),
             "harness": read_thread_engine(_thread_dir(tid)).name,
             "status": status.get("stage", "ready"),
-            "error": str(status.get("error", ""))[:500] or None,
+            "error": ("Thread failed; inspect Assist Web for details."
+                      if status.get("error") else None),
             "workspace": _thread_workspace(tid),
             "revision": revision,
         },
         "messages": messages,
-        "has_older_messages": start > 0 or covered_raw < len(selected),
-        "next_before": (before + covered_raw
-                        if start > 0 or covered_raw < len(selected) else None),
+        "has_older_messages": has_older,
+        "next_before": next_before,
         "truncated": truncated,
     }
+
+
+def _assistant_response(tid: str, response_id: str) -> str:
+    """Read a pinned assistant response by its sealed write position."""
+    sealed = _checkpoint_position(_open_sealed_id(tid, response_id, "m") or (), with_role=True)
+    if sealed is not None:
+        fields = _open_sealed_id(tid, response_id, "m")
+        assert fields is not None and fields[4] == "assistant"
+        checkpoint_id, task_id, index, item_index = sealed
+        saver = state.MANAGER.checkpointer
+        with saver.cursor(transaction=False) as cursor:
+            cursor.execute(
+                "SELECT type, length(value), value FROM writes WHERE thread_id = ? "
+                "AND checkpoint_ns = '' AND checkpoint_id = ? AND task_id = ? "
+                "AND idx = ? AND channel = 'messages'",
+                (tid, checkpoint_id, task_id, index),
+            )
+            row = cursor.fetchone()
+        if row is None or not isinstance(row[1], int) or row[1] > MAX_HISTORY_WRITE_BYTES:
+            raise HTTPException(status_code=404, detail="Assistant response not found")
+        try:
+            value = saver.serde.loads_typed((row[0], row[2]))
+            items = value if isinstance(value, list) else [value]
+            projected = _messages_to_dicts([convert_to_messages(items)[item_index]],
+                                           split_tool_call_content=True,
+                                           include_message_ids=False)
+        except (Exception, IndexError):
+            raise HTTPException(status_code=404, detail="Assistant response not found")
+        response = next((message["content"] for message in projected
+                         if message.get("role") == "assistant"), None)
+        if isinstance(response, str):
+            return response
+        raise HTTPException(status_code=404, detail="Assistant response not found")
+
+    # Pi's local store retains the legacy opaque hash.  Deep threads must never
+    # fall back to a whole-graph hydration for an invented response identifier.
+    if not threads._is_pi_thread(tid):
+        raise HTTPException(status_code=404, detail="Assistant response not found")
+    raw_messages = _thread_messages(tid)
+    records = visible_records_from_dicts(raw_messages)
+    for ordinal, (raw, record) in enumerate(zip(raw_messages, records, strict=True), start=1):
+        if (_message_id(tid, raw, ordinal) == response_id
+                and record.role == "assistant" and record.source_kind == "assistant"):
+            return record.text
+    raise HTTPException(status_code=404, detail="Assistant response not found")
 
 
 def _list_threads() -> dict[str, Any]:
@@ -304,14 +631,19 @@ def _list_threads() -> dict[str, Any]:
         try:
             status = state._get_status(tid)
             workspace = _thread_workspace(tid)
+            title = _stored_thread_title(tid)
+            activity_at = os.stat(_thread_dir(tid)).st_mtime
             values.append((threads._thread_status_rank(tid, status.get("stage", "ready")), {
                 "id": tid,
-                "description": state._thread_title(tid),
+                "description": title,
+                "search_description": _normalized_search_title(title),
                 "harness": read_thread_engine(_thread_dir(tid)).name,
                 "status": status.get("stage", "ready"),
                 "repo_key": workspace["repo_key"],
                 "repo_label": workspace["repo_label"],
                 "unread": state._has_unseen_response(tid),
+                "activity_at": activity_at,
+                "revision": _thread_revision_cursor(tid),
             }))
         except (OSError, ThreadEngineError):
             continue
@@ -329,6 +661,20 @@ def _phone_dispatch_key(key: str) -> str:
 
 def _phone_thread_id(key: str) -> str:
     return "phone-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+
+
+def _phone_thread_limit_reached() -> bool:
+    """Keep one authenticated phone client from creating unlimited thread stores."""
+    return sum(tid.startswith("phone-") for tid in state.MANAGER.list()) >= MAX_PHONE_THREADS
+
+
+def _phone_initialization_limit_reached() -> bool:
+    """Leave the shared first-thread worker available to ordinary web starts."""
+    return sum(
+        tid.startswith("phone-")
+        and state._get_status(tid).get("stage") in {"initializing", "cloning"}
+        for tid in state.MANAGER.list()
+    ) >= MAX_PHONE_INITIALIZATIONS
 
 
 def _find_dispatch(tid: str, dispatch_key: str):
@@ -353,7 +699,13 @@ def _submit_existing(tid: str, text: str, key: str) -> tuple[Any, bool, bool]:
             raise HTTPException(status_code=409, detail="Thread harness is unavailable") from error
         if state._get_status(tid).get("pending_email_token"):
             raise HTTPException(status_code=409, detail="Resolve the pending approval first")
-        run, busy = threads._accept_message_run_locked(tid, text, dispatch_key=dispatch_key)
+        try:
+            run, busy = threads._accept_message_run_locked(
+                tid, text, dispatch_key=dispatch_key,
+                max_runs=MAX_PHONE_RUNS_PER_THREAD,
+                max_pending=MAX_PHONE_PENDING_RUNS)
+        except InvalidRunTransition as error:
+            raise HTTPException(status_code=429, detail=str(error)) from error
         return run, busy, False
 
 
@@ -368,20 +720,28 @@ def _create_and_submit(body: _CreateThread, key: str) -> tuple[str, Any, str | N
         if os.path.isdir(state.MANAGER.thread_dir(tid)):
             replay = _find_dispatch(tid, dispatch_key)
             if replay is None:
-                raise HTTPException(status_code=409, detail="Phone draft conflicts with an existing thread")
-            expected_domain = domain or (state.DOMAINS[0] if state.DOMAINS else None)
-            try:
-                existing_engine = read_thread_engine(_thread_dir(tid)).name
-            except ThreadEngineError as error:
-                raise HTTPException(status_code=409, detail="Thread harness is unavailable") from error
-            if (replay.text != body.message or existing_engine != body.harness
-                    or state._get_status(tid).get("domain", "") != (expected_domain or "")):
-                raise HTTPException(status_code=409, detail="Idempotency-Key conflicts with prior message")
-            return tid, replay, None, True
+                if threads._runs().list(tid):
+                    raise HTTPException(status_code=409, detail="Phone draft conflicts with an existing thread")
+                state.MANAGER.hard_delete(tid)
+            else:
+                expected_domain = domain or (state.DOMAINS[0] if state.DOMAINS else None)
+                try:
+                    existing_engine = read_thread_engine(_thread_dir(tid)).name
+                except ThreadEngineError as error:
+                    raise HTTPException(status_code=409, detail="Thread harness is unavailable") from error
+                if (replay.text != body.message or existing_engine != body.harness
+                        or state._get_status(tid).get("domain", "") != (expected_domain or "")):
+                    raise HTTPException(status_code=409, detail="Idempotency-Key conflicts with prior message")
+                return tid, replay, None, True
+        if _phone_thread_limit_reached():
+            raise HTTPException(status_code=429, detail="Phone thread limit reached")
+        if _phone_initialization_limit_reached():
+            raise HTTPException(status_code=429, detail="Phone initialization is busy")
         try:
             tid, run_id, selected = threads.create_thread_with_message_core(
                 body.message, domain, engine=body.harness, thread_id=tid,
-                dispatch_key=dispatch_key)
+                dispatch_key=dispatch_key, max_runs=MAX_PHONE_RUNS_PER_THREAD,
+                max_pending=MAX_PHONE_PENDING_RUNS)
             run = threads._runs().get(tid, run_id)
         except (ValueError, ThreadEngineError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
@@ -396,7 +756,8 @@ def _run_status(tid: str, run_id: str) -> dict[str, Any]:
     except RunNotFound as error:
         raise HTTPException(status_code=404, detail="Run not found") from error
     return {"id": run.id, "thread_id": tid, "status": run.status,
-            "error": (run.error or "")[:500] or None,
+            "error": ("Run failed; inspect Assist Web for details."
+                      if run.error else None),
             "updated_at": run.updated_at,
             "thread_status": state._get_status(tid).get("stage", "ready")}
 
@@ -405,6 +766,10 @@ def _cancel_pending_run(tid: str, run_id: str) -> dict[str, Any]:
     """Cancel only unclaimed work; a running model turn cannot be lied about."""
     _thread_dir(tid)
     _require_id(run_id, "run id")
+    status = state._get_status(tid)
+    if (status.get("stage") in {"initializing", "cloning"}
+            and status.get("pending_run_id") == run_id):
+        raise HTTPException(status_code=409, detail="Thread setup is already in progress")
     try:
         run = threads._runs().cancel_pending(tid, run_id)
     except RunNotFound as error:
@@ -445,9 +810,9 @@ def _diff(tid: str) -> dict[str, Any]:
 
 def _workspace_manifest(tid: str) -> dict[str, Any]:
     _thread_dir(tid)
-    entries = _workspace_entries(tid)
+    entries, truncated = _workspace_entries(tid, with_truncation=True)
     return {"workspace": _thread_workspace(tid), "files": entries,
-            "truncated": len(entries) >= MAX_FILES}
+            "truncated": truncated}
 
 
 def _open_workspace_file(root_fd: int, relative: str) -> int:
@@ -470,10 +835,13 @@ def _open_workspace_file(root_fd: int, relative: str) -> int:
 def _workspace_archive(tid: str) -> bytes:
     """Build a bounded, regular-file-only worktree archive for a phone mirror."""
     _thread_dir(tid)
-    root = Path(state.MANAGER.thread_default_working_dir(tid)).resolve()
+    root = state.MANAGER.thread_default_working_dir(tid)
     buffer = io.BytesIO()
     total = 0
-    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as error:
+        raise HTTPException(status_code=409, detail="Workspace is unavailable") from error
     try:
         with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
             for entry in _workspace_entries(tid):
@@ -526,29 +894,29 @@ async def get_thread(tid: str) -> dict[str, Any]:
 
 
 @router.get("/threads/{tid}/history")
-async def get_thread_history(tid: str, before: int) -> dict[str, Any]:
+async def get_thread_history(tid: str, before: str) -> dict[str, Any]:
     return await anyio.to_thread.run_sync(_snapshot, tid, before)
 
 
 @router.post("/threads")
-async def create_thread(request: Request, background_tasks: BackgroundTasks) -> dict[str, Any]:
+async def create_thread(request: Request) -> dict[str, Any]:
     body = await _validated_body(request, _CreateThread)
     assert isinstance(body, _CreateThread)
     key = _request_key(request)
     tid, run, domain, replay = await anyio.to_thread.run_sync(_create_and_submit, body, key)
     if not replay:
-        background_tasks.add_task(threads._initialize_thread, tid, run.id, domain)
+        threads._INITIALIZATION_SCHEDULER.submit(run.id, tid, domain)
     return {"thread_id": tid, "run_id": run.id, "replayed": replay}
 
 
 @router.post("/threads/{tid}/messages")
-async def send_message(tid: str, request: Request, background_tasks: BackgroundTasks) -> dict[str, Any]:
+async def send_message(tid: str, request: Request) -> dict[str, Any]:
     body = await _validated_body(request, _SendMessage)
     assert isinstance(body, _SendMessage)
     key = _request_key(request)
     run, busy, replay = await anyio.to_thread.run_sync(_submit_existing, tid, body.message, key)
     if not busy and not replay:
-        background_tasks.add_task(threads._execute_run, run.id, tid, user_priority=True)
+        threads._RESUME_SCHEDULER.submit(run.id, tid, user_priority=True)
     return {"thread_id": tid, "run_id": run.id, "replayed": replay,
             "status": run.status}
 
@@ -605,7 +973,12 @@ async def get_workspace(tid: str) -> dict[str, Any]:
 
 @router.get("/threads/{tid}/workspace/archive")
 async def get_workspace_archive(tid: str) -> Response:
-    data = await anyio.to_thread.run_sync(_workspace_archive, tid)
+    if not _ARCHIVE_SLOTS.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="A workspace archive is already in progress")
+    try:
+        data = await anyio.to_thread.run_sync(_workspace_archive, tid)
+    finally:
+        _ARCHIVE_SLOTS.release()
     return Response(data, media_type="application/gzip",
                     headers={"Content-Disposition": 'attachment; filename="workspace.tar.gz"',
                              "Cache-Control": "no-store"})
@@ -625,15 +998,9 @@ async def pin_response(tid: str, request: Request) -> dict[str, Any]:
 
     def create() -> dict[str, Any]:
         directory = _thread_dir(tid)
-        snapshot = _snapshot(tid)
-        response = next((message for message in snapshot["messages"]
-                         if message["id"] == body.response_id
-                         and message["role"] == "assistant"
-                         and message["kind"] == "assistant"), None)
-        if response is None:
-            raise HTTPException(status_code=404, detail="Assistant response not found")
         try:
-            pin = create_pin(directory, body.response_id, response["text"])
+            pin = create_pin(directory, body.response_id,
+                             _assistant_response(tid, body.response_id))
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return pin.__dict__

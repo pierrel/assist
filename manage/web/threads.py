@@ -16,6 +16,7 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import subprocess
 import threading
 import time
@@ -1600,7 +1601,7 @@ def _initialize_thread(
     tid: str, run_id: str, domain: str | None,
     rider: ContextRider | None = None,
 ) -> None:
-    """Background task: clone the repo, start sandbox, process the first message."""
+    """Dedicated initialization worker: clone, then execute the first durable Run."""
     try:
         if domain:
             # Carry started_at through the cloning write (_set_status is a full replace):
@@ -1610,16 +1611,18 @@ def _initialize_thread(
             _set_status(tid, "cloning", pending_message=pending, domain=domain,
                         started_at=_get_status(tid).get("started_at"))
             try:
+                _reset_unexecuted_workspace(tid)
                 dm = DomainManager(
                     MANAGER.thread_default_working_dir(tid),
                     domain,
                     branch_suffix=tid[-4:],
+                    clone_timeout_s=INITIALIZATION_CLONE_TIMEOUT_S,
                 )
                 # Refresh cache: a previous render may have cached a no-remote DM.
                 DOMAIN_MANAGERS[tid] = dm
             except Exception as e:
                 logging.error("Clone failed for thread %s: %s", tid, e, exc_info=True)
-                _fail_initialization(tid, run_id, e, f"Clone failed: {e}", pending)
+                _fail_initialization(tid, run_id, pending)
                 return
         _execute_run(run_id, tid)
     except Exception as e:
@@ -1628,20 +1631,42 @@ def _initialize_thread(
             pending = _runs().get(tid, run_id).text or ""
         except Exception:
             pending = ""
-        _fail_initialization(tid, run_id, e, str(e), pending)
+        _fail_initialization(tid, run_id, pending)
 
 
-def _fail_initialization(
-    tid: str, run_id: str, error: Exception, status_error: str, pending: str,
-) -> None:
+def _reset_unexecuted_workspace(tid: str) -> None:
+    """Remove a partial first-clone worktree before retrying initialization.
+
+    No Run has executed before this point, so the first initialization owns the
+    workspace. Retrying from an empty directory makes a crash during ``git clone``
+    deterministic instead of letting ``DomainManager`` mistake a partial directory
+    for a repository.
+    """
+    workspace = MANAGER.thread_default_working_dir(tid)
+    if os.path.abspath(workspace) == os.path.abspath(MANAGER.thread_dir(tid)):
+        return
+    if os.path.islink(workspace):
+        os.unlink(workspace)
+    elif os.path.isdir(workspace):
+        shutil.rmtree(workspace)
+    elif os.path.exists(workspace):
+        raise RuntimeError("initial workspace is not a directory")
+
+
+def _fail_initialization(tid: str, run_id: str, pending: str) -> None:
     """Terminalize a Run that failed before or during initialization."""
+    message = "Thread setup failed; create a new thread."
     with _RUN_ADMISSION_LOCK:
         run = _runs().get(tid, run_id)
         if run.status == "pending":
             run = _runs().claim(tid, run_id)
         if run.status == "running":
-            _runs().transition(tid, run_id, "error", error=str(error))
-    _set_status(tid, "error", error=status_error, pending_message=pending)
+            _runs().transition(tid, run_id, "error", error=message)
+        for follower in _runs().list(tid):
+            if follower.status == "pending":
+                _runs().transition(tid, _runs().claim(tid, follower.id).id,
+                                   "error", error=message)
+    _set_status(tid, "error", error=message, pending_message=pending)
     _notify_turn_observers(tid, "error", None, None, run_id)
 
 
@@ -2458,7 +2483,8 @@ def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
     runs = _runs().list(tid)
     if any(run.status == "running" for run in runs):
         return
-    if (_get_status(tid).get("stage") == "paused"
+    status = _get_status(tid)
+    if (status.get("stage") == "paused"
             and any(run.status == "interrupted" for run in runs)):
         return
     pending_runs = [run for run in runs
@@ -2469,6 +2495,10 @@ def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
                  if run.mode == "turn" and run.origin is None
                  and run.text is not None), None)
     selected = user or pending_runs[0]
+    if status.get("stage") in {"initializing", "cloning"}:
+        _INITIALIZATION_SCHEDULER.submit(
+            selected.id, tid, status.get("domain") or None)
+        return
     _RESUME_SCHEDULER.submit(
         selected.id, tid, user_priority=(selected is user))
 
@@ -3110,7 +3140,6 @@ async def create_thread(domain: str | None = Form(None), engine: str = Form("dee
 
 @app.post("/threads/with-message")
 async def create_thread_with_message(
-    background_tasks: BackgroundTasks,
     text: str = Form(...),
     domain: str | None = Form(None),
     engine: str = Form("deepagents"),
@@ -3124,30 +3153,42 @@ async def create_thread_with_message(
         create_thread_with_message_core,
         text, domain, rider, engine, location,
     )
-    background_tasks.add_task(
-        _initialize_thread, tid, run_id, selected, rider,
-    )
+    _INITIALIZATION_SCHEDULER.submit(run_id, tid, selected, rider)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
 def create_thread_with_message_core(
     text: str, domain: str | None, rider: ContextRider | None = None, engine: str = "deepagents",
     location: LocationSnapshot | None = None, *, thread_id: str | None = None,
-    dispatch_key: str | None = None,
+    dispatch_key: str | None = None, max_runs: int | None = None,
+    max_pending: int | None = None,
 ) -> tuple[str, str, str | None]:
     """Persist a new thread's first Run before its slow initialization starts."""
-    selected_engine = _require_new_thread_engine(engine)
-    tid = MANAGER.reserve_visible(selected_engine, thread_id)
-    selected = domain or (DOMAINS[0] if DOMAINS else None)
-    if selected_engine == "pi" and selected is None:
-        _create_empty_pi_workspace(tid)
-    if selected_engine == "pi":
-        _ensure_pi_description(tid, text)
-    _set_status(tid, "initializing", pending_message=text, domain=selected or "",
-                started_at=_now_ms())
-    run = _create_run(tid, text, rider=rider, location=location,
-                      dispatch_key=dispatch_key)
-    return tid, run.id, selected
+    # The clone scheduler has one worker.  Bound admission *before* publishing a
+    # directory or Run, otherwise unauthenticated browser POSTs can retain an
+    # arbitrary on-disk clone backlog while that worker is blocked on a remote.
+    with _INITIALIZATION_ADMISSION_LOCK:
+        if sum(_get_status(existing).get("stage") in INIT_STAGES
+               for existing in MANAGER.list()) >= MAX_INITIALIZING_THREADS:
+            raise HTTPException(status_code=429, detail="Thread setup is busy")
+        selected_engine = _require_new_thread_engine(engine)
+        tid = MANAGER.reserve_visible(selected_engine, thread_id)
+        selected = domain or (DOMAINS[0] if DOMAINS else None)
+        if selected_engine == "pi" and selected is None:
+            _create_empty_pi_workspace(tid)
+        if selected_engine == "pi":
+            _ensure_pi_description(tid, text)
+        started_at = _now_ms()
+        _set_status(tid, "initializing", pending_message=text, domain=selected or "",
+                    started_at=started_at)
+        run = _create_run(tid, text, rider=rider, location=location,
+                          dispatch_key=dispatch_key, max_runs=max_runs,
+                          max_pending=max_pending)
+        # A first Run needs its slow clone before execution.  Persist that relation so
+        # startup recovery replays initialization rather than running in a missing worktree.
+        _set_status(tid, "initializing", pending_message=text, domain=selected or "",
+                    pending_run_id=run.id, started_at=started_at)
+        return tid, run.id, selected
 
 
 def _create_empty_pi_workspace(tid: str) -> None:
@@ -3187,7 +3228,7 @@ async def get_thread(
         if stage not in INIT_STAGES and is_pi:
             _backfill_pi_description(tid)
             pi_messages = [{"role": message.role, "content": message.text, "run_id": message.run_id,
-                            "message_id": f"pi:{message.run_id}"}
+                            "message_id": f"pi:{message.role}:{message.run_id}"}
                            for message in _PI_CONVERSATIONS.get_messages(MANAGER.thread_dir(tid))]
             try:
                 pi_traces = _PI_TRACES.get_events(MANAGER.thread_dir(tid))
@@ -3216,7 +3257,7 @@ def _thread_messages_for_fragment(tid: str) -> tuple[Thread | None, list[dict] |
         return None, [], [], False
     if _is_pi_thread(tid):
         messages = [{"role": message.role, "content": message.text, "run_id": message.run_id,
-                     "message_id": f"pi:{message.run_id}"}
+                     "message_id": f"pi:{message.role}:{message.run_id}"}
                     for message in _PI_CONVERSATIONS.get_messages(MANAGER.thread_dir(tid))]
         try:
             traces = _PI_TRACES.get_events(MANAGER.thread_dir(tid))
@@ -3327,7 +3368,9 @@ class _EmailApprovalPending(Exception):
 
 def _accept_message_run_locked(tid: str, text: str, rider=None,
                                location: LocationSnapshot | None = None,
-                               dispatch_key: str | None = None) -> tuple[Run, bool]:
+                               dispatch_key: str | None = None,
+                               max_runs: int | None = None,
+                               max_pending: int | None = None) -> tuple[Run, bool]:
     """Admit one message while `_RUN_ADMISSION_LOCK' is held."""
     if _get_status(tid).get("pending_email_token"):
         raise _EmailApprovalPending
@@ -3341,7 +3384,8 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
         # best-effort must not change message-admission semantics.
         pass
     run = _create_run(tid, text, rider=rider, location=location,
-                      dispatch_key=dispatch_key)
+                      dispatch_key=dispatch_key, max_runs=max_runs,
+                      max_pending=max_pending)
     if busy:
         # Cover both wait points. The paused head may still be queued on
         # the scheduler, or it may already be parked inside the affinity
@@ -3354,10 +3398,13 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
 
 def _accept_message_run(tid: str, text: str, rider=None,
                         location: LocationSnapshot | None = None,
-                        dispatch_key: str | None = None) -> tuple[Run, bool]:
+                        dispatch_key: str | None = None,
+                        max_runs: int | None = None,
+                        max_pending: int | None = None) -> tuple[Run, bool]:
     """Persist one web submission and return whether earlier work owns the thread."""
     with _RUN_ADMISSION_LOCK:
-        return _accept_message_run_locked(tid, text, rider, location, dispatch_key)
+        return _accept_message_run_locked(tid, text, rider, location, dispatch_key,
+                                          max_runs, max_pending)
 
 
 def _record_browser_location(rider: ContextRider | None) -> LocationSnapshot | None:
@@ -3887,6 +3934,16 @@ def queue_recovery_runs() -> None:
     pending runs are queued in durable creation order.
     """
     visible = MANAGER.list()
+    # ``create_thread_with_message_core`` shows an initializing status before it
+    # commits the first Run. If the process dies in that tiny pre-acceptance window,
+    # there is deliberately no durable work to replay. Delete the reservation so a
+    # deterministic phone retry can create it again instead of colliding with an
+    # empty visible thread.
+    for tid in list(visible):
+        if (_get_status(tid).get("stage") == "initializing"
+                and not _runs().list(tid)):
+            MANAGER.hard_delete(tid)
+            visible.remove(tid)
     for tid in visible:
         legacy = MESSAGE_BACKLOG.for_thread(tid)
         if legacy:
@@ -3956,9 +4013,11 @@ def queue_recovery_runs() -> None:
         # claim leaves the old busy status projection behind; dispatch the
         # persisted ticket instead of synthesizing a duplicate from status.json.
         status = _get_status(tid)
-        if any(run.status == "pending"
-               and run.id == status.get("pending_run_id")
-               for run in visible_runs[tid]):
+        if ((status.get("stage") in {"initializing", "cloning"}
+             and any(run.status == "pending" for run in visible_runs[tid]))
+                or any(run.status == "pending"
+                       and run.id == status.get("pending_run_id")
+                       for run in visible_runs[tid])):
             _dispatch_pending_after(tid)
             continue
 
@@ -4030,8 +4089,42 @@ class _PriorityRunQueue:
             self._cond.notify_all()
 
 
+class _InitializationScheduler:
+    """One dedicated worker for bounded first-thread setup.
+
+    A repository clone may block on a remote indefinitely. It must never occupy
+    the serial Run scheduler, whose job is to drain recoveries and turn resumes.
+    The durable Run plus its ``initializing``/``cloning`` status remain the
+    recovery authority; this queue is only a wake-up notification.
+    """
+
+    def __init__(self) -> None:
+        self._q: queue.Queue[tuple[str, str, str | None, ContextRider | None]] = queue.Queue()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._loop, name="initialization-scheduler", daemon=True)
+        self._thread.start()
+
+    def submit(self, run_id: str, tid: str, domain: str | None,
+               rider: ContextRider | None = None) -> None:
+        self._q.put((run_id, tid, domain, rider))
+
+    def _loop(self) -> None:
+        while True:
+            run_id, tid, domain, rider = self._q.get()
+            try:
+                _initialize_thread(tid, run_id, domain, rider)
+            except Exception:
+                logging.error("first-thread initialization failed for %s", tid,
+                              exc_info=True)
+
+
 class _ResumeScheduler:
-    """One dedicated thread that dispatches all queued durable run IDs serially.
+    """One dedicated thread that dispatches queued durable work serially.
 
     A paused turn resumes by re-running ``_process_message(..., resume=True)``, which
     re-acquires the LLM slot and parks in the queue's ``cond.wait`` until its turn comes
@@ -4043,9 +4136,8 @@ class _ResumeScheduler:
     is ``--parallel 1``, so only one resume can run at a time anyway. A resume that pauses
     again simply re-submits itself here (round-robin, back of the queue).
 
-    Startup queues abandoned heads before their followers, so a live submit can never
-    execute on a mid-flight checkpoint. The queue is notification only; ``runs.json``
-    remains the recoverable authority."""
+    Startup queues abandoned heads before their followers. The queue is notification
+    only; ``runs.json`` and ``status.json`` remain the recoverable authority."""
 
     def __init__(self) -> None:
         self._q = _PriorityRunQueue()
@@ -4090,7 +4182,11 @@ class _ResumeScheduler:
                               exc_info=True)
 
 
+_INITIALIZATION_SCHEDULER = _InitializationScheduler()
 _RESUME_SCHEDULER = _ResumeScheduler()
+INITIALIZATION_CLONE_TIMEOUT_S = 120
+MAX_INITIALIZING_THREADS = 2
+_INITIALIZATION_ADMISSION_LOCK = threading.Lock()
 
 
 _GEO_DELIVER_INTERVAL_S = 120   # retry held completions (D4) roughly every 2 min
@@ -4121,6 +4217,7 @@ def _geo_startup() -> None:
 
 def start_scheduler() -> None:
     _SCHEDULER.start()
+    _INITIALIZATION_SCHEDULER.start()
     _RESUME_SCHEDULER.start()
     if _PROVISIONER is not None and GEO_DIR is not None:
         threading.Thread(target=_geo_startup, name="geo-startup", daemon=True).start()
@@ -4173,7 +4270,6 @@ async def post_message(tid: str, background_tasks: BackgroundTasks,
 @app.post("/thread/{tid}/continue-deep")
 async def continue_pi_in_deep(
     tid: str,
-    background_tasks: BackgroundTasks,
     summary: str = Form(""),
 ):
     """Start an independent Deep thread from one optional, visible Pi handoff summary."""
@@ -4181,7 +4277,7 @@ async def continue_pi_in_deep(
         lambda: _continue_pi_in_deep(tid, summary),
         limiter=_get_run_admission_limiter(),
     )
-    background_tasks.add_task(_initialize_thread, new_tid, run_id, domain)
+    _INITIALIZATION_SCHEDULER.submit(run_id, new_tid, domain)
     return RedirectResponse(url=f"/thread/{new_tid}", status_code=303)
 
 

@@ -12,6 +12,7 @@ Composed from route modules:
 - ``threads``— index, thread page, and the message/capture/merge/delete
                routes.  Owns ``_process_message``.
 - ``evals``  — ``/evals`` and ``/evals/run/{id}`` routes.
+- ``phone_api`` — authenticated ``/api/v1/phone`` machine routes for the phone.
 - ``manage.voice.wire`` — the bounded ``/call`` WebSocket transport.
 
 Importing ``manage.web`` triggers route registration on ``app`` via the

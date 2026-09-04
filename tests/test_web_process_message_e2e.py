@@ -554,12 +554,11 @@ def test_direct_main_turn_never_receives_global_location(client, monkeypatch):
 
 
 def test_new_thread_form_flows_rider(client, monkeypatch):
-    """The index new-thread form (/threads/with-message) now carries the rider too —
-    sent_at/tz/lat/lon reach _initialize_thread (→ the first message's _process_message)."""
+    """The index new-thread form carries its rider into isolated initialization."""
     from assist.context_rider import ContextRider  # noqa: F401
     captured = {}
-    monkeypatch.setattr("manage.web.threads._initialize_thread",
-                        lambda tid, text, domain, rider=None: captured.update(rider=rider))
+    monkeypatch.setattr(threads._INITIALIZATION_SCHEDULER, "submit",
+                        lambda run_id, tid, domain, rider=None: captured.update(rider=rider))
 
     class _FakeChat:
         thread_id = "thread-e2e"

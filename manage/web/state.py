@@ -700,15 +700,18 @@ def _recover_interrupted_threads() -> None:
     """Worker-thread startup migration + recovery queueing.
 
     Run-store locks, legacy-journal reads, and checkpoint inspection are blocking, so
-    lifespan invokes this function through ``run_in_threadpool`` before serving. Busy
-    status is first projected to paused so a live submit cannot outrun the recovered
-    head; ``queue_recovery_runs`` then imports legacy tickets and queues run IDs in
+    lifespan invokes this function through ``run_in_threadpool`` before serving. A
+    running busy status is first projected to paused so a live submit cannot outrun
+    the recovered head. ``initializing`` and ``cloning`` stay intact: they record
+    that the accepted first Run still needs its repository setup.
+    ``queue_recovery_runs`` then imports legacy tickets and queues durable work in
     dependency order.
     """
     from manage.web.threads import queue_recovery_runs
     for tid in MANAGER.list():
         status = _get_status(tid)
-        if status.get("stage") in BUSY_STAGES:
+        if (status.get("stage") in BUSY_STAGES
+                and status.get("stage") not in {"initializing", "cloning"}):
             _set_status(tid, "paused",
                         **{k: v for k, v in status.items() if k != "stage"})
     queue_recovery_runs()
