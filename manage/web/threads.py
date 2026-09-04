@@ -3132,11 +3132,12 @@ async def create_thread_with_message(
 
 def create_thread_with_message_core(
     text: str, domain: str | None, rider: ContextRider | None = None, engine: str = "deepagents",
-    location: LocationSnapshot | None = None,
+    location: LocationSnapshot | None = None, *, thread_id: str | None = None,
+    dispatch_key: str | None = None,
 ) -> tuple[str, str, str | None]:
     """Persist a new thread's first Run before its slow initialization starts."""
     selected_engine = _require_new_thread_engine(engine)
-    tid = MANAGER.reserve_visible(selected_engine)
+    tid = MANAGER.reserve_visible(selected_engine, thread_id)
     selected = domain or (DOMAINS[0] if DOMAINS else None)
     if selected_engine == "pi" and selected is None:
         _create_empty_pi_workspace(tid)
@@ -3144,7 +3145,8 @@ def create_thread_with_message_core(
         _ensure_pi_description(tid, text)
     _set_status(tid, "initializing", pending_message=text, domain=selected or "",
                 started_at=_now_ms())
-    run = _create_run(tid, text, rider=rider, location=location)
+    run = _create_run(tid, text, rider=rider, location=location,
+                      dispatch_key=dispatch_key)
     return tid, run.id, selected
 
 
@@ -3323,30 +3325,39 @@ class _EmailApprovalPending(Exception):
     """A web submission tried to bypass a displayed email approval."""
 
 
+def _accept_message_run_locked(tid: str, text: str, rider=None,
+                               location: LocationSnapshot | None = None,
+                               dispatch_key: str | None = None) -> tuple[Run, bool]:
+    """Admit one message while `_RUN_ADMISSION_LOCK' is held."""
+    if _get_status(tid).get("pending_email_token"):
+        raise _EmailApprovalPending
+    prior_stage = _get_status(tid).get("stage")
+    busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
+    try:
+        if _is_pi_thread(tid):
+            _ensure_pi_description(tid, text)
+    except ThreadEngineError:
+        # Dispatch will make the existing invalid-engine error durable; title
+        # best-effort must not change message-admission semantics.
+        pass
+    run = _create_run(tid, text, rider=rider, location=location,
+                      dispatch_key=dispatch_key)
+    if busy:
+        # Cover both wait points. The paused head may still be queued on
+        # the scheduler, or it may already be parked inside the affinity
+        # queue. Promotion never touches the active holder.
+        _RESUME_SCHEDULER.promote(tid)
+        THREAD_QUEUE.promote(tid)
+    _mark_pending(tid, text, busy, run.id)
+    return run, busy
+
+
 def _accept_message_run(tid: str, text: str, rider=None,
-                        location: LocationSnapshot | None = None) -> tuple[Run, bool]:
+                        location: LocationSnapshot | None = None,
+                        dispatch_key: str | None = None) -> tuple[Run, bool]:
     """Persist one web submission and return whether earlier work owns the thread."""
     with _RUN_ADMISSION_LOCK:
-        if _get_status(tid).get("pending_email_token"):
-            raise _EmailApprovalPending
-        prior_stage = _get_status(tid).get("stage")
-        busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
-        try:
-            if _is_pi_thread(tid):
-                _ensure_pi_description(tid, text)
-        except ThreadEngineError:
-            # Dispatch will make the existing invalid-engine error durable; title
-            # best-effort must not change message-admission semantics.
-            pass
-        run = _create_run(tid, text, rider=rider, location=location)
-        if busy:
-            # Cover both wait points. The paused head may still be queued on
-            # the scheduler, or it may already be parked inside the affinity
-            # queue. Promotion never touches the active holder.
-            _RESUME_SCHEDULER.promote(tid)
-            THREAD_QUEUE.promote(tid)
-        _mark_pending(tid, text, busy, run.id)
-        return run, busy
+        return _accept_message_run_locked(tid, text, rider, location, dispatch_key)
 
 
 def _record_browser_location(rider: ContextRider | None) -> LocationSnapshot | None:

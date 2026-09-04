@@ -25,6 +25,8 @@ from manage.web.app import app  # noqa: F401
 from manage.web import (  # noqa: E402,F401
     threads, review, evals, schedules, geo, egress,
 )
+from manage.web.phone_api import router as _phone_api_router  # noqa: E402
+app.include_router(_phone_api_router)
 from manage.voice import wire as _voice_wire  # noqa: E402,F401
 
 # Subagent tools use a private, prefixless Agent Protocol ASGI app. It is never
