@@ -96,8 +96,10 @@ a sandbox request rather than promising that the foreground shell caused it.
    sandbox start.
 3. Add deterministic proxy unit coverage for same-host spacing, independent
    hosts, concurrent reservations, the internal-model exemption, and the
-   schema-driven recreate path.  Existing Docker smoke and end-to-end tests
-   retain the actual sandbox-to-proxy path coverage.
+   schema-driven recreate path. Existing Docker smoke uses an untouched base
+   host in its approval-corruption check, so the assertion is independent of
+   a deliberately preceding cooldown; end-to-end tests retain the actual
+   sandbox-to-proxy path coverage.
 4. This new document carries the changed deployment note: it needs an
    egress-proxy image rebuild (=make deploy-sandbox-build=), not only a code
    rsync/restart. Historical dated documents remain unchanged.
