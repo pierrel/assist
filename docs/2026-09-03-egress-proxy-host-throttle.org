@@ -1,0 +1,130 @@
+#+TITLE: Conservative host throttling at the sandbox egress proxy
+#+DATE: 2026-09-03
+
+* Goal
+
+Prevent sandboxed agent code from generating a burst of outbound connections
+to one remote host. The control belongs at the shared egress proxy, not in
+individual tools: shell commands, installed libraries, and every sandboxed
+agent profile already traverse that boundary.
+
+This change deliberately does not route host-process tools through the proxy.
+=read_url= has an older, separate host-process throttle; making all such tools
+use the proxy is a follow-up with a different transport and deployment design.
+
+* Lineage
+
+- [[file:2026-05-08-sandbox-network-allowlist.org][Sandbox egress allowlist]]
+  established the internal network, plaintext proxy, and exact host gate. This
+  design adds conservative remote-host admission at that same gate. It does not
+  revise the older document's historical design or extend its scope to decrypt
+  TLS.
+
+* Design
+
+The one long-lived =assist-egress-proxy= process owns a small in-memory
+=HostThrottle=.  Before opening an upstream socket, CONNECT and HTTP-proxy
+requests atomically admit the normalized hostname. One host uses a fixed
+backoff sequence for successive starts:
+2 seconds, 4, 8, 16, then 60 seconds on the fifth request.  The sequence
+resets only after five quiet minutes.  An extra request gets a local =429
+Retry-After= response without an upstream socket.  It does not create a
+sleeping proxy thread or wait while holding a lock.
+
+A rejected attempt is still traffic: it refreshes the five-minute quiet-period
+clock without reducing or resetting the current backoff. Repeated retries
+therefore cannot make a busy host look idle and regain the initial interval.
+
+The sequence is a fixed proxy boundary, not a per-tool/model knob.  It applies
+equally to the operator allowlist and a user-approved exact host:port grant.
+=host.docker.internal= is the one exception: it carries the local model
+traffic, which is not a remote host and would otherwise serialize ordinary
+model turns.
+
+The proxy remains plaintext CONNECT forwarding.  It cannot see individual
+HTTPS requests, response status, or =Retry-After= inside a tunnel without TLS
+interception and a trusted CA in the sandbox.  The boundary therefore controls
+new upstream connections rather than pretending to inspect encrypted traffic.
+That preserves the existing no-MITM trust model.  A malicious command can
+reuse one TLS connection; the sandbox's existing allowlist, per-turn lifetime,
+and loop guards remain the complementary bounds.
+
+* Agent-visible result
+
+The proxy returns =429 Retry-After=, an =X-Assist-Egress-Result: throttled=
+header, and a truthful plaintext body for HTTP clients. Some clients discard
+all of that metadata, even while returning a successful process exit. The
+trusted sandbox host boundary gives every command a fresh proxy credential and
+uses Docker's command-start log cursor. It accepts only a newly emitted
+throttle event matching both that sandbox container's egress-network IP and
+the marker's hash. It then prepends one centralized explanation: Assist
+stopped a request from the sandbox before the remote host was contacted, this
+is neither an outage nor an approval denial, and the agent must use existing
+evidence or another allowed source instead of immediately retrying or
+requesting egress approval. The trusted event preserves the precise bounded
+=Retry-After= value. An origin 429, arbitrary command output, and an event
+from another sandbox never receive a false local-provenance claim. A command
+can deliberately leave a same-UID background process that reads and reuses a
+later command's proxy marker, so the agent-visible wording truthfully describes
+a sandbox request rather than promising that the foreground shell caused it.
+
+* Threat model and containment
+
+- Untrusted agent commands choose hostnames and can create many concurrent
+  connections.  The proxy lowercases hostnames before the existing allowlist
+  and throttle checks; all names use the same fixed per-host budget.
+- A host can be deliberately slow. The proxy never queues or sleeps a request:
+  an early start fails locally while the fixed sequence limits fresh starts.
+  Concurrent existing connections do not bypass that spacing. Other hosts
+  continue normally. The existing upstream connect and tunnel-idle timeouts
+  remain in force.
+- A long-lived proxy can observe many hostnames. Stale reservation entries are
+  pruned after the map crosses a small threshold, preventing old hosts from
+  accumulating indefinitely. Recent distinct hosts remain intentionally
+  tracked for their five-minute reset window.
+- The control does not add a listener, privileged capability, secret, network
+  route, or user-facing approval state.  It runs in the existing unprivileged
+  proxy container.
+
+* Implementation plan
+
+1. Add the small thread-safe throttle to =dockerfiles/egress-proxy.py= and
+   apply it immediately before both allowed CONNECT and allowed HTTP upstream
+   connects.
+2. Advance the proxy configuration schema marker in
+   =assist/sandbox_manager.py= so a pre-throttle proxy is replaced on its next
+   sandbox start.
+3. Add deterministic proxy unit coverage for same-host spacing, independent
+   hosts, concurrent reservations, the internal-model exemption, and the
+   schema-driven recreate path. Existing Docker smoke uses an untouched base
+   host in its approval-corruption check, so the assertion is independent of
+   a deliberately preceding cooldown; end-to-end tests retain the actual
+   sandbox-to-proxy path coverage.
+4. This new document carries the changed deployment note: it needs an
+   egress-proxy image rebuild (=make deploy-sandbox-build=), not only a code
+   rsync/restart. Historical dated documents remain unchanged.
+
+* Design review notes
+
+- *Simplicity:* one proxy-local primitive is smaller and more complete than
+  changing every sandbox client or adding a shared service/configuration.
+- *Agent/framework fit:* no prompt, agent graph, middleware, or tool surface
+  changes.  The transport boundary enforces the behavior for arbitrary code.
+- *User intention and UX:* the user asked for a progressively stricter
+  protection, not a UI or opt-out.  Excess calls return an ordinary local
+  rate-limit response instead of holding the interface on a hidden queue.
+- *Clean interface:* =HostThrottle.admit(host)= is the sole new policy seam;
+  request parsing and authorization stay unchanged.
+- *Threat model:* the fixed host key and local rejection contain burst/concurrent
+  requests.  TLS response-aware backoff is explicitly not claimed because the
+  proxy does not decrypt traffic.
+- *Event-loop liveness:* the proxy has its own per-connection threads.  No
+  =manage/web/= event-loop path is touched.
+
+* Verification
+
+Run the focused proxy and sandbox tests, the complete mocked Python suite,
+the local egress Docker smoke, and the local review loop.  On deployment, build
+the proxy image, run the remote egress smoke, restart the web service, then
+open a fresh sandbox and inspect the proxy logs for the 2/4/8/16/60-second
+backoff on a repeated external host.

@@ -121,6 +121,7 @@ class TestEnsureEgressProxy(TestCase):
         self.assertEqual(kwargs["extra_hosts"],
                          {"host.docker.internal": "host-gateway"})
         self.assertIn("EGRESS_ALLOWLIST", kwargs["environment"])
+        self.assertIn("EGRESS_THROTTLE_BODY", kwargs["environment"])
         self.assertEqual(kwargs["labels"]["assist.egress-allowlist-hash"],
                          self._allowlist_hash())
 
@@ -141,6 +142,26 @@ class TestEnsureEgressProxy(TestCase):
         stale_proxy.id = "stale"
         stale_proxy.status = "running"
         stale_proxy.labels = {"assist.egress-allowlist-hash": "0000000000000000"}
+        client = self._make_client(proxy=stale_proxy)
+
+        SandboxManager._ensure_egress_proxy_running(client)
+
+        stale_proxy.remove.assert_called_once_with(force=True)
+        client.containers.run.assert_called_once()
+
+    def test_recreates_when_proxy_policy_schema_changes(self):
+        """An older image cannot stay alive behind a matching allowlist.
+
+        Host throttling lives inside the proxy image, so its schema marker is
+        part of the label contract that forces a replacement after deployment.
+        """
+        old_hash = hashlib.sha256(
+            (",".join(_load_egress_allowlist()) + "|v2-approvals:").encode()
+        ).hexdigest()[:16]
+        stale_proxy = MagicMock()
+        stale_proxy.id = "old-policy"
+        stale_proxy.status = "running"
+        stale_proxy.labels = {"assist.egress-allowlist-hash": old_hash}
         client = self._make_client(proxy=stale_proxy)
 
         SandboxManager._ensure_egress_proxy_running(client)

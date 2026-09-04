@@ -168,31 +168,45 @@ if timeout 5 bash -c "exec 3<>/dev/tcp/1.1.1.1/443" 2>/dev/null; then
 fi
 echo "ok  (3) raw TCP to 1.1.1.1:443  blocked"
 
-# (4) Mixed-case allowlist hostname — DNS hostnames are case-insensitive
+# (4) Real install path — exactly what dev-agent does in
+#     test_dev_agent_runs_eval.py. Run this before the explicit pypi probes:
+#     pip manages its own connection reuse/retries, while the probes deliberately
+#     consume the shared pypi.org throttle budget.
+if ! pip install --user --break-system-packages --no-cache-dir --quiet \
+        -r /workspace/requirements.txt 2>/tmp/pip.err; then
+    echo "FAIL: pip install -r requirements.txt via proxy failed:"
+    cat /tmp/pip.err
+    exit 1
+fi
+echo "ok  (4) pip install -r requirements.txt  succeeded via proxy"
+
+# (5) Mixed-case allowlist hostname — DNS hostnames are case-insensitive
 #     per RFC 4343.  The proxy lowercases before comparing.  Probes
 #     that the comparison is consistent between client and allowlist.
 status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
+    --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 70 \
     https://Pypi.Org/ 2>/dev/null)
 if ! upstream_reached "$status"; then
     echo "FAIL: mixed-case Pypi.Org did not reach upstream (status=$status, "
     echo "case-insensitive allowlist match likely broken)"
     exit 1
 fi
-echo "ok  (4) mixed-case https://Pypi.Org  allowed (status=$status)"
+echo "ok  (5) mixed-case https://Pypi.Org  allowed (status=$status)"
 
-# (5) HTTP-via-proxy code path — the absolute-URL request line that
+# (6) HTTP-via-proxy code path — the absolute-URL request line that
 #     ASSIST_MODEL_URL traffic uses.  pypi over plain HTTP returns
 #     301-to-https; we just need to see that we reached upstream.
 status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
+    --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 70 \
     --proxy "$HTTP_PROXY" http://pypi.org/ 2>/dev/null)
 if ! upstream_reached "$status"; then
     echo "FAIL: HTTP-via-proxy to pypi.org did not reach upstream (status=$status)"
     exit 1
 fi
-echo "ok  (5) HTTP-via-proxy http://pypi.org/  reached (status=$status)"
+echo "ok  (6) HTTP-via-proxy http://pypi.org/  reached (status=$status)"
 
-# (6) HTTP-via-proxy denied for off-allowlist host — same code path
-#     as (5) but the allowlist gate fires.  Gives both branches of
+# (7) HTTP-via-proxy denied for off-allowlist host — same code path
+#     as (6) but the allowlist gate fires.  Gives both branches of
 #     the HTTP path coverage.
 status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
     --proxy "$HTTP_PROXY" http://example.com/ 2>/dev/null)
@@ -200,18 +214,7 @@ if upstream_reached "$status"; then
     echo "FAIL: HTTP-via-proxy to example.com reached upstream (status=$status, allowlist not enforced)"
     exit 1
 fi
-echo "ok  (6) HTTP-via-proxy http://example.com/  blocked (status=$status)"
-
-# (7) Real install path — exactly what dev-agent does in
-#     test_dev_agent_runs_eval.py.  Catches any drift in
-#     requirements.txt that adds a non-allowlisted host.
-if ! pip install --user --break-system-packages --no-cache-dir --quiet \
-        -r /workspace/requirements.txt 2>/tmp/pip.err; then
-    echo "FAIL: pip install -r requirements.txt via proxy failed:"
-    cat /tmp/pip.err
-    exit 1
-fi
-echo "ok  (7) pip install -r requirements.txt  succeeded via proxy"
+echo "ok  (7) HTTP-via-proxy http://example.com/  blocked (status=$status)"
 
 echo "PASS"
 ' 2>&1)
@@ -275,7 +278,7 @@ case "$s5" in 2*|3*) echo "FAIL: private-resolving approved host reachable ($s5)
 
 echo "{corrupt" > "$APPROVALS_DIR/approved-hosts.json"
 s6=$(probe https://example.com/)
-s7=$(probe https://pypi.org/)
+s7=$(probe https://pip.pypa.io/)
 case "$s6" in 2*|3*) echo "FAIL: corrupt approvals still grants ($s6)"; exit 1;; esac
 case "$s7" in 2*|3*) echo "ok (13) corrupt approvals: base allowed, grants denied";;
     *) echo "FAIL: corrupt approvals broke the BASE allowlist ($s7)"; exit 1;; esac

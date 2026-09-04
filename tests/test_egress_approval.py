@@ -2,9 +2,12 @@
 functions, routes, render (docs/2026-07-21-egress-approval-hitl.org). The
 live-proxy half (real containers) lives in dockerfiles/test-sandbox-egress.sh.
 """
+import base64
+import hashlib
 import importlib.util
 import json
 import os
+import socket
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -310,6 +313,7 @@ def test_client_map_roundtrip(tmp_path):
 def proxy_mod(tmp_path, monkeypatch):
     monkeypatch.setenv("EGRESS_ALLOWLIST", "pypi.org,host.docker.internal")
     monkeypatch.setenv("APPROVALS_DIR", str(tmp_path))
+    monkeypatch.setenv("EGRESS_THROTTLE_BODY", "request stopped locally\n")
     spec = importlib.util.spec_from_file_location(
         "egress_proxy_under_test",
         os.path.join(os.path.dirname(__file__), "..", "dockerfiles",
@@ -386,6 +390,131 @@ def test_base_allowlist_unaffected_by_approvals(proxy_mod, tmp_path):
     # corrupt approvals in place: base host membership is a plain set check
     (tmp_path / "approved-hosts.json").write_text("{corrupt")
     assert "pypi.org" in proxy_mod.ALLOWLIST
+
+
+# --- proxy host throttle ------------------------------------------------------
+
+def test_proxy_throttle_exponentially_spaces_repeated_host(proxy_mod):
+    now = [100.0]
+    throttle = proxy_mod.HostThrottle(clock=lambda: now[0])
+
+    for interval in (2, 4, 8, 16, 60):
+        throttle.admit("example.com")
+        with pytest.raises(proxy_mod.HostThrottleBusy) as exc:
+            throttle.admit("example.com")
+        assert exc.value.retry_after_s == interval
+        now[0] += interval
+
+
+def test_proxy_throttle_resets_after_a_quiet_period(proxy_mod):
+    now = [100.0]
+    throttle = proxy_mod.HostThrottle(clock=lambda: now[0])
+
+    for interval in (2, 4, 8):
+        throttle.admit("example.com")
+        now[0] += interval
+    now[0] += proxy_mod.HOST_IDLE_RESET_S
+    throttle.admit("example.com")
+    with pytest.raises(proxy_mod.HostThrottleBusy) as exc:
+        throttle.admit("example.com")
+    assert exc.value.retry_after_s == 2
+
+
+def test_proxy_throttle_counts_denied_attempts_as_non_quiet(proxy_mod):
+    now = [100.0]
+    throttle = proxy_mod.HostThrottle(clock=lambda: now[0])
+
+    throttle.admit("example.com")
+    now[0] += 1
+    with pytest.raises(proxy_mod.HostThrottleBusy):
+        throttle.admit("example.com")
+
+    # A denial is traffic. It keeps the backoff at the second interval until
+    # five quiet minutes have elapsed after that attempt.
+    now[0] += proxy_mod.HOST_IDLE_RESET_S - 1
+    throttle.admit("example.com")
+    with pytest.raises(proxy_mod.HostThrottleBusy) as exc:
+        throttle.admit("example.com")
+    assert exc.value.retry_after_s == 4
+
+
+def test_proxy_throttle_allows_independent_hosts(proxy_mod):
+    throttle = proxy_mod.HostThrottle(clock=lambda: 100.0)
+    throttle.admit("first.example")
+    throttle.admit("second.example")
+
+
+def test_proxy_throttle_rejects_concurrent_same_host_connections(proxy_mod):
+    import concurrent.futures
+
+    throttle = proxy_mod.HostThrottle(clock=lambda: 100.0)
+
+    def attempt(_unused):
+        try:
+            throttle.admit("example.com")
+            return "admitted"
+        except proxy_mod.HostThrottleBusy as exc:
+            return exc
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(attempt, range(4)))
+
+    admitted = [result for result in results if result == "admitted"]
+    denied = [result for result in results
+              if isinstance(result, proxy_mod.HostThrottleBusy)]
+    assert len(admitted) == 1
+    assert [result.retry_after_s for result in denied] == [2, 2, 2]
+
+
+def test_proxy_throttle_keeps_the_local_model_bridge_unthrottled(
+    proxy_mod, monkeypatch):
+    calls = []
+    monkeypatch.setattr(proxy_mod.HOST_THROTTLE, "admit", lambda host: calls.append(host))
+    assert proxy_mod.admit_host("host.docker.internal") is None
+    assert calls == []
+
+
+def test_proxy_connect_throttles_before_opening_upstream(proxy_mod, monkeypatch):
+    calls = []
+    upstream = object()
+    monkeypatch.setattr(
+        proxy_mod, "admit_host", lambda host: calls.append(("admit", host)))
+    monkeypatch.setattr(
+        proxy_mod.socket, "create_connection",
+        lambda target, timeout: calls.append(("connect", target, timeout)) or upstream)
+
+    assert proxy_mod.connect_upstream("example.com", 443, None) is upstream
+    assert calls == [
+        ("admit", "example.com"),
+        ("connect", ("example.com", 443), 10),
+    ]
+
+
+def test_proxy_throttle_response_never_contacts_the_upstream(proxy_mod):
+    client, peer = socket.socketpair()
+    try:
+        proxy_mod.throttle(client, "172.30.0.2", "example.com", 8, None)
+        response = peer.recv(4096).decode()
+    finally:
+        client.close()
+        peer.close()
+    assert response.startswith("HTTP/1.1 429 Too Many Requests\r\n")
+    assert "THROTTLE" not in response
+    assert "X-Assist-Egress-Result: throttled\r\n" in response
+    assert "Retry-After: 8\r\n" in response
+    assert response.endswith("request stopped locally\n")
+
+
+def test_proxy_request_correlation_is_hashed_and_strict(proxy_mod):
+    token = "assist-exec-" + "a" * 32
+    header = "Proxy-Authorization: Basic " + base64.b64encode(
+        f"{token}:".encode()).decode()
+    assert proxy_mod.request_correlation(header) == hashlib.sha256(
+        token.encode()).hexdigest()[:16]
+    assert proxy_mod.request_correlation(
+        "Proxy-Authorization: Basic not-base64") is None
+    assert proxy_mod.request_correlation(
+        "Proxy-Authorization: Basic " + base64.b64encode(b"other:").decode()) is None
 
 
 # --- denial-signature matcher -------------------------------------------------

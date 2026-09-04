@@ -76,11 +76,12 @@ def _load_egress_allowlist() -> list[str]:
 
 def _egress_proxy_config_hash(allowlist_csv: str, approvals_dir: str | None) -> str:
     """The proxy's config fingerprint (a container label): allowlist content
-    plus the approvals-mount schema/path, so a change to EITHER recreates the
-    proxy on the next sandbox start. The version marker exists so proxies
-    started before the approvals feature recreate once and gain the mount."""
+    plus the approvals-mount schema/path and proxy-policy schema, so a change
+    to any of them recreates the proxy on the next sandbox start. The version
+    marker makes containers with an earlier approval or throttle policy
+    recreate once and gain the current behavior."""
     return hashlib.sha256(
-        (allowlist_csv + "|v2-approvals:" + (approvals_dir or "")).encode()
+        (allowlist_csv + "|v4-host-throttle-guidance-approvals:" + (approvals_dir or "")).encode()
     ).hexdigest()[:16]
 
 
@@ -205,18 +206,20 @@ class SandboxManager:
                 except APIError as e:
                     logger.warning("Could not remove existing egress proxy: %s", e)
 
-            from assist.egress.guidance import EGRESS_DENY_BODY
+            from assist.egress.guidance import EGRESS_DENY_BODY, EGRESS_THROTTLE_BODY
             proxy = client.containers.run(
                 EGRESS_PROXY_IMAGE,
                 name=EGRESS_PROXY_NAME,
                 detach=True,
                 restart_policy={"Name": "unless-stopped"},
                 extra_hosts={"host.docker.internal": "host-gateway"},
-                # EGRESS_DENY_BODY: the 403 body text, centralized in
+                # EGRESS_DENY_BODY / EGRESS_THROTTLE_BODY: the proxy response
+                # text, centralized in
                 # assist/egress/guidance.py and delivered here so no
                 # guidance prose lives in proxy code (Pierre, PR #200).
                 environment={"EGRESS_ALLOWLIST": allowlist_csv,
-                             "EGRESS_DENY_BODY": EGRESS_DENY_BODY},
+                             "EGRESS_DENY_BODY": EGRESS_DENY_BODY,
+                             "EGRESS_THROTTLE_BODY": EGRESS_THROTTLE_BODY},
                 labels={
                     "assist.egress-proxy": "true",
                     "assist.egress-allowlist-hash": allowlist_hash,

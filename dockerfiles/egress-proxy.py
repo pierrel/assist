@@ -42,14 +42,28 @@ User-approved grants (docs/2026-07-21-egress-approval-hitl.org):
   never be able to point into the host or LAN. The 403 body text arrives
   via EGRESS_DENY_BODY (centralized in assist/egress/guidance.py — no
   guidance prose lives here).
+
+Host throttling:
+  Every allowed remote hostname receives new connections on a fixed 2s, 4s,
+  8s, 16s, then 60s backoff across all sandbox turns. Excess requests receive
+  a local HTTP 429 before reaching the host. The local model bridge
+  ``host.docker.internal`` is excluded: it is not remote egress and normal
+  model execution opens many connections through that name.  CONNECT remains
+  opaque TLS forwarding, so this controls new connections rather than claiming
+  to inspect encrypted response rate-limit headers.
 """
+import base64
+import hashlib
 import ipaddress
 import json
+import math
 import os
+import re
 import select
 import socket
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -58,6 +72,17 @@ PIPE_TIMEOUT = 600  # seconds of idle on a tunnel before tearing down
 APPROVALS_DIR = os.environ.get("APPROVALS_DIR", "/approvals")
 APPROVALS_MAX_BYTES = 65536
 REVOKED_ONLY = "revoked-only"
+# Repeated connections to one host start quickly, then reach the one-minute
+# ceiling on the fifth request.  This is a fixed proxy boundary, not a
+# per-tool/model knob, so concurrent sandbox clients cannot evade it.
+HOST_BACKOFF_INTERVALS_S = (2.0, 4.0, 8.0, 16.0, 60.0)
+HOST_IDLE_RESET_S = 5 * 60.0
+_THROTTLE_PRUNE_THRESHOLD = 256
+# The proxy carries ordinary model requests to the local host through this
+# name.  It is not remote egress, and throttling it would serialize every
+# model call in a normal turn.
+_UNTHROTTLED_HOSTS = frozenset({"host.docker.internal"})
+_EXECUTION_TOKEN_RE = re.compile(r"assist-exec-[0-9a-f]{32}")
 
 
 def load_allowlist() -> frozenset[str]:
@@ -67,10 +92,70 @@ def load_allowlist() -> frozenset[str]:
 
 ALLOWLIST = load_allowlist()
 DENY_BODY = os.environ.get("EGRESS_DENY_BODY", "").encode("utf-8")
+THROTTLE_BODY = os.environ.get("EGRESS_THROTTLE_BODY", "").encode("utf-8")
 
 
 def log(msg: str) -> None:
     print(f"egress-proxy: {msg}", flush=True)
+
+
+class HostThrottle:
+    """Admit one remote-host connection with bounded exponential backoff."""
+
+    def __init__(self, intervals_s=HOST_BACKOFF_INTERVALS_S,
+                 clock=time.monotonic) -> None:
+        self._intervals_s = intervals_s
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._states: dict[str, tuple[float, float, int]] = {}
+
+    def admit(self, host: str) -> None:
+        """Reserve one connection or raise without creating a waiting thread."""
+        now = self._clock()
+        with self._lock:
+            next_allowed, last_request, count = self._states.get(
+                host, (now, float("-inf"), 0))
+            if now - last_request >= HOST_IDLE_RESET_S:
+                next_allowed, count = now, 0
+            retry_after = max(1, math.ceil(next_allowed - now))
+            if next_allowed > now:
+                self._states[host] = (next_allowed, now, count)
+                raise HostThrottleBusy(retry_after)
+            interval_s = self._intervals_s[min(count, len(self._intervals_s) - 1)]
+            self._states[host] = (now + interval_s, now, count + 1)
+            self._prune(now)
+
+    def _prune(self, now: float) -> None:
+        if len(self._states) <= _THROTTLE_PRUNE_THRESHOLD:
+            return
+        self._states = {
+            host: state for host, state in self._states.items()
+            if now - state[1] < HOST_IDLE_RESET_S
+        }
+
+
+class HostThrottleBusy(Exception):
+    """A local rate limit that prevented an upstream connection."""
+
+    def __init__(self, retry_after_s: int) -> None:
+        self.retry_after_s = retry_after_s
+
+
+HOST_THROTTLE = HostThrottle()
+
+
+def admit_host(host: str) -> None:
+    """Apply the shared remote-host admission boundary before connect."""
+    if host in _UNTHROTTLED_HOSTS:
+        return
+    HOST_THROTTLE.admit(host)
+
+
+def connect_upstream(host: str, port: int,
+                     approved_ip: str | None) -> socket.socket:
+    """Admit then open one vetted upstream connection."""
+    admit_host(host)
+    return socket.create_connection((approved_ip or host, port), timeout=10)
 
 
 def deny(client: socket.socket, host: str, reason: str) -> None:
@@ -81,6 +166,53 @@ def deny(client: socket.socket, host: str, reason: str) -> None:
             b"Content-Type: text/plain\r\n"
             + f"Content-Length: {len(DENY_BODY)}\r\n".encode()
             + b"Connection: close\r\n\r\n" + DENY_BODY
+        )
+    except OSError:
+        pass
+
+
+def request_correlation(header_block: str) -> str | None:
+    """Return a hashed per-execution proxy marker, if one is well formed.
+
+    The sandbox host sets a fresh username in its proxy URL for every command.
+    Clients put it in Proxy-Authorization, which is visible before a CONNECT
+    tunnel starts. Hash it before logging: the log only needs a correlation
+    marker and must not retain the token itself.
+    """
+    for line in header_block.split("\r\n"):
+        name, separator, value = line.partition(":")
+        if not separator or name.strip().lower() != "proxy-authorization":
+            continue
+        scheme, separator, encoded = value.strip().partition(" ")
+        if scheme.lower() != "basic" or not separator:
+            return None
+        try:
+            username, _, _ = base64.b64decode(encoded, validate=True).decode(
+                "utf-8").partition(":")
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if _EXECUTION_TOKEN_RE.fullmatch(username):
+            return hashlib.sha256(username.encode()).hexdigest()[:16]
+        return None
+    return None
+
+
+def throttle(client: socket.socket, client_ip: str, host: str,
+             retry_after_s: int, correlation: str | None) -> None:
+    """Return a local bounded-rate response without contacting the host."""
+    # The host backend reads timestamped proxy events matching both this
+    # container's egress-network IP and its fresh execution marker. That is
+    # trusted provenance for clients which discard a 429 body and headers.
+    log(f"THROTTLE client={client_ip} host={host} retry after {retry_after_s}s "
+        f"execution={correlation or '-'}")
+    try:
+        client.sendall(
+            b"HTTP/1.1 429 Too Many Requests\r\n"
+            b"Content-Type: text/plain\r\n"
+            b"X-Assist-Egress-Result: throttled\r\n"
+            + f"Retry-After: {retry_after_s}\r\n".encode()
+            + f"Content-Length: {len(THROTTLE_BODY)}\r\n".encode()
+            + b"Connection: close\r\n\r\n" + THROTTLE_BODY
         )
     except OSError:
         pass
@@ -206,6 +338,7 @@ def handle(client: socket.socket, addr) -> None:
         if not head:
             return
         request_line, _, header_block = head.partition("\r\n")
+        correlation = request_correlation(header_block)
         parts = request_line.split(" ")
         if len(parts) != 3:
             deny(client, "<malformed>", f"bad request line: {request_line!r}")
@@ -231,8 +364,10 @@ def handle(client: socket.socket, addr) -> None:
                          "approved host resolves to private/reserved space")
                     return
             try:
-                upstream = socket.create_connection(
-                    (approved_ip or host, port), timeout=10)
+                upstream = connect_upstream(host, port, approved_ip)
+            except HostThrottleBusy as e:
+                throttle(client, addr[0], host, e.retry_after_s, correlation)
+                return
             except OSError as e:
                 deny(client, host, f"upstream connect failed: {e}")
                 return
@@ -277,7 +412,7 @@ def handle(client: socket.socket, addr) -> None:
             if not line:
                 continue
             name = line.split(":", 1)[0].strip().lower()
-            if name in ("proxy-connection", "connection"):
+            if name in ("proxy-connection", "proxy-authorization", "connection"):
                 continue
             kept_headers.append(line)
         new_request = f"{method} {path} HTTP/1.1\r\n"
@@ -288,8 +423,10 @@ def handle(client: socket.socket, addr) -> None:
             new_request += h + "\r\n"
         new_request += "\r\n"
         try:
-            upstream = socket.create_connection(
-                (approved_ip or host, port), timeout=10)
+            upstream = connect_upstream(host, port, approved_ip)
+        except HostThrottleBusy as e:
+            throttle(client, addr[0], host, e.retry_after_s, correlation)
+            return
         except OSError as e:
             deny(client, host, f"upstream connect failed: {e}")
             return

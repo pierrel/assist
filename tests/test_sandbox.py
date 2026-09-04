@@ -2,6 +2,7 @@
 
 All Docker interactions are mocked — no real Docker daemon needed.
 """
+import hashlib
 import os
 import tempfile
 import shutil
@@ -26,6 +27,14 @@ class TestDockerSandboxBackend(TestCase):
         self.container = MagicMock()
         self.container.id = "abc123def456"
         self.sandbox = DockerSandboxBackend(self.container)
+
+    @staticmethod
+    def _throttle_event(token="a" * 32, retry_after=8):
+        execution_token = "assist-exec-" + token
+        correlation = hashlib.sha256(execution_token.encode()).hexdigest()[:16]
+        return (
+            "egress-proxy: THROTTLE client=172.30.0.2 host=example.com "
+            f"retry after {retry_after}s execution={correlation}\n").encode()
 
     def test_id_returns_short_container_id(self):
         self.assertEqual(self.sandbox.id, "abc123def456")
@@ -118,6 +127,7 @@ class TestDockerSandboxBackend(TestCase):
         self.assertIn("timeout --kill-after=", invoked[2])
         self.assertIn("echo hello world", invoked[2])
         self.assertEqual(call_args.kwargs["workdir"], "/workspace")
+        self.container.client.containers.get.assert_not_called()
 
     def test_execute_nonzero_exit(self):
         self.container.exec_run.return_value = (1, b"error: not found\n")
@@ -125,6 +135,95 @@ class TestDockerSandboxBackend(TestCase):
 
         self.assertEqual(resp.exit_code, 1)
         self.assertIn("not found", resp.output)
+
+    def test_execute_proxy_throttle_returns_truthful_guidance(self):
+        """A bare client result still has trusted local throttle provenance."""
+        self.container.attrs = {
+            "NetworkSettings": {"Networks": {
+                "assist-egress-network": {"IPAddress": "172.30.0.2"}}}}
+        proxy = self.container.client.containers.get.return_value
+        proxy.logs.return_value = self._throttle_event()
+        self.container.exec_run.return_value = (0, b"429")
+
+        with patch("assist.sandbox.secrets.token_hex", return_value="a" * 32):
+            resp = self.sandbox.execute("curl https://example.com")
+
+        self.assertIn("throttled locally by Assist", resp.output)
+        self.assertIn("a request from this sandbox before it contacted the remote host", resp.output)
+        self.assertIn("neither an external outage nor an egress-approval denial", resp.output)
+        self.assertIn("at least 8 seconds", resp.output)
+
+    def test_execute_proxy_throttle_preserves_retry_after_header(self):
+        self.container.attrs = {
+            "NetworkSettings": {"Networks": {
+                "assist-egress-network": {"IPAddress": "172.30.0.2"}}}}
+        proxy = self.container.client.containers.get.return_value
+        proxy.logs.return_value = self._throttle_event()
+        self.container.exec_run.return_value = (1, b"Proxy error: 429 Too Many Requests\n")
+
+        with patch("assist.sandbox.secrets.token_hex", return_value="a" * 32):
+            resp = self.sandbox.execute("curl http://example.com")
+
+        self.assertIn("at least 8 seconds", resp.output)
+
+    def test_execute_proxy_throttle_clamps_untrusted_retry_after_text(self):
+        self.container.attrs = {
+            "NetworkSettings": {"Networks": {
+                "assist-egress-network": {"IPAddress": "172.30.0.2"}}}}
+        proxy = self.container.client.containers.get.return_value
+        proxy.logs.return_value = self._throttle_event(retry_after=999999)
+        self.container.exec_run.return_value = (1, b"Proxy error: 429 Too Many Requests\n")
+
+        with patch("assist.sandbox.secrets.token_hex", return_value="a" * 32):
+            resp = self.sandbox.execute("curl http://example.com")
+
+        self.assertIn("at least 60 seconds", resp.output)
+
+    def test_execute_proxy_throttle_survives_a_busy_proxy_log(self):
+        self.container.attrs = {
+            "NetworkSettings": {"Networks": {
+                "assist-egress-network": {"IPAddress": "172.30.0.2"}}}}
+        proxy = self.container.client.containers.get.return_value
+        proxy.logs.return_value = (
+            b"unrelated event\n" * 101
+            + self._throttle_event())
+        self.container.exec_run.return_value = (1, b"Proxy error: 429 Too Many Requests\n")
+
+        with patch("assist.sandbox.time.time", return_value=123.5), \
+             patch("assist.sandbox.secrets.token_hex", return_value="a" * 32):
+            resp = self.sandbox.execute("curl http://example.com")
+
+        self.assertIn("throttled locally by Assist", resp.output)
+        proxy.logs.assert_called_once_with(since=123.5)
+
+    def test_execute_ignores_a_throttle_for_another_execution(self):
+        self.container.attrs = {
+            "NetworkSettings": {"Networks": {
+                "assist-egress-network": {"IPAddress": "172.30.0.2"}}}}
+        proxy = self.container.client.containers.get.return_value
+        proxy.logs.return_value = self._throttle_event(token="b" * 32)
+        self.container.exec_run.return_value = (1, b"Proxy error: 429 Too Many Requests\n")
+
+        with patch("assist.sandbox.secrets.token_hex", return_value="a" * 32):
+            resp = self.sandbox.execute("echo unrelated")
+
+        self.assertNotIn("throttled locally by Assist", resp.output)
+
+    def test_execute_origin_429_is_not_mislabelled_as_local_throttle(self):
+        self.container.exec_run.return_value = (
+            1, b"HTTP/1.1 429 Too Many Requests\nServer: nginx proxy\nRetry-After: 30\n")
+
+        resp = self.sandbox.execute("curl https://example.com")
+
+        self.assertNotIn("throttled locally by Assist", resp.output)
+
+    def test_execute_unrelated_429_text_does_not_get_network_guidance(self):
+        self.container.exec_run.return_value = (0, b"the 429th record\n")
+
+        resp = self.sandbox.execute("echo 'the 429th record'")
+
+        self.assertNotIn("Network request received HTTP 429", resp.output)
+        self.container.client.containers.get.assert_not_called()
 
     def test_execute_timeout_returns_guidance(self):
         """Exit 124 = coreutils `timeout` SIGTERM'd; surface adjustment hints."""

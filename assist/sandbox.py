@@ -12,9 +12,14 @@ where the host bind mount lives. ``/agent`` passes through only on a
 backend explicitly constructed for a container with that private main-agent mount.
 """
 
+import hashlib
 import logging
 import os
+import re
+import secrets
 import shlex
+import threading
+import time
 
 from deepagents.backends.sandbox import BaseSandbox
 from deepagents.backends.protocol import (
@@ -29,7 +34,10 @@ from deepagents.backends.protocol import (
 )
 from docker.errors import NotFound as DockerNotFound
 
-from assist.egress.guidance import EGRESS_DENIED_GUIDANCE
+from assist.egress.guidance import (
+    EGRESS_DENIED_GUIDANCE,
+    egress_throttled_guidance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +70,13 @@ def _looks_like_egress_denial(output: str) -> bool:
     low = output.lower()
     return (("403" in low or "forbidden" in low)
             and ("proxy" in low or "tunnel" in low))
+
+
+_THROTTLE_LOG = re.compile(
+    r"egress-proxy: THROTTLE client=(\S+) host=\S+ retry after (\d+)s "
+    r"execution=([0-9a-f]{16})$")
+_HTTP_429 = re.compile(r"\b429\b")
+_EGRESS_PROXY_URL = "http://{token}@assist-egress-proxy:8888"
 
 
 _TIMEOUT_GUIDANCE = (
@@ -136,6 +151,43 @@ class DockerSandboxBackend(BaseSandbox):
         self._strip_prefixes = strip_prefixes
         self._native_agent_dir = native_agent_dir
         self._run_ids: tuple[int, int] | None = None
+        # A sandbox can receive parallel tool calls. Keep one command's
+        # proxy-log cursor, execution, and result attribution indivisible so a
+        # sibling cannot claim its local-throttle event.
+        self._execute_lock = threading.Lock()
+
+    def _proxy_logs_since(self, started_at: float) -> bytes | None:
+        """Read trusted proxy events produced after one command began.
+
+        The proxy is the only component that knows it rejected a request before
+        an upstream connection. Docker's timestamp cursor avoids a fixed log
+        tail: a busy proxy cannot push this command's event out of view.
+        """
+        try:
+            logs = self.container.client.containers.get(
+                "assist-egress-proxy").logs(since=started_at)
+            return logs if isinstance(logs, bytes) else None
+        except Exception:
+            return None
+
+    def _local_throttle_retry_after(self, command_started_at: float,
+                                    correlation: str) -> int | None:
+        """Return a confirmed local-throttle delay from this command's events."""
+        current_proxy_logs = self._proxy_logs_since(command_started_at)
+        if current_proxy_logs is None:
+            return None
+        try:
+            client_ip = self.container.attrs["NetworkSettings"]["Networks"][
+                "assist-egress-network"]["IPAddress"]
+        except (KeyError, TypeError, AttributeError):
+            return None
+        for line in reversed(current_proxy_logs.decode(
+                "utf-8", errors="replace").splitlines()):
+            match = _THROTTLE_LOG.search(line)
+            if (match and match.group(1) == client_ip
+                    and match.group(3) == correlation):
+                return min(60, max(1, int(match.group(2))))
+        return None
 
     @property
     def native_agent_dir(self) -> bool:
@@ -254,15 +306,32 @@ class DockerSandboxBackend(BaseSandbox):
         partial output so the model can recover and try a different
         approach instead of just seeing a generic "Error".
         """
+        with self._execute_lock:
+            return self._execute_locked(command)
+
+    def _execute_locked(self, command: str) -> ExecuteResponse:
+        """Run one command while its proxy-log attribution is exclusive."""
         bounded = (
             f"timeout --kill-after={EXEC_KILL_GRACE_SECONDS}s "
             f"{EXEC_TIMEOUT_SECONDS}s bash -c {shlex.quote(command)}"
         )
+        command_started_at = time.time()
+        execution_token = "assist-exec-" + secrets.token_hex(16)
+        correlation = hashlib.sha256(execution_token.encode()).hexdigest()[:16]
+        proxy_url = _EGRESS_PROXY_URL.format(token=execution_token)
         try:
             exit_code, output_bytes = self.container.exec_run(
                 ["bash", "-c", bounded],
                 demux=False,
                 workdir=self.work_dir,
+                environment={
+                    "HTTPS_PROXY": proxy_url,
+                    "HTTP_PROXY": proxy_url,
+                    "https_proxy": proxy_url,
+                    "http_proxy": proxy_url,
+                    "ALL_PROXY": proxy_url,
+                    "all_proxy": proxy_url,
+                },
             )
         except DockerNotFound as e:
             # Container is gone (stopped, removed, daemon-restarted, TTL
@@ -293,6 +362,10 @@ class DockerSandboxBackend(BaseSandbox):
             output = _TIMEOUT_GUIDANCE.format(timeout=EXEC_TIMEOUT_SECONDS) + (
                 output if output else "(no output)"
             )
+        elif (_HTTP_429.search(output)
+              and (retry_after := self._local_throttle_retry_after(
+                  command_started_at, correlation)) is not None):
+            output = egress_throttled_guidance(retry_after) + output
         elif exit_code != 0 and _looks_like_egress_denial(output):
             # The egress proxy denied a host. curl discards CONNECT response
             # bodies on the HTTPS path, so the agent would otherwise see an
