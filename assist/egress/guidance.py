@@ -49,7 +49,7 @@ EGRESS_THROTTLE_BODY = (
 def egress_throttled_guidance(retry_after_s: int) -> str:
     """The complete model-visible fact for a proxy-local rate limit."""
     return (
-    "[Network request throttled locally by Assist] Assist stopped this "
+        "[Network request throttled locally by Assist] Assist stopped "
         "a request from this sandbox before it contacted the remote host. This is neither "
         "an external outage nor an egress-approval denial. Do NOT request "
         "egress approval and do NOT retry this host immediately. Use evidence "
