@@ -67,6 +67,7 @@ _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _MESSAGE_SOURCE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,199}\Z")
 _HISTORY_CURSOR_RE = re.compile(r"(?:m-[0-9a-f]{32}|c-[A-Za-z0-9_-]{24,240})\Z")
 _SEALED_ID_RE = re.compile(r"[A-Za-z0-9_-]{24,240}\Z")
+_RESPONSE_ID_RE = re.compile(r"m-(?:[0-9a-f]{32}|[A-Za-z0-9_-]{24,240})\Z")
 _KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{15,127}\Z")
 _FILE_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_./-])([A-Za-z0-9][A-Za-z0-9._/-]{0,240}"
@@ -115,6 +116,13 @@ async def _validated_body(request: Request, model: type[_StrictModel]) -> _Stric
 def _require_id(value: str, label: str = "resource id") -> str:
     if value in {".", ".."} or not _ID_RE.fullmatch(value):
         raise HTTPException(status_code=422, detail=f"Invalid {label}")
+    return value
+
+
+def _require_response_id(value: str) -> str:
+    """Accept only the opaque assistant-response IDs this API emits."""
+    if not _RESPONSE_ID_RE.fullmatch(value):
+        raise HTTPException(status_code=422, detail="Invalid response id")
     return value
 
 
@@ -312,40 +320,43 @@ def _workspace_entries(tid: str, *, include_size: bool = True,
         return (entries, truncated) if with_truncation else entries
     try:
         nodes = 0
-        for current, dirs, files, current_fd in os.fwalk(".", dir_fd=root_fd,
-                                                          follow_symlinks=False):
-            base = "" if current == "." else current.removeprefix("./")
-            safe_dirs = []
-            for name in dirs:
-                nodes += 1
-                if nodes > MAX_WORKSPACE_NODES:
-                    truncated = True
+        walker = os.fwalk(".", dir_fd=root_fd, follow_symlinks=False)
+        try:
+            for current, dirs, files, current_fd in walker:
+                base = "" if current == "." else current.removeprefix("./")
+                safe_dirs = []
+                for name in dirs:
+                    nodes += 1
+                    if nodes > MAX_WORKSPACE_NODES:
+                        truncated = True
+                        break
+                    try:
+                        mode = os.stat(name, dir_fd=current_fd, follow_symlinks=False).st_mode
+                    except OSError:
+                        continue
+                    if name != ".git" and stat.S_ISDIR(mode):
+                        safe_dirs.append(name)
+                dirs[:] = safe_dirs
+                if truncated:
                     break
-                try:
-                    mode = os.stat(name, dir_fd=current_fd, follow_symlinks=False).st_mode
-                except OSError:
-                    continue
-                if name != ".git" and stat.S_ISDIR(mode):
-                    safe_dirs.append(name)
-            dirs[:] = safe_dirs
-            if truncated:
-                break
-            for name in files:
-                nodes += 1
-                if nodes > MAX_WORKSPACE_NODES or len(entries) >= MAX_FILES:
-                    truncated = True
+                for name in files:
+                    nodes += 1
+                    if nodes > MAX_WORKSPACE_NODES or len(entries) >= MAX_FILES:
+                        truncated = True
+                        break
+                    try:
+                        metadata = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if name == ".git" or not stat.S_ISREG(metadata.st_mode):
+                        continue
+                    relative = f"{base}/{name}" if base else name
+                    entries.append({"path": relative, "type": "file", "size": metadata.st_size}
+                                   if include_size else {"path": relative})
+                if truncated:
                     break
-                try:
-                    metadata = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
-                except OSError:
-                    continue
-                if name == ".git" or not stat.S_ISREG(metadata.st_mode):
-                    continue
-                relative = f"{base}/{name}" if base else name
-                entries.append({"path": relative, "type": "file", "size": metadata.st_size}
-                               if include_size else {"path": relative})
-            if truncated:
-                break
+        finally:
+            walker.close()
     finally:
         os.close(root_fd)
     entries.sort(key=lambda entry: entry["path"])
@@ -1012,7 +1023,6 @@ async def pin_response(tid: str, request: Request) -> dict[str, Any]:
 async def unpin_response(tid: str, response_id: str) -> Response:
     def remove() -> None:
         directory = _thread_dir(tid)
-        _require_id(response_id, "response id")
-        delete_pin(directory, response_id)
+        delete_pin(directory, _require_response_id(response_id))
     await anyio.to_thread.run_sync(remove)
     return Response(status_code=204, headers={"Cache-Control": "no-store"})

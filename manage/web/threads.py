@@ -3371,7 +3371,7 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
                                dispatch_key: str | None = None,
                                max_runs: int | None = None,
                                max_pending: int | None = None) -> tuple[Run, bool]:
-    """Admit one message while `_RUN_ADMISSION_LOCK' is held."""
+    """Admit one message while ``_RUN_ADMISSION_LOCK`` is held."""
     if _get_status(tid).get("pending_email_token"):
         raise _EmailApprovalPending
     prior_stage = _get_status(tid).get("stage")

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import os
 import sqlite3
 import tarfile
 import threading
@@ -415,6 +416,11 @@ def test_checkpoint_history_pages_message_writes_without_hydrating_graph_state(t
     assert pin.status_code == 200
     assert pin.json()["text"] == "ok"
 
+    deleted = client.delete(f"/api/v1/phone/threads/thread-a/pins/{response_id}",
+                            headers=_auth())
+    assert deleted.status_code == 204
+    assert client.get("/api/v1/phone/threads/thread-a/pins", headers=_auth()).json()["pins"] == []
+
     monkeypatch.setattr(phone_api, "_thread_messages",
                         lambda tid: (_ for _ in ()).throw(AssertionError("no full state read")))
     invalid = client.post("/api/v1/phone/threads/thread-a/pins", headers=_auth(),
@@ -480,6 +486,30 @@ def test_workspace_archive_omits_git_and_symlinked_host_files(tmp_path, monkeypa
     assert response.json()["files"] == [{"path": "notes.md", "type": "file", "size": 5}]
     assert archive.status_code == 200
     assert b"private" not in archive.content
+
+
+def test_workspace_listing_closes_fwalk_after_a_truncated_walk(tmp_path, monkeypatch):
+    thread_dir = _thread_environment(tmp_path, monkeypatch, [])
+    workspace = thread_dir / "workspace"
+    closed = False
+
+    class Walker:
+        def __init__(self):
+            self.fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY)
+
+        def __iter__(self):
+            yield ".", [], ["notes.md"], self.fd
+
+        def close(self):
+            nonlocal closed
+            closed = True
+            os.close(self.fd)
+
+    monkeypatch.setattr(phone_api.os, "fwalk", lambda *args, **kwargs: Walker())
+    monkeypatch.setattr(phone_api, "MAX_WORKSPACE_NODES", 0)
+
+    assert phone_api._workspace_entries("thread-a") == []
+    assert closed
 
 
 def test_workspace_archive_rechecks_a_file_that_turns_into_a_symlink(tmp_path, monkeypatch):

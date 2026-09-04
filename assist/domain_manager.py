@@ -348,8 +348,10 @@ class DomainManager:
             is_empty = not os.listdir(self.repo_path) if repo_exists else True
 
             if not existing_remote and (not repo_exists or is_empty):
-                clone_repo(self.repo, self.repo_path, branch_suffix=branch_suffix,
-                           timeout_s=clone_timeout_s)
+                clone_args = {"branch_suffix": branch_suffix}
+                if clone_timeout_s is not None:
+                    clone_args["timeout_s"] = clone_timeout_s
+                clone_repo(self.repo, self.repo_path, **clone_args)
         else:
             os.makedirs(self.repo_path, exist_ok=True)
 
