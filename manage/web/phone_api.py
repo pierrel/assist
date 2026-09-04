@@ -205,7 +205,7 @@ def _thread_dir(tid: str) -> str:
         directory = state.MANAGER.thread_dir(tid)
     except Exception as error:
         raise HTTPException(status_code=404, detail="Thread not found") from error
-    if not os.path.isdir(directory):
+    if os.path.islink(directory) or not os.path.isdir(directory):
         raise HTTPException(status_code=404, detail="Thread not found")
     if (os.path.exists(os.path.join(directory, ".subagent"))
             or os.path.exists(os.path.join(directory, ".deleted"))):

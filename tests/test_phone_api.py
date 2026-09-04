@@ -77,6 +77,17 @@ def test_phone_api_rejects_hidden_thread_directories(tmp_path, monkeypatch):
     assert response.status_code == 404
 
 
+def test_phone_api_rejects_symlinked_thread_directories(tmp_path, monkeypatch):
+    thread_dir = _thread_environment(tmp_path, monkeypatch, [])
+    replacement = tmp_path / "replacement"
+    thread_dir.rename(replacement)
+    thread_dir.symlink_to(replacement, target_is_directory=True)
+
+    response = _client(monkeypatch).get("/api/v1/phone/threads/thread-a", headers=_auth())
+
+    assert response.status_code == 404
+
+
 def test_phone_api_has_no_server_pin_endpoints(tmp_path, monkeypatch):
     _thread_environment(tmp_path, monkeypatch, [])
     client = _client(monkeypatch)
