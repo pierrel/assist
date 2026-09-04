@@ -35,6 +35,18 @@ _CASES = (
         ],
         "fail",
     ),
+    (
+        "temporal-correction",
+        "The next log should progress from the previous Day 2 to Day 3, and the "
+        "immediate interruption should correct 19m to 10m rather than retain 19m.",
+        [
+            {"id": "r0001", "order": 1, "role": "user", "text": "The previous completed log was Day 2. Now log 19m.", "source_kind": "user", "capture_eligible": True},
+            {"id": "r0002", "order": 2, "role": "assistant", "text": "Recorded Day 3 with 19 minutes.", "source_kind": "assistant", "capture_eligible": True},
+            {"id": "r0003", "order": 3, "role": "user", "text": "Interrupt that: it was 10m instead.", "source_kind": "user", "capture_eligible": True},
+            {"id": "r0004", "order": 4, "role": "assistant", "text": "Corrected Day 3 to 10 minutes.", "source_kind": "assistant", "capture_eligible": True},
+        ],
+        "pass",
+    ),
 )
 
 
@@ -51,6 +63,7 @@ def test_judged_live_capture(
     capture = store.create(
         thread_id=case_id, reason=reason, scope="last_3", turn_range=(1, 1),
         records=tuple(VisibleRecord(**record) for record in records),
+        calibration={"verdict": expected, "reason": "Synthetic calibration evidence."},
     )
     capture_id = capture["request"]["capture_id"]
     worker = CaptureWorker(store)
@@ -69,3 +82,6 @@ def test_judged_live_capture(
         "judge_model": judged.get("judge", {}).get("model"), "verdict": judged.get("verdict"),
     }, sort_keys=True), flush=True)
     assert judged["status"] == expected
+    assert judged["criteria"]["status"] == "criteria"
+    assert "observation" in judged
+    assert "judge" in judged

@@ -15,3 +15,11 @@ wanted the answer to identify the capital as Paris” has the requested outcome
 “identify Paris as the capital” and may forbid naming a different capital.  Do
 not choose `needs_clarification` merely because the user did not use formal
 evaluation language.
+
+A reason can also describe an evolving state across the conversation.  Treat
+temporal continuity, a correction, or an interruption as concrete outcomes:
+state the expected final value and the required consistent sequence, rather
+than treating the wording as commentary.  A later correction ordinarily
+supersedes the earlier value it names.  Use `needs_clarification` only when no
+observable outcome can be recovered; then ask one direct, nonempty question
+that names exactly what outcome is missing.  That status has no criteria.

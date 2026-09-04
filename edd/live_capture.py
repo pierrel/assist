@@ -35,6 +35,7 @@ _PROMPT_PATH = Path(__file__).with_name("live_capture_interpreter_prompt.md")
 CAPTURE_PROJECTION_VERSION = 1
 CAPTURE_OBSERVATION_VERSION = 1
 MAX_REASON_BYTES = 8_000
+MAX_CALIBRATION_REASON_BYTES = 8_000
 MAX_RECORDS = 240
 MAX_RECORD_BYTES = 32_000
 MAX_SNAPSHOT_BYTES = 512_000
@@ -44,7 +45,10 @@ CAPTURE_QUEUE_HOLD_TIMEOUT_S = 120.0
 CAPTURE_QUEUE_POLL_TIMEOUT_S = 1.0
 CAPTURE_MODEL_WALL_TIMEOUT_S = 110.0
 CAPTURE_OUTPUT_TOKENS = 1_024
-_REJECTED_CAPTURE_RESERVATION_BYTES = MAX_REASON_BYTES + 4_096
+# JSON escapes one ASCII control byte as a six-byte ``\\u0000`` sequence.
+# Reserve that worst case before creating a rejected capture, whose request has
+# no transcript and therefore cannot be checked against the normal snapshot cap.
+_REJECTED_CAPTURE_RESERVATION_BYTES = 6 * (MAX_REASON_BYTES + MAX_CALIBRATION_REASON_BYTES) + 4_096
 # A judged result retains the canonical observation as well as the immutable
 # transcript.  Reserve for that duplicate evidence, criterion ID lists, and
 # bounded model output before admitting the snapshot.
@@ -60,7 +64,22 @@ class CaptureCriterion(_ClosedModel):
 
 
 class CaptureStorageFull(ValueError):
-    """The private store cannot safely persist another capture card."""
+    """The private store cannot safely persist another capture."""
+
+
+def _validated_calibration(calibration: dict[str, Any]) -> dict[str, str]:
+    """Return bounded private user evidence without exposing it to judging."""
+    if not isinstance(calibration, dict):
+        raise ValueError("calibration must be an object")
+    verdict = calibration.get("verdict")
+    reason = calibration.get("reason")
+    if verdict not in {"pass", "fail"}:
+        raise ValueError("calibration verdict must be pass or fail")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("a calibration reason is required")
+    if len(reason.encode()) > MAX_CALIBRATION_REASON_BYTES:
+        raise ValueError("calibration reason is too large")
+    return {"verdict": verdict, "reason": reason}
 
 
 class CaptureCriteria(_ClosedModel):
@@ -73,11 +92,25 @@ class CaptureCriteria(_ClosedModel):
     def validate_criteria(self) -> "CaptureCriteria":
         if self.status == "criteria" and not self.requested:
             raise ValueError("criteria need a requested outcome")
-        if self.status == "needs_clarification" and self.requested:
-            raise ValueError("clarification cannot include requested outcomes")
+        if self.status == "needs_clarification":
+            if self.requested or self.forbidden:
+                raise ValueError("clarification cannot include criteria")
+            if not self.clarification or not self.clarification.strip():
+                raise ValueError("clarification needs a specific question")
         if len(self.requested) > 4 or len(self.forbidden) > 4:
             raise ValueError("criteria are bounded")
         return self
+
+
+def _invalid_clarification_result(result: dict[str, Any]) -> bool:
+    """Identify legacy terminal clarifications that violate the current contract."""
+    if result.get("status") != "needs_clarification":
+        return False
+    try:
+        criteria = CaptureCriteria.model_validate(result["criteria"])
+    except (KeyError, TypeError, ValueError):
+        return True
+    return criteria.status != "needs_clarification"
 
 
 @dataclass(frozen=True)
@@ -187,13 +220,14 @@ class CaptureStore:
     def create(
         self, *, thread_id: str, reason: str, scope: Literal["last_3", "entire"],
         records: tuple[VisibleRecord, ...], turn_range: tuple[int, int] = (1, 1),
-        source_revision: str | None = None,
+        source_revision: str | None = None, calibration: dict[str, Any],
     ) -> dict[str, Any]:
         reason_bytes = reason.encode()
         if not reason.strip():
             raise ValueError("a capture reason is required")
         if len(reason_bytes) > MAX_REASON_BYTES:
             raise ValueError("capture reason is too large")
+        calibration = _validated_calibration(calibration)
         if turn_range[0] < 1 or turn_range[1] < turn_range[0]:
             raise ValueError("invalid capture turn range")
         with self._lock:
@@ -201,11 +235,14 @@ class CaptureStore:
             if stored + _REJECTED_CAPTURE_RESERVATION_BYTES > MAX_STORE_BYTES:
                 raise CaptureStorageFull("private capture storage is full")
             if len(records) > MAX_RECORDS:
-                return self._create_rejected(thread_id, reason, scope, turn_range, "too many visible records")
+                return self._create_rejected(
+                    thread_id, reason, calibration, scope, turn_range, "too many visible records")
             if any(len(record.text) > MAX_RECORD_BYTES for record in records):
-                return self._create_rejected(thread_id, reason, scope, turn_range, "a visible record is too large")
+                return self._create_rejected(
+                    thread_id, reason, calibration, scope, turn_range, "a visible record is too large")
             if any(len(record.text.encode()) > MAX_RECORD_BYTES for record in records):
-                return self._create_rejected(thread_id, reason, scope, turn_range, "a visible record is too large")
+                return self._create_rejected(
+                    thread_id, reason, calibration, scope, turn_range, "a visible record is too large")
             transcript = {
                 "projection_version": CAPTURE_PROJECTION_VERSION,
                 "observation_schema_version": CAPTURE_OBSERVATION_VERSION,
@@ -213,20 +250,27 @@ class CaptureStore:
             }
             transcript_bytes = _json_bytes(transcript)
             if len(transcript_bytes) > MAX_SNAPSHOT_BYTES:
-                return self._create_rejected(thread_id, reason, scope, turn_range, "selected conversation is too large")
+                return self._create_rejected(
+                    thread_id, reason, calibration, scope, turn_range, "selected conversation is too large")
             if stored + len(transcript_bytes) + _RESULT_RESERVATION_BYTES > MAX_STORE_BYTES:
                 return self._create_rejected(
-                    thread_id, reason, scope, turn_range, "private capture storage is full", status="failed")
-            return self._create_files(thread_id, reason, scope, turn_range, transcript, transcript_bytes, source_revision, "queued", None)
+                    thread_id, reason, calibration, scope, turn_range,
+                    "private capture storage is full", status="failed")
+            return self._create_files(
+                thread_id, reason, calibration, scope, turn_range, transcript,
+                transcript_bytes, source_revision, "queued", None)
 
-    def _create_rejected(self, thread_id: str, reason: str, scope: str,
+    def _create_rejected(self, thread_id: str, reason: str, calibration: dict[str, str], scope: str,
                          turn_range: tuple[int, int], error: str,
                          *, status: Literal["failed", "needs_shorter_scope"] = "needs_shorter_scope") -> dict[str, Any]:
         with self._lock:
-            return self._create_files(thread_id, reason, scope, turn_range, None, None, None, status, error)
+            return self._create_files(
+                thread_id, reason, calibration, scope, turn_range, None, None,
+                None, status, error)
 
     def _create_files(
-        self, thread_id: str, reason: str, scope: str, turn_range: tuple[int, int],
+        self, thread_id: str, reason: str, calibration: dict[str, str], scope: str,
+        turn_range: tuple[int, int],
         transcript: dict[str, Any] | None,
         transcript_bytes: bytes | None, source_revision: str | None, status: str, error: str | None,
     ) -> dict[str, Any]:
@@ -241,6 +285,7 @@ class CaptureStore:
             "scope": scope, "turn_range": list(turn_range), "created_at": created_at,
             "source_revision": source_revision,
         }
+        request["calibration"] = calibration
         result = {"status": status, "updated_at": created_at}
         if error:
             result["error"] = error
@@ -300,10 +345,12 @@ class CaptureStore:
                 if isinstance(thread_id, str) and isinstance(entries, list)
             }
 
-    def update_result(self, thread_id: str, capture_id: str, result: dict[str, Any]) -> dict[str, Any]:
+    def update_result(
+        self, thread_id: str, capture_id: str, result: dict[str, Any], *, replace: bool = False,
+    ) -> dict[str, Any]:
         with self._lock:
             current = self.get_for_thread(thread_id, capture_id)
-            result = {**current["result"], **result, "updated_at": _utc_now()}
+            result = {**({} if replace else current["result"]), **result, "updated_at": _utc_now()}
             result_path = self._path(capture_id, "result.json")
             new_bytes = len(_json_bytes(result))
             if self._store_bytes() - result_path.stat().st_size + new_bytes > MAX_STORE_BYTES:
@@ -321,6 +368,16 @@ class CaptureStore:
             self._write_json(self._index, index)
             return {**current, "result": result}
 
+    def retry_interpretation(self, thread_id: str, capture_id: str) -> dict[str, Any]:
+        """Discard invalid derived data while retaining immutable transcript provenance."""
+        current = self.get_for_thread(thread_id, capture_id)
+        result = {
+            key: current["result"][key]
+            for key in ("transcript_sha256", "transcript_bytes")
+            if key in current["result"]
+        }
+        return self.update_result(thread_id, capture_id, {"status": "queued", **result}, replace=True)
+
     def pending(self) -> list[tuple[str, str]]:
         with self._lock:
             pending: list[tuple[str, str]] = []
@@ -334,10 +391,18 @@ class CaptureStore:
                     if not isinstance(entry, dict):
                         continue
                     capture_id = entry.get("capture_id")
-                    if (entry.get("status") in {"queued", "interpreting", "judging"}
-                            and isinstance(capture_id, str)
-                            and _ID_RE.fullmatch(capture_id)):
+                    if not isinstance(capture_id, str) or not _ID_RE.fullmatch(capture_id):
+                        continue
+                    if entry.get("status") in {"queued", "interpreting", "judging"}:
                         pending.append((thread_id, capture_id))
+                    elif entry.get("status") == "needs_clarification":
+                        try:
+                            result = self._read_json(self._path(capture_id, "result.json"))
+                        except (FileNotFoundError, ValueError):
+                            continue
+                        incomplete = result.get("status") in {"queued", "interpreting", "judging"}
+                        if incomplete or _invalid_clarification_result(result):
+                            pending.append((thread_id, capture_id))
             return pending[:MAX_RECOVERY]
 
 
@@ -589,6 +654,9 @@ class CaptureWorker:
     def _process(self, thread_id: str, capture_id: str) -> None:
         current = self.store.get_for_thread(thread_id, capture_id)
         result = current["result"]
+        if _invalid_clarification_result(result):
+            current = self.store.retry_interpretation(thread_id, capture_id)
+            result = current["result"]
         if result["status"] in {"pass", "partial", "fail", "failed", "needs_shorter_scope", "needs_clarification"}:
             return
         transcript = current["transcript"]

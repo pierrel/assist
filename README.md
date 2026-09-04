@@ -422,6 +422,9 @@ configuration and keeps the in-app urgent behavior without sending SMS.
 - Live captures: `ASSIST_CAPTURES_DIR` (default: sibling `assist_captures`; owner-only private snapshots)
 - Thread pages start with the ten most recent user turns; load older turns on demand.
 - Pins and capture cards are browser-local. Dismissing a capture removes it from that browser while preserving its private stored evidence.
+- A live capture also retains your private pass/fail assessment and rationale for
+  later calibration work.  The independent interpreter and judge do not receive
+  that assessment.
 - Model: Your local model endpoint
 - Domains: Your local git repositories (optional)
 - Sandbox: Docker container per turn for isolated command execution

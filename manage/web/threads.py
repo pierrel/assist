@@ -1398,8 +1398,15 @@ def render_thread(
               <p>Keep a private snapshot and judge what happened. This does not replay it or change the system.</p>
               <form id="capture-form" action="/thread/{tid}/capture" method="post">
                 <input type="hidden" name="csrf_token" value="{html.escape(CAPTURE_CSRF)}"/>
-                <label for="reason">Why are you capturing this conversation?</label>
+                <label for="reason">What should the independent judge assess?</label>
                 <textarea id="reason" name="reason" required maxlength="8000" placeholder="What surprised you, or what went wrong?"></textarea>
+                <fieldset style="border:0;padding:0;margin:.7rem 0;">
+                  <legend>Your assessment, kept separate from the judge</legend>
+                  <label><input type="radio" name="calibration_verdict" value="pass" required/> Pass</label>
+                  <label><input type="radio" name="calibration_verdict" value="fail" required/> Fail</label><br/>
+                  <label for="calibration-reason">Why?</label>
+                  <textarea id="calibration-reason" name="calibration_reason" required maxlength="8000" placeholder="Why do you think this passed or failed?"></textarea>
+                </fieldset>
                 <fieldset style="border:0;padding:0;margin:.7rem 0;">
                   <legend>Conversation range</legend>
                   <label><input type="radio" name="scope" value="last_3" checked/> Last 3 completed turns</label><br/>
@@ -4831,7 +4838,7 @@ async def rename_thread(tid: str, description: str = Form("")):
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
-def _create_live_capture(tid: str, reason: str, scope: str) -> dict:
+def _create_live_capture(tid: str, reason: str, scope: str, calibration: dict[str, str]) -> dict:
     """Take the canonical completed-turn snapshot; called off the event loop."""
     _require_deep_thread(tid)
     if _get_status(tid).get("stage") in BUSY_STAGES:
@@ -4860,6 +4867,7 @@ def _create_live_capture(tid: str, reason: str, scope: str) -> dict:
         thread_id=tid, reason=reason, scope=scope, records=records,
         turn_range=(selected_ordinals[0], selected_ordinals[-1]),
         source_revision=os.getenv("ASSIST_SOURCE_REVISION"),
+        calibration=calibration,
     )
     if capture["result"]["status"] == "queued":
         try:
@@ -4875,13 +4883,16 @@ def _create_live_capture(tid: str, reason: str, scope: str) -> dict:
 @app.post("/thread/{tid}/capture")
 async def capture_thread(
     tid: str, reason: str = Form(...), scope: str = Form("last_3"),
+    calibration_verdict: str = Form(...), calibration_reason: str = Form(...),
     csrf_token: str = Form(...),
 ):
     if not hmac.compare_digest(csrf_token, CAPTURE_CSRF):
         raise HTTPException(status_code=403, detail="invalid capture form")
     try:
         capture = await anyio.to_thread.run_sync(
-            _create_live_capture, tid, reason, scope, limiter=CAPTURE_THREAD_LIMITER)
+            _create_live_capture, tid, reason, scope,
+            {"verdict": calibration_verdict, "reason": calibration_reason},
+            limiter=CAPTURE_THREAD_LIMITER)
     except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail="Thread not found") from error
     except CaptureStorageFull as error:
