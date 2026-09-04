@@ -401,8 +401,7 @@ The phone client uses the versioned JSON API under `/api/v1/phone`. It is inert
 until `ASSIST_PHONE_API_TOKEN` is set in an ignored owner-only deployment
 environment file. Send that value only as `Authorization: Bearer <token>` from
 the phone; never pass it into a sandbox or commit it. The API exposes visible
-thread snapshots, durable idempotent sends, bounded workspace snapshots, and
-durable response pins.
+thread snapshots, durable idempotent sends, and bounded workspace snapshots.
 The exact request, cursor, event, and failure contract is in
 [the phone API design note](docs/2026-09-04-phone-api.org).
 

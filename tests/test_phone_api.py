@@ -1,4 +1,4 @@
-"""Phone API contract: auth, visible snapshots, pins, and safe worktree data."""
+"""Phone API contract: auth, visible snapshots, and safe worktree data."""
 from __future__ import annotations
 
 import io
@@ -75,6 +75,17 @@ def test_phone_api_rejects_hidden_thread_directories(tmp_path, monkeypatch):
     response = _client(monkeypatch).get("/api/v1/phone/threads/thread-a", headers=_auth())
 
     assert response.status_code == 404
+
+
+def test_phone_api_has_no_server_pin_endpoints(tmp_path, monkeypatch):
+    _thread_environment(tmp_path, monkeypatch, [])
+    client = _client(monkeypatch)
+
+    assert client.get("/api/v1/phone/threads/thread-a/pins", headers=_auth()).status_code == 404
+    assert client.post("/api/v1/phone/threads/thread-a/pins", headers=_auth(),
+                       json={"response_id": "m-anything"}).status_code == 404
+    assert client.delete("/api/v1/phone/threads/thread-a/pins/m-anything",
+                         headers=_auth()).status_code == 404
 
 
 def test_thread_list_uses_stored_titles_and_supplies_chooser_metadata(tmp_path, monkeypatch):
@@ -416,27 +427,8 @@ def test_checkpoint_history_pages_message_writes_without_hydrating_graph_state(t
     assert [message["text"] for message in older["messages"]] == ["message 1", "ok"]
     assert newest["next_before"].startswith("c-")
 
-    response_id = next(message["id"] for message in newest["messages"]
-                       if message["role"] == "assistant")
-    user_id = next(message["id"] for message in newest["messages"]
-                   if message["role"] == "user")
-    pin = client.post("/api/v1/phone/threads/thread-a/pins", headers=_auth(),
-                      json={"response_id": response_id})
-    assert pin.status_code == 200
-    assert pin.json()["text"] == "ok"
-    assert client.post("/api/v1/phone/threads/thread-a/pins", headers=_auth(),
-                       json={"response_id": user_id}).status_code == 404
-
-    deleted = client.delete(f"/api/v1/phone/threads/thread-a/pins/{response_id}",
-                            headers=_auth())
-    assert deleted.status_code == 204
-    assert client.get("/api/v1/phone/threads/thread-a/pins", headers=_auth()).json()["pins"] == []
-
     monkeypatch.setattr(phone_api, "_thread_messages",
                         lambda tid: (_ for _ in ()).throw(AssertionError("no full state read")))
-    invalid = client.post("/api/v1/phone/threads/thread-a/pins", headers=_auth(),
-                          json={"response_id": "m-" + "0" * 32})
-    assert invalid.status_code == 404
 
 
 def test_pi_message_ids_remain_stable_across_reordering(tmp_path, monkeypatch):
@@ -447,39 +439,6 @@ def test_pi_message_ids_remain_stable_across_reordering(tmp_path, monkeypatch):
         "thread-a", message, 99)
     assert phone_api._message_id("thread-a", message, 1) != phone_api._message_id(
         "thread-a", {**message, "role": "user"}, 1)
-
-
-def test_pin_requires_a_visible_assistant_response_and_is_durable(tmp_path, monkeypatch):
-    _thread_environment(tmp_path, monkeypatch, [
-        {"role": "assistant", "content": "Read notes.md", "message_id": "a1"},
-    ])
-    client = _client(monkeypatch)
-    snapshot = client.get("/api/v1/phone/threads/thread-a", headers=_auth()).json()
-    response_id = snapshot["messages"][0]["id"]
-
-    created = client.post("/api/v1/phone/threads/thread-a/pins", headers=_auth(),
-                          json={"response_id": response_id})
-    listed = client.get("/api/v1/phone/threads/thread-a/pins", headers=_auth())
-
-    assert created.status_code == 200
-    assert listed.json()["pins"][0]["response_id"] == response_id
-    assert listed.json()["pins"][0]["text"] == "Read notes.md"
-    assert client.post("/api/v1/phone/threads/thread-a/pins", headers=_auth(),
-                       json={"response_id": "m-missing"}).status_code == 404
-
-
-def test_pin_accepts_an_assistant_response_from_an_older_history_page(tmp_path, monkeypatch):
-    messages = [{"role": "assistant", "content": f"answer {index}",
-                 "message_id": f"a{index}"} for index in range(81)]
-    _thread_environment(tmp_path, monkeypatch, messages)
-    client = _client(monkeypatch)
-    old_response_id = phone_api._message_id("thread-a", messages[0], 1)
-
-    response = client.post("/api/v1/phone/threads/thread-a/pins", headers=_auth(),
-                           json={"response_id": old_response_id})
-
-    assert response.status_code == 200
-    assert response.json()["text"] == "answer 0"
 
 
 def test_workspace_archive_omits_git_and_symlinked_host_files(tmp_path, monkeypatch):

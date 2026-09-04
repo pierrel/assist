@@ -31,7 +31,6 @@ from langchain_core.messages import convert_to_messages
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from assist.domain_manager import current_branch
-from assist.phone_pins import MAX_PINS, create_pin, delete_pin, list_pins
 from assist.run_service import InvalidRunTransition, TERMINAL_STATUSES, RunNotFound
 from assist.thread import _messages_to_dicts
 from assist.thread_engine import ThreadEngineError, read_thread_engine
@@ -67,7 +66,6 @@ _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _MESSAGE_SOURCE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,199}\Z")
 _HISTORY_CURSOR_RE = re.compile(r"(?:m-[0-9a-f]{32}|c-[A-Za-z0-9_-]{24,240})\Z")
 _SEALED_ID_RE = re.compile(r"[A-Za-z0-9_-]{24,240}\Z")
-_RESPONSE_ID_RE = re.compile(r"m-(?:[0-9a-f]{32}|[A-Za-z0-9_-]{24,240})\Z")
 _KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{15,127}\Z")
 _FILE_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_./-])([A-Za-z0-9][A-Za-z0-9._/-]{0,240}"
@@ -87,10 +85,6 @@ class _CreateThread(_StrictModel):
 
 class _SendMessage(_StrictModel):
     message: Annotated[str, Field(min_length=1, max_length=MAX_MESSAGE_CHARS)]
-
-
-class _CreatePin(_StrictModel):
-    response_id: Annotated[str, Field(min_length=1, max_length=256)]
 
 
 async def _validated_body(request: Request, model: type[_StrictModel]) -> _StrictModel:
@@ -116,13 +110,6 @@ async def _validated_body(request: Request, model: type[_StrictModel]) -> _Stric
 def _require_id(value: str, label: str = "resource id") -> str:
     if value in {".", ".."} or not _ID_RE.fullmatch(value):
         raise HTTPException(status_code=422, detail=f"Invalid {label}")
-    return value
-
-
-def _require_response_id(value: str) -> str:
-    """Accept only the opaque assistant-response IDs this API emits."""
-    if not _RESPONSE_ID_RE.fullmatch(value):
-        raise HTTPException(status_code=422, detail="Invalid response id")
     return value
 
 
@@ -591,52 +578,6 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
     }
 
 
-def _assistant_response(tid: str, response_id: str) -> str:
-    """Read a pinned assistant response by its sealed write position."""
-    fields = _open_sealed_id(tid, response_id, "m")
-    sealed = _checkpoint_position(fields or (), with_role=True)
-    if sealed is not None:
-        if fields is None or fields[4] != "assistant":
-            raise HTTPException(status_code=404, detail="Assistant response not found")
-        checkpoint_id, task_id, index, item_index = sealed
-        saver = state.MANAGER.checkpointer
-        with saver.cursor(transaction=False) as cursor:
-            cursor.execute(
-                "SELECT type, length(value), value FROM writes WHERE thread_id = ? "
-                "AND checkpoint_ns = '' AND checkpoint_id = ? AND task_id = ? "
-                "AND idx = ? AND channel = 'messages'",
-                (tid, checkpoint_id, task_id, index),
-            )
-            row = cursor.fetchone()
-        if row is None or not isinstance(row[1], int) or row[1] > MAX_HISTORY_WRITE_BYTES:
-            raise HTTPException(status_code=404, detail="Assistant response not found")
-        try:
-            value = saver.serde.loads_typed((row[0], row[2]))
-            items = value if isinstance(value, list) else [value]
-            projected = _messages_to_dicts([convert_to_messages(items)[item_index]],
-                                           split_tool_call_content=True,
-                                           include_message_ids=False)
-        except (Exception, IndexError):
-            raise HTTPException(status_code=404, detail="Assistant response not found")
-        response = next((message["content"] for message in projected
-                         if message.get("role") == "assistant"), None)
-        if isinstance(response, str):
-            return response
-        raise HTTPException(status_code=404, detail="Assistant response not found")
-
-    # Pi's local store retains the legacy opaque hash.  Deep threads must never
-    # fall back to a whole-graph hydration for an invented response identifier.
-    if not threads._is_pi_thread(tid):
-        raise HTTPException(status_code=404, detail="Assistant response not found")
-    raw_messages = _thread_messages(tid)
-    records = visible_records_from_dicts(raw_messages)
-    for ordinal, (raw, record) in enumerate(zip(raw_messages, records, strict=True), start=1):
-        if (_message_id(tid, raw, ordinal) == response_id
-                and record.role == "assistant" and record.source_kind == "assistant"):
-            return record.text
-    raise HTTPException(status_code=404, detail="Assistant response not found")
-
-
 def _thread_repo_summary(status: dict[str, Any]) -> tuple[str | None, str]:
     """Return the persisted chooser label without inspecting a Git worktree."""
     domain = status.get("domain")
@@ -1002,36 +943,3 @@ async def get_workspace_archive(tid: str) -> Response:
     return Response(data, media_type="application/gzip",
                     headers={"Content-Disposition": 'attachment; filename="workspace.tar.gz"',
                              "Cache-Control": "no-store"})
-
-
-@router.get("/threads/{tid}/pins")
-async def get_pins(tid: str) -> dict[str, Any]:
-    directory = await anyio.to_thread.run_sync(_thread_dir, tid)
-    pins = await anyio.to_thread.run_sync(list_pins, directory)
-    return {"pins": [pin.__dict__ for pin in pins], "limit": MAX_PINS}
-
-
-@router.post("/threads/{tid}/pins")
-async def pin_response(tid: str, request: Request) -> dict[str, Any]:
-    body = await _validated_body(request, _CreatePin)
-    assert isinstance(body, _CreatePin)
-
-    def create() -> dict[str, Any]:
-        directory = _thread_dir(tid)
-        try:
-            pin = create_pin(directory, body.response_id,
-                             _assistant_response(tid, body.response_id))
-        except ValueError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
-        return pin.__dict__
-
-    return await anyio.to_thread.run_sync(create)
-
-
-@router.delete("/threads/{tid}/pins/{response_id}")
-async def unpin_response(tid: str, response_id: str) -> Response:
-    def remove() -> None:
-        directory = _thread_dir(tid)
-        delete_pin(directory, _require_response_id(response_id))
-    await anyio.to_thread.run_sync(remove)
-    return Response(status_code=204, headers={"Cache-Control": "no-store"})
