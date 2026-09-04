@@ -236,9 +236,9 @@ def test_continue_pi_in_deep_creates_independent_deep_thread(
     threads._PI_CONVERSATIONS.append(source_dir, "pi-run", "user", "Pi-only history")
     initialized: list[tuple[str, str, str | None]] = []
     monkeypatch.setattr(
-        threads,
-        "_initialize_thread",
-        lambda tid, run_id, domain, rider=None: initialized.append((tid, run_id, domain)),
+        threads._INITIALIZATION_SCHEDULER,
+        "submit",
+        lambda run_id, tid, domain, rider=None: initialized.append((tid, run_id, domain)),
     )
 
     response = TestClient(threads.app).post(

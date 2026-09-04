@@ -47,6 +47,9 @@ def wired(tmp_path, monkeypatch):
     with contextlib.suppress(Exception):
         while True:
             threads._RESUME_SCHEDULER._q.get_nowait()
+    with contextlib.suppress(Exception):
+        while True:
+            threads._INITIALIZATION_SCHEDULER._q.get_nowait()
     return tid, tmp_path
 
 
@@ -215,6 +218,63 @@ def test_recovery_dispatches_committed_pending_run_without_status_duplicate(
     assert queued["run_id"] == run.id
 
 
+def test_recovery_replays_persisted_first_run_initialization(wired):
+    """A crash before the first clone must not execute that Run without its worktree."""
+    tid, _ = wired
+    run = threads._create_run(tid, "first message")
+    _set_status(tid, "initializing", pending_message="first message",
+                pending_run_id=run.id, domain="repo://example")
+
+    threads.queue_recovery_runs()
+
+    assert threads._INITIALIZATION_SCHEDULER._q.get_nowait() == (
+        run.id, tid, "repo://example", None)
+
+
+def test_recovery_replays_first_run_when_status_lacks_its_id(wired):
+    """The acceptance/status write boundary cannot make the first Run ordinary work."""
+    tid, _ = wired
+    run = threads._create_run(tid, "first message")
+    _set_status(tid, "initializing", pending_message="first message", domain="repo://example")
+
+    threads.queue_recovery_runs()
+
+    assert threads._INITIALIZATION_SCHEDULER._q.get_nowait() == (
+        run.id, tid, "repo://example", None)
+
+
+def test_recovery_replays_partial_clone_before_running_first_turn(wired):
+    tid, _ = wired
+    run = threads._create_run(tid, "first message")
+    _set_status(tid, "cloning", pending_message="first message",
+                pending_run_id=run.id, domain="repo://example")
+
+    threads.queue_recovery_runs()
+
+    assert threads._INITIALIZATION_SCHEDULER._q.get_nowait() == (
+        run.id, tid, "repo://example", None)
+
+
+def test_recovery_discards_unaccepted_first_thread_reservation(wired):
+    """A status-only initial thread never became accepted work, so retry may recreate it."""
+    tid, tmp_path = wired
+    _set_status(tid, "initializing", pending_message="first message")
+
+    threads.queue_recovery_runs()
+
+    assert not (tmp_path / tid).exists()
+
+
+def test_initialization_failure_terminalizes_pending_followers(wired):
+    tid, _ = wired
+    first = threads._create_run(tid, "first")
+    follower = threads._create_run(tid, "later")
+
+    threads._fail_initialization(tid, first.id, "first")
+
+    assert [run.status for run in threads._runs().list(tid)] == ["error", "error"]
+
+
 def test_recovering_pi_head_never_builds_a_deep_graph(wired, monkeypatch):
     tid, tmp_path = wired
     write_new_thread_engine(tmp_path / tid, "pi")
@@ -343,6 +403,23 @@ def test_lifespan_rewrites_busy_to_paused_and_enqueues_recovery(wired, monkeypat
     assert st.get("pending_message") == "mid-flight"    # carried through
     assert st.get("sender") == "+15550001111"           # triage info survives
     assert len(recovered) == 1 and recovered[0][1] == tid
+
+
+def test_lifespan_preserves_initializing_for_first_run_recovery(wired, monkeypatch):
+    tid, _ = wired
+    run = threads._create_run(tid, "first")
+    _set_status(tid, "initializing", pending_message="first",
+                pending_run_id=run.id, domain="repo://example")
+    recovered = []
+    monkeypatch.setattr(threads._INITIALIZATION_SCHEDULER, "submit",
+                        lambda run_id, thread_id, domain: recovered.append(
+                            (run_id, thread_id, domain)))
+
+    from manage.web.state import _recover_interrupted_threads
+    _recover_interrupted_threads()
+
+    assert _get_status(tid)["stage"] == "initializing"
+    assert recovered == [(run.id, tid, "repo://example")]
 
 
 # --- kill-shaped resume: a real graph, a real SqliteSaver, a hard abandon -----

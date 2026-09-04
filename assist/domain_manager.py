@@ -128,7 +128,8 @@ def ensure_thread_branch(repo_dir: str, suffix: str | None = None) -> str:
     return new_branch
 
 
-def clone_repo(repo_url: str, dest_dir: str, branch_suffix: str | None = None) -> None:
+def clone_repo(repo_url: str, dest_dir: str, branch_suffix: str | None = None,
+               timeout_s: float | None = None) -> None:
     """Always clone the repository into dest_dir.
 
     ``branch_suffix`` is forwarded to :func:`create_timestamped_branch`
@@ -136,7 +137,8 @@ def clone_repo(repo_url: str, dest_dir: str, branch_suffix: str | None = None) -
     """
     parent = os.path.dirname(dest_dir)
     os.makedirs(parent, exist_ok=True)
-    subprocess.run(['git', 'clone', '--branch', 'main', repo_url, dest_dir], check=True)
+    subprocess.run(['git', 'clone', '--branch', 'main', repo_url, dest_dir], check=True,
+                   timeout=timeout_s)
     create_timestamped_branch(dest_dir, suffix=branch_suffix)
 
 
@@ -315,7 +317,8 @@ class DomainManager:
     def __init__(self,
                  repo_path: str | None = None,
                  repo: str | None = None,
-                 branch_suffix: str | None = None):
+                 branch_suffix: str | None = None,
+                 clone_timeout_s: float | None = None):
         """Initialize DomainManager with a repository.
 
         Args:
@@ -324,6 +327,7 @@ class DomainManager:
             branch_suffix: Forwarded to :func:`create_timestamped_branch`
                 during clone and post-merge re-branch.  Pass the last 4
                 chars of the owning thread id.
+            clone_timeout_s: Optional hard deadline for the initial ``git clone``.
 
         Raises:
             ValueError: If repo_path has a remote but it conflicts with repo arg
@@ -344,7 +348,10 @@ class DomainManager:
             is_empty = not os.listdir(self.repo_path) if repo_exists else True
 
             if not existing_remote and (not repo_exists or is_empty):
-                clone_repo(self.repo, self.repo_path, branch_suffix=branch_suffix)
+                clone_args = {"branch_suffix": branch_suffix}
+                if clone_timeout_s is not None:
+                    clone_args["timeout_s"] = clone_timeout_s
+                clone_repo(self.repo, self.repo_path, **clone_args)
         else:
             os.makedirs(self.repo_path, exist_ok=True)
 

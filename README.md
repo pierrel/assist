@@ -391,8 +391,19 @@ after the operator swaps the model on the serving host).
 | `ASSIST_THREADS_DIR` | Data storage location                                                                                    | `/tmp/assist_threads` |
 | `ASSIST_CAPTURES_DIR` | Private judged-live-capture storage, outside thread data and never forwarded to sandboxes              | sibling `assist_captures` |
 | `ASSIST_PORT`        | Server port                                                                                              | `8000`                |
+| `ASSIST_PHONE_API_TOKEN` | Dedicated bearer token that enables the authenticated `/api/v1/phone` client API                     | Unset (API returns 503) |
 
 See [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md) for complete reference.
+
+### Phone client API
+
+The phone client uses the versioned JSON API under `/api/v1/phone`. It is inert
+until `ASSIST_PHONE_API_TOKEN` is set in an ignored owner-only deployment
+environment file. Send that value only as `Authorization: Bearer <token>` from
+the phone; never pass it into a sandbox or commit it. The API exposes visible
+thread snapshots, durable idempotent sends, and bounded workspace snapshots.
+The exact request, cursor, event, and failure contract is in
+[the phone API design note](docs/2026-09-04-phone-api.org).
 
 ### Voice calls
 

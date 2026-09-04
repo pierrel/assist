@@ -12,6 +12,7 @@ Composed from route modules:
 - ``threads``— index, thread page, and the message/capture/merge/delete
                routes.  Owns ``_process_message``.
 - ``evals``  — ``/evals`` and ``/evals/run/{id}`` routes.
+- ``phone_api`` — authenticated ``/api/v1/phone`` machine routes for the phone.
 - ``manage.voice.wire`` — the bounded ``/call`` WebSocket transport.
 
 Importing ``manage.web`` triggers route registration on ``app`` via the
@@ -25,6 +26,8 @@ from manage.web.app import app  # noqa: F401
 from manage.web import (  # noqa: E402,F401
     threads, review, evals, schedules, geo, egress,
 )
+from manage.web.phone_api import router as _phone_api_router  # noqa: E402
+app.include_router(_phone_api_router)
 from manage.voice import wire as _voice_wire  # noqa: E402,F401
 
 # Subagent tools use a private, prefixless Agent Protocol ASGI app. It is never
