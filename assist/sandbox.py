@@ -75,6 +75,7 @@ def _looks_like_egress_denial(output: str) -> bool:
 _THROTTLE_LOG = re.compile(
     r"egress-proxy: THROTTLE client=(\S+) host=\S+ retry after (\d+)s "
     r"execution=([0-9a-f]{16})$")
+_HTTP_429 = re.compile(r"\b429\b")
 _EGRESS_PROXY_URL = "http://{token}@assist-egress-proxy:8888"
 
 
@@ -361,8 +362,9 @@ class DockerSandboxBackend(BaseSandbox):
             output = _TIMEOUT_GUIDANCE.format(timeout=EXEC_TIMEOUT_SECONDS) + (
                 output if output else "(no output)"
             )
-        elif (retry_after := self._local_throttle_retry_after(
-                command_started_at, correlation)) is not None:
+        elif (_HTTP_429.search(output)
+              and (retry_after := self._local_throttle_retry_after(
+                  command_started_at, correlation)) is not None):
             output = egress_throttled_guidance(retry_after) + output
         elif exit_code != 0 and _looks_like_egress_denial(output):
             # The egress proxy denied a host. curl discards CONNECT response

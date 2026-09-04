@@ -2,8 +2,8 @@
 
 All Docker interactions are mocked — no real Docker daemon needed.
 """
-import os
 import hashlib
+import os
 import tempfile
 import shutil
 from unittest import TestCase, skipIf
@@ -127,6 +127,7 @@ class TestDockerSandboxBackend(TestCase):
         self.assertIn("timeout --kill-after=", invoked[2])
         self.assertIn("echo hello world", invoked[2])
         self.assertEqual(call_args.kwargs["workdir"], "/workspace")
+        self.container.client.containers.get.assert_not_called()
 
     def test_execute_nonzero_exit(self):
         self.container.exec_run.return_value = (1, b"error: not found\n")
@@ -201,7 +202,7 @@ class TestDockerSandboxBackend(TestCase):
                 "assist-egress-network": {"IPAddress": "172.30.0.2"}}}}
         proxy = self.container.client.containers.get.return_value
         proxy.logs.return_value = self._throttle_event(token="b" * 32)
-        self.container.exec_run.return_value = (0, b"unrelated command\n")
+        self.container.exec_run.return_value = (1, b"Proxy error: 429 Too Many Requests\n")
 
         with patch("assist.sandbox.secrets.token_hex", return_value="a" * 32):
             resp = self.sandbox.execute("echo unrelated")
@@ -222,6 +223,7 @@ class TestDockerSandboxBackend(TestCase):
         resp = self.sandbox.execute("echo 'the 429th record'")
 
         self.assertNotIn("Network request received HTTP 429", resp.output)
+        self.container.client.containers.get.assert_not_called()
 
     def test_execute_timeout_returns_guidance(self):
         """Exit 124 = coreutils `timeout` SIGTERM'd; surface adjustment hints."""
