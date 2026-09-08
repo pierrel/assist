@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import MessagesState, START, StateGraph
 
-from assist.run_service import InvalidRunTransition
+from assist.run_service import RunService
 from manage.web import state
 from manage.web.app import app
 from manage.web import phone_api
@@ -198,19 +198,74 @@ def test_all_first_thread_routes_are_bounded_before_reserving_a_directory(monkey
     assert error.value.detail == "Thread setup is busy"
 
 
-def test_phone_message_limit_returns_a_clear_backpressure_response(tmp_path, monkeypatch):
+def _real_run_admission(tmp_path, monkeypatch):
+    service = RunService(str(tmp_path))
+    scheduled = []
     _thread_environment(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(phone_api.threads, "_runs", lambda: service)
+    monkeypatch.setattr(phone_api.threads, "_is_pi_thread", lambda tid: False)
     monkeypatch.setattr(phone_api.threads, "_pi_message_admits", lambda tid: True)
-    monkeypatch.setattr(phone_api.threads, "_accept_message_run_locked",
-                        lambda *args, **kwargs: (_ for _ in ()).throw(
-                            InvalidRunTransition("pending run limit reached")))
+    monkeypatch.setattr(phone_api.threads, "_get_status", lambda tid: {"stage": "ready"})
+    monkeypatch.setattr(phone_api.threads, "_set_status", lambda *args, **kwargs: None)
+    monkeypatch.setattr(phone_api.threads.THREAD_QUEUE, "peek_holder", lambda: None)
+    monkeypatch.setattr(phone_api.threads._RESUME_SCHEDULER, "submit",
+                        lambda run_id, tid, **kwargs: scheduled.append((run_id, tid, kwargs)))
+    return service, scheduled
+
+
+def test_mature_thread_accepts_and_replays_one_phone_message(tmp_path, monkeypatch):
+    service, scheduled = _real_run_admission(tmp_path, monkeypatch)
+    for index in range(201):
+        run = service.create("thread-a", "general-agent", f"historic {index}")
+        service.transition("thread-a", run.id, "success")
+    client = _client(monkeypatch)
+    headers = {**_auth(), "Idempotency-Key": "mature-thread-key"}
+
+    accepted = client.post(
+        "/api/v1/phone/threads/thread-a/messages",
+        headers=headers, json={"message": "continue"})
+    replayed = client.post(
+        "/api/v1/phone/threads/thread-a/messages",
+        headers=headers, json={"message": "continue"})
+
+    assert accepted.status_code == 200
+    assert replayed.status_code == 200
+    assert accepted.json()["replayed"] is False
+    assert replayed.json() == {**accepted.json(), "replayed": True}
+    assert len(service.list("thread-a")) == 202
+    assert service.list("thread-a")[-1].status == "pending"
+    assert scheduled == [(accepted.json()["run_id"], "thread-a", {"user_priority": True})]
+
+
+def test_phone_pending_limit_returns_a_clear_backpressure_response(tmp_path, monkeypatch):
+    service, scheduled = _real_run_admission(tmp_path, monkeypatch)
+    for index in range(phone_api.MAX_PHONE_PENDING_RUNS):
+        service.create("thread-a", "general-agent", f"pending {index}")
 
     response = _client(monkeypatch).post(
         "/api/v1/phone/threads/thread-a/messages",
-        headers={**_auth(), "Idempotency-Key": "a" * 16}, json={"message": "continue"})
+        headers={**_auth(), "Idempotency-Key": "pending-limit-key"},
+        json={"message": "continue"})
 
     assert response.status_code == 429
     assert response.json()["detail"] == "pending run limit reached"
+    assert len(service.list("thread-a")) == phone_api.MAX_PHONE_PENDING_RUNS
+    assert scheduled == []
+
+
+def test_phone_message_rejects_a_pending_email_approval(tmp_path, monkeypatch):
+    _thread_environment(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(phone_api.threads, "_pi_message_admits", lambda tid: True)
+    monkeypatch.setattr(phone_api.threads, "_get_status",
+                        lambda tid: {"stage": "paused", "pending_email_token": "token"})
+
+    response = _client(monkeypatch).post(
+        "/api/v1/phone/threads/thread-a/messages",
+        headers={**_auth(), "Idempotency-Key": "pending-email-key"},
+        json={"message": "continue"})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Resolve the pending approval first"
 
 
 def test_phone_cannot_cancel_its_first_run_while_setup_is_pending(tmp_path, monkeypatch):

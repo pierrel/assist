@@ -57,7 +57,6 @@ MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
 MAX_ARCHIVE_FILE_BYTES = 4 * 1024 * 1024
 MAX_DESCRIPTION_CHARS = 120
 MAX_PHONE_THREADS = 200
-MAX_PHONE_RUNS_PER_THREAD = 200
 MAX_PHONE_PENDING_RUNS = 4
 MAX_PHONE_INITIALIZATIONS = 1
 _SSE_SLOTS = threading.BoundedSemaphore(4)
@@ -658,13 +657,13 @@ def _submit_existing(tid: str, text: str, key: str) -> tuple[Any, bool, bool]:
                 raise HTTPException(status_code=503, detail="Pi preview is unavailable")
         except ThreadEngineError as error:
             raise HTTPException(status_code=409, detail="Thread harness is unavailable") from error
-        if state._get_status(tid).get("pending_email_token"):
-            raise HTTPException(status_code=409, detail="Resolve the pending approval first")
         try:
             run, busy = threads._accept_message_run_locked(
                 tid, text, dispatch_key=dispatch_key,
-                max_runs=MAX_PHONE_RUNS_PER_THREAD,
                 max_pending=MAX_PHONE_PENDING_RUNS)
+        except threads._EmailApprovalPending as error:
+            raise HTTPException(
+                status_code=409, detail="Resolve the pending approval first") from error
         except InvalidRunTransition as error:
             raise HTTPException(status_code=429, detail=str(error)) from error
         return run, busy, False
@@ -701,8 +700,7 @@ def _create_and_submit(body: _CreateThread, key: str) -> tuple[str, Any, str | N
         try:
             tid, run_id, selected = threads.create_thread_with_message_core(
                 body.message, domain, engine=body.harness, thread_id=tid,
-                dispatch_key=dispatch_key, max_runs=MAX_PHONE_RUNS_PER_THREAD,
-                max_pending=MAX_PHONE_PENDING_RUNS)
+                dispatch_key=dispatch_key)
             run = threads._runs().get(tid, run_id)
         except (ValueError, ThreadEngineError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
