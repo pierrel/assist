@@ -3160,8 +3160,7 @@ async def create_thread_with_message(
 def create_thread_with_message_core(
     text: str, domain: str | None, rider: ContextRider | None = None, engine: str = "deepagents",
     location: LocationSnapshot | None = None, *, thread_id: str | None = None,
-    dispatch_key: str | None = None, max_runs: int | None = None,
-    max_pending: int | None = None,
+    dispatch_key: str | None = None,
 ) -> tuple[str, str, str | None]:
     """Persist a new thread's first Run before its slow initialization starts."""
     # The clone scheduler has one worker.  Bound admission *before* publishing a
@@ -3182,8 +3181,7 @@ def create_thread_with_message_core(
         _set_status(tid, "initializing", pending_message=text, domain=selected or "",
                     started_at=started_at)
         run = _create_run(tid, text, rider=rider, location=location,
-                          dispatch_key=dispatch_key, max_runs=max_runs,
-                          max_pending=max_pending)
+                          dispatch_key=dispatch_key)
         # A first Run needs its slow clone before execution.  Persist that relation so
         # startup recovery replays initialization rather than running in a missing worktree.
         _set_status(tid, "initializing", pending_message=text, domain=selected or "",
@@ -3369,7 +3367,6 @@ class _EmailApprovalPending(Exception):
 def _accept_message_run_locked(tid: str, text: str, rider=None,
                                location: LocationSnapshot | None = None,
                                dispatch_key: str | None = None,
-                               max_runs: int | None = None,
                                max_pending: int | None = None) -> tuple[Run, bool]:
     """Admit one message while ``_RUN_ADMISSION_LOCK`` is held."""
     if _get_status(tid).get("pending_email_token"):
@@ -3384,7 +3381,7 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
         # best-effort must not change message-admission semantics.
         pass
     run = _create_run(tid, text, rider=rider, location=location,
-                      dispatch_key=dispatch_key, max_runs=max_runs,
+                      dispatch_key=dispatch_key,
                       max_pending=max_pending)
     if busy:
         # Cover both wait points. The paused head may still be queued on
@@ -3398,13 +3395,10 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
 
 def _accept_message_run(tid: str, text: str, rider=None,
                         location: LocationSnapshot | None = None,
-                        dispatch_key: str | None = None,
-                        max_runs: int | None = None,
-                        max_pending: int | None = None) -> tuple[Run, bool]:
+                        dispatch_key: str | None = None) -> tuple[Run, bool]:
     """Persist one web submission and return whether earlier work owns the thread."""
     with _RUN_ADMISSION_LOCK:
-        return _accept_message_run_locked(tid, text, rider, location, dispatch_key,
-                                          max_runs, max_pending)
+        return _accept_message_run_locked(tid, text, rider, location, dispatch_key)
 
 
 def _record_browser_location(rider: ContextRider | None) -> LocationSnapshot | None:

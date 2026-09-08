@@ -1,0 +1,58 @@
+#+title: Mature thread admission from the phone API
+
+State: Implemented and locally validated (2026-09-07)
+
+* Lineage
+
+This amends only the total per-thread Run-history bound in the “Bounds and
+failure semantics” section of
+[[file:2026-09-04-phone-api.org][the original phone API contract]].  That document remains the contract for
+authentication, request and response bounds, thread creation, workspace access,
+idempotency, event streams, and initialization.
+
+* Problem
+
+The phone API supplied a 200-Run lifetime limit when admitting a message to an
+existing thread.  The underlying Run store counted every historic Run,
+including terminal Runs created by browser and system clients.  A mature thread
+could therefore remain healthy and writable in the browser while every phone
+submission failed with HTTP 429 before durable acceptance.
+
+The bound did not isolate phone-created growth.  It counted unrelated clients,
+and the ordinary browser path could continue growing the same Run store.
+
+* Design
+
+Existing-thread phone submissions have no total historical Run limit.  They
+retain the four-pending-Run limit, so an authenticated client cannot accumulate
+unbounded outstanding work.  Request-size bounds, bearer authentication,
+idempotency, serial execution, the phone-created-thread limit, and initialization
+bounds are unchanged.
+
+The now-inert lifetime and pending arguments are also removed from first-message
+thread creation.  A deterministic new phone thread has no prior Runs, and all
+later messages use the existing-thread path.  The now-unused =max_runs=
+plumbing and outer =max_pending= wrapper are removed from the ordinary web
+admission helpers as well.  Generic Run-store limits remain available to their
+direct callers, including Agent Protocol's independently bounded child Runs.
+
+This accepts cumulative storage and admission-I/O growth for an authenticated
+client that submits work sequentially after each prior turn finishes or is
+cancelled.  The removed cap was not a sound isolation boundary because it
+counted Runs from every origin while browser submissions could keep growing the
+same file.
+Compaction or an origin-specific quota would need to preserve idempotency across
+old requests; that work is deferred until mature-thread latency or storage is a
+measured problem.
+
+* Verification
+
+A regression test constructs a thread with more than 200 terminal Runs, submits
+one synthetic phone message, and requires one durable pending Run and one
+scheduler admission.  Replaying the same idempotency key must return that Run
+without another append or schedule.  A separate test fills all four pending
+slots and requires the next phone submission to return HTTP 429 without adding
+or scheduling work.
+
+Production verification is read-only: confirm the deployed source and HTTPS API
+health.  The failed user message is neither reconstructed nor replayed.
