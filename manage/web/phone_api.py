@@ -615,11 +615,14 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
     }
 
 
-def _thread_repo_summary(status: dict[str, Any]) -> tuple[str | None, str]:
-    """Return the persisted chooser label without inspecting a Git worktree."""
+def _thread_repo_summary(tid: str, status: dict[str, Any]) -> tuple[str | None, str]:
+    """Return chooser metadata from setup state or the thread's durable repository."""
     domain = status.get("domain")
     if not isinstance(domain, str) or not domain:
-        return None, "No repository"
+        manager = state._get_domain_manager(tid)
+        domain = manager.repo if manager is not None else None
+        if not isinstance(domain, str) or not domain:
+            return None, "No repository"
     return _repo_key(domain), state._domain_label(domain)
 
 
@@ -628,7 +631,7 @@ def _list_threads() -> dict[str, Any]:
     for tid in state.MANAGER.list()[:MAX_THREADS]:
         try:
             status = state._get_status(tid)
-            repo_key, repo_label = _thread_repo_summary(status)
+            repo_key, repo_label = _thread_repo_summary(tid, status)
             title = _stored_thread_title(tid)
             activity_at = os.stat(_thread_dir(tid)).st_mtime
             values.append((threads._thread_status_rank(tid, status.get("stage", "ready")), {

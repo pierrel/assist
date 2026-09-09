@@ -107,9 +107,10 @@ def test_thread_list_uses_stored_titles_and_supplies_chooser_metadata(tmp_path, 
     monkeypatch.setattr(state.MANAGER, "list", lambda: ["thread-a"])
     monkeypatch.setattr(state.MANAGER, "get",
                         lambda tid: (_ for _ in ()).throw(AssertionError("no model title")))
-    monkeypatch.setattr(state, "_get_status", lambda tid: {
-        "stage": "ready", "domain": "https://example.com/repo.git",
-    })
+    monkeypatch.setattr(state, "_get_status", lambda tid: {"stage": "ready"})
+    monkeypatch.setattr(state, "_get_domain_manager", lambda tid: SimpleNamespace(
+        repo="https://example.com/repo.git",
+    ))
     monkeypatch.setattr(phone_api, "_thread_workspace",
                         lambda tid: (_ for _ in ()).throw(AssertionError("no Git worktree scan")))
 
@@ -123,6 +124,25 @@ def test_thread_list_uses_stored_titles_and_supplies_chooser_metadata(tmp_path, 
     assert thread["repo_label"] == "repo"
     assert isinstance(thread["activity_at"], float)
     assert len(thread["revision"]) == 24
+
+
+def test_thread_list_uses_setup_domain_without_caching_an_empty_manager(tmp_path, monkeypatch):
+    _thread_environment(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(state.MANAGER, "list", lambda: ["thread-a"])
+    monkeypatch.setattr(state, "_get_status", lambda tid: {
+        "stage": "initializing", "domain": "https://example.com/repo.git",
+    })
+    monkeypatch.setattr(
+        state, "_get_domain_manager",
+        lambda tid: (_ for _ in ()).throw(AssertionError("no pre-clone manager")),
+    )
+
+    response = _client(monkeypatch).get("/api/v1/phone/threads", headers=_auth())
+
+    assert response.status_code == 200
+    thread = response.json()["threads"][0]
+    assert thread["repo_key"] == phone_api._repo_key("https://example.com/repo.git")
+    assert thread["repo_label"] == "repo"
 
 
 def test_thread_list_normalizes_only_leading_pictographs(tmp_path, monkeypatch):
