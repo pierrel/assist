@@ -6,8 +6,11 @@ status are projections which may be rebuilt from this store after a restart.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
+import stat
+import threading
 import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -22,6 +25,8 @@ RunStatus = Literal[
     "cancelled", "awaiting_approval",
 ]
 RunMode = Literal["turn", "child"]
+CancelCleanup = Literal["pending", "complete"]
+ObservationToken = tuple[int, int, int, int, int]
 
 RUNS_FILE = "runs.json"
 # ``interrupted`` is terminal for that protocol invocation. Logical work continues in
@@ -40,6 +45,10 @@ class RunNotFound(RecordNotFound):
 
 class InvalidRunTransition(ValueError):
     """A requested status change is not valid for the run's current state."""
+
+
+class RunStoreUnavailable(RuntimeError):
+    """The durable Run store could not provide a readable or writable snapshot."""
 
 
 def _now() -> str:
@@ -83,6 +92,44 @@ class Run:
     # Private host-side location snapshot for this visible run. It is excluded
     # from protocol responses and is only reconstructed into tool configuration.
     location: dict | None = None
+    # A cancellation receipt belongs to the immutable accepted handle, not a
+    # successor slice.  Its absence keeps historical records unchanged.
+    cancel_cleanup: CancelCleanup | None = None
+
+    _MAX_OPAQUE_ID_CHARS = 256
+
+    @staticmethod
+    def _required_opaque_id(value: object, name: str) -> str:
+        """Return one bounded durable identifier without coercing corrupt values."""
+        if (not isinstance(value, str) or not value
+                or len(value) > Run._MAX_OPAQUE_ID_CHARS):
+            raise ValueError(f"invalid {name}")
+        return value
+
+    @staticmethod
+    def _optional_opaque_id(value: object, name: str) -> str | None:
+        """Return an absent or bounded durable identifier without coercion."""
+        if value is None or value == "":
+            return None
+        return Run._required_opaque_id(value, name)
+
+    @staticmethod
+    def _optional_text(value: object, name: str) -> str | None:
+        """Accept only persisted text, never a lossy string coercion."""
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError(f"invalid {name}")
+        return value
+
+    @staticmethod
+    def _optional_mapping(value: object, name: str) -> dict | None:
+        """Accept only the map shape dispatch later dereferences."""
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError(f"invalid {name}")
+        return dict(value)
 
     def to_dict(self) -> dict:
         value = asdict(self)
@@ -90,41 +137,64 @@ class Run:
             value.pop("delegate_user_urls")
         if self.location is None:
             value.pop("location")
+        if self.cancel_cleanup is None:
+            value.pop("cancel_cleanup")
         return value
 
     @staticmethod
     def from_dict(value: dict) -> "Run":
+        if not isinstance(value, dict):
+            raise TypeError("run record must be an object")
         if value.get("status") not in _STATUSES:
             raise ValueError(f"invalid run status: {value.get('status')!r}")
         if value.get("mode", "turn") not in _MODES:
             raise ValueError(f"invalid run mode: {value.get('mode')!r}")
+        cancel_cleanup = value.get("cancel_cleanup")
+        if cancel_cleanup not in {None, "pending", "complete"}:
+            raise ValueError(f"invalid cancellation cleanup: {cancel_cleanup!r}")
+        delegate_user_urls = value.get("delegate_user_urls") or ()
+        if (not isinstance(delegate_user_urls, list | tuple)
+                or any(not isinstance(url, str) or len(url) > 4096
+                       for url in delegate_user_urls)):
+            raise ValueError("invalid delegate user URLs")
+        active_ms = value.get("active_ms", 0.0)
+        if (isinstance(active_ms, bool) or not isinstance(active_ms, int | float)
+                or not math.isfinite(active_ms) or active_ms < 0):
+            raise ValueError("invalid active milliseconds")
+        resume = value.get("resume", False)
+        if not isinstance(resume, bool):
+            raise ValueError("invalid resume flag")
         return Run(
-            thread_id=str(value["thread_id"]),
-            assistant_id=str(value["assistant_id"]),
-            text=(str(value["text"]) if value.get("text") is not None else None),
-            id=str(value["id"]),
-            work_id=str(value.get("work_id") or value["id"]),
+            thread_id=Run._required_opaque_id(value["thread_id"], "thread id"),
+            assistant_id=Run._required_opaque_id(value["assistant_id"], "assistant id"),
+            text=Run._optional_text(value.get("text"), "text"),
+            id=Run._required_opaque_id(value["id"], "run id"),
+            work_id=Run._required_opaque_id(
+                value.get("work_id") or value["id"], "work id"),
             status=value["status"],
             mode=value.get("mode", "turn"),
-            parent_thread_id=value.get("parent_thread_id") or None,
-            parent_run_id=value.get("parent_run_id") or None,
-            dispatch_key=value.get("dispatch_key") or None,
-            sender=value.get("sender") or None,
-            rider=value.get("rider") or None,
-            origin=value.get("origin") or None,
-            resume=bool(value.get("resume", False)),
-            resume_decision=value.get("resume_decision") or None,
-            pending_text=(str(value["pending_text"])
-                          if value.get("pending_text") is not None else None),
-            active_ms=float(value.get("active_ms", 0.0)),
-            consumed_by=value.get("consumed_by") or None,
-            error=value.get("error") or None,
-            result=value.get("result") or None,
-            multitask_strategy=value.get("multitask_strategy", "enqueue"),
-            created_at=str(value["created_at"]),
-            updated_at=str(value["updated_at"]),
-            delegate_user_urls=tuple(value.get("delegate_user_urls") or ()),
-            location=dict(value["location"]) if value.get("location") else None,
+            parent_thread_id=Run._optional_opaque_id(
+                value.get("parent_thread_id"), "parent thread id"),
+            parent_run_id=Run._optional_opaque_id(value.get("parent_run_id"), "parent run id"),
+            dispatch_key=Run._optional_opaque_id(value.get("dispatch_key"), "dispatch key"),
+            sender=Run._optional_opaque_id(value.get("sender"), "sender"),
+            rider=Run._optional_mapping(value.get("rider"), "rider"),
+            origin=Run._optional_opaque_id(value.get("origin"), "origin"),
+            resume=resume,
+            resume_decision=Run._optional_mapping(
+                value.get("resume_decision"), "resume decision"),
+            pending_text=Run._optional_text(value.get("pending_text"), "pending text"),
+            active_ms=float(active_ms),
+            consumed_by=Run._optional_opaque_id(value.get("consumed_by"), "consumed by"),
+            error=Run._optional_text(value.get("error"), "error"),
+            result=Run._optional_text(value.get("result"), "result"),
+            multitask_strategy=Run._required_opaque_id(
+                value.get("multitask_strategy", "enqueue"), "multitask strategy"),
+            created_at=Run._required_opaque_id(value["created_at"], "created at"),
+            updated_at=Run._required_opaque_id(value["updated_at"], "updated at"),
+            delegate_user_urls=tuple(delegate_user_urls),
+            location=Run._optional_mapping(value.get("location"), "location"),
+            cancel_cleanup=cancel_cleanup,
         )
 
 
@@ -154,6 +224,36 @@ class RunService(PerThreadJsonStore[Run]):
     FILENAME = RUNS_FILE
     NOTFOUND_EXC = RunNotFound
 
+    def __init__(self, root_dir: str):
+        super().__init__(root_dir)
+        self._revisions: dict[str, int] = {}
+        self._revision_lock = threading.Lock()
+
+    def _write(self, thread_id: str, runs: list[Run]) -> None:
+        """Persist RUNS before incrementing their process-local invalidation revision."""
+        super()._write(thread_id, runs)
+
+        with self._revision_lock:
+            self._revisions[thread_id] = self._revisions.get(thread_id, 0) + 1
+
+    def revision(self, thread_id: str) -> int:
+        """Return THREAD-ID's process-local durable-write invalidation revision."""
+        with self._revision_lock:
+            return self._revisions.get(thread_id, 0)
+
+    def list_with_revision(self, thread_id: str) -> tuple[list[Run], int]:
+        """Read one durable snapshot and its invalidation revision atomically."""
+        runs, revision, _token = self.list_with_revision_and_token(thread_id)
+        return runs, revision
+
+    def list_with_revision_and_token(
+            self, thread_id: str
+    ) -> tuple[list[Run], int, ObservationToken | None]:
+        """Read one coherent durable snapshot, revision, and file observation token."""
+        with self._lock:
+            runs, token = self._read_with_token(thread_id)
+            return runs, self.revision(thread_id), token
+
     @property
     def root_dir(self) -> str:
         return self._root
@@ -162,13 +262,71 @@ class RunService(PerThreadJsonStore[Run]):
     def _from_dict(value: dict) -> Run:
         return Run.from_dict(value)
 
+    @staticmethod
+    def _token(metadata: os.stat_result) -> ObservationToken:
+        return (metadata.st_dev, metadata.st_ino, metadata.st_size,
+                metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+    @classmethod
+    def _regular_token(cls, metadata: os.stat_result) -> ObservationToken:
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RunStoreUnavailable("Run store is unavailable")
+        return cls._token(metadata)
+
+    def _open_observation_fd(self, thread_id: str) -> int:
+        """Open one private durable file without following a crafted final symlink."""
+        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+        return os.open(self._path(thread_id), flags)
+
+    def observation_token(self, thread_id: str) -> ObservationToken | None:
+        """Probe one durable file in O(1), without parsing its Run history."""
+        try:
+            fd = self._open_observation_fd(thread_id)
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise RunStoreUnavailable("Run store is unavailable") from error
+        try:
+            return self._regular_token(os.fstat(fd))
+        except OSError as error:
+            raise RunStoreUnavailable("Run store is unavailable") from error
+        finally:
+            os.close(fd)
+
+    def _read_with_token(self, thread_id: str) -> tuple[list[Run], ObservationToken | None]:
+        """Parse one coherent no-follow snapshot, retrying one in-place mutation."""
+        for _attempt in range(2):
+            try:
+                fd = self._open_observation_fd(thread_id)
+            except FileNotFoundError:
+                return [], None
+            except OSError as error:
+                raise RunStoreUnavailable("Run store is unavailable") from error
+            try:
+                before = self._regular_token(os.fstat(fd))
+                with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as stream:
+                    values = json.load(stream)
+                after = self._regular_token(os.fstat(fd))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise RunStoreUnavailable("Run store is unavailable") from error
+            finally:
+                os.close(fd)
+            if before != after:
+                continue
+            try:
+                if not isinstance(values, list):
+                    raise TypeError("run store must be a list")
+                return [Run.from_dict(value) for value in values], before
+            except (AttributeError, KeyError, TypeError, ValueError) as error:
+                raise RunStoreUnavailable("Run store is unavailable") from error
+        raise RunStoreUnavailable("Run store is unavailable")
+
     def _read(self, thread_id: str) -> list[Run]:
         try:
-            with open(self._path(thread_id)) as stream:
-                values = json.load(stream)
-        except FileNotFoundError:
-            return []
-        return [Run.from_dict(value) for value in values]
+            runs, _token = self._read_with_token(thread_id)
+            return runs
+        except RunStoreUnavailable:
+            raise
 
     def create(
         self,
@@ -290,7 +448,7 @@ class RunService(PerThreadJsonStore[Run]):
         """
         try:
             return self._read(thread_id)
-        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        except RunStoreUnavailable:
             return []
 
     @staticmethod
@@ -372,6 +530,73 @@ class RunService(PerThreadJsonStore[Run]):
             runs[runs.index(current)] = changed
             self._write(thread_id, runs)
             return changed
+
+    def cancel_logical(self, thread_id: str, accepted_id: str) -> list[Run]:
+        """Atomically cancel a pending logical slice and receipt its cleanup.
+
+        The accepted handle owns the receipt so a retry can distinguish its
+        incomplete cleanup from an unrelated terminal cancellation.  The
+        returned records are the durable post-write snapshot.
+        """
+        with self._lock:
+            runs = self._read(thread_id)
+            accepted = self._find(runs, accepted_id)
+            work = [run for run in runs if run.work_id == accepted.work_id]
+            selected = work[-1]
+            if selected.status != "pending":
+                raise InvalidRunTransition(
+                    f"cannot cancel non-pending logical run {selected.id}: {selected.status}")
+            now = _now()
+            updated = []
+            for run in runs:
+                changes = {}
+                if run.id == selected.id or (
+                        run.work_id == accepted.work_id and run.status == "interrupted"):
+                    changes.update(status="cancelled", updated_at=now)
+                if run.id == accepted_id:
+                    changes["cancel_cleanup"] = "pending"
+                    changes.setdefault("updated_at", now)
+                updated.append(replace(run, **changes) if changes else run)
+            self._write(thread_id, updated)
+            return updated
+
+    def complete_cancel_cleanup(self, thread_id: str, accepted_id: str) -> Run:
+        """Durably record that ACCEPTED-ID's idempotent cancellation cleanup ended."""
+        with self._lock:
+            runs = self._read(thread_id)
+            accepted = self._find(runs, accepted_id)
+            if accepted.cancel_cleanup == "complete":
+                return accepted
+            if accepted.cancel_cleanup != "pending":
+                raise InvalidRunTransition(
+                    f"run {accepted_id} has no pending cancellation cleanup")
+            completed = replace(accepted, cancel_cleanup="complete", updated_at=_now())
+            runs[runs.index(accepted)] = completed
+            self._write(thread_id, runs)
+            return completed
+
+    def fail_initialization(
+            self, thread_id: str, run_id: str, error: str
+    ) -> list[Run]:
+        """Atomically mark the failed initializer and its pending followers erroneous."""
+        with self._lock:
+            runs = self._read(thread_id)
+            self._find(runs, run_id)
+            now = _now()
+            changed = False
+            failed = []
+            updated_runs = []
+            for run in runs:
+                should_fail = run.id == run_id or run.status == "pending"
+                if should_fail and run.status in {"pending", "running"}:
+                    run = replace(run, status="error", error=error, updated_at=now)
+                    changed = True
+                if should_fail and run.status == "error":
+                    failed.append(run)
+                updated_runs.append(run)
+            if changed:
+                self._write(thread_id, updated_runs)
+            return failed
 
     def scan_all(self) -> list[Run]:
         """Return runs across visible and hidden thread directories."""

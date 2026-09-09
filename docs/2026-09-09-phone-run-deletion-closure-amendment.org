@@ -1,0 +1,25 @@
+#+TITLE: Phone Run deletion closure amendment
+#+DATE: <2026-09-09>
+
+* Correction
+
+A live phone observer now registers its exact accepted work id under the same
+admission lock as deletion.  This covers status-only observations that have no
+provisional journal because the bounded journal is saturated or the process
+has restarted.  A successful hard deletion closes both retained journals and
+registered status-only observers.  The SSE loop either observes that closure
+before durable projection or projects before deletion wins; it never projects
+a deleted thread and then mistakes the outcome for an observer failure.
+
+Deleted journals are evictable even if their worker had not first finished.
+The client clears stale provisional insertion markers, preserves visible
+partial text, and persists its next editable tail as the local new-thread
+draft.  Its next Send therefore creates a new canonical thread rather than
+writing into the deleted conversation's provisional region.
+
+* Lineage
+
+This amends [[file:2026-09-09-phone-run-observer-closure-amendment.org][the
+phone Run observer closure amendment]].  That record remains historical.  This
+correction makes its deletion closure complete for status-only observers and
+for the next local submission.

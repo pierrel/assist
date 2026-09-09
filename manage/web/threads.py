@@ -1598,18 +1598,66 @@ def render_thread(
     """
 
 
+def _finish_initialization_failure(
+    tid: str, run_id: str, pending: str, domain: str | None,
+    rider: ContextRider | None,
+) -> None:
+    """Persist the terminal outcome or retry the same durable initializer."""
+    try:
+        _fail_initialization(tid, run_id, pending)
+    except RunNotFound:
+        _INITIALIZATION_SCHEDULER.complete(run_id, tid)
+    except Exception:
+        logging.error("Could not persist initialization failure for %s", tid,
+                      exc_info=True)
+        _INITIALIZATION_SCHEDULER.retry(run_id, tid, domain, rider)
+    else:
+        _INITIALIZATION_SCHEDULER.complete(run_id, tid)
+
+
+def _settle_cancelled_initializer(tid: str, run_id: str) -> bool:
+    """Finish setup-only cancellation once its original initializer owns the thread.
+
+    Cancellation records the durable receipt immediately, but never races a
+    clone or turns a follower loose against a partial workspace.  Only the
+    bounded initializer changes this initial projection to ready.
+    """
+    with _RUN_ADMISSION_LOCK:
+        current = _runs().get(tid, run_id)
+        status = _get_status(tid)
+        if not (current.status == "cancelled"
+                and current.cancel_cleanup in {"pending", "complete"}
+                and status.get("pending_run_id") == run_id):
+            return False
+        _set_status(tid, "ready")
+    _INITIALIZATION_SCHEDULER.complete(run_id, tid)
+    _dispatch_pending_after(tid, run_id)
+    return True
+
+
 def _initialize_thread(
     tid: str, run_id: str, domain: str | None,
     rider: ContextRider | None = None,
 ) -> None:
     """Dedicated initialization worker: clone, then execute the first durable Run."""
     try:
+        current = _runs().get(tid, run_id)
+        pending = current.text or ""
+        # A failure's durable terminalization can succeed just before its status
+        # projection write fails.  The retry owns only that projection, never a
+        # second execution attempt for the already terminal Run.
+        if current.status == "error":
+            _set_status(tid, "error", error=current.error or "Thread setup failed; create a new thread.",
+                        pending_message=pending)
+            _INITIALIZATION_SCHEDULER.complete(run_id, tid)
+            return
         if domain:
-            # Carry started_at through the cloning write (_set_status is a full replace):
-            # otherwise a domain thread's elapsed baseline resets at clone-completion,
-            # excluding the clone+init the user has been waiting through since submit.
-            pending = _runs().get(tid, run_id).text or ""
+            # Carry the durable initializer identity and started_at through this
+            # full-replace status write.  The former lets cancellation settle only
+            # its original head after a clone; the latter keeps clone time in the
+            # user-visible elapsed baseline.
             _set_status(tid, "cloning", pending_message=pending, domain=domain,
+                        pending_run_id=run_id,
                         started_at=_get_status(tid).get("started_at"))
             try:
                 _reset_unexecuted_workspace(tid)
@@ -1623,16 +1671,27 @@ def _initialize_thread(
                 DOMAIN_MANAGERS[tid] = dm
             except Exception as e:
                 logging.error("Clone failed for thread %s: %s", tid, e, exc_info=True)
-                _fail_initialization(tid, run_id, pending)
+                _finish_initialization_failure(tid, run_id, pending, domain, rider)
                 return
+        # A DELETE may have committed while this initializer was queued or
+        # cloning.  The clone is bounded setup already owned by this worker;
+        # it is never interrupted, but the cancelled Run is never executed.
+        if _settle_cancelled_initializer(tid, run_id):
+            return
         _execute_run(run_id, tid)
+        # The same race exists between the post-setup read and the Run claim.
+        # A claim that wins makes DELETE return 409; otherwise settle the exact
+        # durable cancellation before releasing the initialization owner.
+        if _settle_cancelled_initializer(tid, run_id):
+            return
+        _INITIALIZATION_SCHEDULER.complete(run_id, tid)
     except Exception as e:
         logging.error("Initialization failed for thread %s: %s", tid, e, exc_info=True)
         try:
             pending = _runs().get(tid, run_id).text or ""
         except Exception:
             pending = ""
-        _fail_initialization(tid, run_id, pending)
+        _finish_initialization_failure(tid, run_id, pending, domain, rider)
 
 
 def _reset_unexecuted_workspace(tid: str) -> None:
@@ -1658,15 +1717,9 @@ def _fail_initialization(tid: str, run_id: str, pending: str) -> None:
     """Terminalize a Run that failed before or during initialization."""
     message = "Thread setup failed; create a new thread."
     with _RUN_ADMISSION_LOCK:
-        run = _runs().get(tid, run_id)
-        if run.status == "pending":
-            run = _runs().claim(tid, run_id)
-        if run.status == "running":
-            _runs().transition(tid, run_id, "error", error=message)
-        for follower in _runs().list(tid):
-            if follower.status == "pending":
-                _runs().transition(tid, _runs().claim(tid, follower.id).id,
-                                   "error", error=message)
+        failed = _runs().fail_initialization(tid, run_id, message)
+    for run in failed:
+        RUN_STREAMS.finish(tid, run.work_id)
     _set_status(tid, "error", error=message, pending_message=pending)
     _notify_turn_observers(tid, "error", None, None, run_id)
 
@@ -2339,6 +2392,7 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
             return
     except ThreadEngineError as error:
         logging.error("thread %s has an invalid engine marker", tid, exc_info=True)
+        finished_work_id = None
         if run.status in {"pending", "running", "interrupted"}:
             with _RUN_ADMISSION_LOCK:
                 current = _runs().get(tid, run.id)
@@ -2346,6 +2400,10 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
                     current = _runs().claim(tid, run.id)
                 if current.status == "running":
                     _runs().transition(tid, run.id, "error", error=str(error))
+                    finished_work_id = current.work_id
+        if finished_work_id is not None:
+            RUN_STREAMS.finish(tid, finished_work_id)
+        if run.status in {"pending", "running", "interrupted"}:
             _set_status(tid, "error", error="Thread engine is unavailable")
         return
     if run.mode == "child":
@@ -2388,10 +2446,13 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
         # this invocation's terminal projection.
         if current.status == "running":
             status = _get_status(tid)
-            terminal = "error" if status.get("stage") == "error" else "success"
+            stage = status.get("stage")
+            terminal = ("error" if stage == "error"
+                        else "awaiting_approval" if stage == "awaiting_approval"
+                        else "success")
             _runs().transition(tid, run_id, terminal, error=status.get("error"))
             current = _runs().get(tid, run_id)
-        if current.status in {"success", "error", "timeout", "cancelled"}:
+        if current.status in {"success", "error", "timeout", "cancelled", "awaiting_approval"}:
             if not any(candidate.id != current.id
                        and candidate.work_id == current.work_id
                        and candidate.status in {"pending", "running"}
@@ -2869,8 +2930,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                         pending_reply=_pending_text,
                                         pending_sender=prior_pending_sender,
                                         started_at=started_at)
-                            # A terminal awaiting_approval, like the normal pending exit — so
-                            # the observer must fire. Don't notify inline: this is INSIDE the
+                            # A nonterminal awaiting_approval state ends this observer, like the
+                            # normal pending exit, so the common notifier must fire. Don't notify
+                            # inline: this is INSIDE the
                             # THREAD_QUEUE.acquire scope, and a synchronous observer would then
                             # run while holding the global single-flight slot, stalling every
                             # turn. Unwind instead (reaping the container via the finally,
@@ -4060,6 +4122,16 @@ def queue_recovery_runs() -> None:
         # claim leaves the old busy status projection behind; dispatch the
         # persisted ticket instead of synthesizing a duplicate from status.json.
         status = _get_status(tid)
+        cancelled_initializer = next(
+            (run for run in visible_runs[tid]
+             if (run.id == status.get("pending_run_id") and run.status == "cancelled"
+                 and run.cancel_cleanup in {"pending", "complete"})),
+            None)
+        if (status.get("stage") in {"initializing", "cloning"}
+                and cancelled_initializer is not None):
+            _INITIALIZATION_SCHEDULER.submit(
+                cancelled_initializer.id, tid, status.get("domain") or None)
+            continue
         if ((status.get("stage") in {"initializing", "cloning"}
              and any(run.status == "pending" for run in visible_runs[tid]))
                 or any(run.status == "pending"
@@ -4148,6 +4220,10 @@ class _InitializationScheduler:
     def __init__(self) -> None:
         self._q: queue.Queue[tuple[str, str, str | None, ContextRider | None]] = queue.Queue()
         self._thread: threading.Thread | None = None
+        self._scheduled: set[tuple[str, str]] = set()
+        self._active: set[tuple[str, str]] = set()
+        self._retries: dict[tuple[str, str], int] = {}
+        self._lock = threading.Lock()
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -4158,16 +4234,48 @@ class _InitializationScheduler:
 
     def submit(self, run_id: str, tid: str, domain: str | None,
                rider: ContextRider | None = None) -> None:
+        key = (run_id, tid)
+        with self._lock:
+            if key in self._scheduled or key in self._active:
+                return
+            self._scheduled.add(key)
         self._q.put((run_id, tid, domain, rider))
+
+    def retry(self, run_id: str, tid: str, domain: str | None,
+              rider: ContextRider | None) -> None:
+        """Queue the same durable initializer once after capped backoff."""
+        key = (run_id, tid)
+        with self._lock:
+            if key in self._scheduled:
+                return
+            attempt = self._retries.get(key, 0) + 1
+            self._retries[key] = attempt
+            self._scheduled.add(key)
+        delay = min(2 ** (attempt - 1), 30)
+        timer = threading.Timer(delay, self._q.put, args=((run_id, tid, domain, rider),))
+        timer.daemon = True
+        timer.start()
+
+    def complete(self, run_id: str, tid: str) -> None:
+        """Forget retry state once this exact durable initializer has settled."""
+        with self._lock:
+            self._retries.pop((run_id, tid), None)
 
     def _loop(self) -> None:
         while True:
             run_id, tid, domain, rider = self._q.get()
+            key = (run_id, tid)
+            with self._lock:
+                self._scheduled.discard(key)
+                self._active.add(key)
             try:
                 _initialize_thread(tid, run_id, domain, rider)
             except Exception:
                 logging.error("first-thread initialization failed for %s", tid,
                               exc_info=True)
+            finally:
+                with self._lock:
+                    self._active.discard(key)
 
 
 class _ResumeScheduler:
@@ -4977,7 +5085,9 @@ def _delete_thread_and_children(tid: str) -> None:
             if any(child.status == "running" for child in child_runs):
                 continue
             MANAGER.hard_delete(child_tid)
+            RUN_STREAMS.mark_thread_gone(child_tid)
         MANAGER.hard_delete(tid, on_delete=[_evict_caches, _evict_egress])
+        RUN_STREAMS.mark_thread_gone(tid)
 
 
 @app.post("/thread/{tid}/rename")

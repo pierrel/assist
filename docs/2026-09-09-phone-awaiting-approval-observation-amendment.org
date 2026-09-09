@@ -1,0 +1,22 @@
+#+TITLE: Phone awaiting-approval observation amendment
+#+DATE: <2026-09-09>
+
+* Correction
+
+=awaiting_approval= is a nonterminal durable Run state, but it ends the
+finite phone SSE observation.  At that point the worker has no further model
+text to stream and the phone must reconcile the canonical snapshot to show the
+approval state.  The SSE =terminal= event therefore means that this observation
+has ended; it does not assert that every enclosed Run status is terminal.
+
+The status and terminal payloads remain the same logical projection.  A
+=transitioning= fair-scheduling handoff still does not end observation.  A
+terminal durable outcome and =awaiting_approval= each end this live-text
+observer, after which the canonical snapshot is authoritative.
+
+* Lineage
+
+This amends [[file:2026-09-08-phone-run-streaming.org][incremental phone Run
+streaming]].  That earlier record remains historical.  This correction narrows
+the meaning of its SSE =terminal= event without changing durable Run state
+semantics.

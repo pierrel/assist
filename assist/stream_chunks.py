@@ -1,9 +1,9 @@
 """Defensive normalization of langgraph stream-chunk payloads.
 
-Shared by every consumer of `Thread.stream_message` — the assist CLI
-(`manage/cli.py`) and the emacsos-server NDJSON gateway (`emacsos_server`,
-which installs assist editable) — so langgraph-version-specific chunk shapes
-are handled in exactly one place rather than re-discovered per consumer.
+Shared by Assist's `Thread.stream_message` consumers, including the CLI
+(`manage/cli.py`), so langgraph-version-specific chunk shapes are handled in
+one place.  EmacsOS keeps a matching small text extractor until its separately
+deployable server can require the paired Assist release that exports it.
 """
 from __future__ import annotations
 

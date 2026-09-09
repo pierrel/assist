@@ -1,0 +1,35 @@
+#+TITLE: Phone Run observer closure amendment
+#+DATE: <2026-09-09>
+
+* Correction
+
+The process-local phone journal now has a monotonic entry revision.  An SSE
+observer copies the bounded provisional snapshot only when that revision
+changes.  Activation, reset, an accepted delta, first truncation, and first
+finish advance it; unchanged polls inspect only O(1) state.  Journal revisions
+are invalidation only, never durable Run authority.  A terminal journal change
+forces a fresh durable projection before the observer reports a Run outcome.
+
+Successful hard deletion marks each matching retained journal closed.  An
+already-open observer emits =closed-set= with =thread-gone= and stops without a
+second durable projection.  The client keeps visible partial text and its next
+draft, clears the accepted retry tuple, and makes the next submission a new
+thread.
+
+Initialization failure now terminalizes the head and pending followers in one
+RunService write.  Journal completion, status, and notifications follow only
+after that write succeeds.  A write failure leaves the same durable Run tuple
+owned and requeues it through the one initializer with capped backoff; it never
+creates a replacement Run.
+
+An unreadable durable Run store is sanitized: initial observation returns a
+no-store 503, while a later required re-projection emits
+=run-store-unavailable= and closes.  The client keeps its accepted identity
+and asks for operator repair.  Automatic repair remains deferred.
+
+* Lineage
+
+This amends [[file:2026-09-09-phone-run-observer-revision-amendment.org][the
+phone Run observer revision amendment]].  That record remains historical.  It
+adds the copy-free journal snapshot, closure, persistence-failure, and
+unavailable-store outcomes without changing durable Run authority.

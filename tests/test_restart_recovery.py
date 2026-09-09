@@ -14,13 +14,15 @@ import contextlib
 import json
 import os
 import sqlite3
+import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from manage import web
-from manage.web import threads
+from manage.web import phone_api, threads
+from manage.web.run_stream import RunStreamJournal
 from manage.web.state import MESSAGE_BACKLOG, _get_status, _set_status
 from assist.backlog import MessageBacklog, PendingMessage
 from assist.thread_engine import write_new_thread_engine
@@ -267,12 +269,313 @@ def test_recovery_discards_unaccepted_first_thread_reservation(wired):
 
 def test_initialization_failure_terminalizes_pending_followers(wired):
     tid, _ = wired
-    first = threads._create_run(tid, "first")
-    follower = threads._create_run(tid, "later")
-
-    threads._fail_initialization(tid, first.id, "first")
+    first = threads._create_run(tid, "first", work_id="first-work")
+    follower = threads._create_run(tid, "later", work_id="follower-work")
+    journal = RunStreamJournal()
+    for work_id in (first.work_id, follower.work_id):
+        assert journal.reserve(tid, work_id)
+        assert journal.activate(tid, work_id)
+    # `wired` gives this test a real durable run store; the journal is the
+    # phone-only process-local observer that must be retired with both runs.
+    with patch.object(threads, "RUN_STREAMS", journal):
+        threads._fail_initialization(tid, first.id, "first")
 
     assert [run.status for run in threads._runs().list(tid)] == ["error", "error"]
+    assert journal.read(tid, first.work_id)["terminal"]
+    assert journal.read(tid, follower.work_id)["terminal"]
+
+
+def test_cancelled_initializer_finishes_its_owned_setup_before_releasing_a_follower(
+        wired, monkeypatch):
+    """DELETE is immediate, but a clone owner alone releases its ready projection."""
+    tid, tmp_path = wired
+    head = threads._create_run(tid, "first", work_id="first-work")
+    follower = threads._create_run(tid, "later", work_id="later-work")
+    _set_status(tid, "initializing", pending_message="first", pending_run_id=head.id,
+                domain="repo://example")
+    journal = RunStreamJournal()
+    assert journal.reserve(tid, head.work_id) and journal.activate(tid, head.work_id)
+    started, release = threading.Event(), threading.Event()
+    executed, dispatched = [], []
+
+    class BlockingDomain:
+        def __init__(self, *_args, **_kwargs):
+            started.set()
+            assert release.wait(1)
+
+    monkeypatch.setattr(phone_api, "RUN_STREAMS", journal)
+    monkeypatch.setattr(threads, "RUN_STREAMS", journal)
+    monkeypatch.setattr(threads, "DomainManager", BlockingDomain)
+    monkeypatch.setattr(threads, "_execute_run", lambda *args: executed.append(args))
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
+                        lambda run_id, thread_id, **_kwargs: dispatched.append((run_id, thread_id)))
+    monkeypatch.setattr(threads._INITIALIZATION_SCHEDULER, "complete", lambda *_args: None)
+
+    worker = threading.Thread(
+        target=threads._initialize_thread, args=(tid, head.id, "repo://example"))
+    worker.start()
+    assert started.wait(1)
+
+    code, value = phone_api._cancel_logical_run(tid, head.id)
+
+    assert code == 200
+    assert value["run"]["status"] == "cancelled"
+    assert _get_status(tid)["stage"] == "cloning"
+    assert threads._runs().get(tid, head.id).cancel_cleanup == "complete"
+    assert journal.read(tid, head.work_id)["terminal"]
+    assert not executed and not dispatched
+    assert (tmp_path / tid).is_dir()
+
+    release.set()
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert not executed
+    assert _get_status(tid)["stage"] == "ready"
+    assert dispatched == [(follower.id, tid)]
+
+
+def test_cancelled_no_domain_initializer_never_executes_the_head(wired, monkeypatch):
+    tid, _ = wired
+    head = threads._create_run(tid, "first")
+    _set_status(tid, "initializing", pending_message="first", pending_run_id=head.id)
+    journal = RunStreamJournal()
+    assert journal.reserve(tid, head.work_id) and journal.activate(tid, head.work_id)
+    executed = []
+
+    monkeypatch.setattr(phone_api, "RUN_STREAMS", journal)
+    monkeypatch.setattr(threads, "RUN_STREAMS", journal)
+    monkeypatch.setattr(threads, "_execute_run", lambda *args: executed.append(args))
+    monkeypatch.setattr(threads._INITIALIZATION_SCHEDULER, "complete", lambda *_args: None)
+
+    assert phone_api._cancel_logical_run(tid, head.id)[0] == 200
+    threads._initialize_thread(tid, head.id, None)
+
+    assert not executed
+    assert _get_status(tid)["stage"] == "ready"
+
+
+def test_cancelled_initializer_clone_failure_does_not_execute_it(wired, monkeypatch):
+    tid, _ = wired
+    head = threads._create_run(tid, "first")
+    _set_status(tid, "initializing", pending_message="first", pending_run_id=head.id,
+                domain="repo://example")
+    executed = []
+
+    monkeypatch.setattr(threads, "DomainManager",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("clone failed")))
+    monkeypatch.setattr(threads, "_execute_run", lambda *args: executed.append(args))
+    monkeypatch.setattr(threads._INITIALIZATION_SCHEDULER, "complete", lambda *_args: None)
+
+    assert phone_api._cancel_logical_run(tid, head.id)[0] == 200
+    threads._initialize_thread(tid, head.id, "repo://example")
+
+    assert not executed
+    assert threads._runs().get(tid, head.id).status == "cancelled"
+    assert _get_status(tid)["stage"] == "error"
+
+
+def test_restart_requeues_the_exact_cancelled_initializer_without_a_new_run(wired, monkeypatch):
+    tid, _ = wired
+    head = threads._create_run(tid, "first")
+    _set_status(tid, "initializing", pending_message="first", pending_run_id=head.id,
+                domain="repo://example")
+    threads._runs().cancel_logical(tid, head.id)
+    threads._runs().complete_cancel_cleanup(tid, head.id)
+    submitted = []
+
+    monkeypatch.setattr(threads.MANAGER, "list", lambda: [tid])
+    monkeypatch.setattr(threads._INITIALIZATION_SCHEDULER, "submit",
+                        lambda *job: submitted.append(job))
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no resume")))
+
+    threads.queue_recovery_runs()
+
+    assert submitted == [(head.id, tid, "repo://example")]
+    assert [run.id for run in threads._runs().list(tid)] == [head.id]
+
+
+def test_initialization_failure_retry_repairs_only_the_status_projection(wired, monkeypatch):
+    tid, _ = wired
+    run = threads._create_run(tid, "first", work_id="first-work")
+    _set_status(tid, "initializing", pending_message="first", pending_run_id=run.id)
+    scheduler = threads._InitializationScheduler()
+    retries, completions = [], []
+    writes = {"status": 0}
+    original_set_status = threads._set_status
+
+    def fail_once(thread_id, stage, **kwargs):
+        if stage == "error" and writes["status"] == 0:
+            writes["status"] += 1
+            raise OSError("status unavailable")
+        original_set_status(thread_id, stage, **kwargs)
+
+    monkeypatch.setattr(threads, "_INITIALIZATION_SCHEDULER", scheduler)
+    monkeypatch.setattr(scheduler, "retry", lambda *job: retries.append(job))
+    monkeypatch.setattr(scheduler, "complete", lambda *job: completions.append(job))
+    monkeypatch.setattr(threads, "_set_status", fail_once)
+    monkeypatch.setattr(threads, "_execute_run",
+                        lambda *_args: (_ for _ in ()).throw(RuntimeError("setup failed")))
+
+    threads._initialize_thread(tid, run.id, None)
+    assert threads._runs().get(tid, run.id).status == "error"
+    assert retries == [(run.id, tid, None, None)]
+
+    threads._initialize_thread(tid, run.id, None)
+
+    assert _get_status(tid)["stage"] == "error"
+    assert completions == [(run.id, tid)]
+
+
+def test_initialization_failure_requeues_the_same_run_until_one_final_dispatch(
+        wired, monkeypatch):
+    tid, _ = wired
+    run = threads._create_run(tid, "first", work_id="first-work")
+    scheduler = threads._InitializationScheduler()
+    retries, completions, executions = [], [], []
+    writes = 0
+    service = threads._runs()
+    write = service._write
+
+    def fail_once(thread_id, runs):
+        nonlocal writes
+        writes += 1
+        if writes == 1:
+            raise OSError("durable store unavailable")
+        write(thread_id, runs)
+
+    def execute(run_id, thread_id):
+        executions.append((run_id, thread_id))
+        service.claim(thread_id, run_id)
+        service.transition(thread_id, run_id, "success")
+
+    monkeypatch.setattr(service, "_write", fail_once)
+    monkeypatch.setattr(threads, "_INITIALIZATION_SCHEDULER", scheduler)
+    monkeypatch.setattr(scheduler, "retry", lambda *job: retries.append(job))
+    monkeypatch.setattr(scheduler, "complete", lambda *job: completions.append(job))
+    monkeypatch.setattr(threads, "_execute_run",
+                        lambda *_args: (_ for _ in ()).throw(RuntimeError("clone failed")))
+
+    threads._initialize_thread(tid, run.id, None)
+
+    assert retries == [(run.id, tid, None, None)]
+    assert [(item.id, item.work_id, item.status) for item in service.list(tid)] == [
+        (run.id, "first-work", "pending")]
+
+    monkeypatch.setattr(threads, "_execute_run", execute)
+    threads._initialize_thread(retries[0][1], retries[0][0], retries[0][2])
+
+    assert executions == [(run.id, tid)]
+    assert [(item.id, item.work_id, item.status) for item in service.list(tid)] == [
+        (run.id, "first-work", "success")]
+    assert completions == [(run.id, tid)]
+
+
+def test_persistent_initialization_failure_stays_owned_and_requeued(wired, monkeypatch):
+    tid, _ = wired
+    run = threads._create_run(tid, "first", work_id="first-work")
+    scheduler = threads._InitializationScheduler()
+    retries = []
+    service = threads._runs()
+
+    monkeypatch.setattr(threads, "_INITIALIZATION_SCHEDULER", scheduler)
+    monkeypatch.setattr(scheduler, "retry", lambda *job: retries.append(job))
+    monkeypatch.setattr(service, "_write",
+                        lambda *_args: (_ for _ in ()).throw(OSError("store unavailable")))
+    monkeypatch.setattr(threads, "_execute_run",
+                        lambda *_args: (_ for _ in ()).throw(RuntimeError("clone failed")))
+
+    threads._initialize_thread(tid, run.id, None)
+    threads._initialize_thread(tid, run.id, None)
+
+    assert retries == [(run.id, tid, None, None), (run.id, tid, None, None)]
+    assert [(item.id, item.work_id, item.status) for item in service.list(tid)] == [
+        (run.id, "first-work", "pending")]
+
+
+def test_initialization_retry_is_deduplicated_and_caps_its_backoff(monkeypatch):
+    scheduler = threads._InitializationScheduler()
+    delays = []
+
+    class Timer:
+        daemon = False
+
+        def __init__(self, delay, _callback, args):
+            delays.append((delay, args))
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(threads.threading, "Timer", Timer)
+
+    scheduler.retry("run-a", "thread-a", None, None)
+    scheduler.retry("run-a", "thread-a", None, None)
+    with scheduler._lock:
+        scheduler._scheduled.clear()
+        scheduler._retries[("run-a", "thread-a")] = 5
+    scheduler.retry("run-a", "thread-a", None, None)
+
+    assert [delay for delay, _ in delays] == [1, 30]
+
+
+def test_execute_run_preserves_awaiting_approval_and_retires_phone_journal(wired, monkeypatch):
+    """The durable Run must match the approval state a phone observer sees."""
+    tid, _ = wired
+    run = threads._create_run(tid, "need approval", work_id="approval-work")
+    journal = RunStreamJournal()
+    assert journal.reserve(tid, run.work_id)
+    assert journal.activate(tid, run.work_id)
+
+    def await_approval(_tid, _text, *, _run, **_kwargs):
+        threads._runs().claim(_tid, _run.id)
+        _set_status(_tid, "awaiting_approval")
+
+    monkeypatch.setattr(threads, "RUN_STREAMS", journal)
+    monkeypatch.setattr(threads, "_process_message", await_approval)
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *_args: None)
+
+    threads._execute_run(run.id, tid)
+
+    assert threads._runs().get(tid, run.id).status == "awaiting_approval"
+    assert journal.read(tid, run.work_id)["terminal"]
+
+
+def test_thread_deletion_closes_phone_journals(wired, monkeypatch):
+    tid, _ = wired
+    run = threads._create_run(tid, "delete me", work_id="deleted-work")
+    journal = RunStreamJournal()
+    assert journal.reserve(tid, run.work_id)
+    assert journal.activate(tid, run.work_id)
+    monkeypatch.setattr(threads, "RUN_STREAMS", journal)
+    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+    monkeypatch.setattr(threads, "_evict_caches", lambda _tid: None)
+    monkeypatch.setattr(threads, "_evict_egress", lambda _tid: None)
+
+    threads._delete_thread_and_children(tid)
+
+    assert journal.is_gone(tid, run.work_id)
+
+
+def test_invalid_engine_execution_retires_phone_journal(wired, monkeypatch):
+    """A durable engine error has the same bounded observer cleanup as a turn error."""
+    from assist.thread_engine import ThreadEngineError
+
+    tid, _ = wired
+    run = threads._create_run(tid, "broken engine", work_id="broken-engine-work")
+    journal = RunStreamJournal()
+    assert journal.reserve(tid, run.work_id)
+    assert journal.activate(tid, run.work_id)
+    monkeypatch.setattr(threads, "RUN_STREAMS", journal)
+    monkeypatch.setattr(
+        threads, "_is_pi_thread",
+        lambda _tid: (_ for _ in ()).throw(ThreadEngineError("invalid marker")),
+    )
+
+    threads._execute_run(run.id, tid)
+
+    assert threads._runs().get(tid, run.id).status == "error"
+    assert journal.read(tid, run.work_id)["terminal"]
 
 
 def test_recovering_pi_head_never_builds_a_deep_graph(wired, monkeypatch):

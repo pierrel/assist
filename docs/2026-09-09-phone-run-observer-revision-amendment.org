@@ -1,0 +1,27 @@
+#+TITLE: Phone Run observer revision amendment
+#+DATE: <2026-09-09>
+
+* Correction
+
+The phone SSE observer no longer parses a thread's complete durable Run history
+on each one-second poll.  It first captures the durable logical projection and
+its process-local per-thread RunService revision under the normal admission
+lock.  Later polls inspect only that revision, the thread stage, and whether
+the process-local stream journal became terminal.  They reproject durably only
+when one of those values changes.
+
+The revision is invalidation, never Run authority.  It advances only after a
+successful durable =runs.json= write and can reset on process restart; every
+new observer still begins from the durable projection.  A status-stage or
+journal-terminal change likewise forces a durable re-read, so the observer
+does not infer a Run outcome from process-local state.
+
+Durable per-Run indexing is deliberately deferred.  The bounded initial
+projection still scans the existing Run history, while idle polling is O(1).
+
+* Lineage
+
+This amends [[file:2026-09-08-phone-run-streaming.org][incremental phone Run
+streaming]].  That record remains historical.  This correction
+changes only the observer's invalidation mechanics; durable Run semantics and
+the fair admission handoff remain unchanged.
