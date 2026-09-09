@@ -92,6 +92,7 @@ from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
 from edd.live_capture import CaptureStorageFull
 
 from manage.web.app import app
+from manage.web.run_stream import PHONE_DELTA_CHUNK_BYTES, RUN_STREAMS
 from manage.web.diff import _DIFF_CSS, _render_inline_diffs
 from assist.geo.model import STATE_FAILED, STATE_IMPORTING
 from assist.geo.provisioner import Provisioner
@@ -2030,6 +2031,7 @@ def _runs():
 def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 resume_decision=None, resume=False, active_ms=0.0,
                 pending_text=None, origin=None, work_id=None,
+                run_id=None,
                 assistant_id="general-agent", mode="turn", parent_thread_id=None,
                 parent_run_id=None, dispatch_key=None,
                 cancel_pending=False, max_runs=None,
@@ -2037,7 +2039,7 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 delegate_user_urls=(), location: LocationSnapshot | None = None) -> Run:
     """Commit one web turn before placing its id on a dispatch queue."""
     return _runs().create(
-        tid, assistant_id, text, work_id=work_id, mode=mode,
+        tid, assistant_id, text, run_id=run_id, work_id=work_id, mode=mode,
         parent_thread_id=parent_thread_id, parent_run_id=parent_run_id,
         dispatch_key=dispatch_key, sender=sender,
         rider=_rider_to_fields(rider) if rider is not None else None,
@@ -2047,6 +2049,24 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
         max_pending=max_pending, multitask_strategy=multitask_strategy,
         delegate_user_urls=delegate_user_urls,
         location=_location_to_fields(location) if location else None)
+
+
+def _publish_phone_text(tid: str, work_id: str, text: str) -> None:
+    """Split a model callback by Unicode code point before bounded publication."""
+    # JSON can escape each input byte as ``\\u00XX``.  This keeps the final
+    # single-line record below the 48 KiB transport cap for control-heavy text.
+    start = 0
+    bytes_in_piece = 0
+    for end, character in enumerate(text, start=1):
+        character_bytes = len(character.encode("utf-8"))
+        if bytes_in_piece and bytes_in_piece + character_bytes > PHONE_DELTA_CHUNK_BYTES:
+            if RUN_STREAMS.publish_delta(tid, work_id, text[start:end - 1]) is None:
+                return
+            start = end - 1
+            bytes_in_piece = 0
+        bytes_in_piece += character_bytes
+    if start < len(text):
+        RUN_STREAMS.publish_delta(tid, work_id, text[start:])
 
 
 def _delegate_configurable(run: Run) -> dict | None:
@@ -2372,6 +2392,11 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
             _runs().transition(tid, run_id, terminal, error=status.get("error"))
             current = _runs().get(tid, run_id)
         if current.status in {"success", "error", "timeout", "cancelled"}:
+            if not any(candidate.id != current.id
+                       and candidate.work_id == current.work_id
+                       and candidate.status in {"pending", "running"}
+                       for candidate in _runs().list(tid)):
+                RUN_STREAMS.finish(tid, current.work_id)
             _dispatch_pending_after(tid, run_id)
     except RunNotFound:
         pass  # thread deletion removes its run store while a dispatcher unwinds.
@@ -2792,7 +2817,13 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 except FileNotFoundError:
                     return
                 _set_status(tid, "processing", **pending_kwargs)
-                if resume:
+                observed = (_run is not None
+                            and RUN_STREAMS.read(tid, _run.work_id) is not None)
+                if resume and observed:
+                    resp = chat.observe_resume(
+                        lambda delta: _publish_phone_text(tid, _run.work_id, delta),
+                        lambda _attempt: RUN_STREAMS.reset_attempt(tid, _run.work_id))
+                elif resume:
                     # Fair-scheduling resume: continue the in-flight turn from its
                     # durable checkpoint (input=None). No new message, no supersede.
                     resp = chat.resume()
@@ -2848,7 +2879,13 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                             raise _SupersedeCapReached
                         if same_sender:
                             text = _SUPERSEDE_RIDER + text
-                    resp = chat.message(text)
+                    if observed:
+                        resp = chat.observe_message(
+                            text,
+                            lambda delta: _publish_phone_text(tid, _run.work_id, delta),
+                            lambda _attempt: RUN_STREAMS.reset_attempt(tid, _run.work_id))
+                    else:
+                        resp = chat.message(text)
             finally:
                 # One container per turn: kill it as soon as this turn's agent
                 # run finishes — success, error, or the early return above —
@@ -2927,27 +2964,34 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         logging.info("fair-sched: %s paused (active hold %.0fs carried); queuing resume", tid,
                      carry / 1000.0)
         DOMAIN_MANAGERS.pop(tid, None)  # fresh container on resume; drop the cached backend
-        # Enqueue the resume BEFORE advertising `paused`, so a new message that races in
-        # and sees `paused` is routed onto this scheduler strictly AFTER the resume.
-        if _run is not None:
-            _runs().transition(tid, _run.id, "interrupted", active_ms=carry)
-            successor = _create_run(
-                tid, None, rider=rider, sender=sender, resume=True,
-                active_ms=carry, pending_text=pending_kwargs.get("pending_message"),
-                origin=origin, work_id=_run.work_id,
-                location=_location_from_fields(_run.location))
+        # Atomically create the successor and publish the paused projection before
+        # making that successor runnable.
+        # Admission and DELETE take this lock too, so neither can observe an
+        # interrupted predecessor without its same-work successor.
+        with _RUN_ADMISSION_LOCK:
+            if _run is not None:
+                _runs().transition(tid, _run.id, "interrupted", active_ms=carry)
+                successor = _create_run(
+                    tid, None, rider=rider, sender=sender, resume=True,
+                    active_ms=carry, pending_text=pending_kwargs.get("pending_message"),
+                    origin=origin, work_id=_run.work_id,
+                    location=_location_from_fields(_run.location))
+            else:
+                # Compatibility for direct low-level callers during the migration.
+                successor = _create_run(
+                    tid, None, rider=rider, sender=sender, resume=True,
+                    active_ms=carry, pending_text=pending_kwargs.get("pending_message"),
+                    origin=origin)
+            # accumulated_active_ms rides the status write so a restart-recovered resume
+            # keeps its 2h-cap accounting (the in-memory scheduler submission is lost with
+            # the process; sender/rider are already in pending_kwargs). A crash of a
+            # PROCESSING turn has no carry to persist — its resumed slice restarts the
+            # cap at 0, accepted (the cap is a runaway backstop, not billing).
+            _set_status(tid, "paused", accumulated_active_ms=carry, **pending_kwargs)
+            # A scheduler may execute inline in a deterministic test or immediately
+            # on an idle worker.  Publish the durable paused projection first so a
+            # newly-running successor can never be overwritten by this old slice.
             _RESUME_SCHEDULER.submit(successor.id, tid)
-        else:
-            # Compatibility for direct low-level callers during the migration.
-            _RESUME_SCHEDULER.submit_resume(
-                tid, rider, sender, carry, pending_kwargs.get("pending_message"),
-                origin=origin)
-        # accumulated_active_ms rides the status write so a restart-recovered resume
-        # keeps its 2h-cap accounting (the in-memory submit_resume above is lost with
-        # the process; sender/rider are already in pending_kwargs). A crash of a
-        # PROCESSING turn has no carry to persist — its resumed slice restarts the
-        # cap at 0, accepted (the cap is a runaway backstop, not billing).
-        _set_status(tid, "paused", accumulated_active_ms=carry, **pending_kwargs)
         return
     except SandboxContainerLostError as e:
         # Distinct status message: a dead container is recoverable —
@@ -3160,7 +3204,8 @@ async def create_thread_with_message(
 def create_thread_with_message_core(
     text: str, domain: str | None, rider: ContextRider | None = None, engine: str = "deepagents",
     location: LocationSnapshot | None = None, *, thread_id: str | None = None,
-    dispatch_key: str | None = None,
+    dispatch_key: str | None = None, run_id: str | None = None,
+    work_id: str | None = None,
 ) -> tuple[str, str, str | None]:
     """Persist a new thread's first Run before its slow initialization starts."""
     # The clone scheduler has one worker.  Bound admission *before* publishing a
@@ -3181,6 +3226,7 @@ def create_thread_with_message_core(
         _set_status(tid, "initializing", pending_message=text, domain=selected or "",
                     started_at=started_at)
         run = _create_run(tid, text, rider=rider, location=location,
+                          run_id=run_id, work_id=work_id,
                           dispatch_key=dispatch_key)
         # A first Run needs its slow clone before execution.  Persist that relation so
         # startup recovery replays initialization rather than running in a missing worktree.
@@ -3367,7 +3413,9 @@ class _EmailApprovalPending(Exception):
 def _accept_message_run_locked(tid: str, text: str, rider=None,
                                location: LocationSnapshot | None = None,
                                dispatch_key: str | None = None,
-                               max_pending: int | None = None) -> tuple[Run, bool]:
+                               max_pending: int | None = None,
+                               run_id: str | None = None,
+                               work_id: str | None = None) -> tuple[Run, bool]:
     """Admit one message while ``_RUN_ADMISSION_LOCK`` is held."""
     if _get_status(tid).get("pending_email_token"):
         raise _EmailApprovalPending
@@ -3381,6 +3429,7 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
         # best-effort must not change message-admission semantics.
         pass
     run = _create_run(tid, text, rider=rider, location=location,
+                      run_id=run_id, work_id=work_id,
                       dispatch_key=dispatch_key,
                       max_pending=max_pending)
     if busy:
@@ -3395,10 +3444,14 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
 
 def _accept_message_run(tid: str, text: str, rider=None,
                         location: LocationSnapshot | None = None,
-                        dispatch_key: str | None = None) -> tuple[Run, bool]:
+                        dispatch_key: str | None = None,
+                        max_pending: int | None = None,
+                        run_id: str | None = None,
+                        work_id: str | None = None) -> tuple[Run, bool]:
     """Persist one web submission and return whether earlier work owns the thread."""
     with _RUN_ADMISSION_LOCK:
-        return _accept_message_run_locked(tid, text, rider, location, dispatch_key)
+        return _accept_message_run_locked(tid, text, rider, location, dispatch_key,
+                                          max_pending, run_id, work_id)
 
 
 def _record_browser_location(rider: ContextRider | None) -> LocationSnapshot | None:

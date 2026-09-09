@@ -1,6 +1,7 @@
 """Phone API contract: auth, visible snapshots, and safe worktree data."""
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import sqlite3
@@ -17,6 +18,8 @@ from assist.run_service import RunService
 from manage.web import state
 from manage.web.app import app
 from manage.web import phone_api
+from manage.web import run_stream
+from manage.web.run_stream import RunStreamJournal, encode_sse
 
 
 def _client(monkeypatch) -> TestClient:
@@ -135,7 +138,7 @@ def test_thread_list_normalizes_only_leading_pictographs(tmp_path, monkeypatch):
 def test_create_queues_initialization_on_the_dedicated_scheduler(monkeypatch):
     scheduled = []
     monkeypatch.setattr(phone_api, "_create_and_submit",
-                        lambda body, key: ("thread-a", SimpleNamespace(id="run-a"), "repo-a", False))
+                        lambda body, key, **kwargs: ("thread-a", SimpleNamespace(id="run-a", work_id=kwargs["work_id"]), "repo-a", False))
     monkeypatch.setattr(phone_api.threads._INITIALIZATION_SCHEDULER, "submit",
                         lambda run_id, tid, domain: scheduled.append((run_id, tid, domain)))
 
@@ -150,7 +153,7 @@ def test_create_queues_initialization_on_the_dedicated_scheduler(monkeypatch):
 def test_message_queues_on_the_dedicated_scheduler(monkeypatch):
     scheduled = []
     monkeypatch.setattr(phone_api, "_submit_existing",
-                        lambda tid, text, key: (SimpleNamespace(id="run-a", status="pending"), False, False))
+                        lambda tid, text, key, **kwargs: (SimpleNamespace(id="run-a", status="pending", work_id=kwargs["work_id"]), False, False))
     monkeypatch.setattr(phone_api.threads._RESUME_SCHEDULER, "submit",
                         lambda run_id, tid, **kwargs: scheduled.append((run_id, tid, kwargs)))
 
@@ -280,6 +283,342 @@ def test_phone_cannot_cancel_its_first_run_while_setup_is_pending(tmp_path, monk
     assert response.json()["detail"] == "Thread setup is already in progress"
 
 
+def test_phone_journal_hides_reservations_and_resets_the_retained_attempt():
+    journal = RunStreamJournal()
+
+    assert journal.reserve("thread-a", "work-a")
+    assert journal.read("thread-a", "work-a") is None
+    assert journal.activate("thread-a", "work-a")
+    assert journal.publish_delta("thread-a", "work-a", "first") == {
+        "attempt": 1, "index": 1, "text": "first"}
+    assert journal.reset_attempt("thread-a", "work-a") == 2
+    assert journal.publish_delta("thread-a", "work-a", "second") == {
+        "attempt": 2, "index": 1, "text": "second"}
+    assert journal.read("thread-a", "work-a") == {
+        "attempt": 2, "deltas": [{"attempt": 2, "index": 1, "text": "second"}],
+        "truncated": False, "terminal": False}
+
+
+def test_phone_journal_saturates_status_only_then_evicts_only_terminal(monkeypatch):
+    monkeypatch.setattr(run_stream, "MAX_WORKS", 2)
+    journal = RunStreamJournal()
+    assert journal.reserve("t", "active")
+    assert journal.reserve("t", "terminal")
+    assert journal.activate("t", "active")
+    assert journal.activate("t", "terminal")
+    assert not journal.reserve("t", "status-only")
+    journal.finish("t", "terminal")
+    assert journal.reserve("t", "replacement")
+    assert journal.read("t", "active") is not None
+    assert journal.read("t", "terminal") is None
+
+
+def test_phone_journal_truncates_once_and_stops_further_publication(monkeypatch):
+    monkeypatch.setattr(run_stream, "MAX_TEXT_BYTES", 1)
+    journal = RunStreamJournal()
+    assert journal.reserve("t", "w") and journal.activate("t", "w")
+    assert journal.publish_delta("t", "w", "x") is not None
+    assert journal.publish_delta("t", "w", "y") is None
+    assert journal.read("t", "w")["truncated"]
+    assert journal.publish_delta("t", "w", "z") is None
+
+
+def test_phone_sse_encoder_uses_real_record_newlines_and_json_escapes_control_text():
+    record = encode_sse("assistant-delta", {"text": "x\nevent: forged\rdata: y"})
+
+    assert record.splitlines() == [
+        "event: assistant-delta", 'data: {"text":"x\\nevent: forged\\rdata: y"}', ""]
+    assert record.endswith("\n\n")
+    assert "\\n" in record and "\\r" in record
+
+
+def test_phone_sse_rejects_an_encoded_record_over_its_transport_bound():
+    with pytest.raises(ValueError, match="record exceeds bound"):
+        phone_api._sse("assistant-delta", {"text": "\\" * phone_api.MAX_PHONE_SSE_RECORD_BYTES})
+
+
+def test_phone_run_events_replay_reset_delta_truncation_status_and_terminal(monkeypatch):
+    """The real route emits one ordered, replayable observation before terminal truth."""
+    journal = RunStreamJournal()
+    assert journal.reserve("thread-a", "work-a") and journal.activate("thread-a", "work-a")
+    monkeypatch.setattr(run_stream, "MAX_TEXT_BYTES", 1)
+    assert journal.publish_delta("thread-a", "work-a", "x") is not None
+    assert journal.publish_delta("thread-a", "work-a", "y") is None
+    monkeypatch.setattr(phone_api, "RUN_STREAMS", journal)
+    monkeypatch.setattr(phone_api, "_logical_status", lambda tid, run_id: {
+        "id": run_id, "thread_id": tid, "work_id": "work-a", "physical_run_id": "slice-a",
+        "status": "success", "error": None, "updated_at": 1, "thread_status": "ready"})
+
+    response = _client(monkeypatch).get(
+        "/api/v1/phone/threads/thread-a/runs/run-a/events", headers=_auth())
+
+    assert response.status_code == 200
+    assert [line.removeprefix("event: ") for line in response.text.splitlines()
+            if line.startswith("event: ")] == [
+                "assistant-reset", "assistant-delta", "assistant-truncated", "status", "terminal"]
+    assert all(line.startswith("data: {") for line in response.text.splitlines()
+               if line.startswith("data: "))
+
+
+def test_phone_run_events_reports_the_bounded_route_timeout(monkeypatch):
+    """The route has an explicit error outcome instead of silently ending a live Run."""
+    monkeypatch.setattr(phone_api, "range", lambda *_args: range(1), raising=False)
+    monkeypatch.setattr(phone_api, "_logical_status", lambda tid, run_id: {
+        "id": run_id, "thread_id": tid, "work_id": "work-a", "physical_run_id": "slice-a",
+        "status": "pending", "error": None, "updated_at": 1, "thread_status": "ready"})
+
+    response = _client(monkeypatch).get(
+        "/api/v1/phone/threads/thread-a/runs/run-a/events", headers=_auth())
+
+    assert response.status_code == 200
+    assert [line.removeprefix("event: ") for line in response.text.splitlines()
+            if line.startswith("event: ")] == ["status", "error"]
+
+
+def test_phone_reservation_discards_on_replay_and_submission_failure(monkeypatch):
+    journal = RunStreamJournal()
+    monkeypatch.setattr(phone_api, "RUN_STREAMS", journal)
+    monkeypatch.setattr(phone_api.threads, "_is_pi_thread", lambda _: False)
+    existing = SimpleNamespace(id="replayed", work_id="prior-work")
+    assert journal.reserve("thread-a", "prior-work") and journal.activate("thread-a", "prior-work")
+    monkeypatch.setattr(phone_api, "_submit_existing",
+                        lambda *_args, **_kwargs: (existing, False, True))
+
+    run, busy, replay, live_text = phone_api._reserve_existing("thread-a", "hello", "key")
+
+    assert run is existing and not busy and replay and live_text
+    assert list(journal._entries) == [("thread-a", "prior-work")]
+
+    monkeypatch.setattr(phone_api, "_submit_existing",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("no durable run")))
+    with pytest.raises(RuntimeError, match="no durable run"):
+        phone_api._reserve_existing("thread-a", "hello", "key")
+    assert list(journal._entries) == [("thread-a", "prior-work")]
+
+
+def test_phone_create_reservation_is_active_but_initialization_stays_status_only(monkeypatch):
+    journal = RunStreamJournal()
+    monkeypatch.setattr(phone_api, "RUN_STREAMS", journal)
+    monkeypatch.setattr(phone_api, "_create_and_submit",
+                        lambda body, key, **kwargs: (
+                            phone_api._phone_thread_id(key),
+                            SimpleNamespace(id=kwargs["run_id"], work_id=kwargs["work_id"]), None, False))
+
+    tid, run, _domain, replay, live_text = phone_api._reserve_create(
+        phone_api._CreateThread(message="start"), "a" * 16)
+    assert tid == phone_api._phone_thread_id("a" * 16) and not replay and live_text
+    assert journal.read(tid, run.work_id) is not None
+
+    _tid, pi_run, _domain, replay, live_text = phone_api._reserve_create(
+        phone_api._CreateThread(message="start", harness="pi"), "b" * 16)
+    assert not replay and not live_text
+    assert journal.read(_tid, pi_run.work_id) is None
+
+
+def test_logical_projection_uses_one_run_snapshot_for_successor_and_crash_states(monkeypatch):
+    def run(identifier, work_id, status):
+        return SimpleNamespace(id=identifier, work_id=work_id, status=status,
+                               updated_at=1, error=None)
+
+    cases = [
+        ([run("run-a", "work-a", "interrupted"), run("run-b", "work-a", "pending")],
+         "paused", "pending", "run-b"),
+        ([run("run-a", "work-a", "interrupted")], "paused", "transitioning", "run-a"),
+        ([run("run-a", "work-a", "interrupted")], "ready", "interrupted", "run-a"),
+        ([run("run-a", "work-a", "interrupted"), run("run-z", "other", "running")],
+         "paused", "interrupted", "run-a"),
+    ]
+    monkeypatch.setattr(phone_api, "_thread_dir", lambda _tid: None)
+    for runs, stage, expected, physical in cases:
+        monkeypatch.setattr(phone_api.threads, "_runs", lambda: SimpleNamespace(list=lambda _tid: runs))
+        monkeypatch.setattr(state, "_get_status", lambda _tid, stage=stage: {"stage": stage})
+        projection = phone_api._logical_status("thread-a", "run-a")
+        assert (projection["status"], projection["physical_run_id"]) == (expected, physical)
+
+
+def test_logical_cancel_closes_only_its_chain_and_dispatches_one_follower(monkeypatch):
+    def run(identifier, work_id, status):
+        return SimpleNamespace(id=identifier, work_id=work_id, status=status,
+                               updated_at=1, error=None)
+
+    predecessor = run("run-a", "work-a", "interrupted")
+    successor = run("run-b", "work-a", "pending")
+    follower = run("run-c", "work-b", "pending")
+    stale = run("run-d", "old-work", "interrupted")
+    records = [predecessor, successor, follower, stale]
+    dispatched, statuses = [], ["paused"]
+
+    class Runs:
+        def list(self, _tid):
+            return records
+
+        def cancel_pending(self, _tid, run_id):
+            selected = next(item for item in records if item.id == run_id)
+            assert selected.status == "pending"
+            selected.status = "cancelled"
+            return selected
+
+        def cancel(self, _tid, run_id):
+            selected = next(item for item in records if item.id == run_id)
+            selected.status = "cancelled"
+            return selected
+
+    journal = RunStreamJournal()
+    assert journal.reserve("thread-a", "work-a") and journal.activate("thread-a", "work-a")
+    monkeypatch.setattr(phone_api, "RUN_STREAMS", journal)
+    monkeypatch.setattr(phone_api, "_thread_dir", lambda _tid: None)
+    monkeypatch.setattr(phone_api.threads, "_runs", Runs)
+    monkeypatch.setattr(state, "_get_status", lambda _tid: {"stage": statuses[-1]})
+    monkeypatch.setattr(phone_api.threads, "_set_status",
+                        lambda _tid, stage, **_kw: statuses.append(stage))
+    monkeypatch.setattr(phone_api.threads, "_dispatch_pending_after",
+                        lambda tid, run_id: dispatched.append((tid, run_id)))
+
+    code, value = phone_api._cancel_logical_run("thread-a", "run-a")
+    again, repeated = phone_api._cancel_logical_run("thread-a", "run-a")
+
+    assert code == 200 and value["outcome"] == "cancelled"
+    assert [item.status for item in records] == ["cancelled", "cancelled", "pending", "interrupted"]
+    assert statuses == ["paused", "ready"]
+    assert dispatched == [("thread-a", "run-b")]
+    assert journal.read("thread-a", "work-a")["terminal"]
+    assert again == 409 and repeated["outcome"] == "cancelled"
+
+
+def test_sse_outer_lifetime_closes_the_iterator_after_multiple_sublimit_sends(monkeypatch):
+    """One absolute deadline covers accumulated send time, then releases the body."""
+    monkeypatch.setattr(phone_api, "PHONE_SSE_LIFETIME_SECONDS", 0.015)
+    monkeypatch.setattr(phone_api, "PHONE_SSE_SEND_TIMEOUT_SECONDS", 0.1)
+    closed, messages = [], []
+
+    async def body():
+        try:
+            while True:
+                yield b"x"
+        finally:
+            closed.append(True)
+
+    async def send(message):
+        messages.append(message)
+        await asyncio.sleep(0.008)
+
+    async def exercise():
+        response = phone_api._BoundedSSEStreamingResponse(body())
+        await response.stream_response(send)
+
+    asyncio.run(exercise())
+
+    assert len(messages) >= 2
+    assert closed == [True]
+
+
+def test_sse_blocked_send_hits_outer_deadline_and_releases_its_stream_slot(monkeypatch):
+    """A stalled ASGI consumer cannot retain the slot after the observation deadline."""
+    monkeypatch.setattr(phone_api, "PHONE_SSE_LIFETIME_SECONDS", 0.01)
+    monkeypatch.setattr(phone_api, "PHONE_SSE_SEND_TIMEOUT_SECONDS", 0.1)
+    slot = threading.BoundedSemaphore(1)
+    assert slot.acquire(blocking=False)
+    closed = []
+
+    async def body():
+        try:
+            yield b"x"
+        finally:
+            closed.append(True)
+
+    async def blocked_send(_message):
+        await asyncio.sleep(1)
+
+    async def exercise():
+        response = phone_api._BoundedSSEStreamingResponse(body(), on_close=slot.release)
+        await response.stream_response(blocked_send)
+
+    asyncio.run(exercise())
+
+    assert closed == []  # Header backpressure can prevent the generator from starting.
+    assert slot.acquire(blocking=False)
+
+
+def test_busy_phone_acceptance_advertises_its_active_future_worker_journal(monkeypatch):
+    journal = RunStreamJournal()
+    monkeypatch.setattr(phone_api, "RUN_STREAMS", journal)
+    monkeypatch.setattr(phone_api.threads, "_is_pi_thread", lambda _: False)
+    monkeypatch.setattr(phone_api, "_submit_existing",
+                        lambda *_args, **kwargs: (SimpleNamespace(
+                            id=kwargs["run_id"], work_id=kwargs["work_id"]), True, False))
+
+    run, busy, replay, live_text = phone_api._reserve_existing("thread-a", "hello", "key")
+
+    assert busy and not replay and live_text
+    assert journal.read("thread-a", run.work_id) is not None
+
+
+def test_phone_reservation_activates_before_immediate_durable_worker_publish(monkeypatch):
+    """A worker interleaved inside admission always finds its active journal."""
+    journal = RunStreamJournal()
+    monkeypatch.setattr(phone_api, "RUN_STREAMS", journal)
+    monkeypatch.setattr(phone_api.threads, "_is_pi_thread", lambda _: False)
+    published = []
+
+    def submit(tid, _text, _key, **kwargs):
+        # This is the first point at which a durable Run would be visible to a
+        # busy holder.  Publish immediately, before the route receives a reply.
+        value = journal.publish_delta(tid, kwargs["work_id"], "first")
+        published.append(value)
+        return SimpleNamespace(id=kwargs["run_id"], work_id=kwargs["work_id"]), False, False
+
+    monkeypatch.setattr(phone_api, "_submit_existing", submit)
+    run, busy, replay, live_text = phone_api._reserve_existing("thread-a", "hello", "key")
+
+    assert not busy and not replay and live_text
+    assert published == [{"attempt": 1, "index": 1, "text": "first"}]
+    assert journal.read("thread-a", run.work_id)["deltas"] == published
+
+
+def test_phone_reservation_discards_when_activation_itself_fails(monkeypatch):
+    """The pre-admission staging slot cannot leak through an activation exception."""
+    journal = RunStreamJournal()
+    monkeypatch.setattr(phone_api, "RUN_STREAMS", journal)
+    monkeypatch.setattr(phone_api.threads, "_is_pi_thread", lambda _: False)
+    monkeypatch.setattr(journal, "activate",
+                        lambda *_args: (_ for _ in ()).throw(RuntimeError("activate failed")))
+
+    with pytest.raises(RuntimeError, match="activate failed"):
+        phone_api._reserve_existing("thread-a", "hello", "key")
+
+    assert not journal._entries
+
+
+def test_logical_resolver_never_exposes_an_active_candidate_without_a_run(monkeypatch):
+    """Journal activation is not external visibility before durable acceptance."""
+    journal = RunStreamJournal()
+    assert journal.reserve("thread-a", "candidate")
+    assert journal.activate("thread-a", "candidate")
+    monkeypatch.setattr(phone_api, "RUN_STREAMS", journal)
+    monkeypatch.setattr(phone_api, "_thread_dir", lambda _tid: None)
+    monkeypatch.setattr(phone_api.threads, "_runs", lambda: SimpleNamespace(list=lambda _tid: []))
+
+    with pytest.raises(phone_api.HTTPException) as error:
+        phone_api._logical_status("thread-a", "not-a-run")
+
+    assert error.value.status_code == 404
+    assert journal.read("thread-a", "candidate") is not None
+
+
+def test_pi_phone_acceptance_never_advertises_unserved_live_text(monkeypatch):
+    journal = RunStreamJournal()
+    monkeypatch.setattr(phone_api, "RUN_STREAMS", journal)
+    monkeypatch.setattr(phone_api.threads, "_is_pi_thread", lambda _: True)
+    monkeypatch.setattr(phone_api, "_submit_existing",
+                        lambda *_args, **kwargs: (SimpleNamespace(
+                            id=kwargs["run_id"], work_id=kwargs["work_id"]), False, False))
+
+    run, busy, replay, live_text = phone_api._reserve_existing("thread-a", "hello", "key")
+
+    assert not busy and not replay and not live_text
+    assert journal.read("thread-a", run.work_id) is None
+
+
 def test_archive_rejects_a_concurrent_download(monkeypatch):
     monkeypatch.setattr(phone_api, "_ARCHIVE_SLOTS", phone_api.threading.BoundedSemaphore(0))
 
@@ -355,16 +694,16 @@ def test_snapshot_never_exposes_a_backend_error(tmp_path, monkeypatch):
     assert "secret" not in response.text
 
 
-def test_run_status_never_exposes_a_backend_error(monkeypatch):
+def test_logical_run_status_never_exposes_a_backend_error(monkeypatch):
     monkeypatch.setattr(phone_api, "_thread_dir", lambda tid: "/thread-a")
     monkeypatch.setattr(phone_api.threads, "_runs", lambda: SimpleNamespace(
-        get=lambda tid, run_id: SimpleNamespace(
-            id=run_id, status="error",
+        list=lambda tid: [SimpleNamespace(
+            id="run-a", work_id="work-a", status="error",
             error="clone https://user:secret@example.invalid/repo.git failed",
-            updated_at="2026-09-04T05:00:00+00:00")))
+            updated_at="2026-09-04T05:00:00+00:00")]))
     monkeypatch.setattr(state, "_get_status", lambda tid: {"stage": "error"})
 
-    status = phone_api._run_status("thread-a", "run-a")
+    status = phone_api._logical_status("thread-a", "run-a")
 
     assert status["error"] == "Run failed; inspect Assist Web for details."
 

@@ -217,6 +217,41 @@ def test_process_message_kills_container_at_turn_end_on_success(client, monkeypa
     assert calls[0].endswith("thread-e2e"), f"teardown targeted the wrong work_dir: {calls}"
 
 
+def test_durable_worker_publishes_reserved_phone_deltas_then_finishes_journal(client, monkeypatch):
+    """The real Run worker, not a route helper, owns live journal publication."""
+    from manage.web.run_stream import RunStreamJournal
+
+    class _ObservedChat:
+        def observe_message(self, text, publish, _reset):
+            assert text == "hello"
+            publish("hello ")
+            publish("world")
+            return "hello world"
+
+        def pending_reply(self):
+            return None
+
+        def get_messages(self):
+            return [{"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "hello world"}]
+
+    journal = RunStreamJournal()
+    run = threads._create_run("thread-e2e", "hello", work_id="phone-work")
+    assert journal.reserve("thread-e2e", "phone-work")
+    assert journal.activate("thread-e2e", "phone-work")
+    _stub_happy_path(monkeypatch, _ObservedChat())
+    monkeypatch.setattr(threads, "RUN_STREAMS", journal)
+
+    threads._execute_run(run.id, "thread-e2e")
+
+    snapshot = journal.read("thread-e2e", "phone-work")
+    assert snapshot == {"attempt": 1, "deltas": [
+        {"attempt": 1, "index": 1, "text": "hello "},
+        {"attempt": 1, "index": 2, "text": "world"}],
+        "truncated": False, "terminal": True}
+    assert threads._runs().get("thread-e2e", run.id).status == "success"
+
+
 def test_process_message_kills_container_even_when_turn_errors(client, monkeypatch):
     """The teardown is in a `finally`, so a crash mid-turn still reaps the
     container — otherwise an erroring turn would leak its sandbox."""

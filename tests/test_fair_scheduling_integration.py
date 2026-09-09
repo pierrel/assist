@@ -102,6 +102,39 @@ def test_pause_carries_pending_and_submits_resume(wired):
     assert calls == [("message", "hello"), ("resume",)]
 
 
+def test_pause_publishes_paused_before_an_inline_successor_or_follower(wired, monkeypatch):
+    """An eager scheduler cannot let the old pausing slice overwrite its child.
+
+    The deterministic scheduler below is deliberately more adversarial than the
+    production worker: it executes the same-work successor inline and records
+    the status it can observe at submit time.  A follower remains pending until
+    that logical work finishes.
+    """
+    tid, calls = wired
+    head = threads._create_run(tid, "hello")
+    follower = threads._create_run(tid, "follow-up")
+    submitted, status_at_submit = [], []
+
+    def execute_inline(run_id, submitted_tid, **_kwargs):
+        submitted.append(run_id)
+        status_at_submit.append(_get_status(submitted_tid)["stage"])
+        run = threads._runs().get(submitted_tid, run_id)
+        if run.work_id == head.work_id:
+            threads._execute_run(run_id, submitted_tid)
+
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit", execute_inline)
+
+    threads._execute_run(head.id, tid)
+
+    successor = next(run for run in threads._runs().list(tid)
+                     if run.work_id == head.work_id and run.id != head.id)
+    assert status_at_submit[0] == "paused"
+    assert successor.status == "success"
+    assert threads._runs().get(tid, follower.id).status == "pending"
+    assert submitted == [successor.id, follower.id]
+    assert calls == [("message", "hello"), ("resume",)]
+
+
 def test_pause_successor_keeps_the_original_location_snapshot(wired):
     """A later browser fix must not move an already-paused 'from here' turn."""
     tid, _ = wired

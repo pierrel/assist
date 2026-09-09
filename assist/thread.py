@@ -11,7 +11,8 @@ from assist.promptable import base_prompt_for
 from assist.model_manager import select_assistant_model
 from assist.agent import create_agent
 from assist.spec import AgentSpec
-from assist.checkpoint_rollback import invoke_with_rollback
+from assist.checkpoint_rollback import invoke_with_rollback, stream_with_rollback
+from assist.stream_chunks import extract_content_text
 from assist.thread_queue import THREAD_QUEUE
 from langgraph.types import Command
 
@@ -308,6 +309,43 @@ class Thread:
         {"name": "send_reply", "args": {"text": …}}}``. On approve/edit the tool body runs
         (the reply is sent); returns the agent's final content."""
         return self.resume_action(decision)
+
+    def _observe(self, graph_input, on_delta, on_reset=None) -> str:
+        """Execute with rollback while publishing observed-graph model prose.
+
+        ``stream_with_rollback`` requests LangGraph's top-level stream only;
+        model checkpoint namespaces also occur on ordinary top-level chunks.
+        """
+        def receive(chunk) -> None:
+            payload = chunk
+            if isinstance(chunk, tuple) and len(chunk) == 2 and chunk[0] == "messages":
+                payload = chunk[1]
+            try:
+                _message, _metadata = payload
+            except (TypeError, ValueError):
+                return
+            text = extract_content_text(payload)
+            if text:
+                on_delta(text)
+
+        with THREAD_QUEUE.acquire(self.thread_id, on_state_change=self.on_queue_state):
+            result = stream_with_rollback(
+                self.agent, graph_input, self.runconfig, receive, on_reset=on_reset)
+        messages = result.get("messages", [])
+        if messages and isinstance(messages[-1], AIMessage):
+            return messages[-1].content
+        return ""
+
+    def observe_message(self, text: str, on_delta, on_reset=None) -> str:
+        """Run a new message with rollback-safe top-level delta callbacks."""
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        return self._observe({"messages": [{"role": "user", "content": text}]},
+                             on_delta, on_reset)
+
+    def observe_resume(self, on_delta, on_reset=None) -> str:
+        """Resume a checkpoint with the same observed rollback semantics."""
+        return self._observe(None, on_delta, on_reset)
 
     def stream_message(self, text: str) -> Iterator[dict[str, Any] | Any]:
         if not isinstance(text, str):

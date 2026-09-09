@@ -8,7 +8,8 @@ import pytest
 from unittest.mock import Mock, patch, PropertyMock
 from openai import BadRequestError
 
-from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
+from assist.checkpoint_rollback import (invoke_with_rollback, stream_with_rollback,
+                                        RollbackRunnable)
 
 
 def _make_bad_request_error(msg="Expecting ':' delimiter"):
@@ -288,6 +289,90 @@ class TestInvokeWithRollback:
         # 1 initial + 1 retry at cp-3 + 1 retry at cp-2 = 3 attempts
         # Should NOT try cp-1 or cp-0 because depth limit is 2
         assert agent.invoke.call_count == 3
+
+
+class TestStreamWithRollback:
+    """The observed transport follows the same durable checkpoint rule."""
+
+    def test_stream_success_and_nonrollback_error_share_the_invoke_contract(self):
+        """The live transport has no extra retry path beyond the shared planner."""
+        agent = Mock()
+        agent.stream.return_value = iter([("messages", (Mock(content="ok"), {}))])
+        agent.get_state.return_value.values = {"messages": ["final"]}
+        chunks, resets = [], []
+
+        result = stream_with_rollback(
+            agent, {"messages": ["hi"]}, {"configurable": {"thread_id": "t1"}},
+            chunks.append, on_reset=resets.append)
+
+        assert result == {"messages": ["final"]}
+        assert len(chunks) == 1 and resets == []
+        assert agent.stream.call_args.kwargs["durability"] == "sync"
+        # The phone observer must not receive nested graph events.  LangGraph
+        # owns that exclusion, rather than callers inferring it from metadata.
+        assert agent.stream.call_args.kwargs["subgraphs"] is False
+
+        agent = Mock()
+        agent.stream.side_effect = RuntimeError("transport broke")
+        with pytest.raises(RuntimeError, match="transport broke"):
+            stream_with_rollback(
+                agent, {"messages": ["hi"]}, {"configurable": {"thread_id": "t1"}},
+                lambda _chunk: None, on_reset=resets.append)
+        agent.get_state_history.assert_not_called()
+
+    def test_stream_bounds_retries_depth_resets_and_sync_durability(self):
+        """Every failed physical stream clears provisional text before its bounded retry."""
+        agent = Mock()
+        agent.stream.side_effect = _make_bad_request_error()
+        agent.get_state_history.return_value = [
+            _make_checkpoint("bad", step=2), _make_checkpoint("middle", step=1),
+            _make_checkpoint("input", step=0)]
+        resets = []
+
+        with pytest.raises(BadRequestError):
+            stream_with_rollback(
+                agent, {"messages": ["hi"]}, {"configurable": {"thread_id": "t1"}},
+                lambda _chunk: None, on_reset=resets.append,
+                max_retries_per_step=1, max_rollback_depth=2)
+
+        # initial + one retry at each of the two permitted rollback depths
+        assert agent.stream.call_count == 3
+        assert resets == [2, 3]
+        assert all(call.kwargs["durability"] == "sync"
+                   for call in agent.stream.call_args_list)
+
+    def test_reads_the_latest_thread_state_after_a_retry(self):
+        """A target checkpoint is for resuming, never for the final projection."""
+        agent = Mock()
+        agent.stream.side_effect = [_make_bad_request_error(), iter(())]
+        agent.get_state_history.return_value = [
+            _make_checkpoint("bad", step=1), _make_checkpoint("good", step=0)]
+        agent.get_state.return_value.values = {"messages": ["newest"]}
+        config = {"configurable": {"thread_id": "t1"}}
+
+        result = stream_with_rollback(agent, {"messages": ["hi"]}, config, lambda _: None)
+
+        assert result == {"messages": ["newest"]}
+        agent.get_state.assert_called_once_with(config)
+
+    def test_streams_chunks_sync_and_resets_before_the_retry(self):
+        agent = Mock()
+        agent.stream.side_effect = [
+            _make_bad_request_error(),
+            iter([("messages", (Mock(content="new"), {}))])]
+        agent.get_state_history.return_value = [
+            _make_checkpoint("bad", step=1), _make_checkpoint("good", step=0)]
+        agent.get_state.return_value.values = {"messages": ["newest"]}
+        chunks, resets = [], []
+
+        result = stream_with_rollback(
+            agent, {"messages": ["hi"]}, {"configurable": {"thread_id": "t1"}},
+            chunks.append, on_reset=resets.append)
+
+        assert result == {"messages": ["newest"]}
+        assert resets == [2]
+        assert len(chunks) == 1
+        assert all(call.kwargs["durability"] == "sync" for call in agent.stream.call_args_list)
 
 
 class TestRollbackRunnable:

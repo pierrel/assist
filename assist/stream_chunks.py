@@ -38,3 +38,15 @@ def unwrap_messages(value: Any) -> list[Any]:
     if hasattr(value, "content"):
         return [value]
     return []
+
+
+def extract_content_text(messages_chunk: Any) -> str:
+    """Return plain model text from one ``messages`` chunk, never tool output."""
+    try:
+        message, _metadata = messages_chunk
+    except (TypeError, ValueError):
+        return ""
+    if getattr(message, "type", None) == "tool":
+        return ""
+    content = getattr(message, "content", "")
+    return content if isinstance(content, str) else ""

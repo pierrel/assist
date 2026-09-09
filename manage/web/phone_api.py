@@ -21,12 +21,13 @@ import subprocess
 import tarfile
 import threading
 import unicodedata
+import uuid
 from pathlib import Path
 from typing import Annotated, Any
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import convert_to_messages
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -37,6 +38,7 @@ from assist.thread_engine import ThreadEngineError, read_thread_engine
 from assist.visible_conversation import visible_records_from_dicts
 from manage.web import state
 from manage.web import threads
+from manage.web.run_stream import RUN_STREAMS, encode_sse
 
 
 PHONE_API_PREFIX = "/api/v1/phone"
@@ -59,6 +61,9 @@ MAX_DESCRIPTION_CHARS = 120
 MAX_PHONE_THREADS = 200
 MAX_PHONE_PENDING_RUNS = 4
 MAX_PHONE_INITIALIZATIONS = 1
+MAX_PHONE_SSE_RECORD_BYTES = 48 * 1024
+PHONE_SSE_SEND_TIMEOUT_SECONDS = 5
+PHONE_SSE_LIFETIME_SECONDS = 30 * 60
 _SSE_SLOTS = threading.BoundedSemaphore(4)
 _ARCHIVE_SLOTS = threading.BoundedSemaphore(1)
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -70,6 +75,39 @@ _FILE_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_./-])([A-Za-z0-9][A-Za-z0-9._/-]{0,240}"
     r"\.[A-Za-z0-9]{1,16})(?![A-Za-z0-9_./-])"
 )
+
+
+class _BoundedSSEStreamingResponse(StreamingResponse):
+    """Bound a phone SSE observation to 30 minutes and every send to five seconds."""
+
+    def __init__(self, *args, on_close=None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_close = on_close
+
+    async def stream_response(self, send) -> None:
+        async def bounded_send(message: dict[str, Any]) -> None:
+            with anyio.fail_after(PHONE_SSE_SEND_TIMEOUT_SECONDS):
+                await send(message)
+
+        try:
+            with anyio.fail_after(PHONE_SSE_LIFETIME_SECONDS):
+                await bounded_send({"type": "http.response.start", "status": self.status_code,
+                                    "headers": self.raw_headers})
+                async for chunk in self.body_iterator:
+                    if not isinstance(chunk, bytes | memoryview):
+                        chunk = chunk.encode(self.charset)
+                    await bounded_send({"type": "http.response.body", "body": chunk,
+                                        "more_body": True})
+                await bounded_send({"type": "http.response.body", "body": b"",
+                                    "more_body": False})
+        except TimeoutError:
+            return
+        finally:
+            close = getattr(self.body_iterator, "aclose", None)
+            if close is not None:
+                await close()
+            if self._on_close is not None:
+                self._on_close()
 
 
 class _StrictModel(BaseModel):
@@ -642,7 +680,8 @@ def _find_dispatch(tid: str, dispatch_key: str):
                  if run.dispatch_key == dispatch_key), None)
 
 
-def _submit_existing(tid: str, text: str, key: str) -> tuple[Any, bool, bool]:
+def _submit_existing(tid: str, text: str, key: str, *, run_id: str | None = None,
+                     work_id: str | None = None) -> tuple[Any, bool, bool]:
     """Durably accept one idempotent normal web turn under the existing lock."""
     _thread_dir(tid)
     dispatch_key = _phone_dispatch_key(key)
@@ -660,7 +699,8 @@ def _submit_existing(tid: str, text: str, key: str) -> tuple[Any, bool, bool]:
         try:
             run, busy = threads._accept_message_run_locked(
                 tid, text, dispatch_key=dispatch_key,
-                max_pending=MAX_PHONE_PENDING_RUNS)
+                max_pending=MAX_PHONE_PENDING_RUNS, run_id=run_id,
+                work_id=work_id)
         except threads._EmailApprovalPending as error:
             raise HTTPException(
                 status_code=409, detail="Resolve the pending approval first") from error
@@ -669,7 +709,8 @@ def _submit_existing(tid: str, text: str, key: str) -> tuple[Any, bool, bool]:
         return run, busy, False
 
 
-def _create_and_submit(body: _CreateThread, key: str) -> tuple[str, Any, str | None, bool]:
+def _create_and_submit(body: _CreateThread, key: str, *, run_id: str | None = None,
+                       work_id: str | None = None) -> tuple[str, Any, str | None, bool]:
     """Create a deterministic phone draft only when its first message arrives."""
     domain = _domain_for_key(body.repo_key)
     if body.repo_key is not None and domain is None:
@@ -700,42 +741,130 @@ def _create_and_submit(body: _CreateThread, key: str) -> tuple[str, Any, str | N
         try:
             tid, run_id, selected = threads.create_thread_with_message_core(
                 body.message, domain, engine=body.harness, thread_id=tid,
-                dispatch_key=dispatch_key)
+                dispatch_key=dispatch_key, run_id=run_id,
+                work_id=work_id)
             run = threads._runs().get(tid, run_id)
         except (ValueError, ThreadEngineError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         return tid, run, selected, False
 
 
-def _run_status(tid: str, run_id: str) -> dict[str, Any]:
+def _logical_status(tid: str, run_id: str) -> dict[str, Any]:
+    """Project the immutable accepted handle over its current physical slice."""
     _thread_dir(tid)
     _require_id(run_id, "run id")
-    try:
-        run = threads._runs().get(tid, run_id)
-    except RunNotFound as error:
-        raise HTTPException(status_code=404, detail="Run not found") from error
-    return {"id": run.id, "thread_id": tid, "status": run.status,
+    runs = threads._runs().list(tid)
+    accepted = next((run for run in runs if run.id == run_id), None)
+    if accepted is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    thread_status = state._get_status(tid).get("stage", "ready")
+    work = [run for run in runs if run.work_id == accepted.work_id]
+    selected = work[-1]
+    status = selected.status
+    if status == "interrupted":
+        if thread_status in threads.BUSY_STAGES and not any(
+                run.work_id != accepted.work_id and run.status == "running"
+                for run in runs):
+            status = "transitioning"
+    return {"id": accepted.id, "thread_id": tid, "work_id": accepted.work_id,
+            "physical_run_id": selected.id, "status": status,
             "error": ("Run failed; inspect Assist Web for details."
-                      if run.error else None),
-            "updated_at": run.updated_at,
-            "thread_status": state._get_status(tid).get("stage", "ready")}
+                      if selected.error else None), "updated_at": selected.updated_at,
+            "thread_status": thread_status}
 
 
-def _cancel_pending_run(tid: str, run_id: str) -> dict[str, Any]:
-    """Cancel only unclaimed work; a running model turn cannot be lied about."""
-    _thread_dir(tid)
-    _require_id(run_id, "run id")
-    status = state._get_status(tid)
-    if (status.get("stage") in {"initializing", "cloning"}
-            and status.get("pending_run_id") == run_id):
-        raise HTTPException(status_code=409, detail="Thread setup is already in progress")
+def _reserve_existing(tid: str, text: str, key: str) -> tuple[Any, bool, bool, bool]:
+    """Reserve before durable visibility, but never make streaming admission truth."""
+    run_id = uuid.uuid4().hex
+    work_id = uuid.uuid4().hex
+    reserved = not threads._is_pi_thread(tid) and RUN_STREAMS.reserve(tid, work_id)
     try:
-        run = threads._runs().cancel_pending(tid, run_id)
-    except RunNotFound as error:
-        raise HTTPException(status_code=404, detail="Run not found") from error
-    except ValueError as error:
-        raise HTTPException(status_code=409, detail="Run is already executing") from error
-    return {"id": run.id, "status": run.status}
+        # A busy holder can see the durable follower as soon as its locked admission
+        # returns.  Activate first, so every worker that can see that Run can publish.
+        if reserved:
+            RUN_STREAMS.activate(tid, work_id)
+        run, busy, replay = _submit_existing(tid, text, key, run_id=run_id, work_id=work_id)
+    except Exception:
+        if reserved:
+            RUN_STREAMS.discard(tid, work_id)
+        raise
+    if replay or busy:
+        if replay and reserved:
+            RUN_STREAMS.discard(tid, work_id)
+        return run, busy, replay, (RUN_STREAMS.read(tid, run.work_id) is not None
+                                   if replay else reserved)
+    return run, busy, False, reserved
+
+
+def _reserve_create(body: _CreateThread, key: str) -> tuple[str, Any, str | None, bool, bool]:
+    run_id = uuid.uuid4().hex
+    work_id = uuid.uuid4().hex
+    # The final deterministic phone thread id is based on the idempotency key.
+    tid = _phone_thread_id(key)
+    reserved = body.harness != "pi" and RUN_STREAMS.reserve(tid, work_id)
+    try:
+        if reserved:
+            RUN_STREAMS.activate(tid, work_id)
+        tid, run, domain, replay = _create_and_submit(body, key, run_id=run_id, work_id=work_id)
+    except Exception:
+        if reserved:
+            RUN_STREAMS.discard(tid, work_id)
+        raise
+    if replay:
+        if reserved:
+            RUN_STREAMS.discard(tid, work_id)
+        return tid, run, domain, True, RUN_STREAMS.read(tid, run.work_id) is not None
+    # The observer starts status-only until the dedicated initializer reaches
+    # its worker, then sees this already-active journal's deltas.
+    return tid, run, domain, False, reserved
+
+
+def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
+    """Cancel only the newest pending slice and close its paused predecessor chain."""
+    with threads._RUN_ADMISSION_LOCK:
+        current_status = state._get_status(tid)
+        if (current_status.get("stage") in {"initializing", "cloning"}
+                and current_status.get("pending_run_id") == run_id):
+            return 409, {"detail": "Thread setup is already in progress"}
+        projection = _logical_status(tid, run_id)
+        if projection["status"] == "running":
+            return 409, {"detail": "Run is already executing", "outcome": "running",
+                         "run": projection}
+        if projection["status"] == "transitioning":
+            return 409, {"detail": "Run is transitioning", "outcome": "transitioning",
+                         "run": projection}
+        if projection["status"] != "pending":
+            return 409, {"detail": "Run is already terminal", "outcome": projection["status"],
+                         "run": projection}
+        selected_id = projection["physical_run_id"]
+        try:
+            threads._runs().cancel_pending(tid, selected_id)
+        except InvalidRunTransition:
+            return 409, {"detail": "Run is already executing", "outcome": "running",
+                         "run": _logical_status(tid, run_id)}
+        work_id = projection["work_id"]
+        for run in threads._runs().list(tid):
+            if run.work_id == work_id and run.status == "interrupted":
+                threads._runs().cancel(tid, run.id)
+        # A stale interrupted record must not pin the thread paused.  Only an
+        # interrupted slice with a pending/running same-work successor is resumable.
+        if (state._get_status(tid).get("stage") == "paused"
+                and not any(run.status == "interrupted" and any(
+                    later.work_id == run.work_id
+                    and later.status in {"pending", "running"}
+                    for later in threads._runs().list(tid))
+                            for run in threads._runs().list(tid))):
+            threads._set_status(tid, "ready")
+        RUN_STREAMS.finish(tid, work_id)
+        threads._dispatch_pending_after(tid, selected_id)
+        return 200, {"outcome": "cancelled", "run": _logical_status(tid, run_id)}
+
+
+def _sse(event: str, value: dict[str, Any]) -> str:
+    record = encode_sse(event, value)
+    if len(record.encode("utf-8")) > MAX_PHONE_SSE_RECORD_BYTES:
+        raise ValueError("phone SSE record exceeds bound")
+    return record
 
 
 def _diff(tid: str) -> dict[str, Any]:
@@ -862,10 +991,11 @@ async def create_thread(request: Request) -> dict[str, Any]:
     body = await _validated_body(request, _CreateThread)
     assert isinstance(body, _CreateThread)
     key = _request_key(request)
-    tid, run, domain, replay = await anyio.to_thread.run_sync(_create_and_submit, body, key)
+    tid, run, domain, replay, live_text = await anyio.to_thread.run_sync(_reserve_create, body, key)
     if not replay:
         threads._INITIALIZATION_SCHEDULER.submit(run.id, tid, domain)
-    return {"thread_id": tid, "run_id": run.id, "replayed": replay}
+    return {"thread_id": tid, "run_id": run.id, "replayed": replay,
+            "live_text": live_text}
 
 
 @router.post("/threads/{tid}/messages")
@@ -873,51 +1003,86 @@ async def send_message(tid: str, request: Request) -> dict[str, Any]:
     body = await _validated_body(request, _SendMessage)
     assert isinstance(body, _SendMessage)
     key = _request_key(request)
-    run, busy, replay = await anyio.to_thread.run_sync(_submit_existing, tid, body.message, key)
+    run, busy, replay, live_text = await anyio.to_thread.run_sync(_reserve_existing, tid, body.message, key)
     if not busy and not replay:
         threads._RESUME_SCHEDULER.submit(run.id, tid, user_priority=True)
     return {"thread_id": tid, "run_id": run.id, "replayed": replay,
-            "status": run.status}
+            "status": run.status, "live_text": live_text}
 
 
 @router.get("/threads/{tid}/runs/{run_id}")
 async def get_run(tid: str, run_id: str) -> dict[str, Any]:
-    return await anyio.to_thread.run_sync(_run_status, tid, run_id)
+    return await anyio.to_thread.run_sync(_logical_status, tid, run_id)
 
 
 @router.delete("/threads/{tid}/runs/{run_id}")
-async def cancel_run(tid: str, run_id: str) -> dict[str, Any]:
-    return await anyio.to_thread.run_sync(_cancel_pending_run, tid, run_id)
+async def cancel_run(tid: str, run_id: str):
+    code, value = await anyio.to_thread.run_sync(_cancel_logical_run, tid, run_id)
+    if code != 200:
+        return JSONResponse(value, status_code=code)
+    return value
 
 
 @router.get("/threads/{tid}/runs/{run_id}/events")
 async def run_events(tid: str, run_id: str, request: Request) -> StreamingResponse:
-    """Offer bounded status/final events while durable state remains authoritative."""
-    await anyio.to_thread.run_sync(_run_status, tid, run_id)
+    """Offer process-local text and durable Run projection for one logical handle.
+
+    Reset, delta, and truncation are bounded provisional journal observations;
+    status and terminal are the durable logical Run projection.
+    """
+    await anyio.to_thread.run_sync(_logical_status, tid, run_id)
     if not _SSE_SLOTS.acquire(blocking=False):
         raise HTTPException(status_code=429, detail="Too many phone event streams")
+    released = False
+
+    def release_slot() -> None:
+        nonlocal released
+        if not released:
+            released = True
+            _SSE_SLOTS.release()
 
     async def events():
         try:
             previous = None
+            attempt = None
+            seen_index = 0
+            truncated_attempt = None
             for sequence in range(1, 1_801):
                 if await request.is_disconnected():
                     return
-                status = await anyio.to_thread.run_sync(_run_status, tid, run_id)
-                encoded = json.dumps(status, separators=(",", ":"))
+                status = await anyio.to_thread.run_sync(_logical_status, tid, run_id)
+                journal = await anyio.to_thread.run_sync(
+                    lambda: RUN_STREAMS.read(tid, status["work_id"]))
+                if journal is not None and journal["attempt"] != attempt:
+                    attempt = journal["attempt"]
+                    seen_index = 0
+                    truncated_attempt = None
+                    yield _sse("assistant-reset", {"attempt": attempt,
+                                                   "reason": "replay" if sequence == 1 else "rollback"})
+                if journal is not None:
+                    for delta in journal["deltas"]:
+                        if delta["attempt"] == attempt and delta["index"] > seen_index:
+                            yield _sse("assistant-delta", delta)
+                            seen_index = delta["index"]
+                    if journal["truncated"] and truncated_attempt != attempt:
+                        yield _sse("assistant-truncated", {"attempt": attempt})
+                        truncated_attempt = attempt
+                encoded = json.dumps(status, ensure_ascii=True, separators=(",", ":"))
                 if encoded != previous:
-                    yield f"id: {sequence}\nevent: status\ndata: {encoded}\n\n"
+                    yield _sse("status", status)
                     previous = encoded
                 if status["status"] in TERMINAL_STATUSES:
-                    yield "event: terminal\ndata: {}\n\n"
+                    yield _sse("terminal", status)
                     return
                 await asyncio.sleep(1)
-            yield "event: error\ndata: {\"detail\":\"event stream timed out\"}\n\n"
+            yield _sse("error", {"detail": "event stream timed out"})
         finally:
-            _SSE_SLOTS.release()
+            release_slot()
 
-    return StreamingResponse(events(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+    return _BoundedSSEStreamingResponse(
+        events(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        on_close=release_slot)
 
 
 @router.get("/threads/{tid}/diff")
