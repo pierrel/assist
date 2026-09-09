@@ -3030,30 +3030,34 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # making that successor runnable.
         # Admission and DELETE take this lock too, so neither can observe an
         # interrupted predecessor without its same-work successor.
-        with _RUN_ADMISSION_LOCK:
-            if _run is not None:
-                _runs().transition(tid, _run.id, "interrupted", active_ms=carry)
-                successor = _create_run(
-                    tid, None, rider=rider, sender=sender, resume=True,
-                    active_ms=carry, pending_text=pending_kwargs.get("pending_message"),
-                    origin=origin, work_id=_run.work_id,
-                    location=_location_from_fields(_run.location))
-            else:
-                # Compatibility for direct low-level callers during the migration.
-                successor = _create_run(
-                    tid, None, rider=rider, sender=sender, resume=True,
-                    active_ms=carry, pending_text=pending_kwargs.get("pending_message"),
-                    origin=origin)
-            # accumulated_active_ms rides the status write so a restart-recovered resume
-            # keeps its 2h-cap accounting (the in-memory scheduler submission is lost with
-            # the process; sender/rider are already in pending_kwargs). A crash of a
-            # PROCESSING turn has no carry to persist — its resumed slice restarts the
-            # cap at 0, accepted (the cap is a runaway backstop, not billing).
-            _set_status(tid, "paused", accumulated_active_ms=carry, **pending_kwargs)
-            # A scheduler may execute inline in a deterministic test or immediately
-            # on an idle worker.  Publish the durable paused projection first so a
-            # newly-running successor can never be overwritten by this old slice.
-            _RESUME_SCHEDULER.submit(successor.id, tid)
+        ticket = None
+        try:
+            with _RUN_ADMISSION_LOCK:
+                if _run is not None:
+                    _runs().transition(tid, _run.id, "interrupted", active_ms=carry)
+                    successor = _create_run(
+                        tid, None, rider=rider, sender=sender, resume=True,
+                        active_ms=carry, pending_text=pending_kwargs.get("pending_message"),
+                        origin=origin, work_id=_run.work_id,
+                        location=_location_from_fields(_run.location))
+                else:
+                    # Compatibility for direct low-level callers during the migration.
+                    successor = _create_run(
+                        tid, None, rider=rider, sender=sender, resume=True,
+                        active_ms=carry, pending_text=pending_kwargs.get("pending_message"),
+                        origin=origin)
+                # accumulated_active_ms rides the status write so a restart-recovered resume
+                # keeps its 2h-cap accounting (the in-memory scheduler submission is lost with
+                # the process; sender/rider are already in pending_kwargs). A crash of a
+                # PROCESSING turn has no carry to persist — its resumed slice restarts the
+                # cap at 0, accepted (the cap is a runaway backstop, not billing).
+                _set_status(tid, "paused", accumulated_active_ms=carry, **pending_kwargs)
+                # Reserve a promotable queue item while this durable handoff is atomic,
+                # but do not notify or execute it until admission is released below.
+                ticket = _RESUME_SCHEDULER.reserve(successor.id, tid)
+        finally:
+            if ticket is not None:
+                _RESUME_SCHEDULER.commit(ticket)
         return
     except SandboxContainerLostError as e:
         # Distinct status message: a dead container is recoverable —
@@ -4166,15 +4170,33 @@ def queue_recovery_runs() -> None:
 
 
 class _PriorityRunQueue:
-    """Blocking two-tier FIFO with stable promotion by visible thread ID."""
+    """Blocking two-tier FIFO with promotable dormant reservations."""
 
     def __init__(self) -> None:
         self._cond = threading.Condition()
         self._user = deque()
         self._background = deque()
+        self._reserved: dict[object, dict] = {}
 
     def put(self, item: dict) -> None:
         with self._cond:
+            target = self._user if item.get("user_priority") else self._background
+            target.append(item)
+            self._cond.notify()
+
+    def reserve(self, item: dict) -> object:
+        """Register one promotable item without making it runnable."""
+        ticket = object()
+        with self._cond:
+            self._reserved[ticket] = item
+        return ticket
+
+    def commit(self, ticket: object) -> None:
+        """Make one reservation runnable once; a repeated commit is a no-op."""
+        with self._cond:
+            item = self._reserved.pop(ticket, None)
+            if item is None:
+                return
             target = self._user if item.get("user_priority") else self._background
             target.append(item)
             self._cond.notify()
@@ -4197,6 +4219,9 @@ class _PriorityRunQueue:
 
     def promote(self, tid: str) -> None:
         with self._cond:
+            for item in self._reserved.values():
+                if item["tid"] == tid:
+                    item["user_priority"] = True
             promoted = [item for item in self._background if item["tid"] == tid]
             if not promoted:
                 return
@@ -4308,6 +4333,15 @@ class _ResumeScheduler:
     def submit(self, run_id: str, tid: str, *, user_priority: bool = False) -> None:
         self._q.put({"kind": "run", "run_id": run_id, "tid": tid,
                      "user_priority": user_priority})
+
+    def reserve(self, run_id: str, tid: str, *, user_priority: bool = False) -> object:
+        """Reserve a promotable Run notification without waking the worker."""
+        return self._q.reserve({"kind": "run", "run_id": run_id, "tid": tid,
+                                "user_priority": user_priority})
+
+    def commit(self, ticket: object) -> None:
+        """Release one reserved Run notification after its durable handoff."""
+        self._q.commit(ticket)
 
     def promote(self, tid: str) -> None:
         """Promote work that must run before this user's pending message."""

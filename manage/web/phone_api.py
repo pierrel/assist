@@ -34,7 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from assist.domain_manager import current_branch
 from assist.run_service import (AWAITING_APPROVAL_STATUSES, InvalidRunTransition,
-                                RunStoreUnavailable, TERMINAL_STATUSES)
+                                ObservationToken, RunStoreUnavailable, TERMINAL_STATUSES)
 from assist.thread import _messages_to_dicts
 from assist.thread_engine import ThreadEngineError, read_thread_engine
 from assist.visible_conversation import visible_records_from_dicts
@@ -829,7 +829,8 @@ def _observation_invalidation(
 def _logical_status_locked(
         tid: str, run_id: str, *, with_revision: bool = False,
         with_runs: bool = False, include_cleanup: bool = False, with_token: bool = False,
-) -> dict[str, Any] | tuple[dict[str, Any], int] | tuple[dict[str, Any], list[Any]]:
+) -> (dict[str, Any] | tuple[dict[str, Any], int]
+      | tuple[dict[str, Any], int, ObservationToken] | tuple[dict[str, Any], list[Any]]):
     """Project an accepted handle while ``_RUN_ADMISSION_LOCK`` is held."""
     _thread_dir(tid)
     _require_id(run_id, "run id")
