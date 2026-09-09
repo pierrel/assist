@@ -94,7 +94,7 @@ def test_phone_route_validation_errors_are_not_cacheable(monkeypatch):
     assert response.headers["cache-control"] == "no-store"
 
 
-def test_phone_unexpected_errors_are_not_cacheable(monkeypatch):
+def test_phone_unexpected_errors_are_not_cacheable_and_logged(monkeypatch, caplog):
     monkeypatch.setattr(
         phone_api, "_logical_status",
         lambda *_args: (_ for _ in ()).throw(OSError("disk unavailable")),
@@ -106,6 +106,8 @@ def test_phone_unexpected_errors_are_not_cacheable(monkeypatch):
 
     assert response.status_code == 500
     assert response.headers["cache-control"] == "no-store"
+    assert "Unhandled phone API request" in caplog.text
+    assert any(record.exc_info and record.exc_info[0] is OSError for record in caplog.records)
 
 
 def test_phone_route_misses_and_method_errors_are_not_cacheable(tmp_path, monkeypatch):

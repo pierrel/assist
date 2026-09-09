@@ -4,10 +4,14 @@ Lives in its own module so the route submodules (``diff``, ``review``,
 ``threads``, ``evals``) can ``from manage.web.app import app`` to
 register their endpoints without circular-import gymnastics.
 """
+import logging
+
 from fastapi import FastAPI, Request
 from starlette.responses import PlainTextResponse
 
 from manage.web.state import lifespan
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Assist Web", lifespan=lifespan)
 
@@ -23,6 +27,7 @@ async def phone_no_store(request: Request, call_next):
     except Exception:
         if not is_phone_request:
             raise
+        logger.exception("Unhandled phone API request")
         return PlainTextResponse(
             "Internal Server Error", status_code=500,
             headers={"Cache-Control": "no-store"})
