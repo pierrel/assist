@@ -1,0 +1,38 @@
+#+TITLE: Phone thread repository-label authority amendment
+#+DATE: <2026-09-09>
+#+STATUS: Phase 3 implementation, local review converged
+
+* Purpose
+
+The authenticated phone thread catalog must show a repository label that
+describes the durable thread, not a transient worker-status snapshot. This
+amendment records the authority boundary introduced for catalog entries.
+
+* Contract
+
+During first-message setup, before the thread has initialized a
+=DomainManager=, the transient status =domain= is the only available
+repository metadata and supplies the catalog key and label. Once setup has
+finished, =DomainManager.repo= is authoritative for that thread. A missing
+durable manager or repository produces the explicit =No repository= label.
+
+=_thread_repo_summary= applies that rule for every catalog row. Its caller
+runs off the ASGI event loop, so looking up the durable manager does not change
+the phone API's liveness contract. The catalog does not cache either source:
+each listing reads the current setup status or durable manager.
+
+* Lineage
+
+This amends [[file:2026-09-04-phone-api.org][the phone API design]] and
+[[file:2026-09-08-phone-run-streaming.org][incremental phone Run streaming]].
+Those records remain historical. They established authenticated catalog and
+Run-observation behavior; this amendment narrows the catalog's repository-label
+source so settled threads use durable DomainManager metadata while setup keeps
+its necessary transient fallback.
+
+* Validation
+
+=tests/test_phone_api.py= covers a settled thread whose status has no domain
+and obtains its label from =DomainManager.repo=, plus an initializing thread
+that has status metadata but no manager yet. The live catalog check records
+the same label shape for deployed threads.

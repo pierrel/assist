@@ -402,9 +402,11 @@ until `ASSIST_PHONE_API_TOKEN` is set in an ignored owner-only deployment
 environment file. Send that value only as `Authorization: Bearer <token>` from
 the phone; never pass it into a sandbox or commit it. The API exposes visible
 thread snapshots, durable idempotent sends, and bounded workspace snapshots.
-The exact request, cursor, event, and failure contract is in
+The exact request, cursor, event, failure, and repository-label contract is in
 [the phone API design note](docs/2026-09-04-phone-api.org), amended for
-[mature-thread message admission](docs/2026-09-07-phone-api-mature-thread-admission.org).
+[mature-thread message admission](docs/2026-09-07-phone-api-mature-thread-admission.org),
+[incremental Run streaming](docs/2026-09-08-phone-run-streaming.org), and
+[repository-label authority](docs/2026-09-09-phone-repository-label-authority.org).
 
 ### Voice calls
 
