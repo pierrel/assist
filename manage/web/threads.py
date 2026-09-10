@@ -92,6 +92,7 @@ from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
 from edd.live_capture import CaptureStorageFull
 
 from manage.web.app import app
+from manage.web.run_stream import PHONE_DELTA_CHUNK_BYTES, RUN_STREAMS
 from manage.web.diff import _DIFF_CSS, _render_inline_diffs
 from assist.geo.model import STATE_FAILED, STATE_IMPORTING
 from assist.geo.provisioner import Provisioner
@@ -1597,18 +1598,66 @@ def render_thread(
     """
 
 
+def _finish_initialization_failure(
+    tid: str, run_id: str, pending: str, domain: str | None,
+    rider: ContextRider | None,
+) -> None:
+    """Persist the terminal outcome or retry the same durable initializer."""
+    try:
+        _fail_initialization(tid, run_id, pending)
+    except RunNotFound:
+        _INITIALIZATION_SCHEDULER.complete(run_id, tid)
+    except Exception:
+        logging.error("Could not persist initialization failure for %s", tid,
+                      exc_info=True)
+        _INITIALIZATION_SCHEDULER.retry(run_id, tid, domain, rider)
+    else:
+        _INITIALIZATION_SCHEDULER.complete(run_id, tid)
+
+
+def _settle_cancelled_initializer(tid: str, run_id: str) -> bool:
+    """Finish setup-only cancellation once its original initializer owns the thread.
+
+    Cancellation records the durable receipt immediately, but never races a
+    clone or turns a follower loose against a partial workspace.  Only the
+    bounded initializer changes this initial projection to ready.
+    """
+    with _RUN_ADMISSION_LOCK:
+        current = _runs().get(tid, run_id)
+        status = _get_status(tid)
+        if not (current.status == "cancelled"
+                and current.cancel_cleanup in {"pending", "complete"}
+                and status.get("pending_run_id") == run_id):
+            return False
+        _set_status(tid, "ready")
+    _INITIALIZATION_SCHEDULER.complete(run_id, tid)
+    _dispatch_pending_after(tid, run_id)
+    return True
+
+
 def _initialize_thread(
     tid: str, run_id: str, domain: str | None,
     rider: ContextRider | None = None,
 ) -> None:
     """Dedicated initialization worker: clone, then execute the first durable Run."""
     try:
+        current = _runs().get(tid, run_id)
+        pending = current.text or ""
+        # A failure's durable terminalization can succeed just before its status
+        # projection write fails.  The retry owns only that projection, never a
+        # second execution attempt for the already terminal Run.
+        if current.status == "error":
+            _set_status(tid, "error", error=current.error or "Thread setup failed; create a new thread.",
+                        pending_message=pending)
+            _INITIALIZATION_SCHEDULER.complete(run_id, tid)
+            return
         if domain:
-            # Carry started_at through the cloning write (_set_status is a full replace):
-            # otherwise a domain thread's elapsed baseline resets at clone-completion,
-            # excluding the clone+init the user has been waiting through since submit.
-            pending = _runs().get(tid, run_id).text or ""
+            # Carry the durable initializer identity and started_at through this
+            # full-replace status write.  The former lets cancellation settle only
+            # its original head after a clone; the latter keeps clone time in the
+            # user-visible elapsed baseline.
             _set_status(tid, "cloning", pending_message=pending, domain=domain,
+                        pending_run_id=run_id,
                         started_at=_get_status(tid).get("started_at"))
             try:
                 _reset_unexecuted_workspace(tid)
@@ -1622,16 +1671,27 @@ def _initialize_thread(
                 DOMAIN_MANAGERS[tid] = dm
             except Exception as e:
                 logging.error("Clone failed for thread %s: %s", tid, e, exc_info=True)
-                _fail_initialization(tid, run_id, pending)
+                _finish_initialization_failure(tid, run_id, pending, domain, rider)
                 return
+        # A DELETE may have committed while this initializer was queued or
+        # cloning.  The clone is bounded setup already owned by this worker;
+        # it is never interrupted, but the cancelled Run is never executed.
+        if _settle_cancelled_initializer(tid, run_id):
+            return
         _execute_run(run_id, tid)
+        # The same race exists between the post-setup read and the Run claim.
+        # A claim that wins makes DELETE return 409; otherwise settle the exact
+        # durable cancellation before releasing the initialization owner.
+        if _settle_cancelled_initializer(tid, run_id):
+            return
+        _INITIALIZATION_SCHEDULER.complete(run_id, tid)
     except Exception as e:
         logging.error("Initialization failed for thread %s: %s", tid, e, exc_info=True)
         try:
             pending = _runs().get(tid, run_id).text or ""
         except Exception:
             pending = ""
-        _fail_initialization(tid, run_id, pending)
+        _finish_initialization_failure(tid, run_id, pending, domain, rider)
 
 
 def _reset_unexecuted_workspace(tid: str) -> None:
@@ -1657,15 +1717,9 @@ def _fail_initialization(tid: str, run_id: str, pending: str) -> None:
     """Terminalize a Run that failed before or during initialization."""
     message = "Thread setup failed; create a new thread."
     with _RUN_ADMISSION_LOCK:
-        run = _runs().get(tid, run_id)
-        if run.status == "pending":
-            run = _runs().claim(tid, run_id)
-        if run.status == "running":
-            _runs().transition(tid, run_id, "error", error=message)
-        for follower in _runs().list(tid):
-            if follower.status == "pending":
-                _runs().transition(tid, _runs().claim(tid, follower.id).id,
-                                   "error", error=message)
+        failed = _runs().fail_initialization(tid, run_id, message)
+    for run in failed:
+        RUN_STREAMS.finish(tid, run.work_id)
     _set_status(tid, "error", error=message, pending_message=pending)
     _notify_turn_observers(tid, "error", None, None, run_id)
 
@@ -2030,6 +2084,7 @@ def _runs():
 def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 resume_decision=None, resume=False, active_ms=0.0,
                 pending_text=None, origin=None, work_id=None,
+                run_id=None,
                 assistant_id="general-agent", mode="turn", parent_thread_id=None,
                 parent_run_id=None, dispatch_key=None,
                 cancel_pending=False, max_runs=None,
@@ -2037,7 +2092,7 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 delegate_user_urls=(), location: LocationSnapshot | None = None) -> Run:
     """Commit one web turn before placing its id on a dispatch queue."""
     return _runs().create(
-        tid, assistant_id, text, work_id=work_id, mode=mode,
+        tid, assistant_id, text, run_id=run_id, work_id=work_id, mode=mode,
         parent_thread_id=parent_thread_id, parent_run_id=parent_run_id,
         dispatch_key=dispatch_key, sender=sender,
         rider=_rider_to_fields(rider) if rider is not None else None,
@@ -2047,6 +2102,24 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
         max_pending=max_pending, multitask_strategy=multitask_strategy,
         delegate_user_urls=delegate_user_urls,
         location=_location_to_fields(location) if location else None)
+
+
+def _publish_phone_text(tid: str, work_id: str, text: str) -> None:
+    """Split a model callback by Unicode code point before bounded publication."""
+    # JSON can escape each input byte as ``\\u00XX``.  This keeps the final
+    # single-line record below the 48 KiB transport cap for control-heavy text.
+    start = 0
+    bytes_in_piece = 0
+    for end, character in enumerate(text, start=1):
+        character_bytes = len(character.encode("utf-8"))
+        if bytes_in_piece and bytes_in_piece + character_bytes > PHONE_DELTA_CHUNK_BYTES:
+            if RUN_STREAMS.publish_delta(tid, work_id, text[start:end - 1]) is None:
+                return
+            start = end - 1
+            bytes_in_piece = 0
+        bytes_in_piece += character_bytes
+    if start < len(text):
+        RUN_STREAMS.publish_delta(tid, work_id, text[start:])
 
 
 def _delegate_configurable(run: Run) -> dict | None:
@@ -2319,6 +2392,7 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
             return
     except ThreadEngineError as error:
         logging.error("thread %s has an invalid engine marker", tid, exc_info=True)
+        finished_work_id = None
         if run.status in {"pending", "running", "interrupted"}:
             with _RUN_ADMISSION_LOCK:
                 current = _runs().get(tid, run.id)
@@ -2326,6 +2400,10 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
                     current = _runs().claim(tid, run.id)
                 if current.status == "running":
                     _runs().transition(tid, run.id, "error", error=str(error))
+                    finished_work_id = current.work_id
+        if finished_work_id is not None:
+            RUN_STREAMS.finish(tid, finished_work_id)
+        if run.status in {"pending", "running", "interrupted"}:
             _set_status(tid, "error", error="Thread engine is unavailable")
         return
     if run.mode == "child":
@@ -2368,10 +2446,18 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
         # this invocation's terminal projection.
         if current.status == "running":
             status = _get_status(tid)
-            terminal = "error" if status.get("stage") == "error" else "success"
+            stage = status.get("stage")
+            terminal = ("error" if stage == "error"
+                        else "awaiting_approval" if stage == "awaiting_approval"
+                        else "success")
             _runs().transition(tid, run_id, terminal, error=status.get("error"))
             current = _runs().get(tid, run_id)
-        if current.status in {"success", "error", "timeout", "cancelled"}:
+        if current.status in {"success", "error", "timeout", "cancelled", "awaiting_approval"}:
+            if not any(candidate.id != current.id
+                       and candidate.work_id == current.work_id
+                       and candidate.status in {"pending", "running"}
+                       for candidate in _runs().list(tid)):
+                RUN_STREAMS.finish(tid, current.work_id)
             _dispatch_pending_after(tid, run_id)
     except RunNotFound:
         pass  # thread deletion removes its run store while a dispatcher unwinds.
@@ -2792,7 +2878,13 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 except FileNotFoundError:
                     return
                 _set_status(tid, "processing", **pending_kwargs)
-                if resume:
+                observed = (_run is not None
+                            and RUN_STREAMS.read(tid, _run.work_id) is not None)
+                if resume and observed:
+                    resp = chat.observe_resume(
+                        lambda delta: _publish_phone_text(tid, _run.work_id, delta),
+                        lambda _attempt: RUN_STREAMS.reset_attempt(tid, _run.work_id))
+                elif resume:
                     # Fair-scheduling resume: continue the in-flight turn from its
                     # durable checkpoint (input=None). No new message, no supersede.
                     resp = chat.resume()
@@ -2838,8 +2930,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                         pending_reply=_pending_text,
                                         pending_sender=prior_pending_sender,
                                         started_at=started_at)
-                            # A terminal awaiting_approval, like the normal pending exit — so
-                            # the observer must fire. Don't notify inline: this is INSIDE the
+                            # A nonterminal awaiting_approval state ends this observer, like the
+                            # normal pending exit, so the common notifier must fire. Don't notify
+                            # inline: this is INSIDE the
                             # THREAD_QUEUE.acquire scope, and a synchronous observer would then
                             # run while holding the global single-flight slot, stalling every
                             # turn. Unwind instead (reaping the container via the finally,
@@ -2848,7 +2941,13 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                             raise _SupersedeCapReached
                         if same_sender:
                             text = _SUPERSEDE_RIDER + text
-                    resp = chat.message(text)
+                    if observed:
+                        resp = chat.observe_message(
+                            text,
+                            lambda delta: _publish_phone_text(tid, _run.work_id, delta),
+                            lambda _attempt: RUN_STREAMS.reset_attempt(tid, _run.work_id))
+                    else:
+                        resp = chat.message(text)
             finally:
                 # One container per turn: kill it as soon as this turn's agent
                 # run finishes — success, error, or the early return above —
@@ -2927,27 +3026,38 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         logging.info("fair-sched: %s paused (active hold %.0fs carried); queuing resume", tid,
                      carry / 1000.0)
         DOMAIN_MANAGERS.pop(tid, None)  # fresh container on resume; drop the cached backend
-        # Enqueue the resume BEFORE advertising `paused`, so a new message that races in
-        # and sees `paused` is routed onto this scheduler strictly AFTER the resume.
-        if _run is not None:
-            _runs().transition(tid, _run.id, "interrupted", active_ms=carry)
-            successor = _create_run(
-                tid, None, rider=rider, sender=sender, resume=True,
-                active_ms=carry, pending_text=pending_kwargs.get("pending_message"),
-                origin=origin, work_id=_run.work_id,
-                location=_location_from_fields(_run.location))
-            _RESUME_SCHEDULER.submit(successor.id, tid)
-        else:
-            # Compatibility for direct low-level callers during the migration.
-            _RESUME_SCHEDULER.submit_resume(
-                tid, rider, sender, carry, pending_kwargs.get("pending_message"),
-                origin=origin)
-        # accumulated_active_ms rides the status write so a restart-recovered resume
-        # keeps its 2h-cap accounting (the in-memory submit_resume above is lost with
-        # the process; sender/rider are already in pending_kwargs). A crash of a
-        # PROCESSING turn has no carry to persist — its resumed slice restarts the
-        # cap at 0, accepted (the cap is a runaway backstop, not billing).
-        _set_status(tid, "paused", accumulated_active_ms=carry, **pending_kwargs)
+        # Atomically create the successor and publish the paused projection before
+        # making that successor runnable.
+        # Admission and DELETE take this lock too, so neither can observe an
+        # interrupted predecessor without its same-work successor.
+        ticket = None
+        try:
+            with _RUN_ADMISSION_LOCK:
+                if _run is not None:
+                    _runs().transition(tid, _run.id, "interrupted", active_ms=carry)
+                    successor = _create_run(
+                        tid, None, rider=rider, sender=sender, resume=True,
+                        active_ms=carry, pending_text=pending_kwargs.get("pending_message"),
+                        origin=origin, work_id=_run.work_id,
+                        location=_location_from_fields(_run.location))
+                else:
+                    # Compatibility for direct low-level callers during the migration.
+                    successor = _create_run(
+                        tid, None, rider=rider, sender=sender, resume=True,
+                        active_ms=carry, pending_text=pending_kwargs.get("pending_message"),
+                        origin=origin)
+                # accumulated_active_ms rides the status write so a restart-recovered resume
+                # keeps its 2h-cap accounting (the in-memory scheduler submission is lost with
+                # the process; sender/rider are already in pending_kwargs). A crash of a
+                # PROCESSING turn has no carry to persist — its resumed slice restarts the
+                # cap at 0, accepted (the cap is a runaway backstop, not billing).
+                _set_status(tid, "paused", accumulated_active_ms=carry, **pending_kwargs)
+                # Reserve a promotable queue item while this durable handoff is atomic,
+                # but do not notify or execute it until admission is released below.
+                ticket = _RESUME_SCHEDULER.reserve(successor.id, tid)
+        finally:
+            if ticket is not None:
+                _RESUME_SCHEDULER.commit(ticket)
         return
     except SandboxContainerLostError as e:
         # Distinct status message: a dead container is recoverable —
@@ -3160,7 +3270,8 @@ async def create_thread_with_message(
 def create_thread_with_message_core(
     text: str, domain: str | None, rider: ContextRider | None = None, engine: str = "deepagents",
     location: LocationSnapshot | None = None, *, thread_id: str | None = None,
-    dispatch_key: str | None = None,
+    dispatch_key: str | None = None, run_id: str | None = None,
+    work_id: str | None = None,
 ) -> tuple[str, str, str | None]:
     """Persist a new thread's first Run before its slow initialization starts."""
     # The clone scheduler has one worker.  Bound admission *before* publishing a
@@ -3181,6 +3292,7 @@ def create_thread_with_message_core(
         _set_status(tid, "initializing", pending_message=text, domain=selected or "",
                     started_at=started_at)
         run = _create_run(tid, text, rider=rider, location=location,
+                          run_id=run_id, work_id=work_id,
                           dispatch_key=dispatch_key)
         # A first Run needs its slow clone before execution.  Persist that relation so
         # startup recovery replays initialization rather than running in a missing worktree.
@@ -3367,7 +3479,9 @@ class _EmailApprovalPending(Exception):
 def _accept_message_run_locked(tid: str, text: str, rider=None,
                                location: LocationSnapshot | None = None,
                                dispatch_key: str | None = None,
-                               max_pending: int | None = None) -> tuple[Run, bool]:
+                               max_pending: int | None = None,
+                               run_id: str | None = None,
+                               work_id: str | None = None) -> tuple[Run, bool]:
     """Admit one message while ``_RUN_ADMISSION_LOCK`` is held."""
     if _get_status(tid).get("pending_email_token"):
         raise _EmailApprovalPending
@@ -3381,6 +3495,7 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
         # best-effort must not change message-admission semantics.
         pass
     run = _create_run(tid, text, rider=rider, location=location,
+                      run_id=run_id, work_id=work_id,
                       dispatch_key=dispatch_key,
                       max_pending=max_pending)
     if busy:
@@ -3395,10 +3510,14 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
 
 def _accept_message_run(tid: str, text: str, rider=None,
                         location: LocationSnapshot | None = None,
-                        dispatch_key: str | None = None) -> tuple[Run, bool]:
+                        dispatch_key: str | None = None,
+                        max_pending: int | None = None,
+                        run_id: str | None = None,
+                        work_id: str | None = None) -> tuple[Run, bool]:
     """Persist one web submission and return whether earlier work owns the thread."""
     with _RUN_ADMISSION_LOCK:
-        return _accept_message_run_locked(tid, text, rider, location, dispatch_key)
+        return _accept_message_run_locked(tid, text, rider, location, dispatch_key,
+                                          max_pending, run_id, work_id)
 
 
 def _record_browser_location(rider: ContextRider | None) -> LocationSnapshot | None:
@@ -4007,6 +4126,16 @@ def queue_recovery_runs() -> None:
         # claim leaves the old busy status projection behind; dispatch the
         # persisted ticket instead of synthesizing a duplicate from status.json.
         status = _get_status(tid)
+        cancelled_initializer = next(
+            (run for run in visible_runs[tid]
+             if (run.id == status.get("pending_run_id") and run.status == "cancelled"
+                 and run.cancel_cleanup in {"pending", "complete"})),
+            None)
+        if (status.get("stage") in {"initializing", "cloning"}
+                and cancelled_initializer is not None):
+            _INITIALIZATION_SCHEDULER.submit(
+                cancelled_initializer.id, tid, status.get("domain") or None)
+            continue
         if ((status.get("stage") in {"initializing", "cloning"}
              and any(run.status == "pending" for run in visible_runs[tid]))
                 or any(run.status == "pending"
@@ -4041,15 +4170,33 @@ def queue_recovery_runs() -> None:
 
 
 class _PriorityRunQueue:
-    """Blocking two-tier FIFO with stable promotion by visible thread ID."""
+    """Blocking two-tier FIFO with promotable dormant reservations."""
 
     def __init__(self) -> None:
         self._cond = threading.Condition()
         self._user = deque()
         self._background = deque()
+        self._reserved: dict[object, dict] = {}
 
     def put(self, item: dict) -> None:
         with self._cond:
+            target = self._user if item.get("user_priority") else self._background
+            target.append(item)
+            self._cond.notify()
+
+    def reserve(self, item: dict) -> object:
+        """Register one promotable item without making it runnable."""
+        ticket = object()
+        with self._cond:
+            self._reserved[ticket] = item
+        return ticket
+
+    def commit(self, ticket: object) -> None:
+        """Make one reservation runnable once; a repeated commit is a no-op."""
+        with self._cond:
+            item = self._reserved.pop(ticket, None)
+            if item is None:
+                return
             target = self._user if item.get("user_priority") else self._background
             target.append(item)
             self._cond.notify()
@@ -4072,6 +4219,9 @@ class _PriorityRunQueue:
 
     def promote(self, tid: str) -> None:
         with self._cond:
+            for item in self._reserved.values():
+                if item["tid"] == tid:
+                    item["user_priority"] = True
             promoted = [item for item in self._background if item["tid"] == tid]
             if not promoted:
                 return
@@ -4095,6 +4245,10 @@ class _InitializationScheduler:
     def __init__(self) -> None:
         self._q: queue.Queue[tuple[str, str, str | None, ContextRider | None]] = queue.Queue()
         self._thread: threading.Thread | None = None
+        self._scheduled: set[tuple[str, str]] = set()
+        self._active: set[tuple[str, str]] = set()
+        self._retries: dict[tuple[str, str], int] = {}
+        self._lock = threading.Lock()
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -4105,16 +4259,48 @@ class _InitializationScheduler:
 
     def submit(self, run_id: str, tid: str, domain: str | None,
                rider: ContextRider | None = None) -> None:
+        key = (run_id, tid)
+        with self._lock:
+            if key in self._scheduled or key in self._active:
+                return
+            self._scheduled.add(key)
         self._q.put((run_id, tid, domain, rider))
+
+    def retry(self, run_id: str, tid: str, domain: str | None,
+              rider: ContextRider | None) -> None:
+        """Queue the same durable initializer once after capped backoff."""
+        key = (run_id, tid)
+        with self._lock:
+            if key in self._scheduled:
+                return
+            attempt = self._retries.get(key, 0) + 1
+            self._retries[key] = attempt
+            self._scheduled.add(key)
+        delay = min(2 ** (attempt - 1), 30)
+        timer = threading.Timer(delay, self._q.put, args=((run_id, tid, domain, rider),))
+        timer.daemon = True
+        timer.start()
+
+    def complete(self, run_id: str, tid: str) -> None:
+        """Forget retry state once this exact durable initializer has settled."""
+        with self._lock:
+            self._retries.pop((run_id, tid), None)
 
     def _loop(self) -> None:
         while True:
             run_id, tid, domain, rider = self._q.get()
+            key = (run_id, tid)
+            with self._lock:
+                self._scheduled.discard(key)
+                self._active.add(key)
             try:
                 _initialize_thread(tid, run_id, domain, rider)
             except Exception:
                 logging.error("first-thread initialization failed for %s", tid,
                               exc_info=True)
+            finally:
+                with self._lock:
+                    self._active.discard(key)
 
 
 class _ResumeScheduler:
@@ -4147,6 +4333,15 @@ class _ResumeScheduler:
     def submit(self, run_id: str, tid: str, *, user_priority: bool = False) -> None:
         self._q.put({"kind": "run", "run_id": run_id, "tid": tid,
                      "user_priority": user_priority})
+
+    def reserve(self, run_id: str, tid: str, *, user_priority: bool = False) -> object:
+        """Reserve a promotable Run notification without waking the worker."""
+        return self._q.reserve({"kind": "run", "run_id": run_id, "tid": tid,
+                                "user_priority": user_priority})
+
+    def commit(self, ticket: object) -> None:
+        """Release one reserved Run notification after its durable handoff."""
+        self._q.commit(ticket)
 
     def promote(self, tid: str) -> None:
         """Promote work that must run before this user's pending message."""
@@ -4924,7 +5119,9 @@ def _delete_thread_and_children(tid: str) -> None:
             if any(child.status == "running" for child in child_runs):
                 continue
             MANAGER.hard_delete(child_tid)
+            RUN_STREAMS.mark_thread_gone(child_tid)
         MANAGER.hard_delete(tid, on_delete=[_evict_caches, _evict_egress])
+        RUN_STREAMS.mark_thread_gone(tid)
 
 
 @app.post("/thread/{tid}/rename")

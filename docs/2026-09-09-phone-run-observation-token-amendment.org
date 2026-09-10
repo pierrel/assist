@@ -1,0 +1,34 @@
+#+TITLE: Phone Run observation token amendment
+#+DATE: <2026-09-09>
+
+* Correction
+
+The observer revision is insufficient to notice a durable =runs.json= change
+made outside the current =RunService= process.  Each phone observer therefore
+also keeps a filesystem observation token:
+
+#+begin_example
+(st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns)
+#+end_example
+
+The token comes from an =O_RDONLY|O_CLOEXEC|O_NOFOLLOW= descriptor and accepts
+only a regular file.  An unchanged poll obtains that token without parsing the
+Run history.  A projection opens, parses, and fstats the same descriptor before
+and after the parse; it accepts only a coherent token, retries one mismatch,
+then reports the durable store unavailable.  This makes same-size/restored-time
+rewrites and replacements invalidate observation without trusting path metadata
+from a separate lookup.
+
+The SSE observer checks a journal closure before consulting the durable store.
+Otherwise, revision, observation token, stage, and terminal journal changes
+are invalidation signals only: each forces a fresh durable projection rather
+than supplying Run authority.  A missing store is =thread-gone= only when
+deletion already closed the journal; it is otherwise the sanitized unavailable
+outcome.
+
+* Lineage
+
+This amends [[file:2026-09-09-phone-run-observer-closure-amendment.org][the
+phone Run observer closure amendment]].  That record remains historical.  This
+correction adds external durable-store invalidation and coherent descriptor
+parsing without changing the Run lifecycle or journal authority.

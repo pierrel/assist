@@ -1,0 +1,17 @@
+#+TITLE: Phone Run streaming size-bound amendment
+#+DATE: <2026-09-09>
+
+* Correction
+
+The September 8 implementation plan incorrectly described a 16 KiB server
+delta bound. Assist splits model text into at most 7 KiB UTF-8 chunks before
+journal publication. That conservative server limit leaves room for worst-case
+JSON escaping under the 48 KiB encoded SSE-record cap. The 16 KiB limit belongs
+to the EmacsOS client's decoded-delta acceptance check, not to the server.
+
+* Lineage
+
+This amends [[file:2026-09-08-phone-run-streaming.org][incremental phone Run
+streaming]]. The earlier record remains historical. This correction preserves
+the established 48 KiB server record cap while assigning the two distinct
+delta-size limits to their owning sides of the protocol.

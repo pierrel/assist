@@ -402,9 +402,20 @@ until `ASSIST_PHONE_API_TOKEN` is set in an ignored owner-only deployment
 environment file. Send that value only as `Authorization: Bearer <token>` from
 the phone; never pass it into a sandbox or commit it. The API exposes visible
 thread snapshots, durable idempotent sends, and bounded workspace snapshots.
-The exact request, cursor, event, and failure contract is in
+The exact request, cursor, event, failure, and repository-label contract is in
 [the phone API design note](docs/2026-09-04-phone-api.org), amended for
-[mature-thread message admission](docs/2026-09-07-phone-api-mature-thread-admission.org).
+[mature-thread message admission](docs/2026-09-07-phone-api-mature-thread-admission.org),
+[incremental Run streaming](docs/2026-09-08-phone-run-streaming.org), and
+[repository-label authority](docs/2026-09-09-phone-repository-label-authority.org),
+with its [lineage correction](docs/2026-09-09-phone-repository-label-lineage-amendment.org),
+the [streaming size-bound authority](docs/2026-09-09-phone-run-streaming-boundary-amendment.org),
+the [awaiting-approval observation boundary](docs/2026-09-09-phone-awaiting-approval-observation-amendment.org),
+the [observer revision amendment](docs/2026-09-09-phone-run-observer-revision-amendment.org),
+the [observer closure amendment](docs/2026-09-09-phone-run-observer-closure-amendment.org),
+the [observation-token amendment](docs/2026-09-09-phone-run-observation-token-amendment.org),
+the [deleted-thread closure amendment](docs/2026-09-09-phone-run-deletion-closure-amendment.org),
+the [cancellation receipt amendment](docs/2026-09-09-phone-run-cancellation-receipt-amendment.org),
+and the [initializer-cancellation amendment](docs/2026-09-09-phone-initializer-cancellation-amendment.org).
 
 ### Voice calls
 

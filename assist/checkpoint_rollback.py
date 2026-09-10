@@ -184,6 +184,52 @@ def invoke_with_rollback(
     raise RuntimeError("invoke_with_rollback: max attempts exceeded")
 
 
+def stream_with_rollback(
+    agent: CompiledStateGraph,
+    input_data: dict[str, Any] | None,
+    config: dict[str, Any],
+    on_chunk,
+    *,
+    on_reset=None,
+    max_retries_per_step: int = 2,
+    max_rollback_depth: int = 3,
+    rollback_on: tuple[type[Exception], ...] = (BadRequestError,),
+) -> dict[str, Any]:
+    """Stream one graph while retaining ``invoke_with_rollback``'s recovery rule.
+
+    A rollback discards only provisional transport output.  The durable
+    checkpoint remains the graph truth and the returned state has the same shape
+    as ``invoke_with_rollback``.  LangGraph excludes child graph events at this
+    boundary, so callers receive only the observed graph's stream.
+    """
+    class _ObservedGraph:
+        """Adapt stream execution to the already-tested invoke rollback loop."""
+
+        def __init__(self) -> None:
+            self.attempt = 0
+
+        def __getattr__(self, name):
+            return getattr(agent, name)
+
+        def invoke(self, current_input, current_config, *, durability):
+            if self.attempt and on_reset is not None:
+                on_reset(self.attempt + 1)
+            self.attempt += 1
+            for chunk in agent.stream(current_input, current_config,
+                                      stream_mode=["messages", "updates", "values"],
+                                      durability=durability, subgraphs=False):
+                on_chunk(chunk)
+            # ``current_config`` may name the rollback target checkpoint.  Ask
+            # with the original thread-only config so LangGraph resolves newest state.
+            return dict(agent.get_state(config).values or {})
+
+    return invoke_with_rollback(
+        _ObservedGraph(), input_data, config,
+        max_retries_per_step=max_retries_per_step,
+        max_rollback_depth=max_rollback_depth,
+        rollback_on=rollback_on)
+
+
 class RollbackRunnable:
     """Wrap a compiled LangGraph agent so that ``invoke()`` uses rollback.
 

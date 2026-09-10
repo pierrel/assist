@@ -1,0 +1,23 @@
+#+TITLE: Phone Run cancellation receipt amendment
+#+DATE: <2026-09-09>
+
+* Correction
+
+Cancelling a fair-scheduled logical Run is now one durable =RunService=
+transaction.  It cancels the selected pending slice and its same-work
+=interrupted= predecessors, then records =cancel_cleanup: pending= on the
+immutable accepted Run handle.  That receipt distinguishes an incomplete
+phone cancellation from an arbitrary terminal Run.
+
+The phone uses the returned post-write snapshot to clear an obsolete paused
+thread state, finish the provisional journal, and dispatch the following
+pending work.  Only after those idempotent operations succeed does it write
+=cancel_cleanup: complete=.  A retry of a pending receipt repeats cleanup; a
+complete receipt returns the successful cancellation without redispatching.
+
+* Lineage
+
+This amends [[file:2026-09-08-phone-run-streaming.org][incremental phone Run
+streaming]].  That record remains historical.  This correction makes a
+partially completed cancellation explicitly recoverable without treating an
+unrelated terminal Run as replay authorization.

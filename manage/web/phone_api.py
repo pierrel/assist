@@ -12,6 +12,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import inspect
 import io
 import json
 import os
@@ -21,22 +22,25 @@ import subprocess
 import tarfile
 import threading
 import unicodedata
+import uuid
 from pathlib import Path
 from typing import Annotated, Any
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import convert_to_messages
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from assist.domain_manager import current_branch
-from assist.run_service import InvalidRunTransition, TERMINAL_STATUSES, RunNotFound
+from assist.run_service import (AWAITING_APPROVAL_STATUSES, InvalidRunTransition,
+                                ObservationToken, RunStoreUnavailable, TERMINAL_STATUSES)
 from assist.thread import _messages_to_dicts
 from assist.thread_engine import ThreadEngineError, read_thread_engine
 from assist.visible_conversation import visible_records_from_dicts
 from manage.web import state
 from manage.web import threads
+from manage.web.run_stream import RUN_STREAMS, encode_sse
 
 
 PHONE_API_PREFIX = "/api/v1/phone"
@@ -59,6 +63,9 @@ MAX_DESCRIPTION_CHARS = 120
 MAX_PHONE_THREADS = 200
 MAX_PHONE_PENDING_RUNS = 4
 MAX_PHONE_INITIALIZATIONS = 1
+MAX_PHONE_SSE_RECORD_BYTES = 48 * 1024
+PHONE_SSE_SEND_TIMEOUT_SECONDS = 5
+PHONE_SSE_LIFETIME_SECONDS = 30 * 60
 _SSE_SLOTS = threading.BoundedSemaphore(4)
 _ARCHIVE_SLOTS = threading.BoundedSemaphore(1)
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -70,6 +77,42 @@ _FILE_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_./-])([A-Za-z0-9][A-Za-z0-9._/-]{0,240}"
     r"\.[A-Za-z0-9]{1,16})(?![A-Za-z0-9_./-])"
 )
+
+
+class _BoundedSSEStreamingResponse(StreamingResponse):
+    """Bound phone observation work to 30 minutes plus one final-send grace period."""
+
+    def __init__(self, *args, on_close=None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_close = on_close
+
+    async def stream_response(self, send) -> None:
+        async def bounded_send(message: dict[str, Any]) -> None:
+            with anyio.fail_after(PHONE_SSE_SEND_TIMEOUT_SECONDS):
+                await send(message)
+
+        try:
+            with anyio.fail_after(PHONE_SSE_LIFETIME_SECONDS
+                                  + PHONE_SSE_SEND_TIMEOUT_SECONDS):
+                await bounded_send({"type": "http.response.start", "status": self.status_code,
+                                    "headers": self.raw_headers})
+                async for chunk in self.body_iterator:
+                    if not isinstance(chunk, bytes | memoryview):
+                        chunk = chunk.encode(self.charset)
+                    await bounded_send({"type": "http.response.body", "body": chunk,
+                                        "more_body": True})
+                await bounded_send({"type": "http.response.body", "body": b"",
+                                    "more_body": False})
+        except TimeoutError:
+            return
+        finally:
+            close = getattr(self.body_iterator, "aclose", None)
+            if close is not None:
+                await close()
+            if self._on_close is not None:
+                result = self._on_close()
+                if inspect.isawaitable(result):
+                    await result
 
 
 class _StrictModel(BaseModel):
@@ -119,9 +162,8 @@ def _request_key(request: Request) -> str:
     return value
 
 
-def _authenticate(request: Request, response: Response) -> None:
+def _authenticate(request: Request) -> None:
     """Require the dedicated phone token before any thread lookup."""
-    response.headers["Cache-Control"] = "no-store"
     configured = os.environ.get(PHONE_API_TOKEN_ENV)
     if not configured:
         raise HTTPException(status_code=503, detail="Phone API is not configured")
@@ -389,7 +431,7 @@ def _thread_messages(tid: str) -> list[dict]:
     """Legacy full projection for Pi threads and browser-compatible test fixtures."""
     chat, pi_messages, _, _ = threads._thread_messages_for_fragment(tid)
     return pi_messages if pi_messages is not None else (
-        [] if chat is None else getattr(chat, "get_web_messages", chat.get_messages)())
+        [] if chat is None else chat.get_web_messages())
 
 
 def _checkpoint_history(tid: str, before: tuple[str, str, int, int] | None) -> tuple[list[dict], bool]:
@@ -577,11 +619,14 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
     }
 
 
-def _thread_repo_summary(status: dict[str, Any]) -> tuple[str | None, str]:
-    """Return the persisted chooser label without inspecting a Git worktree."""
+def _thread_repo_summary(tid: str, status: dict[str, Any]) -> tuple[str | None, str]:
+    """Return chooser metadata from setup state or the thread's durable repository."""
     domain = status.get("domain")
     if not isinstance(domain, str) or not domain:
-        return None, "No repository"
+        manager = state._get_domain_manager(tid)
+        domain = manager.repo if manager is not None else None
+        if not isinstance(domain, str) or not domain:
+            return None, "No repository"
     return _repo_key(domain), state._domain_label(domain)
 
 
@@ -590,7 +635,7 @@ def _list_threads() -> dict[str, Any]:
     for tid in state.MANAGER.list()[:MAX_THREADS]:
         try:
             status = state._get_status(tid)
-            repo_key, repo_label = _thread_repo_summary(status)
+            repo_key, repo_label = _thread_repo_summary(tid, status)
             title = _stored_thread_title(tid)
             activity_at = os.stat(_thread_dir(tid)).st_mtime
             values.append((threads._thread_status_rank(tid, status.get("stage", "ready")), {
@@ -642,7 +687,8 @@ def _find_dispatch(tid: str, dispatch_key: str):
                  if run.dispatch_key == dispatch_key), None)
 
 
-def _submit_existing(tid: str, text: str, key: str) -> tuple[Any, bool, bool]:
+def _submit_existing(tid: str, text: str, key: str, *, run_id: str | None = None,
+                     work_id: str | None = None) -> tuple[Any, bool, bool]:
     """Durably accept one idempotent normal web turn under the existing lock."""
     _thread_dir(tid)
     dispatch_key = _phone_dispatch_key(key)
@@ -660,7 +706,8 @@ def _submit_existing(tid: str, text: str, key: str) -> tuple[Any, bool, bool]:
         try:
             run, busy = threads._accept_message_run_locked(
                 tid, text, dispatch_key=dispatch_key,
-                max_pending=MAX_PHONE_PENDING_RUNS)
+                max_pending=MAX_PHONE_PENDING_RUNS, run_id=run_id,
+                work_id=work_id)
         except threads._EmailApprovalPending as error:
             raise HTTPException(
                 status_code=409, detail="Resolve the pending approval first") from error
@@ -669,7 +716,8 @@ def _submit_existing(tid: str, text: str, key: str) -> tuple[Any, bool, bool]:
         return run, busy, False
 
 
-def _create_and_submit(body: _CreateThread, key: str) -> tuple[str, Any, str | None, bool]:
+def _create_and_submit(body: _CreateThread, key: str, *, run_id: str | None = None,
+                       work_id: str | None = None) -> tuple[str, Any, str | None, bool]:
     """Create a deterministic phone draft only when its first message arrives."""
     domain = _domain_for_key(body.repo_key)
     if body.repo_key is not None and domain is None:
@@ -700,42 +748,255 @@ def _create_and_submit(body: _CreateThread, key: str) -> tuple[str, Any, str | N
         try:
             tid, run_id, selected = threads.create_thread_with_message_core(
                 body.message, domain, engine=body.harness, thread_id=tid,
-                dispatch_key=dispatch_key)
+                dispatch_key=dispatch_key, run_id=run_id,
+                work_id=work_id)
             run = threads._runs().get(tid, run_id)
         except (ValueError, ThreadEngineError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         return tid, run, selected, False
 
 
-def _run_status(tid: str, run_id: str) -> dict[str, Any]:
-    _thread_dir(tid)
-    _require_id(run_id, "run id")
-    try:
-        run = threads._runs().get(tid, run_id)
-    except RunNotFound as error:
-        raise HTTPException(status_code=404, detail="Run not found") from error
-    return {"id": run.id, "thread_id": tid, "status": run.status,
-            "error": ("Run failed; inspect Assist Web for details."
-                      if run.error else None),
-            "updated_at": run.updated_at,
-            "thread_status": state._get_status(tid).get("stage", "ready")}
+def _logical_status(tid: str, run_id: str) -> dict[str, Any]:
+    """Project the immutable accepted handle over one physical-state snapshot."""
+    # Fair scheduling publishes interrupted predecessor, successor, and paused
+    # thread status under this lock.  Read the same unit atomically so SSE never
+    # mistakes that short handoff for a terminal interrupted Run.
+    with threads._RUN_ADMISSION_LOCK:
+        return _logical_status_locked(tid, run_id)
 
 
-def _cancel_pending_run(tid: str, run_id: str) -> dict[str, Any]:
-    """Cancel only unclaimed work; a running model turn cannot be lied about."""
+def _logical_status_with_revision(tid: str, run_id: str) -> tuple[dict[str, Any], int]:
+    """Return one logical projection and its process-local write invalidation revision."""
+    with threads._RUN_ADMISSION_LOCK:
+        return _logical_status_locked(tid, run_id, with_revision=True)
+
+
+def _logical_status_with_revision_and_token(
+        tid: str, run_id: str
+) -> tuple[dict[str, Any], int, Any]:
+    """Return one coherent durable projection, write revision, and O(1) file token."""
+    with threads._RUN_ADMISSION_LOCK:
+        return _logical_status_locked(tid, run_id, with_revision=True, with_token=True)
+
+
+def _open_observation(tid: str, work_id: str) -> bool:
+    """Register one observer unless deletion won the admission-lock handoff."""
+    with threads._RUN_ADMISSION_LOCK:
+        try:
+            _thread_dir(tid)
+        except HTTPException:
+            return False
+        RUN_STREAMS.open_observer(tid, work_id)
+        return True
+
+
+def _observation_status_with_revision_and_token(
+        tid: str, run_id: str, work_id: str
+) -> tuple[dict[str, Any], int, Any] | None:
+    """Reproject under deletion admission, or report an already-closed observer."""
+    with threads._RUN_ADMISSION_LOCK:
+        if RUN_STREAMS.is_gone(tid, work_id):
+            return None
+        try:
+            return _logical_status_locked(tid, run_id, with_revision=True, with_token=True)
+        except HTTPException as error:
+            if error.status_code == 404:
+                # A deletion that won admission has already marked the journal;
+                # any other missing durable projection is an operator-visible store fault.
+                if RUN_STREAMS.is_gone(tid, work_id):
+                    return None
+                raise RunStoreUnavailable("Run store is unavailable") from error
+            raise
+
+
+def _observation_invalidation(
+        tid: str, work_id: str
+) -> tuple[int, Any, str] | None:
+    """Read cheap observation invalidators under the deletion admission boundary."""
+    with threads._RUN_ADMISSION_LOCK:
+        if RUN_STREAMS.is_gone(tid, work_id):
+            return None
+        service = threads._runs()
+        revision = service.revision(tid)
+        token = service.observation_token(tid)
+        if token is None:
+            # The deletion winner marks the journal while holding this same lock.
+            # A missing file without that mark is a durable-store fault, not a close.
+            raise RunStoreUnavailable("Run store is unavailable")
+        return revision, token, state._get_status(tid).get("stage", "ready")
+
+
+def _logical_status_locked(
+        tid: str, run_id: str, *, with_revision: bool = False,
+        with_runs: bool = False, include_cleanup: bool = False, with_token: bool = False,
+) -> (dict[str, Any] | tuple[dict[str, Any], int]
+      | tuple[dict[str, Any], int, ObservationToken] | tuple[dict[str, Any], list[Any]]):
+    """Project an accepted handle while ``_RUN_ADMISSION_LOCK`` is held."""
     _thread_dir(tid)
     _require_id(run_id, "run id")
-    status = state._get_status(tid)
-    if (status.get("stage") in {"initializing", "cloning"}
-            and status.get("pending_run_id") == run_id):
-        raise HTTPException(status_code=409, detail="Thread setup is already in progress")
+    service = threads._runs()
+    if with_token:
+        runs, revision, token = service.list_with_revision_and_token(tid)
+        if token is None:
+            raise RunStoreUnavailable("Run store is unavailable")
+    else:
+        runs, revision = service.list_with_revision(tid)
+    accepted = next((run for run in runs if run.id == run_id), None)
+    if accepted is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    thread_status = state._get_status(tid).get("stage", "ready")
+    work = [run for run in runs if run.work_id == accepted.work_id]
+    selected = work[-1]
+    status = selected.status
+    if status == "interrupted":
+        if thread_status in threads.BUSY_STAGES and not any(
+                run.work_id != accepted.work_id and run.status == "running"
+                for run in runs):
+            status = "transitioning"
+    projection = {"id": accepted.id, "thread_id": tid, "work_id": accepted.work_id,
+                  "physical_run_id": selected.id, "status": status,
+                  "error": ("Run failed; inspect Assist Web for details."
+                            if selected.error else None), "updated_at": selected.updated_at,
+                  "thread_status": thread_status}
+    if include_cleanup:
+        projection["cancel_cleanup"] = accepted.cancel_cleanup
+    if with_runs:
+        return projection, runs
+    if with_revision:
+        return (projection, revision, token) if with_token else (projection, revision)
+    return projection
+
+
+def _public_run_projection(projection: dict[str, Any]) -> dict[str, Any]:
+    """Remove internal recovery receipts from one phone Run representation."""
+    return {key: value for key, value in projection.items() if key != "cancel_cleanup"}
+
+
+def _reserve_existing(tid: str, text: str, key: str) -> tuple[Any, bool, bool, bool]:
+    """Reserve before durable visibility, but never make streaming admission truth."""
+    run_id = uuid.uuid4().hex
+    work_id = uuid.uuid4().hex
     try:
-        run = threads._runs().cancel_pending(tid, run_id)
-    except RunNotFound as error:
-        raise HTTPException(status_code=404, detail="Run not found") from error
-    except ValueError as error:
-        raise HTTPException(status_code=409, detail="Run is already executing") from error
-    return {"id": run.id, "status": run.status}
+        is_pi_thread = threads._is_pi_thread(tid)
+    except ThreadEngineError as error:
+        raise HTTPException(status_code=409,
+                            detail="Thread harness is unavailable") from error
+    reserved = not is_pi_thread and RUN_STREAMS.reserve(tid, work_id)
+    try:
+        # A busy holder can see the durable follower as soon as its locked admission
+        # returns.  Activate first, so every worker that can see that Run can publish.
+        if reserved:
+            RUN_STREAMS.activate(tid, work_id)
+        run, busy, replay = _submit_existing(tid, text, key, run_id=run_id, work_id=work_id)
+    except Exception:
+        if reserved:
+            RUN_STREAMS.discard(tid, work_id)
+        raise
+    if replay or busy:
+        if replay and reserved:
+            RUN_STREAMS.discard(tid, work_id)
+        return run, busy, replay, (RUN_STREAMS.read(tid, run.work_id) is not None
+                                   if replay else reserved)
+    return run, busy, False, reserved
+
+
+def _reserve_create(body: _CreateThread, key: str) -> tuple[str, Any, str | None, bool, bool]:
+    run_id = uuid.uuid4().hex
+    work_id = uuid.uuid4().hex
+    # The final deterministic phone thread id is based on the idempotency key.
+    tid = _phone_thread_id(key)
+    reserved = body.harness != "pi" and RUN_STREAMS.reserve(tid, work_id)
+    try:
+        if reserved:
+            RUN_STREAMS.activate(tid, work_id)
+        tid, run, domain, replay = _create_and_submit(body, key, run_id=run_id, work_id=work_id)
+    except Exception:
+        if reserved:
+            RUN_STREAMS.discard(tid, work_id)
+        raise
+    if replay:
+        if reserved:
+            RUN_STREAMS.discard(tid, work_id)
+        return tid, run, domain, True, RUN_STREAMS.read(tid, run.work_id) is not None
+    # The observer starts status-only until the dedicated initializer reaches
+    # its worker, then sees this already-active journal's deltas.
+    return tid, run, domain, False, reserved
+
+
+def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
+    """Cancel one accepted logical Run and durably receipt its cleanup."""
+    with threads._RUN_ADMISSION_LOCK:
+        current_status = state._get_status(tid)
+        projection, runs = _logical_status_locked(
+            tid, run_id, with_runs=True, include_cleanup=True)
+        if projection["status"] == "running":
+            return 409, {"detail": "Run is already executing", "outcome": "running",
+                         "run": _public_run_projection(projection)}
+        if projection["status"] == "transitioning":
+            return 409, {"detail": "Run is transitioning", "outcome": "transitioning",
+                         "run": _public_run_projection(projection)}
+        if projection["status"] not in {"pending", "cancelled"}:
+            detail = ("Run is awaiting approval"
+                      if projection["status"] in AWAITING_APPROVAL_STATUSES
+                      else "Run is already terminal")
+            return 409, {"detail": detail, "outcome": projection["status"],
+                         "run": _public_run_projection(projection)}
+        service = threads._runs()
+        try:
+            if projection["status"] == "pending":
+                # This one write cancels the newest pending slice, retires its
+                # interrupted same-work predecessors, and leaves the accepted
+                # handle with a retry receipt.
+                runs = service.cancel_logical(tid, run_id)
+            else:
+                if projection["cancel_cleanup"] is None:
+                    return 409, {"detail": "Run is already terminal", "outcome": "cancelled",
+                                 "run": _public_run_projection(projection)}
+                if projection["cancel_cleanup"] == "complete":
+                    return 200, {"outcome": "cancelled",
+                                 "run": _public_run_projection(projection)}
+        except InvalidRunTransition:
+            return 409, {"detail": "Run is already executing", "outcome": "running",
+                         "run": _logical_status_locked(tid, run_id)}
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            raise RunStoreUnavailable("Run store is unavailable") from error
+        work_id = projection["work_id"]
+        # A stale interrupted record must not pin the thread paused.  Only an
+        # interrupted slice with a pending/running same-work successor is resumable.
+        if (state._get_status(tid).get("stage") == "paused"
+                and not any(run.status == "interrupted" and any(
+                    later.work_id == run.work_id
+                    and later.status in {"pending", "running"}
+                    for later in runs)
+                            for run in runs)):
+            threads._set_status(tid, "ready")
+        RUN_STREAMS.finish(tid, work_id)
+        # The initializer owns a partially prepared first workspace.  Its
+        # bounded worker observes this receipt after setup, changes the status
+        # to ready, and dispatches any follower exactly once.
+        if current_status.get("stage") not in {"initializing", "cloning"}:
+            threads._dispatch_pending_after(tid, projection["physical_run_id"])
+        # This is deliberately the last durable write.  If any earlier cleanup
+        # step fails, the pending receipt makes its retry replay that work; once
+        # complete, a repeated DELETE is a no-dispatch success.
+        try:
+            completed = service.complete_cancel_cleanup(tid, run_id)
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            raise RunStoreUnavailable("Run store is unavailable") from error
+        selected = next(run for run in runs if run.id == projection["physical_run_id"])
+        if selected.id == completed.id:
+            selected = completed
+        projection["status"] = "cancelled"
+        projection["updated_at"] = selected.updated_at
+        projection["thread_status"] = state._get_status(tid).get("stage", "ready")
+        return 200, {"outcome": "cancelled", "run": _public_run_projection(projection)}
+
+
+def _sse(event: str, value: dict[str, Any]) -> str:
+    record = encode_sse(event, value)
+    if len(record.encode("utf-8")) > MAX_PHONE_SSE_RECORD_BYTES:
+        raise ValueError("phone SSE record exceeds bound")
+    return record
 
 
 def _diff(tid: str) -> dict[str, Any]:
@@ -862,10 +1123,16 @@ async def create_thread(request: Request) -> dict[str, Any]:
     body = await _validated_body(request, _CreateThread)
     assert isinstance(body, _CreateThread)
     key = _request_key(request)
-    tid, run, domain, replay = await anyio.to_thread.run_sync(_create_and_submit, body, key)
+    try:
+        tid, run, domain, replay, live_text = await anyio.to_thread.run_sync(
+            _reserve_create, body, key)
+    except RunStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail="run-store-unavailable") from error
     if not replay:
-        threads._INITIALIZATION_SCHEDULER.submit(run.id, tid, domain)
-    return {"thread_id": tid, "run_id": run.id, "replayed": replay}
+        await anyio.to_thread.run_sync(
+            threads._INITIALIZATION_SCHEDULER.submit, run.id, tid, domain)
+    return {"thread_id": tid, "run_id": run.id, "replayed": replay,
+            "live_text": live_text}
 
 
 @router.post("/threads/{tid}/messages")
@@ -873,51 +1140,156 @@ async def send_message(tid: str, request: Request) -> dict[str, Any]:
     body = await _validated_body(request, _SendMessage)
     assert isinstance(body, _SendMessage)
     key = _request_key(request)
-    run, busy, replay = await anyio.to_thread.run_sync(_submit_existing, tid, body.message, key)
+    try:
+        run, busy, replay, live_text = await anyio.to_thread.run_sync(
+            _reserve_existing, tid, body.message, key)
+    except RunStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail="run-store-unavailable") from error
     if not busy and not replay:
-        threads._RESUME_SCHEDULER.submit(run.id, tid, user_priority=True)
+        await anyio.to_thread.run_sync(
+            lambda: threads._RESUME_SCHEDULER.submit(run.id, tid, user_priority=True))
     return {"thread_id": tid, "run_id": run.id, "replayed": replay,
-            "status": run.status}
+            "status": run.status, "live_text": live_text}
 
 
 @router.get("/threads/{tid}/runs/{run_id}")
 async def get_run(tid: str, run_id: str) -> dict[str, Any]:
-    return await anyio.to_thread.run_sync(_run_status, tid, run_id)
+    try:
+        return await anyio.to_thread.run_sync(_logical_status, tid, run_id)
+    except RunStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail="run-store-unavailable") from error
 
 
 @router.delete("/threads/{tid}/runs/{run_id}")
-async def cancel_run(tid: str, run_id: str) -> dict[str, Any]:
-    return await anyio.to_thread.run_sync(_cancel_pending_run, tid, run_id)
+async def cancel_run(tid: str, run_id: str):
+    try:
+        code, value = await anyio.to_thread.run_sync(_cancel_logical_run, tid, run_id)
+    except RunStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail="run-store-unavailable") from error
+    if code != 200:
+        return JSONResponse(value, status_code=code)
+    return value
 
 
 @router.get("/threads/{tid}/runs/{run_id}/events")
 async def run_events(tid: str, run_id: str, request: Request) -> StreamingResponse:
-    """Offer bounded status/final events while durable state remains authoritative."""
-    await anyio.to_thread.run_sync(_run_status, tid, run_id)
+    """Offer process-local text and durable Run projection for one logical handle.
+
+    Reset, delta, and truncation are bounded provisional journal observations;
+    status and terminal are the durable logical Run projection.
+    """
+    try:
+        status, revision, observation_token = await anyio.to_thread.run_sync(
+            _logical_status_with_revision_and_token, tid, run_id)
+    except RunStoreUnavailable as error:
+        raise HTTPException(status_code=503,
+                            detail="run-store-unavailable") from error
     if not _SSE_SLOTS.acquire(blocking=False):
         raise HTTPException(status_code=429, detail="Too many phone event streams")
+    observing = await anyio.to_thread.run_sync(
+        _open_observation, tid, status["work_id"])
+    journal_state = await anyio.to_thread.run_sync(
+        lambda: RUN_STREAMS.snapshot_if_changed(tid, status["work_id"], None))
+    journal_revision, journal = journal_state if journal_state is not None else (None, None)
+    released = False
+
+    async def release_slot() -> None:
+        nonlocal released
+        if not released:
+            released = True
+            if observing:
+                await anyio.to_thread.run_sync(
+                    RUN_STREAMS.close_observer, tid, status["work_id"])
+            _SSE_SLOTS.release()
 
     async def events():
+        nonlocal journal, journal_revision, status
         try:
+            if not observing:
+                yield _sse("closed-set", {"reason": "thread-gone"})
+                return
             previous = None
+            attempt = None
+            seen_index = 0
+            truncated_attempt = None
+            known_revision = revision
+            known_observation_token = observation_token
+            known_thread_status = status["thread_status"]
+            reproject_terminal = bool(journal and journal["terminal"])
             for sequence in range(1, 1_801):
                 if await request.is_disconnected():
                     return
-                status = await anyio.to_thread.run_sync(_run_status, tid, run_id)
-                encoded = json.dumps(status, separators=(",", ":"))
+                needs_reprojection = reproject_terminal
+                try:
+                    invalidation = await anyio.to_thread.run_sync(
+                        _observation_invalidation, tid, status["work_id"])
+                except RunStoreUnavailable:
+                    yield _sse("error", {"detail": "run-store-unavailable"})
+                    return
+                if invalidation is None:
+                    yield _sse("closed-set", {"reason": "thread-gone"})
+                    return
+                current_revision, current_observation_token, current_thread_status = invalidation
+                if sequence != 1:
+                    journal_state = await anyio.to_thread.run_sync(
+                        lambda: RUN_STREAMS.snapshot_if_changed(
+                            tid, status["work_id"], journal_revision))
+                    if journal_state is not None:
+                        journal_revision, journal = journal_state
+                        reproject_terminal = bool(journal["terminal"])
+                    needs_reprojection = (needs_reprojection
+                                           or current_revision != known_revision
+                                           or current_observation_token != known_observation_token
+                                           or current_thread_status != known_thread_status
+                                           or reproject_terminal)
+                elif (current_revision != known_revision
+                      or current_observation_token != known_observation_token
+                      or current_thread_status != known_thread_status):
+                    needs_reprojection = True
+                if needs_reprojection:
+                    try:
+                        projection = await anyio.to_thread.run_sync(
+                            _observation_status_with_revision_and_token,
+                            tid, run_id, status["work_id"])
+                    except RunStoreUnavailable:
+                        yield _sse("error", {"detail": "run-store-unavailable"})
+                        return
+                    if projection is None:
+                        yield _sse("closed-set", {"reason": "thread-gone"})
+                        return
+                    status, known_revision, known_observation_token = projection
+                    known_thread_status = status["thread_status"]
+                    reproject_terminal = False
+                if journal is not None and journal["attempt"] != attempt:
+                    attempt = journal["attempt"]
+                    seen_index = 0
+                    truncated_attempt = None
+                    yield _sse("assistant-reset", {"attempt": attempt,
+                                                   "reason": "replay" if sequence == 1 else "rollback"})
+                if journal is not None:
+                    for delta in journal["deltas"]:
+                        if delta["attempt"] == attempt and delta["index"] > seen_index:
+                            yield _sse("assistant-delta", delta)
+                            seen_index = delta["index"]
+                    if journal["truncated"] and truncated_attempt != attempt:
+                        yield _sse("assistant-truncated", {"attempt": attempt})
+                        truncated_attempt = attempt
+                encoded = json.dumps(status, ensure_ascii=True, separators=(",", ":"))
                 if encoded != previous:
-                    yield f"id: {sequence}\nevent: status\ndata: {encoded}\n\n"
+                    yield _sse("status", status)
                     previous = encoded
-                if status["status"] in TERMINAL_STATUSES:
-                    yield "event: terminal\ndata: {}\n\n"
+                if status["status"] in TERMINAL_STATUSES | AWAITING_APPROVAL_STATUSES:
+                    yield _sse("terminal", status)
                     return
                 await asyncio.sleep(1)
-            yield "event: error\ndata: {\"detail\":\"event stream timed out\"}\n\n"
+            yield _sse("error", {"detail": "event stream timed out"})
         finally:
-            _SSE_SLOTS.release()
+            await release_slot()
 
-    return StreamingResponse(events(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+    return _BoundedSSEStreamingResponse(
+        events(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        on_close=release_slot)
 
 
 @router.get("/threads/{tid}/diff")

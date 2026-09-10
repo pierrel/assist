@@ -1,0 +1,336 @@
+#+TITLE: Incremental text for phone-observed Runs
+#+DATE: <2026-09-08>
+#+STATUS: Phase 3 implementation, local review converged
+
+* Objective
+
+Let the authenticated native phone client observe real incremental top-level
+assistant text from a canonical Assist turn.  The text is a provisional view of
+one logical unit of work.  Durable Run records, checkpoints, and the bounded
+thread snapshot remain authoritative.
+
+Before this implementation, the endpoint polled physical Run status and emitted
+only changed =status= objects followed by =terminal=.  The implemented endpoint
+below adds bounded provisional text without changing durable Run truth.
+
+* Contract
+
+1. =POST /api/v1/phone/threads/{thread}/messages= and first-message thread
+   creation keep their current idempotent acceptance contract.  The returned
+   =run_id= is the stable observation handle for its logical =work_id=.
+2. Journal setup is race-free without changing what acceptance means.  The
+   phone-only, off-loop admission wrapper generates a candidate =run_id= and
+   =work_id=, then best-effort reserves and activates a bounded journal under
+   that identity before calling the existing admission path.  The wrapper passes
+   both ids through =_create_run= to the already supported
+   =RunService.create(run_id=, work_id=)= interface
+   (=assist/run_service.py:173-228=).  The active journal is lookup-visible before
+   the persisted pending Run can become visible to the busy/interjection worker,
+   so every worker that can see the Run can publish to it.  The external logical
+   resolver still requires the durable Run and cannot expose a candidate journal.
+   Discard clears any early deltas and turns a held publisher
+   into a no-op without delaying canonical Run execution.
+   On admission failure, partial create failure, or idempotent replay it
+   discards the unused candidate reservation; a replay reports availability of
+   the already accepted work's existing journal.  If reservation capacity was
+   unavailable, Run creation still proceeds, the response says
+   =live_text=false=, and dispatch follows the existing acceptance path exactly.
+   The Pi harness deliberately takes that same truthful status-only path: it
+   never reserves or advertises a journal that its worker does not publish.
+   For an existing thread, a newly accepted head is submitted only when the
+   thread is not busy.  A busy follower, including one accepted while initial
+   repository cloning is in progress, remains durably pending and unscheduled
+   until the existing terminal/cancellation
+   =threads._dispatch_pending_after= path reaches it.  First-message work uses
+   the existing initialization scheduler.  Replay submits nothing.  A busy
+   follower and an initializing first-message observation emit status-only
+   events until each eventual worker starts, while =live_text=true= truthfully
+   advertises that the active journal will publish there.  The durable
+   pending Run remains the sole acceptance commit, and journal
+   saturation/failure can neither reject nor orphan it nor suppress the
+   scheduling that its existing path requires.  Only the phone wrappers
+   generate/pass explicit ids; generic browser, SMS, scheduled, and child
+   admission has no journal dependency.
+3. =GET .../runs/{run_id}/events= remains authenticated SSE and adds:
+   - =assistant-reset= with an integer =attempt= and reason;
+   - =assistant-delta= with exactly ={attempt,index,text}=, where =index= starts
+     at 1 and increases monotonically within that attempt;
+   - nonterminal =assistant-truncated= with the same =attempt=;
+   - the existing bounded =status=, =terminal=, and =error= events.
+   The first attempt is 1 and each rollback increments it.  Retained and live
+   deltas have the identical schema and index.  The client
+   resets its seen index on =assistant-reset= and accepts only the next index.
+   SSE =id= is transport decoration only; ordering and replay never rely on it,
+   and =Last-Event-ID= is not a recovery protocol.
+4. A journal retains only the current visible attempt: attempt number, current
+   attempt deltas, and one truncation bit.  When rollback starts another model
+   attempt, it increments the attempt, discards all prior-attempt deltas and
+   truncation state, and publishes =assistant-reset(reason="rollback")= before
+   any new delta.  Every connection first emits a synthetic
+   =assistant-reset(reason="replay")= for the retained attempt, then its retained
+   deltas with their original indexes, then at most one retained
+   =assistant-truncated=.  Each SSE observation owns a separate
+   =truncated_attempt_delivered= cursor.  The synthetic replay reset and every
+   live rollback reset clear it; after the reset sequence, the observer emits
+   =assistant-truncated= only when the journal's truncation bit is set and that
+   attempt has not been delivered, then records that attempt.  Deltas use the
+   attempt/index cursor, but truncation deliberately has no invented delta
+   index.  Thus each observation sees it at most once per attempt.
+   A reconnect intentionally repeats the synthetic reset before replay,
+   replacing rather than duplicating visible text.  The client deletes only
+   that work item's provisional assistant body; it keeps the accepted user
+   message and draft.
+5. Only top-level model prose is published.  The observed stream explicitly
+   calls LangGraph with =subgraphs=False=, which excludes child graph events at
+   the framework boundary; a nonempty checkpoint namespace is valid metadata on
+   an ordinary top-level model chunk and is not a child-output filter.  Tool
+   results, reasoning content, prompts, and exceptions never become deltas.
+   Tool calls and graph updates may produce short bounded status text using the
+   already proven projection in EmacsOS's =server/emacsos_server/stream.py:43-167=.
+6. One phone-only logical-work resolver in =phone_api.py= serves GET, DELETE,
+   and SSE.  It resolves the accepted handle, reads Runs with the same
+   =work_id= in durable creation order, and selects the newest physical slice.
+   Its public projection is exactly
+   ={"id": accepted_handle_id, "thread_id": tid, "work_id": work_id,
+   "physical_run_id": selected_run_id, "status": projected_status,
+   "error": sanitized_error_or_null, "updated_at": selected_updated_at,
+   "thread_status": current_thread_status}=.  =id= is the immutable originally
+   accepted handle even when =physical_run_id= advances.  =status= is one of
+   =pending=, =running=, =transitioning=, =success=, =error=, =timeout=,
+   =interrupted=, =cancelled=, or =awaiting_approval=; =error= exposes only the
+   existing sanitized public error for a terminal failure.
+   A pending/running successor supersedes its interrupted predecessor.  The
+   interrupted-to-successor gap reports nonterminal =transitioning=, never a
+   false terminal.  For journaled work, the journal remains active until the
+   executor observes a real terminal slice with no successor; a fair pause does
+   not finish it.  Without a journal, an interrupted head reports
+   =transitioning= only while the thread is busy/paused for that work and no
+   newer different-work Run owns the thread.  If the thread is nonbusy after a
+   crash/recovery decision and no same-work successor exists, =interrupted= is
+   terminal rather than an indefinite transition.  GET returns this projection;
+   SSE =status= and =terminal= carry the same projection.  =terminal= is emitted
+   only for a projected logical terminal, never for =transitioning=.
+
+   DELETE calls the same resolver and has three explicit outcomes.  Cancellation
+   is one logical-work transaction under =threads._RUN_ADMISSION_LOCK=.  It
+   resolves again under the lock, atomically cancels the newest =pending=
+   physical slice with =RunService.cancel_pending=, then transitions every
+   earlier =interrupted= slice with that exact =work_id= to =cancelled= through
+   the existing idempotent =RunService.cancel= transition.  It never changes a
+   running slice or a slice belonging to another work id.  The resolver must now
+   project this whole work =cancelled=.  If thread status is =paused= and no
+   genuinely resumable interrupted slice remains for any work, the transaction
+   clears the stale pause metadata with the normal truthful ready status; if an
+   unrelated resumable interrupted work remains, it preserves =paused= and lets
+   the existing guard retain ownership.  It then finishes this logical work's
+   journal and calls the unmodified
+   =threads._dispatch_pending_after(tid, cancelled_run.id)= before releasing the
+   lock or returning, so an eligible follower can schedule.  It does not bypass
+   the paused guard.  Only after those steps does it return HTTP 200 with
+   ={"outcome":"cancelled", "run":<projection>}=.
+
+   This whole-chain cancellation is required for fair pause: cancelling only
+   pending successor A' while predecessor A remains =interrupted= would leave
+   the thread =paused=, causing =_dispatch_pending_after= to return and strand
+   follower B.  Repeated DELETE sees the already-terminal projection, performs
+   no transitions or dispatch, and therefore cannot double-submit B.  A newest
+   =running= slice returns HTTP 409 with
+   ={"detail":"Run is already executing", "outcome":"running",
+   "run":<projection>}=; a successor/pause gap returns HTTP 409 with
+   ={"detail":"Run is transitioning", "outcome":"transitioning",
+   "run":<projection>}=.  Other already-terminal states use HTTP 409 with their
+   projected status as =outcome= and trigger client reconciliation.  Keeping
+   non-cancel outcomes non-2xx preserves the old client's conservative failure
+   behavior; the new client parses this bounded structured DELETE error body.
+   DELETE never cancels unrelated work and never calls dispatch for the running,
+   transitioning, or already-terminal outcomes.  All resolver and cancellation work remains
+   inside =anyio.to_thread.run_sync=; no =RunService= API change is needed.
+7. A normal terminal event contains no authoritative answer.  The client must
+   fetch =GET /threads/{id}= and replace the provisional region with the
+   canonical snapshot record and its stable message id.  If refresh fails, the
+   partial answer remains visibly =unverified= and retryable; it is never cached
+   as canonical history.
+8. Journals are deliberately ephemeral.  A disconnect does not cancel work.
+   A late observer replays the retained current attempt.  After server restart,
+   status-only reservation failure, or terminal-journal eviction, SSE may have
+   status but no deltas; terminal snapshot reconciliation still works.
+   Re-observation never resubmits model work.
+9. Every SSE record goes through one encoder.  The event name comes from a
+   closed server constant set; the payload, including status/error/model text,
+   is serialized by =json.dumps(..., ensure_ascii=True, separators=(",", ":"))=
+   into exactly one =data: <json>= line.  Newline, carriage return, =event:=,
+   and =data:= substrings inside untrusted values are escaped JSON content and
+   cannot create another field or record.
+
+* Resource and liveness bounds
+
+- Keep the existing four authenticated SSE slots and 30-minute observation
+  limit.  Bound each journal to 256 KiB of UTF-8 text, 4,096 deltas, and at most
+  four retained logical phone works.  On text/delta exhaustion, set one
+  current-attempt truncation bit, publish =assistant-truncated= once per attempt
+  per observation using its =truncated_attempt_delivered= cursor,
+  and stop storing or emitting further deltas for that attempt.  This is not an
+  =error=: status and terminal observation stay alive, and the final canonical
+  snapshot replaces the partial text.
+- The server emits at most 7 KiB UTF-8 model text per delta, split on Python
+  string/code-point boundaries.  That conservative bound leaves room for
+  worst-case JSON escaping inside the 48 KiB encoded SSE-record cap; =_sse=
+  checks every final record.  EmacsOS separately accepts at most 16 KiB decoded
+  UTF-8 delta text and caps one whole SSE event at 64 KiB.  Every split piece
+  receives the next per-attempt index before journal insertion.
+- Reservation, activation/discard, publication, snapshotting, and eviction use
+  one short critical section.  Route-side reservation and the once-per-second journal/status poll
+  run through =anyio.to_thread.run_sync=; the worker publishes off-loop.  The
+  async route therefore never waits on the lock, performs file I/O, or drives
+  LangGraph.  An observation has a 30-minute absolute lifetime and each ASGI
+  send has a five-second deadline, so a slow reader releases its SSE slot.
+- Active work is never evicted.  When reservation needs space, evict the oldest
+  terminal journal first.  Terminal journals are retained only inside the fixed
+  four-entry total bound.  If all four entries are active, reservation returns
+  unavailable and a fifth Run, if durably admitted, proceeds status-only.  The
+  reservation is never an admission preflight or refusal.  There is no timer or
+  cleanup thread.
+
+* Numbered implementation plan
+
+1. In =assist/checkpoint_rollback.py:45-168=, add a streamed sibling to
+   =invoke_with_rollback=.  Share its existing bounded rollback walk and
+   =durability="sync"= rule; consume the explicitly top-level
+   (=subgraphs=False=) =agent.stream= in =messages/updates/values= modes,
+   deliver chunks to a callback, return the final =values= state, and call
+   =on_reset= before each replayed attempt.
+   Preserve =invoke_with_rollback='s default path unchanged.
+2. In =assist/thread.py:252-276,312-352=, add observed variants of new-message
+   and checkpoint-resume execution.  They hold =THREAD_QUEUE= for the full
+   iterator, use the rollback-preserving stream from step 1, and return the
+   same final assistant string as =message=/=resume=.  Do not replace the
+   embedder-facing =stream_message= API in this feature.
+3. In =assist/stream_chunks.py:1-40=, share only LangGraph chunk normalization
+   and the top-level text/tool/update projections genuinely consumed by both
+   runtime paths.  Keep transport event names, status wording, lifecycle, and
+   error mapping in each backend server.
+4. Add =manage/web/run_stream.py= as the small bounded journal described above.
+   Its interface is =reserve(thread_id, work_id) -> bool=,
+   =activate=/=discard=, =publish_delta=, =reset_attempt=, =read=, and =finish=.
+   An active candidate entry is discoverable to worker publication before durable
+   admission; the external Run resolver still requires the durable Run.  Discard
+   clears it and makes subsequent publication a
+   no-op.  Reservation evicts only terminal entries and never throws a capacity
+   error.  Reserved entries count inside the four active-entry bound and are
+   never evicted.  Split/index accounting and current-attempt retention live
+   here.  The worker-side publisher owns UTF-8 splitting before it calls the
+   journal; the journal owns index allocation and current-attempt retention.
+   The module owns no durable Run state and knows nothing about HTTP or
+   Emacs.
+5. In =manage/web/threads.py:2030-2049,3160-3191,3369-3396=, thread optional
+   caller-supplied =run_id=/=work_id= through =_create_run= and the two generic
+   admission helpers without importing the journal or changing defaults.  This
+   is the only generic admission seam required by the phone-only reservation.
+6. In =manage/web/phone_api.py:646-740,863-922=, wrap both existing-thread and
+   first-message admission with reserve-and-activate/create-or-discard and return
+   =live_text= explicitly.  Preserve current dispatch ordering: existing-thread
+   heads submit only when =!busy=, busy followers stay unscheduled for
+   =_dispatch_pending_after=, and first-message heads use the initialization
+   scheduler.  A replay
+   discards its candidate reservation and reports the accepted work's journal.
+   Add the exact shared logical-work projection for GET/DELETE/SSE, the three
+   structured DELETE outcomes, and the locked logical cancellation transaction:
+   pending successor cancel, same-work interrupted-predecessor cancel, terminal
+   projection, truthful paused-status repair, journal finish, then the existing
+   =_dispatch_pending_after= handoff.  Add one safe SSE encoder enforcing the 16
+   KiB delta and 48 KiB encoded-record bounds.
+   Preserve bearer authentication, no-store headers, validation, and
+   idempotency.
+7. In =manage/web/threads.py:2309-2375,2506-2571,2574-2635,2800-2852,
+   2918-2951=, select observed
+   =Thread= execution only when a journal exists for =_run.work_id=.  Publish
+   reset/deltas from the worker thread; the SSE route polls durable status.
+   Successors automatically attach through their inherited work id.  Finish the journal only after
+   =_execute_run= observes a terminal physical slice with no successor; fair
+   pause and recovery gaps remain active.  Keep all existing terminal
+   bookkeeping, sandbox cleanup, synchronization, and observer notifications.
+8. Extend =tests/test_checkpoint_rollback.py= for streamed success, bounded
+   rollback, reset-before-retry, and =durability="sync"= on every attempt;
+   =tests/test_phone_api.py= for auth, pre-visible reservation, activation and
+   discard on new/replay/failure, deterministic indexed current-attempt replay,
+   nonterminal truncation, correct head dispatch with =live_text=false= under
+   four-active-journal saturation, idempotent replay of
+   that accepted work without a new rejection, UTF-8-safe oversized-chunk
+   splitting, the 48 KiB record ceiling, newline/carriage-return/event/data
+   forgery payloads, late/disconnected observers, terminal-only eviction,
+   journaled and status-only pause gaps, crash/nonbusy interrupted termination,
+   exact immutable-handle/selected-slice projections, and newest-slice
+   cancellation.  Add an initialization/clone fixture that accepts head A onto
+   the initialization scheduler, accepts follower B while the thread is busy,
+   proves B is durably pending but not directly submitted, then proves A's
+   terminal/cancellation handoff dispatches B even when either journal was
+   unavailable.  The cancellation fixture schedules pending A without worker
+   claim, accepts B behind it, cancels A, and proves B is dispatched.  The
+   fair-pause regression constructs A =interrupted= -> A' =pending= -> unrelated
+   follower B =pending=, DELETEs logical A, and asserts A and A' are both
+   =cancelled=, stale pause state is cleared, A's journal finishes, and only then
+   B is dispatched.  A variant with a genuinely resumable interrupted different
+   work proves its paused guard is preserved and B is not forced past it; companion
+   cases prove a running/transitioning A, duplicate DELETE, and already-terminal
+   A neither double-dispatch nor cancel the wrong slice.  Assert the locked
+   pending-cancel -> same-work interrupted-chain cancel -> logical terminal
+   projection -> truthful status repair -> journal finish -> dispatch-next ->
+   response ordering and once-per-observation truncation delivery across
+   replay/reset; and
+   =tests/test_web_process_message_e2e.py= for real chunk publication through a
+   fair pause, including candidate activation before durable Run visibility and
+   discard cleanup after admission failure or replay, without
+   blocking the event loop.  Run the full mocked suite with
+   =PYTHONASYNCIODEBUG=1=.  No behavioral LLM eval is required because prompts,
+   tools, and agent decisions do not change.
+
+* Tradeoffs and risks
+
+- Pre-reserving the phone journal consumes one of four slots briefly before
+  durable acceptance.  That is the price of closing the pending-Run visibility
+  race.  Failure still degrades to status-only, and the generic admission path
+  receives only explicit ids rather than journal knowledge.
+- A process-local journal cannot restore partial text after a server restart.
+  Persisting tokens would confuse provisional presentation with canonical
+  conversation history.  Snapshot reconciliation is the simpler truthful
+  fallback.
+- Streaming the graph instead of invoking it can expose subtle framework
+  differences.  Keeping the path opt-in for journaled phone Runs limits blast
+  radius; rollback, sync durability, final response extraction, and fair pause
+  must be pinned before use.
+- Fair scheduling changes physical Run identity mid-work.  Treating the
+  accepted id as a logical observation handle is required to avoid a false
+  terminal event and cancelling the wrong slice.  The status-only resolver's
+  busy/paused transition inference must be pinned against crash recovery and a
+  later different-work Run so it cannot remain transitioning forever.
+- The journal accepts untrusted model text.  Fixed counts/bytes, nonterminal
+  truncation, bearer auth, and omission of tool/reasoning payloads bound
+  disclosure and memory use.
+
+* Explicit non-goals
+
+- No persistence of deltas, resumable durable cursor, WebSocket, or browser UI
+  streaming change.
+- No token-level cancellation of a running model call and no change to Run or
+  checkpoint ownership.
+- No streaming of sub-agent reasoning, tool arguments/results, approvals, or
+  child Runs.
+- No new model prompt, tool, middleware, or behavioral eval.
+
+* Deployment implication
+
+Assist must implement, test, review, and deploy this API before the EmacsOS
+canonical client enables delta handling.  The old status-only endpoint remains
+compatible during that ordering; EmacsOS must feature-detect deltas and still
+finish through a snapshot refresh.
+
+* Lineage
+
+- [[file:2026-09-04-phone-api.org][2026-09-04-phone-api.org]] established the authenticated bounded phone
+  resources and described events as status-only.  This record adds provisional
+  text without changing snapshots as authority.
+- [[file:2026-07-08-fair-scheduling.org][2026-07-08-fair-scheduling.org]] established successor Runs sharing
+  =work_id=.  This record makes that logical identity the observation boundary.
+- [[file:2026-05-30-message-path-durability-sync.org][2026-05-30-message-path-durability-sync.org]] established sync durability and
+  rollback on canonical blocking turns.  This record requires identical
+  semantics for the optional observed-stream path.

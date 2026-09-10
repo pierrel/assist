@@ -11,7 +11,9 @@ test_web_process_message_e2e.py); the pause is raised where the middleware would
 it (out of the agent run), and the real ``THREAD_QUEUE`` is used un-mocked.
 """
 import contextlib
+import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -72,6 +74,8 @@ def wired(tmp_path, monkeypatch):
     with contextlib.suppress(Exception):
         while True:
             threads._RESUME_SCHEDULER._q.get_nowait()
+    with threads._RESUME_SCHEDULER._q._cond:
+        threads._RESUME_SCHEDULER._q._reserved.clear()
     return tid, calls
 
 
@@ -99,6 +103,52 @@ def test_pause_carries_pending_and_submits_resume(wired):
 
     # Lossless + no re-run: the paused message() ran once, then resume() ran once —
     # the turn was NOT restarted with the original message.
+    assert calls == [("message", "hello"), ("resume",)]
+
+
+def test_pause_publishes_paused_before_an_inline_successor_or_follower(wired, monkeypatch):
+    """An eager scheduler cannot let the old pausing slice overwrite its child.
+
+    The deterministic scheduler below is deliberately more adversarial than the
+    production worker: it executes the same-work successor inline after commit
+    and records the status it can observe.  A follower remains pending until
+    that logical work finishes.
+    """
+    tid, calls = wired
+    head = threads._create_run(tid, "hello")
+    follower = threads._create_run(tid, "follow-up")
+    submitted, status_at_submit, admission_released, successor_at_commit = [], [], [], []
+    commit = threads._RESUME_SCHEDULER.commit
+
+    def execute_inline(ticket):
+        unlocked = threads._RUN_ADMISSION_LOCK.acquire(blocking=False)
+        admission_released.append(unlocked)
+        if unlocked:
+            threads._RUN_ADMISSION_LOCK.release()
+        status_at_submit.append(_get_status(tid)["stage"])
+        successor_at_commit.append(next(
+            run.id for run in threads._runs().list(tid)
+            if run.work_id == head.work_id and run.id != head.id))
+        commit(ticket)
+        item = threads._RESUME_SCHEDULER._q.get_nowait()
+        submitted.append(item["run_id"])
+        run = threads._runs().get(tid, item["run_id"])
+        if run.work_id == head.work_id:
+            threads._execute_run(item["run_id"], tid)
+
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "commit", execute_inline)
+
+    threads._execute_run(head.id, tid)
+
+    successor = next(run for run in threads._runs().list(tid)
+                     if run.work_id == head.work_id and run.id != head.id)
+    assert status_at_submit[0] == "paused"
+    assert admission_released[0] is True
+    assert successor_at_commit == [successor.id]
+    assert successor.status == "success"
+    assert threads._runs().get(tid, follower.id).status == "pending"
+    assert submitted == [successor.id]
+    assert threads._RESUME_SCHEDULER._q.get_nowait()["run_id"] == follower.id
     assert calls == [("message", "hello"), ("resume",)]
 
 
@@ -151,6 +201,98 @@ def test_resume_scheduler_user_priority_and_stable_promotion():
 
     assert [q.get_nowait()["run_id"] for _ in range(4)] == [
         "user-1", "parent-resume", "bg-1", "bg-2"]
+
+
+def test_resume_scheduler_reservation_is_invisible_until_committed_once():
+    q = threads._PriorityRunQueue()
+    ticket = q.reserve({"run_id": "resume", "tid": "thread"})
+
+    assert q.empty()
+    with pytest.raises(threads.queue.Empty):
+        q.get_nowait()
+
+    q.commit(ticket)
+    q.commit(ticket)
+
+    assert q.get_nowait()["run_id"] == "resume"
+    with pytest.raises(threads.queue.Empty):
+        q.get_nowait()
+
+
+def test_resume_scheduler_promotes_reservations_on_both_sides_of_commit():
+    q = threads._PriorityRunQueue()
+    q.put({"run_id": "user-first", "tid": "user", "user_priority": True})
+    q.put({"run_id": "background", "tid": "other"})
+    before = q.reserve({"run_id": "before", "tid": "parent"})
+    q.promote("parent")
+    q.commit(before)
+    after = q.reserve({"run_id": "after", "tid": "later"})
+    q.commit(after)
+    q.promote("later")
+
+    assert [q.get_nowait()["run_id"] for _ in range(4)] == [
+        "user-first", "before", "after", "background"]
+
+
+def test_pause_reservation_keeps_a_concurrent_user_promotion(wired, monkeypatch):
+    """A user admitted between reserve and commit still promotes the paused resume."""
+    tid, calls = wired
+    head = threads._create_run(tid, "hello")
+    entered = threading.Event()
+    release = threading.Event()
+    commit = threads._RESUME_SCHEDULER.commit
+
+    def block_commit(ticket):
+        entered.set()
+        assert release.wait(timeout=2)
+        commit(ticket)
+
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "commit", block_commit)
+    worker = threading.Thread(target=threads._execute_run, args=(head.id, tid))
+    worker.start()
+    assert entered.wait(timeout=2)
+
+    follower, busy = threads._accept_message_run(tid, "follow-up")
+    assert busy is True
+    release.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+
+    successor = next(run for run in threads._runs().list(tid)
+                     if run.work_id == head.work_id and run.id != head.id)
+    queued = threads._RESUME_SCHEDULER._q.get_nowait()
+    assert queued["run_id"] == successor.id
+    assert queued["user_priority"] is True
+    assert threads._runs().get(tid, follower.id).status == "pending"
+    assert calls == [("message", "hello")]
+
+
+def test_committed_reservation_skips_a_cancelled_run(wired):
+    tid, calls = wired
+    run = threads._create_run(tid, "cancel me")
+    ticket = threads._RESUME_SCHEDULER.reserve(run.id, tid)
+    threads._runs().transition(tid, run.id, "cancelled")
+
+    threads._RESUME_SCHEDULER.commit(ticket)
+    queued = threads._RESUME_SCHEDULER._q.get_nowait()
+    threads._execute_run(queued["run_id"], queued["tid"])
+
+    assert threads._runs().get(tid, run.id).status == "cancelled"
+    assert calls == []
+
+
+def test_committed_reservation_never_recreates_a_deleted_thread(wired):
+    tid, calls = wired
+    run = threads._create_run(tid, "delete me")
+    ticket = threads._RESUME_SCHEDULER.reserve(run.id, tid)
+    web.MANAGER.hard_delete(tid)
+
+    threads._RESUME_SCHEDULER.commit(ticket)
+    queued = threads._RESUME_SCHEDULER._q.get_nowait()
+    threads._execute_run(queued["run_id"], queued["tid"])
+
+    assert not (Path(web.MANAGER.root_dir) / tid).exists()
+    assert calls == []
 
 
 def test_busy_user_submission_promotes_both_wait_points(wired, monkeypatch):

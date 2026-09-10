@@ -1,0 +1,17 @@
+#+TITLE: Phone repository-label lineage amendment
+#+DATE: <2026-09-09>
+
+* Correction
+
+The repository-label authority amendment named the September 8 Run-streaming
+record in its lineage.  Repository-label authority directly changes the phone
+catalog contract in the September 4 phone API design; it does not amend the
+separate Run-observation record.  The durable =DomainManager.repo= authority
+and initializing-status fallback remain unchanged.
+
+* Lineage
+
+This amends [[file:2026-09-09-phone-repository-label-authority.org][the phone
+repository-label authority amendment]].  That record remains historical.  This
+lineage correction keeps the durable catalog-label decision attached directly
+to its phone API contract.

@@ -1,0 +1,25 @@
+#+TITLE: Phone Run initializer cancellation amendment
+#+DATE: <2026-09-09>
+
+* Correction
+
+An accepted Run can now be cancelled while its existing initializer still owns
+thread creation or clone setup.  The cancellation receipt is written atomically
+under normal admission and the phone returns from that post-write snapshot, but
+it neither marks the thread ready nor dispatches work.  The already-bounded
+initializer remains responsible for finishing setup.
+
+After no-domain or clone setup finishes, the initializer rereads the exact head
+under admission.  If that head is the cancelled accepted Run with its receipt,
+it performs no agent execution, marks the status ready only then, and dispatches
+followers once.  It repeats that check after an execution boundary so a
+cancellation cannot race into a newly started run.  Recovery requeues that same
+cancelled initializing or cloning head through the existing initializer; it
+never creates a replacement Run or deletes a workspace.
+
+* Lineage
+
+This amends [[file:2026-09-09-phone-run-cancellation-receipt-amendment.org][the
+phone Run cancellation receipt amendment]].  That record remains historical.
+This correction defines the receipt's initializer ownership and recovery
+ordering without changing ordinary terminal-cancellation replay.
