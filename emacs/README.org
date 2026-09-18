@@ -41,8 +41,9 @@ The assist.el package provides:
 - `assist-enable` / `assist-disable` - Toggle minor mode
 
 ** Key Bindings  
-- `C-c C-a s` - Submit current conversation
-- `C-c C-a q` - Quick query
+- `C-c a s` - Submit current conversation
+- `C-c a q` - Quick query
+- `C-<return>` - Submit from an Assist conversation buffer
 
 ** Customization
 - `assist-server-url` - URL of the Assist server (default: "http://localhost:8000")

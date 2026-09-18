@@ -257,6 +257,22 @@
             (should assist-minor-mode)))
       (kill-buffer buffer))))
 
+(ert-deftest assist-test-command-bindings-use-the-assist-prefix-and-direct-send ()
+  (with-temp-buffer
+    (org-mode)
+    (assist-minor-mode 1)
+    (should (eq (key-binding (kbd "C-c a s")) #'assist-submit))
+    (should (eq (key-binding (kbd "C-c a q")) #'assist-query))
+    (should (eq (key-binding (kbd "C-<return>")) #'assist-submit))
+    (dolist (key '("C-c C-a s" "C-c C-a q"))
+      (should-not (memq (key-binding (kbd key))
+                        '(assist-submit assist-query))))
+    (let (sent)
+      (cl-letf (((symbol-function 'assist-submit)
+                 (lambda () (interactive) (setq sent (current-buffer)))))
+        (call-interactively (key-binding (kbd "C-<return>"))))
+      (should (eq sent (current-buffer))))))
+
 (ert-deftest assist-test-with-project ()
   (with-project "assist-proj"
 		'("one.txt")

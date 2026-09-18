@@ -1,0 +1,18 @@
+#+title: Assist Emacs keybindings
+
+* Outcome
+
+The standalone Assist Emacs client owns the =C-c a= prefix: =C-c a s= submits
+the current conversation and =C-c a q= starts a one-off query.  =C-<return>=
+submits from every Assist conversation buffer.  Ordinary =RET= remains owned by
+the major mode.
+
+* Scope
+
+This changes only the standalone client keymap.  Canonical Assist-thread list
+and completion commands remain EmacsOS integration commands because the
+standalone client has no canonical catalog.
+
+* Historical supersession
+
+This note supersedes no earlier dated Assist design.
