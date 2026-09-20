@@ -28,6 +28,130 @@ possible, we should enable it. Plan when we pick this up:
 - When it lands, drop =ImageInputGuardMiddleware= (or repoint it to dispatch to the vision
   subagent rather than strip).
 * Architecture
+** TODO Evaluate decision models alongside the main LLM (Jev / open-weight alternatives)
+Research and hardware snapshot: 2026-09-20. This is proposed work, not a
+deployment commitment or evidence of improved Assist behavior. Keep the main
+Qwen model for generation and extended reasoning; evaluate a small decision
+model for bounded judgments that code consumes. No model was downloaded or
+loaded during this investigation, and no service/configuration was changed.
+
+*** Model contract and candidate use cases
+TypeSafe's Jev takes bounded state and typed questions, returning a Choice among
+explicit options, a rubric Score, or a Noul value (0-1) about a proposition.
+Choice/Score include distributions and a derived confidence statistic. Questions
+can be evaluated independently against the same state. Structured output avoids
+free-form parsing, but does not guarantee correct decisions or calibrated
+confidence on Assist's data. No official public Jev weight release was found in
+the sources below at the snapshot date; its documented route is a hosted API.
+
+Candidate applications, in recommended initial order:
+- Thread relevance: rank a bounded shortlist of thread descriptions for a request,
+  including an explicit "none of these" outcome.
+- Context selection: rank retrieved memories/documents before main-model use.
+- Incoming-message triage: suggest actionable/informational/urgent labels without
+  dropping messages, suppressing delivery, or sending replies automatically.
+- Skill selection: suggest a relevant subset without granting tool privileges or
+  replacing the existing progressive-disclosure contract.
+- Research filtering: assess relevance and apparent claim support. A judgment is
+  not proof that a source is true or that research is complete.
+
+Do not initially use this as a task-completion, permission, or security gate.
+Keep authorization, human approval, delivery and trusted-state boundaries in
+deterministic code. In particular, =assist/middleware/interjection.py= remains
+a delivery channel: classification must not prevent user messages reaching the
+running model. Existing seams to inspect when implementing include
+=assist/spec.py=, =assist/agent.py=, and inbound triage in =manage/web/threads.py=;
+this roadmap does not require changes to all of them or a new middleware layer.
+
+*** Open-weight candidates and limitations
+- *Kev*: Qwen-based adapters plus a decision head, with a local server exposing
+  TypeSafe's =/v1/systemone= contract. Investigate the current 0.6B, 4B and 8B
+  family; the older 0.5B checkpoint is superseded. Adapter/head and cited Qwen3
+  bases are Apache-2.0; confirm exact artifact licenses/revisions before use.
+  The smallest model has substantial out-of-domain and confident-error limits.
+  API compatibility is not quality or confidence-semantics equivalence. The
+  repository documents BF16 loading and FP32 small-model serving; verify CUDA
+  serving and peak memory on the actual GPU, not from laptop timing claims.
+- *Bespoke Nimble 9B*: Apache-2.0 adapter for Qwen3.5-9B, with training material
+  and reference inference. Scores allowed answers without free-form generation.
+  The published reference path limits prompts to 2,048 tokens and enum fields
+  to 26 choices; CUDA scoring repeats the prompt per field, unlike its parallel
+  MLX path. It is not interchangeable with Jev without capability adaptation.
+  The documented NVIDIA path uses BF16. Small adapter downloads still require
+  loading the full base model; adapter size is not total serving memory.
+
+*** GPU feasibility: measured snapshot, not a capacity guarantee
+The observed GPU was an RTX 3090 with 24,576 MiB total memory, 19,130 MiB used
+and 4,995 MiB free. The sole reported compute process was llama-server, using
+19,120 MiB, running =Qwen3.8-27B-UD-Q4_K_XL= with a 131,072-token context,
+=q4_0= K/V cache, all GPU layers, and one parallel slot. Other roadmap hardware
+notes may describe different snapshots; remeasure all services before admission,
+including any voice/vision workload. Free memory is not a reserved budget and
+this snapshot does not establish peak usage under load.
+
+Approximate weights-only budgets (parameter count times two bytes, in GiB):
+| Candidate  | 16-bit weights | Beside the observed Qwen allocation             |
+|------------+----------------+-------------------------------------------------|
+| Kev 0.6B   |            1.1 | Likely with bounded inputs; must test peak usage |
+| Kev 4B     |            7.5 | No at standard precision                        |
+| Kev 8B     |           14.9 | No at standard precision                        |
+| Nimble 9B  |           16.8 | No at standard precision                        |
+
+These are estimates, excluding decision heads/adapters, activations, attention
+buffers, allocator/CUDA overhead and loading peaks. FP32 roughly doubles the
+weights portion. A 4-bit Kev 4B has a theoretical weights floor near 1.9 GiB,
+but a working quantized custom-head serving path and its quality/calibration
+have not been verified. At 8B/9B even 4-bit weights leave insufficient comfortable
+headroom in this configuration once overhead is considered.
+
+Recommendation: first test resident Kev 0.6B with short inputs and one decision
+request at a time, without changing Qwen's allocation. Both models may remain
+loaded while inference is sequenced; co-residency still shares compute and memory
+bandwidth. Avoid per-request unload/reload, which undermines the latency benefit.
+Benchmark 4B separately only if the accuracy gap warrants it. If needed, assess
+quantization, a CPU-hosted small model, a separate GPU, or an explicitly authorized
+hosted service before reducing Qwen availability/context. None is assumed proven.
+
+*** Small, replaceable integration and first experiment
+Use one narrow provider adapter: bounded context plus explicit candidate choices
+in; validated typed result/distribution and model/schema version out. Keep policy
+and thresholds outside the adapter. Initially use a separate local service rather
+than assume these custom inference paths work through the existing llama.cpp
+chat endpoint. Future open-weight models should replace this adapter, not require
+a new agent architecture. Do not build a general decision platform in advance.
+
+1. Start with *observation-only thread-relevance ranking*: record predictions
+   without changing routing, then compare against actual user selections. Those
+   selections are useful labels, not unquestionable ground truth; preserve
+   ambiguous/no-match cases and corrections for review.
+2. Compare the current approach, Kev 0.6B and (separately) a larger candidate;
+   optionally include hosted Jev with explicit authorization for outbound data.
+   Keep natural user requests, a held-out comparison set and pinned model/code
+   revisions. Include unfamiliar domains, option-order changes and none-of-above
+   cases, not just training-like examples.
+3. Measure top-choice/ranking accuracy, coverage when abstaining, confidently
+   wrong decisions, calibration on held-out outcomes, p50/p95 latency, loading
+   and peak VRAM, and main-Qwen latency impact under representative load. Select
+   thresholds on a separate calibration split, not the final test set. Raw
+   confidence numbers are not portable across providers.
+4. Bound request size, candidate count, concurrency and timeouts. On failure,
+   unsupported input or uncertainty, preserve current behavior. Keep user data
+   local by default; minimize/redact diagnostic captures and define retention.
+   Non-production GPU/model probes use the workspace's production-priority
+   admission wrapper. Do not unload Qwen or silently shrink its context for tests.
+5. Only propose behavior-changing integration after measured benefit and no
+   unacceptable regression. The reusable investment is a small adapter and a
+   real-usage evaluation set, not a commitment to one vendor or confidence scale.
+
+*** Sources (checked 2026-09-20)
+- [[https://docs.typesafe.ai/introduction][Jev primitives and intended question scope]]
+- [[https://docs.typesafe.ai/introduction/quickstart][Hosted API and Python SDK]]
+- [[https://docs.typesafe.ai/confidence][Confidence semantics and domain-specific thresholds]]
+- [[https://github.com/jaredpalmer/kev][Kev architecture, serving and model family]]
+- [[https://huggingface.co/jaredpalmer/kev-0.6b][Kev 0.6B weights, license and limitations]]
+- [[https://github.com/bespokelabsai/nimble][Nimble serving paths and memory considerations]]
+- [[https://huggingface.co/bespokelabs/Bespoke-Nimble-9B][Nimble weights and reference limits]]
+
 ** TODO Migrate from Deep Agents to Pi through a usable side-by-side path
 Use the design and stop gates in
 [[file:docs/2026-08-02-pi-deepagents-alternative.org][docs/2026-08-02-pi-deepagents-alternative.org]].  First prove exact prompt ownership and
