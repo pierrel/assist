@@ -379,13 +379,20 @@ CUR-POINT at submission time marks where streaming text will be inserted."
 
 ;;; Minor mode
 
+(defvar assist-command-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "s") #'assist-submit)
+    (define-key map (kbd "q") #'assist-query)
+    map)
+  "Assist command prefix map.")
+
 ;;;###autoload
 (define-minor-mode assist-minor-mode
   "Minor mode for Assist integration."
   :lighter assist-mode-line-format
   :keymap (let ((map (make-sparse-keymap)))
-            (define-key map (kbd "C-c C-a s") #'assist-submit)
-            (define-key map (kbd "C-c C-a q") #'assist-query)
+            (define-key map (kbd "C-c a") assist-command-map)
+            (define-key map (kbd "C-<return>") #'assist-submit)
             map))
 
 ;;;###autoload
