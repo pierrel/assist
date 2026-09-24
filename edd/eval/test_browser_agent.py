@@ -63,11 +63,12 @@ class _BrowserSite:
 
     def _page(self, snapshot, targets=(), downloads=(), snapshot_id="first",
               page_id="page-1", network_errors=()):
+        url = ("http://host.docker.internal:5050/" if self.scenario == "internal-status"
+               else f"https://{self.scenario}.fern.example/")
         return {"result": {"page_id": page_id, "snapshot_id": snapshot_id,
-                "url": f"https://{self.scenario}.fern.example/",
+                "url": url,
                 "snapshot": snapshot, "targets": list(targets),
-                "pages": [{"page_id": page_id,
-                           "url": f"https://{self.scenario}.fern.example/"}],
+                "pages": [{"page_id": page_id, "url": url}],
                 "downloads": list(downloads),
                 "network_errors": list(network_errors)}}
 
@@ -93,6 +94,8 @@ class _BrowserSite:
                 return self._page("Fern support hours: 9 a.m. to 5 p.m. Pacific, weekdays.")
             if self.scenario == "status":
                 return self._page("Service status: Green. No active incidents.")
+            if self.scenario == "internal-status":
+                return self._page("Local service status: Green. No active incidents.")
             if self.scenario == "reports":
                 return self._page("Fern reports. Choose a section.",
                                   [{"ref": "reports-button", "role": "button",
@@ -235,6 +238,15 @@ class TestBrowserAgent(TestCase):
         self.assertTrue(agent_tool_calls(agent, "browser_open"), agent.all_messages())
         self.assertIn("green", answer.lower())
         self.assertFalse(agent_tool_calls(agent, "task"), agent.all_messages())
+
+    def test_natural_exact_internal_host_status_question(self):
+        agent, site, answer = self._run(
+            "internal-status", "What is the status at "
+            "http://host.docker.internal:5050?")
+        self.assertTrue(agent_tool_calls(agent, "browser_open"), agent.all_messages())
+        self.assertIn("green", answer.lower())
+        self.assertTrue(any(operation == "open" and args.get("url", "").startswith(
+            "http://host.docker.internal:5050") for operation, args in site.calls))
 
     def test_opens_reports_menu_for_latest_title(self):
         agent, site, answer = self._run(

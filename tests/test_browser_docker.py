@@ -16,7 +16,9 @@ from uuid import uuid4
 import pytest
 
 from assist.browser import manager as browser
-from assist.egress.client_map import read_client
+from assist.browser import authority
+from assist.run_service import RunService
+from assist.egress.client_map import ClientRecord, read_client, record_client
 from assist.egress import runtime_state
 from assist.sandbox_manager import (SandboxManager, _egress_proxy_config_hash,
                                     _network_identity, _bounded_egress_worker)
@@ -304,15 +306,23 @@ def test_isolated_browser_reaches_only_attributed_proxy(tmp_path, monkeypatch):
         monkeypatch.setattr(browser, "_launch_sidecar_bounded", start_in_fixture)
         work_dir = tmp_path / "workspace"
         work_dir.mkdir()
+        (tmp_path / "test-thread").mkdir()
+        authority.mark_new_thread(str(tmp_path), "test-thread")
+        runs = RunService(str(tmp_path))
+        internal_run = runs.create(
+            "test-thread", "general-agent",
+            f"Please visit http://{origin_ip}:8000 and inspect it.",
+            user_origin=True)
         session = browser.BrowserSession(
-            "test-thread", "test-run", str(work_dir), str(tmp_path),
+            "test-thread", internal_run.id, str(work_dir), str(tmp_path),
             browser.BrowserUserRequest(
-                "user-event", "work", f"Please visit http://{origin_ip}:8000 and inspect it."),
-            work_id="work")
+                internal_run.id, internal_run.work_id, internal_run.text,
+                internal_run.admission_sequence),
+            work_id=internal_run.work_id)
         # The browser network's live Docker settings, not its name, are the gate.
         initial = session.command("open", url=f"http://{origin_ip}:8000/")
         assert "error" not in initial, initial
-        session.identity.container = client.containers.get(session.identity.generation)
+        sidecar = client.containers.get(session.identity.generation)
         observation = initial["result"]
         assert "Browser fixture" in observation["snapshot"]
         assert read_client(str(map_dir), session.identity.ip).generation == session.identity.generation
@@ -400,21 +410,23 @@ def test_isolated_browser_reaches_only_attributed_proxy(tmp_path, monkeypatch):
             target={"ref": large_link["ref"]})["result"]
         assert "20 MiB" in session.save_download(
             large["downloads"][-1]["download_id"])["error"]
-        session.identity.container.reload()
-        attrs = session.identity.container.attrs
+        sidecar.reload()
+        attrs = sidecar.attrs
         assert attrs["HostConfig"]["Memory"] == 1024 ** 3
         assert attrs["HostConfig"]["PidsLimit"] == 128
         assert attrs["HostConfig"]["NanoCpus"] == 1_000_000_000
         assert attrs["HostConfig"]["ReadonlyRootfs"] is True
+        assert attrs["HostConfig"]["AutoRemove"] is True
+        assert attrs["HostConfig"]["RestartPolicy"]["Name"] in {"", "no"}
         assert attrs["Mounts"] == []
         assert not any(item.startswith("ASSIST_") for item in attrs["Config"]["Env"])
         assert "size=134217728" in attrs["HostConfig"]["Tmpfs"]["/home/browser"]
         # An exec from the host can inspect routing; the product has no such tool.
-        direct = session.identity.container.exec_run([
+        direct = sidecar.exec_run([
             "python", "-c", "import socket; s=socket.socket(); s.settimeout(2); "
             f"s.connect(('{origin_ip}',8000))"])
         assert direct.exit_code != 0
-        direct_v6 = session.identity.container.exec_run([
+        direct_v6 = sidecar.exec_run([
             "python", "-c", "import socket; "
             "s=socket.socket(socket.AF_INET6,socket.SOCK_STREAM); "
             "s.settimeout(2); s.connect(('2001:4860:4860::8888',53))"])
@@ -422,22 +434,22 @@ def test_isolated_browser_reaches_only_attributed_proxy(tmp_path, monkeypatch):
         for family, destination in [
                 ("AF_INET", f"('{origin_ip}',8000)"),
                 ("AF_INET6", "('2001:4860:4860::8888',53)")]:
-            direct = session.identity.container.exec_run([
+            direct = sidecar.exec_run([
                 "python", "-c", "import socket; "
                 f"s=socket.socket(socket.{family},socket.SOCK_DGRAM); "
                 f"s.settimeout(2); s.connect({destination})"])
             assert direct.exit_code != 0
+        public_run = runs.create(
+            "test-thread", "general-agent", "Read a public page", user_origin=True)
         public_only = browser.BrowserSession(
-            "test-thread", "public-run", str(work_dir), str(tmp_path), None)
+            "test-thread", public_run.id, str(work_dir), str(tmp_path), None)
         with pytest.raises(browser.BrowserUnavailable, match="revoked internal browsing"):
             public_only.command("open", url=f"http://{origin_ip}:8000/")
         session.close()
         session = browser.BrowserSession(
-            "test-thread", "public-run", str(work_dir), str(tmp_path), None)
-        session.deadline = time.monotonic() + 240
-        session._start("public", None)
-        session.identity.container = client.containers.get(session.identity.generation)
+            "test-thread", public_run.id, str(work_dir), str(tmp_path), None)
         denied_http = session.command("open", url="http://unlisted.example:8000/")
+        sidecar = client.containers.get(session.identity.generation)
         assert "error" not in denied_http, denied_http
         denied_probe = session.command("probe", host="unlisted.example", port=8000)
         assert "result" in denied_probe, (denied_probe,
@@ -451,7 +463,7 @@ def test_isolated_browser_reaches_only_attributed_proxy(tmp_path, monkeypatch):
                 f"CONNECT {origin_ip}:8000 HTTP/1.1\r\n\r\n",
                 (f"GET http://{origin_ip}:8000/ws HTTP/1.1\r\n"
                  f"Host: {origin_ip}:8000\r\nUpgrade: websocket\r\n\r\n")]:
-            raw = session.identity.container.exec_run([
+            raw = sidecar.exec_run([
                 "python", "-c", "import socket,sys; "
                 "s=socket.create_connection(('assist-egress-proxy',8888),3); "
                 f"s.sendall({request!r}.encode()); "
@@ -501,6 +513,47 @@ def test_isolated_browser_reaches_only_attributed_proxy(tmp_path, monkeypatch):
             assert denied_after_action > denied_before_action, (
                 button_name, acted, proxy.logs()[-1000:])
             denied_before_action = denied_after_action
+        # A stopped but inspectable browser object cannot retain an internal
+        # grant at an address later recycled by another container.
+        old = client.containers.run(
+            "python:3.13-slim-bookworm", ["python", "-c", "import time;time.sleep(60)"],
+            detach=True, network=browser_name, remove=False,
+            labels={"assist.browser": "true"},
+            name=f"assist-browser-test-stopped-{suffix}")
+        created.append(old)
+        old.reload()
+        old_ip = old.attrs["NetworkSettings"]["Networks"][browser_name]["IPAddress"]
+        record_client(str(map_dir), old_ip, ClientRecord(
+            "test-thread", old.id, "browser", "internal", origin_ip))
+        old.stop(timeout=3)
+        old.reload()
+        assert old.status == "exited"
+        browser.BrowserManager.prune_absent_clients(str(map_dir))
+        assert read_client(str(map_dir), old_ip) is None
+        old.start()
+        restarted = old.exec_run([
+            "python", "-c", "import socket,sys; "
+            "s=socket.create_connection(('assist-egress-proxy',8888),3); "
+            f"s.sendall(b'CONNECT {origin_ip}:8000 HTTP/1.1\\r\\n\\r\\n'); "
+            "sys.stdout.buffer.write(s.recv(512))"])
+        assert b"browser_attribution_missing" in restarted.output
+        old.remove(force=True)
+        recycled_id = subprocess.run([
+            "docker", "run", "-d", "--name", f"assist-browser-test-recycled-{suffix}",
+            "--network", browser_name, "--ip", old_ip,
+            "python:3.13-slim-bookworm", "python", "-c",
+            "import time;time.sleep(60)"],
+            capture_output=True, text=True, check=True, timeout=10).stdout.strip()
+        recycled = client.containers.get(recycled_id)
+        created.append(recycled)
+        recycled.reload()
+        assert recycled.attrs["NetworkSettings"]["Networks"][browser_name]["IPAddress"] == old_ip
+        denied_reuse = recycled.exec_run([
+            "python", "-c", "import socket,sys; "
+            "s=socket.create_connection(('assist-egress-proxy',8888),3); "
+            f"s.sendall(b'CONNECT {origin_ip}:8000 HTTP/1.1\\r\\n\\r\\n'); "
+            "sys.stdout.buffer.write(s.recv(512))"])
+        assert b"browser_attribution_missing" in denied_reuse.output
         unregistered = client.containers.run(
             "python:3.13-slim-bookworm", ["python", "-c", "import time;time.sleep(60)"],
             detach=True, network=browser_name, remove=True,

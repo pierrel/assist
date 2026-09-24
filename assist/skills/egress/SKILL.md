@@ -1,6 +1,6 @@
 ---
 name: egress
-description: "Sandbox network access is restricted to an approved host allowlist — commands that reach a blocked host fail with a proxy 403. EXAMPLES — a curl/pip/git command failed with '403' and 'proxy' or 'tunnel' in the output; you need to fetch a page or API the sandbox can't reach; auditing or reducing which hosts this thread can access. MUST load when a network command is denied or before requesting new network access."
+description: "Ordinary sandbox commands use exact-host egress approvals; the isolated browser also enforces a separate public/internal policy. EXAMPLES — curl/pip/git gets a proxy 403; browser_probe reports host_not_approved; auditing or reducing this thread's grants. MUST load before requesting new network access."
 allowed-tools: request_egress list_allowed_hosts remove_allowed_host
 ---
 
@@ -8,18 +8,22 @@ allowed-tools: request_egress list_allowed_hosts remove_allowed_host
 
 ## The situation
 
-The sandbox's only route to the network is a proxy that enforces an exact
-allowlist of hosts. A command that touches any other host fails with an HTTP
-403 from the proxy ("CONNECT tunnel failed", "Tunnel connection failed",
-"Proxy tunneling failed"). This is a POLICY denial, not an outage — the
-internet is fine; that host just isn't approved.
+Ordinary sandbox commands reach the network through an exact-host proxy.
+A denied host commonly produces a proxy HTTP 403 ("CONNECT tunnel failed",
+"Tunnel connection failed", "Proxy tunneling failed"). The isolated browser
+uses that proxy too, but has an additional public/internal destination policy:
+an HTTP 403 alone does not mean a host is approvable. For browser failures,
+request a grant only when `browser_probe` reports `host_not_approved` for the
+exact observed host and port. `browser_internal_policy` cannot be fixed by
+requesting egress.
 
 ## When a command is denied
 
 1. Decide whether the host is genuinely required for the user's task. Many
    denials are incidental (telemetry, analytics, CDN extras) — if the work
    can proceed without the host, proceed without it and don't request it.
-2. If it IS required: call `request_egress(host, port, task)`.
+2. If it IS required and the denial is `host_not_approved` (or an ordinary
+   shell proxy denial): call `request_egress(host, port, task)`.
    - `host` is the exact DNS hostname (from the failed command's URL).
    - `task` must be a complete instruction for an ordinary agent's future
      follow-up. An async child instead parks here and that exact child resumes
@@ -35,8 +39,9 @@ internet is fine; that host just isn't approved.
 
 ## Managing this thread's access
 
-- `list_allowed_hosts()` — everything this thread can currently reach: the
-  operator's base allowlist plus this thread's own time-limited grants.
+- `list_allowed_hosts()` — the operator's base allowlist plus this thread's
+  approved grants. It does not override the isolated browser's internal-host
+  policy or promise that every destination is reachable.
 - `remove_allowed_host(host, port)` — drop one of this thread's grants once
   you're done with it. Good practice: when a granted host has served its
   purpose, remove it.

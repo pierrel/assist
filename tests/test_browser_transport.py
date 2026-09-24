@@ -8,6 +8,8 @@ import time
 import pytest
 
 from assist.browser import manager as browser
+from assist.browser import authority
+from assist.run_service import RunService
 
 
 def test_nonreading_child_with_small_pipe_cannot_block_stdin_write(monkeypatch):
@@ -74,7 +76,12 @@ def test_auto_removed_sidecar_inspect_is_confirmed_with_lowercase_docker_error(
 
 def test_uncertain_startup_cannot_accumulate_sidecars_in_one_run(
         monkeypatch, tmp_path):
-    session = browser.BrowserSession("thread", "run", str(tmp_path), str(tmp_path), None)
+    (tmp_path / "thread").mkdir()
+    authority.mark_new_thread(str(tmp_path), "thread")
+    run = RunService(str(tmp_path)).create(
+        "thread", "general-agent", "Read a public page", user_origin=True)
+    session = browser.BrowserSession(
+        "thread", run.id, str(tmp_path), str(tmp_path), None)
     monkeypatch.setattr(browser, "configured_directory", lambda: str(tmp_path))
     monkeypatch.setattr(browser, "_load_egress_allowlist", lambda: [])
     launches = []
@@ -92,12 +99,14 @@ def test_uncertain_startup_cannot_accumulate_sidecars_in_one_run(
 
 
 def test_failed_command_kills_sidecar_before_releasing_session(monkeypatch, tmp_path):
+    (tmp_path / "thread").mkdir()
+    authority.mark_new_thread(str(tmp_path), "thread")
     session = browser.BrowserSession("thread", "run", str(tmp_path), str(tmp_path), None)
     session.identity = browser._ContainerIdentity(
-        None, str(tmp_path), "172.20.0.9", "generation", "public", None)
+        str(tmp_path), "172.20.0.9", "generation", "public", None)
     killed = []
     monkeypatch.setattr(browser, "_docker_exec",
-                        lambda *_: (_ for _ in ()).throw(
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(
                             browser.BrowserUnavailable("browser transport timed out")))
     monkeypatch.setattr(browser, "_kill_container_confirmed", killed.append)
     with pytest.raises(browser.BrowserUnavailable, match="timed out"):
@@ -110,7 +119,7 @@ def test_failed_attribution_removal_still_kills_and_keeps_retry_identity(
         monkeypatch, tmp_path):
     session = browser.BrowserSession("thread", "run", str(tmp_path), str(tmp_path), None)
     session.identity = browser._ContainerIdentity(
-        None, str(tmp_path), "172.20.0.9", "generation", "public", None)
+        str(tmp_path), "172.20.0.9", "generation", "public", None)
     killed = []
     monkeypatch.setattr(browser, "forget_client",
                         lambda *_: (_ for _ in ()).throw(OSError("read-only map")))
@@ -119,3 +128,48 @@ def test_failed_attribution_removal_still_kills_and_keeps_retry_identity(
         session.close()
     assert killed == ["generation"]
     assert session.identity.generation == "generation"
+
+
+def test_first_open_deadline_is_one_persisted_work_deadline(tmp_path):
+    (tmp_path / "thread").mkdir()
+    runs = RunService(str(tmp_path))
+    first = runs.create("thread", "general-agent", "Open a page", user_origin=True)
+    before = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+    boot_id, deadline = runs.bind_browser_deadline("thread", first.id)
+    after = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+    assert before + 240_000_000_000 <= deadline <= after + 240_000_000_000
+    successor = runs.create("thread", "general-agent", None,
+                            work_id=first.work_id, resume=True,
+                            user_event_id=first.user_event_id)
+    assert runs.bind_browser_deadline("thread", successor.id) == (boot_id, deadline)
+    assert RunService(str(tmp_path)).bind_browser_deadline(
+        "thread", successor.id) == (boot_id, deadline)
+    assert runs.get("thread", successor.id).browser_deadline_ns == deadline
+
+
+def test_reboot_expires_persisted_browser_capability(tmp_path):
+    session = browser.BrowserSession("thread", "run", str(tmp_path), str(tmp_path), None)
+    session.boot_id = "another-host-boot"
+    session.deadline_ns = time.clock_gettime_ns(time.CLOCK_BOOTTIME) + 240_000_000_000
+    assert session._remaining() == 0
+
+
+def test_command_transport_is_clamped_and_late_result_is_rejected(
+        monkeypatch, tmp_path):
+    (tmp_path / "thread").mkdir()
+    authority.mark_new_thread(str(tmp_path), "thread")
+    session = browser.BrowserSession("thread", "run", str(tmp_path), str(tmp_path), None)
+    session.identity = browser._ContainerIdentity(
+        str(tmp_path), "172.20.0.9", "generation", "public", None)
+    session.deadline = 1
+    remaining = iter((1.0, 0.4, 0.0))
+    monkeypatch.setattr(session, "_remaining", lambda: next(remaining))
+    observed = []
+    monkeypatch.setattr(browser, "_docker_exec",
+                        lambda _gen, _cmd, *, timeout: (
+                            observed.append(timeout) or b'{"result": {}}'))
+    monkeypatch.setattr(browser, "_kill_container_confirmed", lambda gen: None)
+    with pytest.raises(browser.BrowserUnavailable, match="deadline expired"):
+        session.command("observe", page_id="p1")
+    assert observed == [0.4]
+    assert session.identity is None

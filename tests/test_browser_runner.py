@@ -20,6 +20,12 @@ class _Page:
     def on(self, *_args):
         pass
 
+    def goto(self, url, **_kwargs):
+        self.url = url
+
+    def close(self):
+        self.closed = True
+
 
 class _Link:
     def __init__(self, href, name="Manual", tag="a", kind=None):
@@ -55,6 +61,14 @@ def _observed(worker, element):
     worker.snapshots["page"] = "snapshot"
     worker.targets["page"] = {"observed": (
         element, *worker._target_state(element, _Page.url))}
+
+
+def test_sidecar_pid1_is_inert_until_registered_command(monkeypatch):
+    monkeypatch.setattr(runner, "sync_playwright", lambda: (_ for _ in ()).throw(
+        AssertionError("Chromium must not start before an attributed command")))
+    worker = BrowserWorker()
+    assert worker.browser is None and worker.context is None
+    assert worker.pages == {}
 
 
 @pytest.mark.parametrize("selector", [
@@ -189,6 +203,41 @@ def test_closed_pages_do_not_consume_concurrent_page_quota():
     fresh = _Page()
     assert worker._register_page(fresh)
     assert len(worker.pages) == 1
+
+
+def test_six_sequential_visits_reuse_one_page_and_invalidate_old_refs(monkeypatch):
+    worker = BrowserWorker()
+    worker.context = SimpleNamespace(new_page=lambda: _Page())
+    monkeypatch.setattr(worker, "_observe", lambda page_id: {
+        "page_id": page_id, "url": worker.pages[page_id].url})
+    first = worker.open("https://one.example/")
+    page_id = first["page_id"]
+    worker.snapshots[page_id] = "old"
+    worker.targets[page_id] = {"old": object()}
+    for index in range(2, 7):
+        result = worker.open(f"https://{index}.example/", reuse_page_id=page_id)
+        assert result == {"page_id": page_id, "url": f"https://{index}.example/"}
+    assert len(worker.pages) == 1
+    assert page_id not in worker.snapshots
+    assert page_id not in worker.targets
+
+
+def test_five_page_limit_is_concurrent_and_close_releases_popup_slot(monkeypatch):
+    worker = BrowserWorker()
+    worker.context = SimpleNamespace(new_page=lambda: _Page())
+    monkeypatch.setattr(worker, "_observe", lambda page_id: {"page_id": page_id})
+    page_ids = [worker.open(f"https://{index}.example/")["page_id"]
+                for index in range(5)]
+    with pytest.raises(BrowserInputError, match="page limit"):
+        worker.open("https://six.example/")
+    closed = worker.close(page_ids[-1])
+    assert closed["closed_page_id"] == page_ids[-1]
+    assert page_ids[-1] not in worker.pages
+    assert len(closed["pages"]) == 4
+    replacement = worker.open("https://six.example/")["page_id"]
+    assert replacement not in page_ids
+    with pytest.raises(BrowserInputError, match="unknown or closed"):
+        worker.open("https://seven.example/", reuse_page_id=page_ids[-1])
 
 
 def test_partial_playwright_launch_is_closed(monkeypatch):

@@ -764,10 +764,13 @@ async def lifespan(app: FastAPI):
         # Clean up Docker sandbox containers
         try:
             from assist.browser.manager import BrowserManager
-            BrowserManager.cleanup_all()
-            SandboxManager.cleanup_all()
+            await anyio.to_thread.run_sync(BrowserManager.cleanup_all)
         except Exception:
-            pass
+            logging.getLogger(__name__).warning("browser shutdown cleanup failed", exc_info=True)
+        try:
+            await anyio.to_thread.run_sync(SandboxManager.cleanup_all)
+        except Exception:
+            logging.getLogger(__name__).warning("sandbox shutdown cleanup failed", exc_info=True)
         # Close shared resources (e.g., sqlite connection) to avoid leaks
         try:
             MANAGER.close()

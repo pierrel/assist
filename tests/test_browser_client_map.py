@@ -7,7 +7,7 @@ import pytest
 
 from assist.egress.client_map import (
     ClientRecord, _locked, forget_client, prune_absent_browser_clients,
-    record_client)
+    record_client, read_client)
 
 
 def _writer(directory, ip, generation, entered=None, release=None):
@@ -79,9 +79,52 @@ def test_absent_browser_generations_are_pruned_without_touching_sandbox(tmp_path
         "thread", "live", "browser", "public"))
     record_client(directory, "172.20.0.4", ClientRecord(
         "thread", "sandbox", "sandbox"))
-    assert prune_absent_browser_clients(directory, lambda: {"live"}) == 1
+    assert prune_absent_browser_clients(
+        directory, lambda: {("live", "172.20.0.3")}) == 1
     entries = json.loads((tmp_path / "client-map.json").read_text())
     assert set(entries) == {"172.20.0.3", "172.20.0.4"}
+
+
+def test_stopped_or_moved_generation_loses_exact_ip_attribution(tmp_path):
+    directory = str(tmp_path)
+    record_client(directory, "172.20.0.2", ClientRecord(
+        "thread", "same-object", "browser", "internal", "host.docker.internal"))
+    # The Docker object may still exist or even restart on a different IP.
+    assert prune_absent_browser_clients(
+        directory, lambda: {("same-object", "172.20.0.9")}) == 1
+    assert read_client(directory, "172.20.0.2") is None
+
+
+def test_scan_race_keeps_new_exact_ip_owner_without_holding_map_lock(tmp_path):
+    directory = str(tmp_path)
+    ip = "172.20.0.2"
+    record_client(directory, ip, ClientRecord(
+        "old", "old-generation", "browser", "internal", "host.docker.internal"))
+
+    def scan_outside_lock():
+        # A new container is published at the recycled IP during the scan.
+        # This write would time out if Docker scanning held the map lock.
+        record_client(directory, ip, ClientRecord(
+            "new", "new-generation", "browser", "public"))
+        return {("new-generation", ip)}
+
+    assert prune_absent_browser_clients(directory, scan_outside_lock) == 0
+    assert read_client(directory, ip).generation == "new-generation"
+    assert read_client(directory, ip).browser_mode == "public"
+
+
+def test_failed_endpoint_scan_keeps_existing_grant_for_recovery(tmp_path):
+    directory = str(tmp_path)
+    ip = "172.20.0.2"
+    record_client(directory, ip, ClientRecord(
+        "thread", "generation", "browser", "public"))
+
+    def incomplete():
+        raise RuntimeError("Docker inspect failed")
+
+    with pytest.raises(RuntimeError, match="inspect failed"):
+        prune_absent_browser_clients(directory, incomplete)
+    assert read_client(directory, ip).generation == "generation"
 
 
 def test_empty_recovery_queue_still_reaps_browser_attribution(monkeypatch):

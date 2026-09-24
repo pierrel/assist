@@ -34,6 +34,8 @@ def wired(tmp_path, monkeypatch):
     (same shape as test_fair_scheduling_integration's fixture)."""
     tid = "t-recover"
     (tmp_path / tid).mkdir()
+    from assist.browser.authority import mark_new_thread
+    mark_new_thread(str(tmp_path), tid)
 
     monkeypatch.setattr(web.MANAGER, "root_dir", str(tmp_path))
     monkeypatch.setattr(web.MANAGER, "thread_dir", lambda t: str(tmp_path / t))

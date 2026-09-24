@@ -489,6 +489,8 @@ class ThreadManager:
             pending = tempfile.mkdtemp(prefix=".thread-", dir=self.root_dir)
             try:
                 write_new_thread_engine(pending, engine)
+                from assist.browser.authority import mark_new_thread
+                mark_new_thread(self.root_dir, os.path.basename(pending))
                 os.rename(pending, tdir)
                 root_fd = os.open(self.root_dir, os.O_RDONLY | os.O_DIRECTORY)
                 try:

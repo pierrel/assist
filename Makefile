@@ -79,7 +79,7 @@ pi-preview-disable:
 pi-preview-status:
 	$(call with-dev-env,$(PYTHON) scripts/pi-preview.py status)
 
-# Build-time smoke.  Three layers, fail-on-first-regression:
+# Build-time smoke. Shell and browser-runtime checks, fail-on-first-regression:
 #   - test-sandbox-shim.sh: 18 push-bypass variants + privilege-drop checks
 #   - test-sandbox-egress.sh: positive (pip install via proxy) +
 #     negative (off-allowlist host, direct-IP, raw TCP) probes
@@ -90,7 +90,8 @@ pi-preview-status:
 #
 # `deploy-sandbox-build` only runs the two shell harnesses on the
 # remote (no venv there); use `make sandbox-smoke` locally / in CI
-# for the shell, egress, browser-runtime, and Docker regression gates.
+# for shell egress integration and the Chromium runtime gate. The full browser
+# Docker/proxy regression is separate: `make browser-docker-test`.
 sandbox-smoke: sandbox-build browser-smoke
 	bash dockerfiles/test-sandbox-shim.sh
 	bash dockerfiles/test-sandbox-egress.sh

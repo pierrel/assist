@@ -1,7 +1,9 @@
 """Mid-turn interjection — deliver journaled user messages to the RUNNING turn.
 
-A message sent while a turn is running lands durably as a pending Run. This
-middleware's ``before_model`` hook reads the injected run projection at every
+A direct owner message overlapping a browser-capable turn first lands durably
+as ``revocation_pending`` until the old browser is confirmed safe, then becomes
+``pending``. Other eligible mid-turn messages land as ``pending`` immediately.
+This middleware's ``before_model`` hook reads the pending run projection at every
 main-loop model-call boundary and, when unconsumed eligible
 entries exist, appends them to graph state as individually framed
 ``HumanMessage``s — the model's very next call sees them and chooses redirect /

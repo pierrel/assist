@@ -140,18 +140,37 @@ def forget_client(directory: str, ip: str, generation: str) -> None:
 
 
 def prune_absent_browser_clients(
-        directory: str, live_generations: Callable[[], set[str]]) -> int:
-    """Remove absent browser generations without racing another map writer."""
+        directory: str,
+        running_endpoints: Callable[[], set[tuple[str, str]]]) -> int:
+    """Compare-delete stale browser IP+generation records after an unlocked scan."""
     with _locked(directory) as path:
-        live = live_generations()
+        snapshot = {ip: value for ip, value in _read(path).items()
+                    if value["kind"] == "browser"}
+    # Docker must never run while holding the map lock needed by admission.
+    live = running_endpoints()
+    if (not isinstance(live, set) or any(
+            not isinstance(item, tuple) or len(item) != 2
+            or not isinstance(item[0], str) or not item[0]
+            or not isinstance(item[1], str) or _validate_ip(item[1]) != item[1]
+            for item in live)):
+        raise ValueError("invalid running browser endpoint scan")
+    with _locked(directory) as path:
         entries = _read(path)
-        stale = [ip for ip, value in entries.items()
-                 if value["kind"] == "browser" and value["generation"] not in live]
+        stale = [ip for ip, value in snapshot.items()
+                 if (value["generation"], ip) not in live
+                 and entries.get(ip) == value]
         for ip in stale:
             del entries[ip]
         if stale:
             _write(path, entries)
         return len(stale)
+
+
+def browser_records(directory: str, thread_id: str) -> dict[str, ClientRecord]:
+    """Read exact browser records for one thread after a successful scan."""
+    with _locked(directory) as path:
+        return {ip: ClientRecord(**value) for ip, value in _read(path).items()
+                if value["kind"] == "browser" and value["thread_id"] == thread_id}
 
 
 def read_client(directory: str, ip: str) -> ClientRecord | None:

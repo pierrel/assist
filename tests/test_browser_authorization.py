@@ -7,6 +7,7 @@ import pytest
 
 from assist.browser.manager import _user_requested_host
 from assist.browser import manager as browser
+from assist.browser import authority
 from assist.run_service import RunService
 from manage.web import threads
 from manage.web.threads import _browser_user_request
@@ -17,6 +18,8 @@ from manage.web.threads import _browser_user_request
     ("Can you open host.docker.internal?", True),
     ("Check the dashboard at host.docker.internal", True),
     ("Yes, please visit host.docker.internal", True),
+    ("What is the status at http://host.docker.internal:5050?", True),
+    ("Find the report on host.docker.internal", True),
     ("Do not browse host.docker.internal", False),
     ("Open my notes about host.docker.internal", False),
     ("Check the notes mentioning host.docker.internal", False),
@@ -115,7 +118,7 @@ def test_held_event_fences_old_internal_tool_before_worker_runs(tmp_path):
         browser.BrowserUserRequest(old.id, old.work_id, old.text,
                                    old.admission_sequence), work_id=old.work_id)
     session.identity = browser._ContainerIdentity(
-        None, str(tmp_path), "172.20.0.2", "old-generation", "internal",
+        str(tmp_path), "172.20.0.2", "old-generation", "internal",
         "host.docker.internal")
     runs.create("t", "general-agent", "Read a public page",
                 user_origin=True, revocation_pending=True)
@@ -125,6 +128,7 @@ def test_held_event_fences_old_internal_tool_before_worker_runs(tmp_path):
 
 def test_held_events_promote_in_sequence_and_only_latest_rebinds(monkeypatch, tmp_path):
     (tmp_path / "t").mkdir()
+    authority.mark_new_thread(str(tmp_path), "t")
     runs = RunService(str(tmp_path))
     old = runs.create("t", "general-agent", "Visit host.docker.internal",
                       user_origin=True)
@@ -137,7 +141,7 @@ def test_held_events_promote_in_sequence_and_only_latest_rebinds(monkeypatch, tm
         browser.BrowserUserRequest(old.id, old.work_id, old.text,
                                    old.admission_sequence), work_id=old.work_id)
     session.identity = browser._ContainerIdentity(
-        None, str(tmp_path), "172.20.0.2", "old-generation", "internal",
+        str(tmp_path), "172.20.0.2", "old-generation", "internal",
         "host.docker.internal")
     resets = []
 
@@ -149,8 +153,11 @@ def test_held_events_promote_in_sequence_and_only_latest_rebinds(monkeypatch, tm
 
     monkeypatch.setattr(session, "revoke_internal", revoke)
     monkeypatch.setattr(threads, "_runs", lambda: runs)
+    monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
     monkeypatch.setattr(browser.BrowserManager, "current_session",
                         lambda _tid: session)
+    monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped",
+                        lambda *_args: False)
     monkeypatch.setattr(threads._RESUME_SCHEDULER, "promote", lambda _tid: None)
     monkeypatch.setattr(threads.THREAD_QUEUE, "promote", lambda _tid: None)
     monkeypatch.setattr(threads, "_dispatch_pending_after", lambda _tid: None)
@@ -209,6 +216,7 @@ def test_failed_rebind_does_not_promote_held_event(monkeypatch, tmp_path):
 def test_inflight_internal_command_finishes_before_held_event_promotes(
         monkeypatch, tmp_path):
     (tmp_path / "t").mkdir()
+    authority.mark_new_thread(str(tmp_path), "t")
     runs = RunService(str(tmp_path))
     old = runs.create("t", "general-agent", "Visit host.docker.internal",
                       user_origin=True)
@@ -217,11 +225,11 @@ def test_inflight_internal_command_finishes_before_held_event_promotes(
         browser.BrowserUserRequest(old.id, old.work_id, old.text,
                                    old.admission_sequence), work_id=old.work_id)
     session.identity = browser._ContainerIdentity(
-        None, str(tmp_path), "172.20.0.2", "old-generation", "internal",
+        str(tmp_path), "172.20.0.2", "old-generation", "internal",
         "host.docker.internal")
     entered, release, revoked = Event(), Event(), Event()
 
-    def inflight(_generation, _command):
+    def inflight(_generation, _command, **_kwargs):
         entered.set()
         assert release.wait(3)
         return b'{"result": {"snapshot": "old page"}}'
@@ -235,8 +243,13 @@ def test_inflight_internal_command_finishes_before_held_event_promotes(
     monkeypatch.setattr(browser, "_docker_exec", inflight)
     monkeypatch.setattr(session, "revoke_internal", revoke)
     monkeypatch.setattr(threads, "_runs", lambda: runs)
+    monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
     monkeypatch.setattr(browser.BrowserManager, "current_session",
                         lambda _tid: session)
+    monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped",
+                        lambda *_args: False)
+    session.boot_id, session.deadline_ns = runs.bind_browser_deadline("t", old.id)
+    session.deadline = session.deadline_ns / 1_000_000_000
     monkeypatch.setattr(threads._RESUME_SCHEDULER, "promote", lambda _tid: None)
     monkeypatch.setattr(threads.THREAD_QUEUE, "promote", lambda _tid: None)
     monkeypatch.setattr(threads, "_dispatch_pending_after", lambda _tid: None)
@@ -258,6 +271,7 @@ def test_inflight_internal_command_finishes_before_held_event_promotes(
 def test_held_event_stays_queued_while_browser_startup_holds_thread_gate(
         monkeypatch, tmp_path):
     (tmp_path / "t").mkdir()
+    authority.mark_new_thread(str(tmp_path), "t")
     runs = RunService(str(tmp_path))
     old = runs.create("t", "general-agent", "Visit host.docker.internal",
                       user_origin=True)
@@ -291,6 +305,7 @@ def test_held_event_stays_queued_while_browser_startup_holds_thread_gate(
                         lambda: ["host.docker.internal"])
     monkeypatch.setattr(browser, "_launch_sidecar_bounded", stalled_start)
     monkeypatch.setattr(threads, "_runs", lambda: runs)
+    monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
     scheduled = []
     monkeypatch.setattr(threads, "_schedule_browser_revocation_retry",
                         lambda tid: scheduled.append(tid))
@@ -308,24 +323,27 @@ def test_held_event_stays_queued_while_browser_startup_holds_thread_gate(
             opening.result(timeout=3)
 
 
-def test_recovery_confirms_saved_generation_without_session(monkeypatch, tmp_path):
+def test_recovery_confirms_saved_owner_without_session(monkeypatch, tmp_path):
     (tmp_path / "t").mkdir()
+    authority.mark_new_thread(str(tmp_path), "t")
     runs = RunService(str(tmp_path))
+    old = runs.create("t", "general-agent", "Visit host.docker.internal",
+                      user_origin=True)
     held = runs.create("t", "general-agent", "Read a public page",
-                       user_origin=True, revocation_pending=True)
-    runs.transition("t", held.id, "revocation_pending",
-                    revocation_generation="old-generation")
+                       user_origin=True, revocation_pending=True,
+                       browser_reset_run_id=old.id)
     confirmed = []
     monkeypatch.setattr(threads, "_runs", lambda: runs)
+    monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
     monkeypatch.setattr(browser.BrowserManager, "current_session",
                         lambda _tid: None)
-    monkeypatch.setattr(browser.BrowserManager, "confirm_generation_stopped",
-                        lambda generation: confirmed.append(generation))
+    monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped",
+                        lambda root, tid, owner: confirmed.append((root, tid, owner)))
     monkeypatch.setattr(threads._RESUME_SCHEDULER, "promote", lambda _tid: None)
     monkeypatch.setattr(threads.THREAD_QUEUE, "promote", lambda _tid: None)
     monkeypatch.setattr(threads, "_dispatch_pending_after", lambda _tid: None)
     threads._drain_held_browser_events("t")
-    assert confirmed == ["old-generation"]
+    assert confirmed == [(str(tmp_path), "t", old.id)]
     assert runs.get("t", held.id).status == "pending"
 
 

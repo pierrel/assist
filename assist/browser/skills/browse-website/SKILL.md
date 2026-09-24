@@ -1,7 +1,7 @@
 ---
 name: browse-website
 description: "Use when a named website needs rendered JavaScript, menus, forms, or page interactions that read_url cannot expose. Examples: 'open the dashboard and find the report link', 'use the site's filters to locate the manual', 'check what this interactive page says'. The browser belongs to this visible web turn, not a delegate."
-allowed-tools: browser_open browser_observe browser_act browser_wait browser_probe browser_save_download
+allowed-tools: browser_open browser_close browser_observe browser_act browser_wait browser_probe browser_save_download
 ---
 
 # Browse a website
@@ -13,7 +13,11 @@ has a short lifetime; reopen a page after a later turn or an approval pause.
 
 `browser_open(url)` renders one HTTP(S) page and returns its page ID, actual URL,
 snapshot ID, readable accessibility snapshot, link/control targets, popup page
-IDs, download IDs, and network errors. Only existing allowlisted or approved
+IDs, download IDs, and network errors. For another visit, pass an observed live
+page ID as `reuse_page_id` to navigate that page in place; its old snapshot and
+targets become invalid. `browser_close(page_id)` releases a finished page or
+popup. The limit is five concurrently live pages, not five total visits.
+Only existing allowlisted or approved
 hosts are reachable. If a host is denied, use the existing egress approval
 flow only when `browser_probe` returns `host_not_approved`; do not work around
 the proxy or request approval for a different denial reason. A private/local

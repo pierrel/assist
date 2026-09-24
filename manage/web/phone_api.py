@@ -689,31 +689,45 @@ def _find_dispatch(tid: str, dispatch_key: str):
 
 def _submit_existing(tid: str, text: str, key: str, *, run_id: str | None = None,
                      work_id: str | None = None) -> tuple[Any, bool, bool]:
-    """Durably accept one idempotent normal web turn under the existing lock."""
+    """Durably accept one idempotent turn under the browser and Run fences."""
     _thread_dir(tid)
     dispatch_key = _phone_dispatch_key(key)
-    with threads._RUN_ADMISSION_LOCK:
-        replay = _find_dispatch(tid, dispatch_key)
-        if replay is not None:
-            if replay.text != text:
-                raise HTTPException(status_code=409, detail="Idempotency-Key conflicts with prior message")
-            return replay, False, True
-        try:
-            if not threads._pi_message_admits(tid):
-                raise HTTPException(status_code=503, detail="Pi preview is unavailable")
-        except ThreadEngineError as error:
-            raise HTTPException(status_code=409, detail="Thread harness is unavailable") from error
-        try:
-            run, busy = threads._accept_message_run_locked(
-                tid, text, dispatch_key=dispatch_key,
-                max_pending=MAX_PHONE_PENDING_RUNS, run_id=run_id,
-                work_id=work_id)
-        except threads._EmailApprovalPending as error:
-            raise HTTPException(
-                status_code=409, detail="Resolve the pending approval first") from error
-        except InvalidRunTransition as error:
-            raise HTTPException(status_code=429, detail=str(error)) from error
-        return run, busy, False
+    try:
+        with threads.browser_authority.fence(state.MANAGER.root_dir, tid) as browser_state:
+            map_record = False
+            try:
+                map_dir = threads.configured_directory()
+                if map_dir is not None:
+                    map_record = bool(threads.browser_records(map_dir, tid))
+            except (OSError, RuntimeError, ValueError):
+                pass
+            with threads._RUN_ADMISSION_LOCK:
+                replay = _find_dispatch(tid, dispatch_key)
+                if replay is not None:
+                    if replay.text != text:
+                        raise HTTPException(status_code=409, detail="Idempotency-Key conflicts with prior message")
+                    return replay, False, True
+                try:
+                    if not threads._pi_message_admits(tid):
+                        raise HTTPException(status_code=503, detail="Pi preview is unavailable")
+                except ThreadEngineError as error:
+                    raise HTTPException(status_code=409, detail="Thread harness is unavailable") from error
+                try:
+                    run, busy = threads._accept_message_run_locked(
+                        tid, text, dispatch_key=dispatch_key,
+                        max_pending=MAX_PHONE_PENDING_RUNS, run_id=run_id,
+                        work_id=work_id, browser_state=browser_state,
+                        browser_map_record=map_record)
+                except threads._EmailApprovalPending as error:
+                    raise HTTPException(
+                        status_code=409, detail="Resolve the pending approval first") from error
+                except InvalidRunTransition as error:
+                    raise HTTPException(status_code=429, detail=str(error)) from error
+    except (OSError, RuntimeError, ValueError, TimeoutError) as error:
+        raise HTTPException(status_code=503, detail="Browser admission is unavailable") from error
+    if run.status == "revocation_pending":
+        threads._queue_browser_revocation(tid)
+    return run, busy, False
 
 
 def _create_and_submit(body: _CreateThread, key: str, *, run_id: str | None = None,

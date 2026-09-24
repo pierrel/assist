@@ -21,6 +21,7 @@ from manage import web
 from manage.web import threads
 from manage.web.state import _get_status
 from assist.location import LocationSnapshot
+from assist.browser.authority import mark_new_thread
 from assist.thread_queue import ThreadPauseRequested
 
 
@@ -50,6 +51,7 @@ class _PausingChat:
 def wired(tmp_path, monkeypatch):
     tid = "t-pause"
     (tmp_path / tid).mkdir()
+    mark_new_thread(str(tmp_path), tid)
     calls = []
     chat = _PausingChat(tid, calls)
 
@@ -263,7 +265,9 @@ def test_pause_reservation_keeps_a_concurrent_user_promotion(wired, monkeypatch)
     queued = threads._RESUME_SCHEDULER._q.get_nowait()
     assert queued["run_id"] == successor.id
     assert queued["user_priority"] is True
-    assert threads._runs().get(tid, follower.id).status == "pending"
+    # The user submission remains held until exact browser reconciliation,
+    # even though it has already promoted the paused predecessor's ticket.
+    assert threads._runs().get(tid, follower.id).status == "revocation_pending"
     assert calls == [("message", "hello")]
 
 

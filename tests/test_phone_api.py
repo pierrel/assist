@@ -35,6 +35,9 @@ def _thread_environment(tmp_path, monkeypatch, messages):
     thread_dir = tmp_path / "thread-a"
     workspace = thread_dir / "workspace"
     workspace.mkdir(parents=True)
+    from assist.browser.authority import mark_new_thread
+    mark_new_thread(str(tmp_path), "thread-a")
+    monkeypatch.setattr(state.MANAGER, "root_dir", str(tmp_path))
     (workspace / "notes.md").write_text("hello")
     monkeypatch.setattr(state.MANAGER, "thread_dir", lambda tid: str(tmp_path / tid))
     monkeypatch.setattr(state.MANAGER, "thread_default_working_dir",

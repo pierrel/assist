@@ -8,6 +8,7 @@ import signal
 import socket
 import stat
 import sys
+import time
 from urllib.parse import urljoin, urlsplit
 from uuid import uuid4
 
@@ -240,19 +241,36 @@ class BrowserWorker:
         self.targets[page_id] = kept
         return result
 
-    def open(self, url):
+    def open(self, url, reuse_page_id=None):
         http_url(url)
         self._start()
         self._prune_pages()
-        if len(self.pages) >= 5:
-            raise BrowserInputError("browser page limit reached")
-        page = self.context.new_page()
-        page_id = self._register_page(page)
+        if reuse_page_id is not None:
+            if not isinstance(reuse_page_id, str) or not reuse_page_id:
+                raise BrowserInputError("invalid page ID to reuse")
+            page_id = reuse_page_id
+            page = self._page(page_id)
+            self.snapshots.pop(page_id, None)
+            self.targets.pop(page_id, None)
+        else:
+            if len(self.pages) >= 5:
+                raise BrowserInputError("browser page limit reached")
+            page = self.context.new_page()
+            page_id = self._register_page(page)
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=10000)
         except Exception:
             self._error(host_port(url), "document", "navigation_failed")
         return self._observe(page_id)
+
+    def close(self, page_id):
+        page = self._page(page_id)
+        page.close()
+        self._prune_pages()
+        live = [{"page_id": ident, "url": item.url}
+                for ident, item in self.pages.items()]
+        return {"closed_page_id": page_id, "pages": live,
+                "active_page_id": live[-1]["page_id"] if live else None}
 
     def observe(self, page_id):
         return self._observe(page_id)
@@ -369,7 +387,8 @@ class BrowserWorker:
         args = command.get("args") or {}
         if not isinstance(args, dict):
             raise BrowserInputError("invalid browser arguments")
-        methods = {"open": self.open, "observe": self.observe, "act": self.act,
+        methods = {"open": self.open, "close": self.close,
+                   "observe": self.observe, "act": self.act,
                    "wait": self.wait, "download_info": self.download_info,
                    "probe": self.probe}
         if operation not in methods:
@@ -378,7 +397,13 @@ class BrowserWorker:
 
 
 def serve():
-    ttl = max(1, min(240, int(os.environ["BROWSER_TTL_SECONDS"])))
+    with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as stream:
+        if stream.read().strip() != os.environ["BROWSER_BOOT_ID"]:
+            os._exit(124)
+    deadline_ns = int(os.environ["BROWSER_DEADLINE_NS"])
+    ttl = (deadline_ns - time.clock_gettime_ns(time.CLOCK_BOOTTIME)) / 1_000_000_000
+    if ttl <= 0 or ttl > 240:
+        os._exit(124)
     signal.signal(signal.SIGALRM, lambda _signum, _frame: os._exit(124))
     signal.setitimer(signal.ITIMER_REAL, ttl)
     worker = BrowserWorker()

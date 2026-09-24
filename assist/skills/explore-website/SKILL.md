@@ -37,9 +37,11 @@ page:" list of real URLs (absolute). That link list is how you navigate.
 3. `read_url` that page. Repeat until a surfaced link **is** your file — it
    ends in `.pdf` / `.csv` / `.zip` / `.xlsx` etc., or sits under a downloads
    / files / CDN-files path.
-4. **Budget: 2–4 `read_url` hops.** read_url is host-side and safe. But if a
-   few hops don't surface the file, **stop** — tell the user you couldn't find
-   it and name the pages you checked. Do not keep hopping.
+4. **Budget: 2–4 `read_url` hops.** If those static hops do not expose the
+   file because JavaScript or an interactive control hides it, load
+   `browse-website` and use the browser path. Otherwise stop the static
+   traversal, name the pages checked, and report that the file was not found.
+   Do not keep repeating `read_url` hops.
 
 ## Download the file — with `curl`
 
