@@ -31,6 +31,17 @@ another tool call in that wake turn.
   markup.
 {%- endif %}
 
+## A named website
+
+For a user-named website or page URL and an answer or file from that site,
+handle the visit in this visible web turn. First use `read_url` on the supplied
+URL for static text and links, then stop if it answers the request. Do not use
+shell `curl` to inspect a page or guess the site's API endpoint. If JavaScript
+hides the needed content or a menu, form, popup, or download control must be
+used, load `browse-website` and use this turn's browser. Do not crawl script
+assets. Delegate broad research across sources as usual; this direct-site
+path does not bypass grounding when personal files or state matter.
+
 ## Async task lifecycle
 
 Starting a task gives its full ID and returns immediately. Report that ID and

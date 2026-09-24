@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-pi-runtime-build deploy-service deploy-install deploy-speech-models restart status logs setup-sudo help sandbox-build browser-build egress-proxy-build pi-runtime-build pi-preview-enable pi-preview-disable pi-preview-status sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-pi-runtime-build deploy-service deploy-install deploy-speech-models restart status logs setup-sudo help sandbox-build browser-build browser-smoke browser-docker-test egress-proxy-build pi-runtime-build pi-preview-enable pi-preview-disable pi-preview-status sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
 
 eval:
 	$(call with-dev-env,./scripts/run-evals.sh)
@@ -37,7 +37,7 @@ eval:
 test:
 	$(call with-dev-env,.venv/bin/pytest --junit-xml=tests/history/results-$$(date +%Y%m%d-%H%M).xml tests)
 
-web: sandbox-build browser-build pi-runtime-build
+web: sandbox-build browser-smoke pi-runtime-build
 	$(call with-dev-env,.venv/bin/python -m manage.web)
 
 smoke:
@@ -54,6 +54,12 @@ sandbox-build: egress-proxy-build
 
 browser-build:
 	docker build -t assist-browser -f dockerfiles/Dockerfile.browser .
+
+browser-smoke: browser-build
+	bash dockerfiles/test-browser-runtime.sh
+
+browser-docker-test: egress-proxy-build browser-smoke
+	ASSIST_BROWSER_DOCKER_TEST=1 .venv/bin/pytest -q tests/test_browser_docker.py
 
 # Egress allowlist proxy. Tiny stdlib Python image, shared by shell and
 # browser containers. SandboxManager starts it for exact-host policy. See
@@ -84,8 +90,8 @@ pi-preview-status:
 #
 # `deploy-sandbox-build` only runs the two shell harnesses on the
 # remote (no venv there); use `make sandbox-smoke` locally / in CI
-# for the full three-layer coverage.
-sandbox-smoke: sandbox-build
+# for the shell, egress, browser-runtime, and Docker regression gates.
+sandbox-smoke: sandbox-build browser-smoke
 	bash dockerfiles/test-sandbox-shim.sh
 	bash dockerfiles/test-sandbox-egress.sh
 	.venv/bin/pytest tests/test_sandbox_egress_integration.py -v
@@ -123,6 +129,8 @@ deploy-sandbox-build:
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-sandbox -f dockerfiles/Dockerfile.sandbox .'
 	@echo "→ Building browser image on $(DEPLOY_HOST)..."
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-browser -f dockerfiles/Dockerfile.browser .'
+	@echo "→ Running bounded Chromium sandbox smoke on $(DEPLOY_HOST)..."
+	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && bash dockerfiles/test-browser-runtime.sh'
 	@echo "→ Running sandbox-smoke on $(DEPLOY_HOST) (push-refusal regression gate)..."
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && bash dockerfiles/test-sandbox-shim.sh'
 	@echo "→ Running egress-smoke on $(DEPLOY_HOST) (allowlist regression gate)..."
@@ -247,6 +255,9 @@ help:
 	@echo "  make eval           - Run evals"
 	@echo "  make smoke          - Run smoke test against running server"
 	@echo "  make sandbox-build  - Build Docker sandbox image"
+	@echo "  make browser-build  - Build headless browser image"
+	@echo "  make browser-smoke  - Build and launch sandboxed Chromium once"
+	@echo "  make browser-docker-test - Build current images and run real browser/proxy tests"
 	@echo "  make sandbox-shell  - Run interactive sandbox shell"
 	@echo "  make pull-eval-history - Pull eval results from deploy server"
 	@echo ""

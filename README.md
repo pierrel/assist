@@ -855,13 +855,15 @@ assist/
 │   │   ├── dev/SKILL.md     # TDD workflow + code-task routing
 │   │   ├── org-format/SKILL.md
 │   │   └── …
+│   ├── browser/             # Typed Chromium sidecar, runner, and browser skill
 │   ├── main_skills/         # Supervisor-only skills for the async main
 │   │   └── complex-request/SKILL.md
 │   └── templates/           # Jinja prompt templates
 │       ├── deepagents/      # Per-agent system prompts
 │       └── reference/       # Inline references (legacy; being moved into skills)
 ├── dockerfiles/             # Docker images
-│   └── Dockerfile.sandbox   # Sandbox container (Arch-based, with git/python/emacs)
+│   ├── Dockerfile.sandbox   # Sandbox container (Arch-based, with git/python/emacs)
+│   └── Dockerfile.browser   # Bounded headless Chromium sidecar
 ├── edd/                     # Agent evaluations (LLM-driven, network-bound)
 │   ├── eval/                # Evaluation test suite — anything that calls the real model
 │   └── history/             # Test results history (JUnit XML)
@@ -935,6 +937,10 @@ workspaces. Set `ASSIST_EGRESS_CLIENT_MAP_DIR` to an absolute directory owned
 by the web user and not group/world writable. If safe egress approvals are
 already configured, their proxy-mounted directory supplies the map by default.
 The browser tool is unavailable when neither directory is configured.
+Shared proxy/network retirement uses a separate host-only ledger outside the
+thread workspaces (`ASSIST_EGRESS_RUNTIME_DIR`, or a private sibling directory
+by default). It must remain writable even when browser attribution is disabled;
+if it cannot be read safely, new egress setup fails closed.
 
 If Docker is unavailable, the agent falls back to running without a sandbox.
 

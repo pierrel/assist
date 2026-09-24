@@ -1,10 +1,14 @@
 """User-origin attribution and affirmative exact-host admission."""
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event, RLock
 
 import pytest
 
 from assist.browser.manager import _user_requested_host
+from assist.browser import manager as browser
 from assist.run_service import RunService
+from manage.web import threads
 from manage.web.threads import _browser_user_request
 
 
@@ -12,6 +16,7 @@ from manage.web.threads import _browser_user_request
     ("Please visit http://host.docker.internal:8000.", True),
     ("Can you open host.docker.internal?", True),
     ("Check the dashboard at host.docker.internal", True),
+    ("Yes, please visit host.docker.internal", True),
     ("Do not browse host.docker.internal", False),
     ("Open my notes about host.docker.internal", False),
     ("Check the notes mentioning host.docker.internal", False),
@@ -24,6 +29,16 @@ from manage.web.threads import _browser_user_request
 ])
 def test_internal_host_requires_affirmative_exact_direct_request(message, allowed):
     assert _user_requested_host(message, "host.docker.internal") is allowed
+
+
+@pytest.mark.parametrize("url", [
+    "http://@host.docker.internal/",
+    "http://user:@host.docker.internal/",
+    "http://host.docker.internal:0/",
+])
+def test_manager_rejects_empty_userinfo_and_port_zero(url):
+    with pytest.raises(browser.BrowserUnavailable, match="HTTP"):
+        browser._url_host(url)
 
 
 def test_browser_request_is_scoped_to_active_user_work(tmp_path):
@@ -69,3 +84,308 @@ def test_copied_text_and_approval_origin_cannot_mint_internal_authority(tmp_path
     resumed = runs.create("t", "general-agent", None, work_id=direct.work_id,
                           resume=True, user_event_id=direct.user_event_id)
     assert _browser_user_request(resumed, runs.list("t")).event_id == direct.id
+
+
+def test_direct_owner_events_have_durable_order_and_held_state(tmp_path):
+    (tmp_path / "t").mkdir()
+    runs = RunService(str(tmp_path))
+    first = runs.create("t", "general-agent", "Visit host.docker.internal",
+                        user_origin=True)
+    held = runs.create("t", "general-agent", "Read public status",
+                       user_origin=True, revocation_pending=True)
+    third = runs.create("t", "general-agent", "Visit host.docker.internal",
+                        user_origin=True, revocation_pending=True)
+    assert [run.admission_sequence for run in (first, held, third)] == [1, 2, 3]
+    assert held.status == third.status == "revocation_pending"
+    assert runs.list("t")[1].status == "revocation_pending"
+    promoted = runs.transition("t", held.id, "pending",
+                               browser_reset_notice=True)
+    assert promoted.admission_sequence == 2
+    assert promoted.browser_reset_notice is True
+    assert runs.get("t", third.id).status == "revocation_pending"
+
+
+def test_held_event_fences_old_internal_tool_before_worker_runs(tmp_path):
+    (tmp_path / "t").mkdir()
+    runs = RunService(str(tmp_path))
+    old = runs.create("t", "general-agent", "Visit host.docker.internal",
+                      user_origin=True)
+    session = browser.BrowserSession(
+        "t", old.id, str(tmp_path), str(tmp_path),
+        browser.BrowserUserRequest(old.id, old.work_id, old.text,
+                                   old.admission_sequence), work_id=old.work_id)
+    session.identity = browser._ContainerIdentity(
+        None, str(tmp_path), "172.20.0.2", "old-generation", "internal",
+        "host.docker.internal")
+    runs.create("t", "general-agent", "Read a public page",
+                user_origin=True, revocation_pending=True)
+    with pytest.raises(browser.BrowserUnavailable, match="newer user message"):
+        session.command("observe", page_id="old-page")
+
+
+def test_held_events_promote_in_sequence_and_only_latest_rebinds(monkeypatch, tmp_path):
+    (tmp_path / "t").mkdir()
+    runs = RunService(str(tmp_path))
+    old = runs.create("t", "general-agent", "Visit host.docker.internal",
+                      user_origin=True)
+    first = runs.create("t", "general-agent", "Read a public page",
+                        user_origin=True, revocation_pending=True)
+    second = runs.create("t", "general-agent", "Yes, please visit host.docker.internal",
+                         user_origin=True, revocation_pending=True)
+    session = browser.BrowserSession(
+        "t", old.id, str(tmp_path), str(tmp_path),
+        browser.BrowserUserRequest(old.id, old.work_id, old.text,
+                                   old.admission_sequence), work_id=old.work_id)
+    session.identity = browser._ContainerIdentity(
+        None, str(tmp_path), "172.20.0.2", "old-generation", "internal",
+        "host.docker.internal")
+    resets = []
+
+    def revoke():
+        resets.append(session.identity is not None)
+        session.identity = None
+        session.user_request = None
+        return resets[-1]
+
+    monkeypatch.setattr(session, "revoke_internal", revoke)
+    monkeypatch.setattr(threads, "_runs", lambda: runs)
+    monkeypatch.setattr(browser.BrowserManager, "current_session",
+                        lambda _tid: session)
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "promote", lambda _tid: None)
+    monkeypatch.setattr(threads.THREAD_QUEUE, "promote", lambda _tid: None)
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda _tid: None)
+    threads._drain_held_browser_events("t")
+    assert resets == [True, False]
+    assert [runs.get("t", run.id).status for run in (first, second)] == [
+        "pending", "pending"]
+    assert runs.get("t", first.id).browser_reset_notice is True
+    assert session.user_request.event_id == second.id
+
+
+def test_failed_reset_keeps_message_held_with_retry(monkeypatch, tmp_path):
+    (tmp_path / "t").mkdir()
+    runs = RunService(str(tmp_path))
+    held = runs.create("t", "general-agent", "Read a public page",
+                       user_origin=True, revocation_pending=True)
+    session = browser.BrowserSession("t", held.id, str(tmp_path), str(tmp_path), None)
+    monkeypatch.setattr(session, "revoke_internal",
+                        lambda: (_ for _ in ()).throw(
+                            browser.BrowserUnavailable("kill failed")))
+    monkeypatch.setattr(threads, "_runs", lambda: runs)
+    monkeypatch.setattr(browser.BrowserManager, "current_session",
+                        lambda _tid: session)
+    scheduled = []
+    monkeypatch.setattr(threads, "_schedule_browser_revocation_retry",
+                        lambda tid: scheduled.append(tid))
+    threads._drain_held_browser_events("t")
+    record = runs.get("t", held.id)
+    assert record.status == "revocation_pending"
+    assert record.revocation_retry_at is not None
+    assert "unconfirmed" in record.error
+    assert scheduled == ["t"]
+
+
+def test_failed_rebind_does_not_promote_held_event(monkeypatch, tmp_path):
+    (tmp_path / "t").mkdir()
+    runs = RunService(str(tmp_path))
+    held = runs.create("t", "general-agent", "Visit host.docker.internal",
+                       user_origin=True, revocation_pending=True)
+    session = browser.BrowserSession("t", held.id, str(tmp_path), str(tmp_path), None)
+    monkeypatch.setattr(session, "revoke_internal", lambda: True)
+    monkeypatch.setattr(session, "rebind_user_request",
+                        lambda _request: (_ for _ in ()).throw(
+                            browser.BrowserUnavailable("session closed")))
+    monkeypatch.setattr(threads, "_runs", lambda: runs)
+    monkeypatch.setattr(browser.BrowserManager, "current_session",
+                        lambda _tid: session)
+    scheduled = []
+    monkeypatch.setattr(threads, "_schedule_browser_revocation_retry",
+                        lambda tid: scheduled.append(tid))
+    threads._drain_held_browser_events("t")
+    assert runs.get("t", held.id).status == "revocation_pending"
+    assert scheduled == ["t"]
+
+
+def test_inflight_internal_command_finishes_before_held_event_promotes(
+        monkeypatch, tmp_path):
+    (tmp_path / "t").mkdir()
+    runs = RunService(str(tmp_path))
+    old = runs.create("t", "general-agent", "Visit host.docker.internal",
+                      user_origin=True)
+    session = browser.BrowserSession(
+        "t", old.id, str(tmp_path), str(tmp_path),
+        browser.BrowserUserRequest(old.id, old.work_id, old.text,
+                                   old.admission_sequence), work_id=old.work_id)
+    session.identity = browser._ContainerIdentity(
+        None, str(tmp_path), "172.20.0.2", "old-generation", "internal",
+        "host.docker.internal")
+    entered, release, revoked = Event(), Event(), Event()
+
+    def inflight(_generation, _command):
+        entered.set()
+        assert release.wait(3)
+        return b'{"result": {"snapshot": "old page"}}'
+
+    def revoke():
+        session.identity = None
+        session.user_request = None
+        revoked.set()
+        return True
+
+    monkeypatch.setattr(browser, "_docker_exec", inflight)
+    monkeypatch.setattr(session, "revoke_internal", revoke)
+    monkeypatch.setattr(threads, "_runs", lambda: runs)
+    monkeypatch.setattr(browser.BrowserManager, "current_session",
+                        lambda _tid: session)
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "promote", lambda _tid: None)
+    monkeypatch.setattr(threads.THREAD_QUEUE, "promote", lambda _tid: None)
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda _tid: None)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        command = pool.submit(session.command, "observe", page_id="old")
+        assert entered.wait(3)
+        held = runs.create("t", "general-agent", "Read a public page",
+                           user_origin=True, revocation_pending=True)
+        drain = pool.submit(threads._drain_held_browser_events, "t")
+        assert not revoked.wait(0.1)
+        assert runs.get("t", held.id).status == "revocation_pending"
+        release.set()
+        assert command.result(timeout=3)["result"]["snapshot"] == "old page"
+        drain.result(timeout=3)
+    assert revoked.is_set()
+    assert runs.get("t", held.id).status == "pending"
+
+
+def test_held_event_stays_queued_while_browser_startup_holds_thread_gate(
+        monkeypatch, tmp_path):
+    (tmp_path / "t").mkdir()
+    runs = RunService(str(tmp_path))
+    old = runs.create("t", "general-agent", "Visit host.docker.internal",
+                      user_origin=True)
+    session = browser.BrowserSession(
+        "t", old.id, str(tmp_path), str(tmp_path),
+        browser.BrowserUserRequest(old.id, old.work_id, old.text,
+                                   old.admission_sequence), work_id=old.work_id)
+    entered, release = Event(), Event()
+    real_gate = RLock()
+
+    class ShortWaitGate:
+        def acquire(self, timeout):
+            assert timeout == 20
+            return real_gate.acquire(timeout=0.1)
+
+        def release(self):
+            real_gate.release()
+
+    def stalled_start(_request, timeout):
+        assert timeout <= 20
+        entered.set()
+        assert release.wait(3)
+        raise browser.BrowserUnavailable("startup transport timed out")
+
+    monkeypatch.setattr(browser.BrowserManager, "thread_gate",
+                        classmethod(lambda _cls, _tid: ShortWaitGate()))
+    monkeypatch.setattr(browser.BrowserManager, "current_session",
+                        lambda _tid: session)
+    monkeypatch.setattr(browser, "configured_directory", lambda: str(tmp_path))
+    monkeypatch.setattr(browser, "_load_egress_allowlist",
+                        lambda: ["host.docker.internal"])
+    monkeypatch.setattr(browser, "_launch_sidecar_bounded", stalled_start)
+    monkeypatch.setattr(threads, "_runs", lambda: runs)
+    scheduled = []
+    monkeypatch.setattr(threads, "_schedule_browser_revocation_retry",
+                        lambda tid: scheduled.append(tid))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        opening = pool.submit(session.command, "open",
+                              url="http://host.docker.internal/")
+        assert entered.wait(3)
+        held = runs.create("t", "general-agent", "Read a public page",
+                           user_origin=True, revocation_pending=True)
+        threads._drain_held_browser_events("t")
+        assert runs.get("t", held.id).status == "revocation_pending"
+        assert scheduled == ["t"]
+        release.set()
+        with pytest.raises(browser.BrowserUnavailable, match="startup transport"):
+            opening.result(timeout=3)
+
+
+def test_recovery_confirms_saved_generation_without_session(monkeypatch, tmp_path):
+    (tmp_path / "t").mkdir()
+    runs = RunService(str(tmp_path))
+    held = runs.create("t", "general-agent", "Read a public page",
+                       user_origin=True, revocation_pending=True)
+    runs.transition("t", held.id, "revocation_pending",
+                    revocation_generation="old-generation")
+    confirmed = []
+    monkeypatch.setattr(threads, "_runs", lambda: runs)
+    monkeypatch.setattr(browser.BrowserManager, "current_session",
+                        lambda _tid: None)
+    monkeypatch.setattr(browser.BrowserManager, "confirm_generation_stopped",
+                        lambda generation: confirmed.append(generation))
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "promote", lambda _tid: None)
+    monkeypatch.setattr(threads.THREAD_QUEUE, "promote", lambda _tid: None)
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda _tid: None)
+    threads._drain_held_browser_events("t")
+    assert confirmed == ["old-generation"]
+    assert runs.get("t", held.id).status == "pending"
+
+
+def test_thread_deletion_stops_browser_before_erasing_run_journal(
+        monkeypatch, tmp_path):
+    (tmp_path / "t").mkdir()
+    runs = RunService(str(tmp_path))
+    held = runs.create("t", "general-agent", "Read a public page",
+                       user_origin=True, revocation_pending=True)
+    calls = []
+    monkeypatch.setattr(threads, "_runs", lambda: runs)
+    monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
+    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+    monkeypatch.setattr(threads.RUN_STREAMS, "mark_thread_gone", lambda _tid: None)
+    monkeypatch.setattr(browser.BrowserManager, "cleanup",
+                        lambda _tid: calls.append("browser"))
+    monkeypatch.setattr(threads.MANAGER, "hard_delete",
+                        lambda _tid, on_delete=None: calls.append("journal"))
+    threads._delete_thread_and_children("t")
+    assert calls == ["browser", "journal"]
+    assert runs.get("t", held.id).status == "revocation_pending"
+
+
+def test_failed_browser_stop_prevents_thread_deletion(monkeypatch, tmp_path):
+    (tmp_path / "t").mkdir()
+    calls = []
+    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+    monkeypatch.setattr(browser.BrowserManager, "cleanup",
+                        lambda _tid: (_ for _ in ()).throw(
+                            browser.BrowserUnavailable("stop unconfirmed")))
+    monkeypatch.setattr(threads.MANAGER, "hard_delete",
+                        lambda *_args, **_kwargs: calls.append("journal"))
+    with pytest.raises(browser.BrowserUnavailable, match="stop unconfirmed"):
+        threads._delete_thread_and_children("t")
+    assert calls == []
+
+
+def test_deletion_gate_rejects_late_browser_registration(monkeypatch, tmp_path):
+    (tmp_path / "t").mkdir()
+    entered, release = Event(), Event()
+    monkeypatch.setattr(threads, "_runs", lambda: RunService(str(tmp_path)))
+    monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
+    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+    monkeypatch.setattr(threads.RUN_STREAMS, "mark_thread_gone", lambda _tid: None)
+    monkeypatch.setattr(browser.BrowserManager, "cleanup", lambda _tid: None)
+
+    def erase(_tid, on_delete=None):
+        entered.set()
+        assert release.wait(3)
+        (tmp_path / "t").rmdir()
+
+    monkeypatch.setattr(threads.MANAGER, "hard_delete", erase)
+    session = browser.BrowserSession(
+        "t", "late-run", str(tmp_path), str(tmp_path), None)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        deleting = pool.submit(threads._delete_thread_and_children, "t")
+        assert entered.wait(3)
+        registering = pool.submit(browser.BrowserManager.register, session)
+        assert not registering.done()
+        release.set()
+        deleting.result(timeout=3)
+        with pytest.raises(browser.BrowserUnavailable, match="no longer exists"):
+            registering.result(timeout=3)

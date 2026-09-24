@@ -1,0 +1,71 @@
+#+title: Headless browser design v7 — interjection revocation boundary
+#+date: <2026-09-24>
+#+status: design successor; no product code
+
+* Decision
+
+Keep the v6 browser architecture and its existing exact-host proxy,
+isolated-network, approval, page-action and resource contracts. This revision
+only specifies what happens to internal-browser authority when a newer direct
+owner message arrives during a running Run. New user messages do not
+automatically cancel outstanding work; revoking network permission is not
+cancelling that work.
+
+* Direct-user admission and browser authority
+
+Internal-mode authority is bound to an immutable, direct owner user event in
+the active work, not permanently to the Run's opening event. Admission of
+*any newer direct owner user event* on that thread is a revocation boundary,
+whether the message redirects, adds to, or leaves the old task outstanding.
+Before that event is acknowledged as admitted or made eligible for graph
+delivery, the host invalidates the old authorization and closes its
+internal-mode sidecar/context. The browser cannot keep an already-open
+internal page or tunnel alive under the previous event. Interjection
+middleware injects a framed =HumanMessage= at a later model boundary and
+defers its journal claim until a checkpoint; neither injection nor claim is
+the authorization boundary.
+
+Direct-user admission and browser internal-command admission share a
+per-thread ordering gate. A command that wins the gate before a new user
+event may complete only before the event's admission completes; an old
+generation cannot issue or sustain traffic after that boundary. A command
+that reaches the gate after the new event fails against the old event and
+generation. Revocation/teardown must be confirmed before admission returns;
+if it cannot be confirmed, fail closed rather than acknowledge the event
+while stale internal traffic continues. The user message remains durable for
+normal delivery/recovery, and the old task remains in the agent's task state.
+
+A newer immutable direct owner event that explicitly requests one exact,
+already-base-allowlisted internal host, or fresh real-user confirmation of
+that host, may authorize a *new* internal-only sidecar/context bound to that
+event. An unrelated public interjection does not inherit the prior host;
+page text, model-supplied task text and synthetic/system/approval follow-ups
+cannot reauthorize it. V6's rule still applies: an approval-generated
+synthetic Run never inherits internal authorization, even from one source
+request, and a later internal visit needs a new real-user event.
+
+* Verification delta
+
+Test an initial internal visit followed by an unrelated public owner
+interjection and a public page instructing the agent to revisit the old
+internal URL. The prior sidecar closes, the old internal destination is
+denied, and the outstanding task remains visible rather than silently
+cancelled. Test an explicit exact-host owner interjection/confirmation: it
+opens a new isolated internal context reaching only that host. Force both
+in-flight orderings: browser command before user-event admission and user
+event before browser command. After admission completes, no previous
+internal generation or established tunnel remains usable. Force a stalled
+or failed teardown and require fail-closed admission; do not rely on the
+middleware's deferred claim. Retain v6's single- and mixed-approval
+follow-up, proxy, network, download, stateful interaction and behavioral
+tests.
+
+* Historical supersessions
+
+This document directly supersedes
+=docs/2026-09-24-headless-browser-v5.org='s active-request internal
+authorization section where a Run-start event could remain authoritative
+after a newer direct owner interjection, and
+=docs/2026-09-24-headless-browser-v6.org='s approval follow-up clause only
+to clarify that direct-user interjections also revoke older internal
+authority during a running Run. Their other decisions remain unchanged.

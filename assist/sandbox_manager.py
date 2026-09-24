@@ -7,6 +7,9 @@ import threading
 import time
 import fcntl
 from contextlib import contextmanager
+from uuid import uuid4
+
+from assist.egress import runtime_state
 
 logger = logging.getLogger(__name__)
 _ANY_CONTAINER = object()
@@ -112,16 +115,26 @@ def _network_identity(network, *, isolated: bool) -> tuple[str, str]:
 
 
 @contextmanager
-def _proxy_setup_lock(map_dir: str | None):
-    if map_dir is None:
-        yield
-        return
-    with open(os.path.join(map_dir, ".proxy-setup.lock"), "a+b") as stream:
+def _proxy_setup_lock():
+    """Serialize shared Docker egress setup independently of optional grants/map."""
+    with open(os.path.join(runtime_state.runtime_directory(),
+                           ".proxy-setup.lock"), "a+b") as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         try:
             yield
         finally:
             fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def _bounded_egress_worker(argv: list[str], timeout: float = 20):
+    """A timeout kills the process that owns SDK calls and setup locks."""
+    import subprocess
+    try:
+        return subprocess.run(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("egress Docker setup timed out; generation retired") from error
 
 
 class SandboxManager:
@@ -146,12 +159,32 @@ class SandboxManager:
         """Lazily create and cache a Docker client."""
         if cls._docker_client is None:
             import docker
-            cls._docker_client = docker.from_env()
+            cls._docker_client = docker.from_env(timeout=5)
         return cls._docker_client
 
     @classmethod
     def _ensure_egress_proxy_running(cls, client) -> str:
         """Verify live network identities and serve both isolated client kinds."""
+        import docker
+        if isinstance(client, docker.DockerClient):
+            return cls._ensure_egress_proxy_bounded()
+        return cls._ensure_egress_proxy_running_direct(client)
+
+    @classmethod
+    def _ensure_egress_proxy_bounded(cls) -> str:
+        """Kill a stalled SDK worker without leaving its host locks held."""
+        import sys
+        result = _bounded_egress_worker(
+            [sys.executable, "-m", "assist.egress.runtime_worker", "proxy"])
+        if result.returncode or result.stdout.strip() != EGRESS_PROXY_NAME.encode():
+            raise RuntimeError(
+                "egress Docker setup failed: "
+                + result.stderr.decode("utf-8", errors="replace")[-1000:])
+        return EGRESS_PROXY_NAME
+
+    @classmethod
+    def _ensure_egress_proxy_running_direct(cls, client) -> str:
+        """Run inside the killable worker, or with a deterministic test double."""
         from docker.errors import APIError, NotFound
         from assist.egress.client_map import configured_directory
 
@@ -177,31 +210,113 @@ class SandboxManager:
             else:
                 approvals_dir = os.path.join(approvals_dir, APPROVALS_SUBDIR)
                 os.makedirs(approvals_dir, exist_ok=True)
-        map_dir = configured_directory()
+        try:
+            map_dir = configured_directory()
+        except (OSError, RuntimeError) as error:
+            # Browser attribution is optional for an ordinary shell sandbox.
+            # A bad browser-only map must not remove its base-list egress.
+            logger.warning("browser client map unavailable: %s", error)
+            map_dir = None
 
-        with cls._egress_lock, _proxy_setup_lock(map_dir):
+        with cls._egress_lock, _proxy_setup_lock():
+            ordinary_creation_token = None
+            browser_creation_token = None
+            for name in ((EGRESS_NETWORK, BROWSER_NETWORK)
+                         if map_dir is not None else (EGRESS_NETWORK,)):
+                pending = runtime_state.pending_creation("network", name)
+                if pending:
+                    try:
+                        candidate = client.networks.get(name)
+                    except NotFound:
+                        raise RuntimeError(
+                            f"{name} creation outcome is uncertain; retry after recovery")
+                    candidate.reload()
+                    label = (candidate.attrs.get("Labels") or {}).get(
+                        "assist.egress-generation")
+                    if label == pending:
+                        runtime_state.retire("network", candidate.id,
+                                             "incomplete create")
+                        client.networks.get(candidate.id).remove()
+                        try:
+                            client.networks.get(candidate.id)
+                        except NotFound:
+                            runtime_state.settle_creation("network", name, pending)
+                        else:
+                            raise RuntimeError(f"{name} removal is unconfirmed")
+                    elif label:
+                        # A distinct labelled successor occupies the immutable
+                        # name; the old late create cannot replace it.
+                        runtime_state.settle_creation("network", name, pending)
+                    else:
+                        raise RuntimeError(f"{name} creation outcome is uncertain")
+            pending_proxy = runtime_state.pending_creation("proxy", EGRESS_PROXY_NAME)
+            if pending_proxy:
+                try:
+                    candidate = client.containers.get(EGRESS_PROXY_NAME)
+                    candidate.reload()
+                except NotFound:
+                    raise RuntimeError("egress proxy creation outcome is uncertain")
+                label = candidate.labels.get("assist.egress-generation")
+                if label == pending_proxy:
+                    runtime_state.retire("proxy", candidate.id,
+                                         "incomplete create")
+                    client.containers.get(candidate.id).remove(force=True)
+                    try:
+                        client.containers.get(candidate.id)
+                    except NotFound:
+                        runtime_state.settle_creation("proxy", EGRESS_PROXY_NAME,
+                                                      pending_proxy)
+                    else:
+                        raise RuntimeError("egress proxy removal is unconfirmed")
+                elif label:
+                    runtime_state.settle_creation("proxy", EGRESS_PROXY_NAME,
+                                                  pending_proxy)
+                else:
+                    raise RuntimeError("egress proxy creation outcome is uncertain")
             try:
                 egress_net = client.networks.get(EGRESS_NETWORK)
             except NotFound:
+                ordinary_creation_token = uuid4().hex
+                runtime_state.begin_creation("network", EGRESS_NETWORK,
+                                             ordinary_creation_token)
                 egress_net = client.networks.create(
                     EGRESS_NETWORK, driver="bridge", internal=True,
+                    labels={"assist.egress-generation": ordinary_creation_token},
                 )
                 logger.info("Created egress network %s (internal)", EGRESS_NETWORK)
             ordinary_id, ordinary_cidr = _network_identity(
                 egress_net, isolated=False)
+            if ordinary_creation_token:
+                if (egress_net.attrs.get("Labels") or {}).get(
+                        "assist.egress-generation") != ordinary_creation_token:
+                    raise RuntimeError("new egress network generation changed")
+                runtime_state.settle_creation("network", EGRESS_NETWORK,
+                                              ordinary_creation_token)
+            runtime_state.assert_admissible("network", ordinary_id)
             browser_net = None
             browser_id = browser_cidr = ""
             if map_dir is not None:
                 try:
                     browser_net = client.networks.get(BROWSER_NETWORK)
                 except NotFound:
+                    browser_creation_token = uuid4().hex
+                    runtime_state.begin_creation("network", BROWSER_NETWORK,
+                                                 browser_creation_token)
                     browser_net = client.networks.create(
                         BROWSER_NETWORK, driver="bridge", internal=True,
                         enable_ipv6=False,
                         options={"com.docker.network.bridge.gateway_mode_ipv4":
-                                 "isolated"})
+                                 "isolated"},
+                        labels={"assist.egress-generation": browser_creation_token})
                 browser_id, browser_cidr = _network_identity(
                     browser_net, isolated=True)
+                if browser_creation_token:
+                    if (browser_net.attrs.get("Labels") or {}).get(
+                            "assist.egress-generation") != browser_creation_token:
+                        raise RuntimeError("new browser network generation changed")
+                    runtime_state.settle_creation("network", BROWSER_NETWORK,
+                                                  browser_creation_token)
+                runtime_state.assert_admissible("network", browser_id)
                 if ipaddress.ip_network(ordinary_cidr).overlaps(
                         ipaddress.ip_network(browser_cidr)):
                     raise RuntimeError("browser and sandbox networks overlap")
@@ -215,9 +330,14 @@ class SandboxManager:
                 existing.reload()
             except NotFound:
                 pass
+            prior_retirement = (runtime_state.retirement("proxy", existing.id)
+                                if existing is not None else None)
+            if prior_retirement not in (None, "remove"):
+                raise RuntimeError("egress proxy generation is retired")
 
             needs_recreate = (
                 existing is None
+                or prior_retirement is not None
                 or existing.status != "running"
                 or existing.labels.get("assist.egress-allowlist-hash") != allowlist_hash
             )
@@ -233,10 +353,11 @@ class SandboxManager:
 
             if existing is not None:
                 try:
-                    existing.remove(force=True)
+                    runtime_state.retire("proxy", existing.id, "remove")
+                    client.containers.get(existing.id).remove(force=True)
                     logger.info("Removed stale egress proxy %s", existing.id[:12])
                 except APIError as e:
-                    logger.warning("Could not remove existing egress proxy: %s", e)
+                    raise RuntimeError("old egress proxy removal is unconfirmed") from e
 
             from assist.egress.guidance import EGRESS_DENY_BODY, EGRESS_THROTTLE_BODY
             volumes = {}
@@ -244,6 +365,8 @@ class SandboxManager:
                 volumes[approvals_dir] = {"bind": "/approvals", "mode": "ro"}
             if map_dir:
                 volumes[map_dir] = {"bind": "/client-map", "mode": "ro"}
+            token = uuid4().hex
+            runtime_state.begin_creation("proxy", EGRESS_PROXY_NAME, token)
             proxy = client.containers.run(
                 EGRESS_PROXY_IMAGE,
                 name=EGRESS_PROXY_NAME,
@@ -262,24 +385,36 @@ class SandboxManager:
                 labels={
                     "assist.egress-proxy": "true",
                     "assist.egress-allowlist-hash": allowlist_hash,
+                    "assist.egress-generation": token,
                 },
                 **({"volumes": volumes} if volumes else {}),
             )
+            runtime_state.retire("network", ordinary_id, "connect:" + proxy.id)
             try:
                 egress_net.connect(proxy)
             except APIError as e:
                 if "already exists" not in str(e).lower():
                     raise
+            proxy.reload()
+            attached = proxy.attrs.get("NetworkSettings", {}).get("Networks", {})
+            if attached.get(EGRESS_NETWORK, {}).get("NetworkID") != ordinary_id:
+                raise RuntimeError("egress proxy ordinary attachment differs from policy")
+            runtime_state.settle_retirement("network", ordinary_id,
+                                            "connect:" + proxy.id)
             if browser_net is not None:
+                runtime_state.retire("network", browser_id, "connect:" + proxy.id)
                 browser_net.connect(proxy)
             proxy.reload()
             attached = proxy.attrs.get("NetworkSettings", {}).get("Networks", {})
             if (attached.get(EGRESS_NETWORK, {}).get("NetworkID") != ordinary_id
                     or (browser_net is not None and
                         attached.get(BROWSER_NETWORK, {}).get("NetworkID") != browser_id)):
-                proxy.remove(force=True)
                 raise RuntimeError("egress proxy network attachment differs from policy")
+            if browser_net is not None:
+                runtime_state.settle_retirement("network", browser_id,
+                                                "connect:" + proxy.id)
             cls._wait_for_egress_proxy_ready(proxy)
+            runtime_state.settle_creation("proxy", EGRESS_PROXY_NAME, token)
             logger.info(
                 "Started egress proxy %s with %d allowlist entries (hash=%s)",
                 proxy.id[:12], len(allowlist), allowlist_hash,
@@ -385,6 +520,9 @@ class SandboxManager:
         # container's run user so ownership and execution stay aligned.
         user_arg = f"{st.st_uid}:{st.st_gid}"
 
+        runtime_state.assert_outside_mounts(
+            work_dir, os.path.join(os.path.dirname(work_dir), "tmp"), agent_dir)
+
         # Egress proxy bring-up runs OUTSIDE the broad-except below.
         # If the allowlist file is missing, or the egress network
         # exists but isn't internal=True, or the proxy image is
@@ -404,17 +542,14 @@ class SandboxManager:
 
         try:
             proxy_url = f"http://{EGRESS_PROXY_NAME}:{EGRESS_PROXY_PORT}"
-            # The sandbox is on an internal Docker network — no host-gateway
-            # route, no NAT.  The only reachable name on this network is
-            # ``assist-egress-proxy``, which terminates allowlisted CONNECT
-            # tunnels and forwards allowlisted HTTP requests.
+            # This ordinary shell sandbox is on an internal Docker network;
+            # its configured HTTP(S) clients use the shared egress proxy.
+            # The browser uses a separate isolated-gateway bridge to block
+            # direct host and upstream routes, including raw TCP/UDP.
             #
-            # NO_PROXY is *not* set: with internal=True there is no direct
-            # path to bypass even for localhost references — every byte
-            # must traverse the proxy.  ASSIST_MODEL_URL (rewritten to
-            # host.docker.internal) reaches the host via the proxy's
-            # bridge-side connection; ``host.docker.internal`` is in the
-            # default allowlist for that reason.
+            # NO_PROXY is not set: configured HTTP(S) client traffic uses
+            # the proxy. ASSIST_MODEL_URL (rewritten to host.docker.internal)
+            # reaches the host through that proxy when allowlisted.
             sandbox_env = {
                 "HTTPS_PROXY": proxy_url,
                 "HTTP_PROXY": proxy_url,

@@ -11,17 +11,23 @@ import os
 import re
 import selectors
 import subprocess
+import sys
 import threading
 import time
+import weakref
+from contextlib import contextmanager
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 from assist.egress.client_map import (
-    ClientRecord, configured_directory, forget_client, record_client)
+    ClientRecord, configured_directory, forget_client,
+    prune_absent_browser_clients, record_client)
+from assist.egress import runtime_state
 from assist.sandbox_manager import (
     BROWSER_NETWORK, EGRESS_PROXY_NAME, SandboxManager, _load_egress_allowlist,
     _network_identity)
+from assist.run_service import RunService
 
 logger = logging.getLogger(__name__)
 BROWSER_IMAGE = "assist-browser"
@@ -39,6 +45,7 @@ class BrowserUserRequest:
     event_id: str
     work_id: str
     text: str
+    admission_sequence: int = 0
 
 
 def _url_host(url: str) -> str:
@@ -47,8 +54,8 @@ def _url_host(url: str) -> str:
     try:
         parsed = urlsplit(url)
         if (parsed.scheme not in {"http", "https"} or not parsed.hostname
-                or parsed.username or parsed.password
-                or not 1 <= (parsed.port or 80) <= 65535):
+                or parsed.username is not None or parsed.password is not None
+                or (parsed.port is not None and not 1 <= parsed.port <= 65535)):
             raise ValueError
     except ValueError as error:
         raise BrowserUnavailable("use an HTTP(S) URL without userinfo") from error
@@ -73,7 +80,7 @@ def _user_requested_host(message: str | None, host: str) -> bool:
     if re.search(r"['\"`]|\b(?:not|never|avoid|without|don.t|cannot|can.t)\b",
                  message, re.I):
         return False
-    pattern = (r"^\s*(?:(?:please|can you|could you|would you)\s+)?"
+    pattern = (r"^\s*(?:yes,\s*)?(?:(?:please|can you|could you|would you)\s+)?"
                r"(?:visit|open|browse|go to|look at|inspect|check|show)\s+"
                r"(?:(?:me\s+)?(?:the\s+)?"
                r"(?:site|website|page|dashboard)\s+(?:(?:at|on)\s+)?)?"
@@ -98,6 +105,7 @@ def _bounded_cli(argv: list[str], *, payload: bytes = b"",
     with selectors.DefaultSelector() as selector:
         selector.register(process.stdout, selectors.EVENT_READ)
         if payload:
+            os.set_blocking(process.stdin.fileno(), False)
             selector.register(process.stdin, selectors.EVENT_WRITE)
         try:
             while selector.get_map():
@@ -111,6 +119,8 @@ def _bounded_cli(argv: list[str], *, payload: bytes = b"",
                     if key.fileobj is process.stdin:
                         try:
                             sent += os.write(process.stdin.fileno(), payload[sent:sent + 8192])
+                        except BlockingIOError:
+                            continue
                         except BrokenPipeError as error:
                             raise BrowserUnavailable("browser sidecar command failed") from error
                         if sent == len(payload):
@@ -155,11 +165,103 @@ def _docker_download(container_id: str, source: str) -> bytes:
 
 def _kill_container(container_id: str) -> None:
     try:
+        killed = subprocess.run(["docker", "kill", container_id],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=5, check=False)
+        if killed.returncode:
+            logger.warning("sidecar kill rc=%s stderr=%r", killed.returncode,
+                           killed.stderr[-200:])
+    except (OSError, subprocess.TimeoutExpired):
+        logger.warning("browser sidecar kill could not complete")
+
+
+def _kill_container_confirmed(container_id: str) -> None:
+    """Stop one exact sidecar; uncertain teardown cannot release user admission."""
+    try:
         subprocess.run(["docker", "kill", container_id],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        timeout=5, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        logger.warning("browser sidecar kill could not complete")
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise BrowserUnavailable("browser sidecar teardown is unconfirmed") from error
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            inspected = subprocess.run(
+                ["docker", "inspect", "--format", "{{.State.Running}}", container_id],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2,
+                check=False)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise BrowserUnavailable("browser sidecar teardown is unconfirmed") from error
+        if inspected.returncode == 0 and inspected.stdout.strip() == b"false":
+            return
+        if (inspected.returncode != 0 and
+                (b"no such object" in inspected.stderr.lower()
+                 or b"no such container" in inspected.stderr.lower())):
+            return
+        time.sleep(0.05)
+    logger.warning("sidecar teardown unresolved: rc=%s stdout=%r stderr=%r",
+                   inspected.returncode, inspected.stdout[-200:],
+                   inspected.stderr[-200:])
+    raise BrowserUnavailable("browser sidecar teardown is unconfirmed")
+
+
+def _launch_sidecar_direct(request: dict, *, ensure_proxy: bool = True):
+    """Docker SDK work performed only in a disposable host worker process."""
+    client = SandboxManager._get_docker_client()
+    BrowserManager.prune_absent_clients(request["map_dir"])
+    if ensure_proxy:
+        SandboxManager._ensure_egress_proxy_running_direct(client)
+    network = client.networks.get(BROWSER_NETWORK)
+    network_id, _ = _network_identity(network, isolated=True)
+    runtime_state.assert_admissible("network", network_id)
+    proxy = client.containers.get(EGRESS_PROXY_NAME)
+    proxy.reload()
+    runtime_state.assert_admissible("proxy", proxy.id)
+    attached = proxy.attrs.get("NetworkSettings", {}).get("Networks", {})
+    if attached.get(BROWSER_NETWORK, {}).get("NetworkID") != network_id:
+        raise BrowserUnavailable("egress proxy is not on the browser network")
+    if request["remaining"] <= 0:
+        raise BrowserUnavailable("browser Run deadline expired")
+    with open(SECCOMP_PROFILE, encoding="utf-8") as profile:
+        seccomp = profile.read()
+    container = client.containers.run(
+        BROWSER_IMAGE, detach=True, network=BROWSER_NETWORK,
+        name=f"assist-browser-{uuid4().hex[:16]}",
+        user="10001:10001", read_only=True, remove=True,
+        mem_limit="1g", pids_limit=128, nano_cpus=1_000_000_000,
+        shm_size="64m", cap_drop=["ALL"],
+        security_opt=[f"seccomp={seccomp}", "no-new-privileges"],
+        tmpfs={
+            "/run": "rw,nosuid,size=1048576,uid=10001,gid=10001",
+            "/tmp": "rw,nosuid,size=33554432,uid=10001,gid=10001",
+            "/home/browser": "rw,nosuid,size=134217728,uid=10001,gid=10001",
+            "/downloads": "rw,nosuid,size=33554432,uid=10001,gid=10001",
+        },
+        environment={"BROWSER_SESSION_TOKEN": request["token"],
+                     "BROWSER_TTL_SECONDS": str(request["remaining"])},
+        labels={"assist.browser": "true", "assist.browser-root": request["label_root"],
+                "assist.browser-run": request["run_id"],
+                "assist.browser-owner-pid": str(request["owner_pid"]),
+                "assist.browser-owner-start": request["owner_start"]},
+    )
+    container.reload()
+    ip = container.attrs["NetworkSettings"]["Networks"][BROWSER_NETWORK]["IPAddress"]
+    if not ip:
+        raise BrowserUnavailable("browser sidecar has no network identity")
+    return {"generation": container.id, "ip": ip}, container
+
+
+def _launch_sidecar_bounded(request: dict, timeout: float) -> dict:
+    payload = json.dumps(request, separators=(",", ":")).encode()
+    output = _bounded_cli(
+        [sys.executable, "-m", "assist.browser.startup_worker"],
+        payload=payload, limit=4096, timeout=timeout)
+    result = json.loads(output)
+    if (not isinstance(result, dict) or
+            not isinstance(result.get("generation"), str) or
+            not isinstance(result.get("ip"), str)):
+        raise BrowserUnavailable("browser startup returned invalid identity")
+    return result
 
 
 @dataclass
@@ -182,80 +284,67 @@ class BrowserSession:
         self.threads_root = threads_root
         self.user_request = user_request
         self.work_id = work_id
+        if (user_request is not None and work_id is not None
+                and user_request.work_id != work_id):
+            raise BrowserUnavailable("browser request belongs to another work")
         self.token = uuid4().hex
         self.deadline = None
         self.identity: _ContainerIdentity | None = None
+        self.startup_uncertain = False
         self.closed = False
         self._lock = threading.RLock()
 
     def _start(self, mode: str, internal_host: str | None):
+        if self.startup_uncertain:
+            raise BrowserUnavailable("browser startup outcome is unconfirmed for this Run")
         map_dir = configured_directory()
         if map_dir is None:
             raise BrowserUnavailable("browser client-map directory is not configured")
-        client = SandboxManager._get_docker_client()
-        SandboxManager._ensure_egress_proxy_running(client)
-        network = client.networks.get(BROWSER_NETWORK)
-        network_id, _ = _network_identity(network, isolated=True)
-        proxy = client.containers.get(EGRESS_PROXY_NAME)
-        proxy.reload()
-        attached = proxy.attrs.get("NetworkSettings", {}).get("Networks", {})
-        if attached.get(BROWSER_NETWORK, {}).get("NetworkID") != network_id:
-            raise BrowserUnavailable("egress proxy is not on the browser network")
         now = time.monotonic()
-        if self.deadline is None:
-            self.deadline = now + 240
         remaining = math.ceil(self.deadline - now)
         if remaining <= 0:
             raise BrowserUnavailable("browser Run deadline expired")
         label_root = hashlib.sha256(
             os.path.realpath(self.threads_root).encode()).hexdigest()[:20]
-        with open(SECCOMP_PROFILE, encoding="utf-8") as profile:
-            seccomp = profile.read()
-        container = client.containers.run(
-            BROWSER_IMAGE, detach=True, network=BROWSER_NETWORK,
-            name=f"assist-browser-{uuid4().hex[:16]}",
-            user="10001:10001", read_only=True, remove=True,
-            mem_limit="1g", pids_limit=128, nano_cpus=1_000_000_000,
-            shm_size="64m", cap_drop=["ALL"],
-            security_opt=[f"seccomp={seccomp}", "no-new-privileges"],
-            tmpfs={
-                "/run": "rw,nosuid,size=1048576,uid=10001,gid=10001",
-                "/tmp": "rw,nosuid,size=33554432,uid=10001,gid=10001",
-                "/home/browser": "rw,nosuid,size=134217728,uid=10001,gid=10001",
-                "/downloads": "rw,nosuid,size=33554432,uid=10001,gid=10001",
-            },
-            environment={"BROWSER_SESSION_TOKEN": self.token,
-                         "BROWSER_TTL_SECONDS": str(remaining)},
-            labels={"assist.browser": "true", "assist.browser-root": label_root,
-                    "assist.browser-run": self.run_id,
-                    "assist.browser-owner-pid": str(os.getpid()),
-                    "assist.browser-owner-start": _owner_start()},
-        )
+        request = {"token": self.token, "remaining": remaining,
+                   "label_root": label_root, "run_id": self.run_id,
+                   "owner_pid": os.getpid(), "owner_start": _owner_start(),
+                   "map_dir": map_dir}
         try:
-            container.reload()
-            ip = container.attrs["NetworkSettings"]["Networks"][BROWSER_NETWORK]["IPAddress"]
-            if not ip:
-                raise BrowserUnavailable("browser sidecar has no network identity")
-            record_client(map_dir, ip, ClientRecord(
-                self.thread_id, container.id, "browser", mode, internal_host))
+            result = _launch_sidecar_bounded(
+                request, timeout=min(20, max(0.1, self.deadline - now)))
         except Exception:
-            _kill_container(container.id)
+            # Docker may finish a create after its worker is cancelled. A
+            # late sidecar is proxy-denied, but this Run must not accumulate
+            # another uncertain sidecar before its fixed PID 1 TTL expires.
+            self.startup_uncertain = True
+            raise
+        generation, ip = result["generation"], result["ip"]
+        try:
+            if time.monotonic() >= self.deadline:
+                raise BrowserUnavailable("browser Run deadline expired")
+            record_client(map_dir, ip, ClientRecord(
+                self.thread_id, generation, "browser", mode, internal_host))
+        except Exception:
+            self.startup_uncertain = True
+            _kill_container(generation)
             raise
         self.identity = _ContainerIdentity(
-            container, map_dir, ip, container.id, mode, internal_host)
+            None, map_dir, ip, generation, mode, internal_host)
 
     def _stop(self):
-        identity, self.identity = self.identity, None
+        identity = self.identity
         if identity is None:
             return
-        try:
-            _kill_container(identity.generation)
-        except Exception:
-            logger.warning("browser container teardown failed", exc_info=True)
+        forgotten_error = None
         try:
             forget_client(identity.map_dir, identity.ip, identity.generation)
-        except Exception:
-            logger.warning("browser client-map teardown failed", exc_info=True)
+        except Exception as error:
+            forgotten_error = error
+        _kill_container_confirmed(identity.generation)
+        if forgotten_error is not None:
+            raise BrowserUnavailable("browser attribution teardown is unconfirmed") from forgotten_error
+        self.identity = None
 
     def close(self):
         with self._lock:
@@ -268,8 +357,7 @@ class BrowserSession:
         if _internal_host(host):
             if host not in allowlist:
                 raise BrowserUnavailable("internal host is outside the base allowlist")
-            if (self.user_request is None or self.work_id is None
-                    or self.user_request.work_id != self.work_id
+            if (self.user_request is None
                     or not _user_requested_host(self.user_request.text, host)):
                 raise BrowserUnavailable(
                     "internal browsing needs a fresh user request naming this exact host")
@@ -283,11 +371,55 @@ class BrowserSession:
         if self.identity is None:
             self._start(mode, internal_host)
 
-    def command(self, operation: str, **args):
+    def _direct_authority_state(self, bound_sequence):
+        try:
+            runs = RunService(self.threads_root).list(self.thread_id)
+        except Exception as error:
+            raise BrowserUnavailable("direct-user authority is unavailable") from error
+        if not runs and self.user_request and self.user_request.admission_sequence:
+            raise BrowserUnavailable("direct-user authority is unavailable")
+        direct = [run for run in runs if run.user_event_id == run.id
+                  and run.origin is None and run.sender is None]
+        latest = max((run.admission_sequence for run in direct), default=0)
+        bound = next((run for run in direct
+                      if run.admission_sequence == bound_sequence), None)
+        return latest, bound
+
+    def _fence_internal_command(self, operation, args):
+        internal = (self.identity is not None and self.identity.mode == "internal")
+        if operation == "open":
+            internal = internal or _internal_host(_url_host(args["url"]))
+        if internal:
+            bound = self.user_request.admission_sequence if self.user_request else -1
+            latest, source = self._direct_authority_state(bound)
+            if (latest > bound or (bound > 0 and
+                                   (source is None or source.status == "revocation_pending"))):
+                raise BrowserUnavailable("newer user message revoked internal browsing")
+
+    def revoke_internal(self):
+        """Under the thread gate, destroy internal state before event promotion."""
         with self._lock:
+            self.user_request = None
+            if self.identity is None or self.identity.mode != "internal":
+                return False
+            self._stop()
+            return True
+
+    def rebind_user_request(self, request: BrowserUserRequest):
+        """Bind the same tool session to one promoted direct owner event."""
+        with self._lock:
+            if self.closed or (self.identity and self.identity.mode == "internal"):
+                raise BrowserUnavailable("old internal browser is not closed")
+            self.user_request = request
+
+    def command(self, operation: str, **args):
+        with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
             if self.closed:
                 raise BrowserUnavailable("browser Run has ended")
+            self._fence_internal_command(operation, args)
             if operation == "open":
+                if self.deadline is None:
+                    self.deadline = time.monotonic() + 240
                 self._ensure_mode(args["url"])
             elif self.identity is None:
                 raise BrowserUnavailable("open a page first")
@@ -309,7 +441,7 @@ class BrowserSession:
                 raise
 
     def save_download(self, download_id: str, filename: str | None = None):
-        with self._lock:
+        with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
             return self._save_download_locked(download_id, filename)
 
     def _save_download_locked(self, download_id: str, filename: str | None):
@@ -358,47 +490,106 @@ class BrowserSession:
 class BrowserManager:
     _lock = threading.Lock()
     _sessions: dict[str, BrowserSession] = {}
+    _gate_lock = threading.Lock()
+    _gates = weakref.WeakValueDictionary()
+
+    @classmethod
+    def thread_gate(cls, thread_id: str):
+        with cls._gate_lock:
+            gate = cls._gates.get(thread_id)
+            if gate is None:
+                gate = threading.RLock()
+                cls._gates[thread_id] = gate
+            return gate
+
+    @classmethod
+    @contextmanager
+    def bounded_thread_gate(cls, thread_id: str):
+        gate = cls.thread_gate(thread_id)
+        if not gate.acquire(timeout=20):
+            raise BrowserUnavailable("browser thread gate timed out")
+        try:
+            yield
+        finally:
+            gate.release()
+
+    @classmethod
+    def current_session(cls, thread_id: str) -> BrowserSession | None:
+        with cls._lock:
+            return cls._sessions.get(thread_id)
+
+    @classmethod
+    def confirm_generation_stopped(cls, generation: str) -> None:
+        _kill_container_confirmed(generation)
+
+    @classmethod
+    def prune_absent_clients(cls, map_dir: str):
+        def live_generations():
+            output = _bounded_cli(
+                ["docker", "ps", "--no-trunc", "--filter", "label=assist.browser=true",
+                 "--format", "{{.ID}}"], limit=65536, timeout=5)
+            return set(output.decode("ascii").splitlines())
+
+        return prune_absent_browser_clients(map_dir, live_generations)
 
     @classmethod
     def register(cls, session: BrowserSession):
-        with cls._lock:
+        with cls.bounded_thread_gate(session.thread_id), cls._lock:
+            if not os.path.isdir(os.path.join(session.threads_root, session.thread_id)):
+                raise BrowserUnavailable("browser thread no longer exists")
             if session.thread_id in cls._sessions:
                 raise BrowserUnavailable("thread already has a browser Run")
             cls._sessions[session.thread_id] = session
 
     @classmethod
     def cleanup(cls, thread_id: str, expected: BrowserSession | None = None):
-        with cls._lock:
-            current = cls._sessions.get(thread_id)
-            if expected is not None and current is not expected:
-                return
-            cls._sessions.pop(thread_id, None)
-        if current:
-            current.close()
+        with cls.bounded_thread_gate(thread_id):
+            with cls._lock:
+                current = cls._sessions.get(thread_id)
+                if expected is not None and current is not expected:
+                    return
+            if current:
+                current.close()
+                with cls._lock:
+                    if cls._sessions.get(thread_id) is current:
+                        cls._sessions.pop(thread_id, None)
 
     @classmethod
     def cleanup_all(cls):
         with cls._lock:
             sessions = list(cls._sessions.values())
-            cls._sessions.clear()
         for session in sessions:
-            session.close()
+            try:
+                cls.cleanup(session.thread_id, session)
+            except Exception:
+                logger.warning("browser session teardown remains unconfirmed",
+                               exc_info=True)
 
     @classmethod
     def reap_orphans(cls, threads_root: str):
-        """Reap only this deployment's sidecars whose owning process is gone."""
+        """Reap this deployment's absent-owner sidecars with bounded Docker CLI."""
         label_root = hashlib.sha256(
             os.path.realpath(threads_root).encode()).hexdigest()[:20]
         try:
-            client = SandboxManager._get_docker_client()
-            candidates = client.containers.list(filters={
-                "label": ["assist.browser=true", f"assist.browser-root={label_root}"]})
+            output = _bounded_cli(
+                ["docker", "ps", "--no-trunc", "--filter", "label=assist.browser=true",
+                 "--filter", f"label=assist.browser-root={label_root}",
+                 "--format", "{{.ID}}"], limit=65536, timeout=5)
         except Exception as error:
             logger.warning("browser orphan scan skipped: %s", error)
             return
-        map_dir = configured_directory()
-        for container in candidates:
-            labels = container.labels
+        try:
+            map_dir = configured_directory()
+        except (OSError, RuntimeError):
+            map_dir = None
+        for generation in output.decode("ascii").splitlines():
+            try:
+                labels = json.loads(_bounded_cli(
+                    ["docker", "inspect", "--format", "{{json .Config.Labels}}",
+                     generation], limit=8192, timeout=5))
+            except Exception:
+                logger.warning("browser orphan labels unavailable", exc_info=True)
+                continue
             try:
                 pid = int(labels["assist.browser-owner-pid"])
                 with open(f"/proc/{pid}/stat", encoding="ascii") as stream:
@@ -407,16 +598,26 @@ class BrowserManager:
                     continue
             except (ValueError, KeyError, FileNotFoundError, ProcessLookupError):
                 pass
+            except (OSError, TypeError):
+                logger.warning("browser orphan owner check unavailable", exc_info=True)
+                continue
             try:
-                container.kill()
                 if map_dir is not None:
-                    ip = (container.attrs.get("NetworkSettings", {})
-                          .get("Networks", {}).get(BROWSER_NETWORK, {})
-                          .get("IPAddress"))
+                    networks = json.loads(_bounded_cli(
+                        ["docker", "inspect", "--format",
+                         "{{json .NetworkSettings.Networks}}", generation],
+                        limit=16384, timeout=5))
+                    ip = (networks.get(BROWSER_NETWORK) or {}).get("IPAddress")
                     if ip:
-                        forget_client(map_dir, ip, container.id)
+                        forget_client(map_dir, ip, generation)
+                _kill_container_confirmed(generation)
             except Exception:
                 logger.warning("browser orphan reap failed", exc_info=True)
+        if map_dir is not None:
+            try:
+                cls.prune_absent_clients(map_dir)
+            except Exception:
+                logger.warning("browser client-map prune failed", exc_info=True)
 
 
 def browser_tools(session: BrowserSession):

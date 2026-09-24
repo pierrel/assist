@@ -60,6 +60,11 @@ class TestEnsureEgressProxy(TestCase):
     def setUp(self):
         SandboxManager._docker_client = None
         SandboxManager._containers.clear()
+        self.runtime = tempfile.TemporaryDirectory(prefix="egress-ledger-test-")
+        self.addCleanup(self.runtime.cleanup)
+        env = patch.dict(os.environ, {"ASSIST_EGRESS_RUNTIME_DIR": self.runtime.name})
+        env.start()
+        self.addCleanup(env.stop)
 
     def tearDown(self):
         SandboxManager._docker_client = None
@@ -82,6 +87,10 @@ class TestEnsureEgressProxy(TestCase):
         else:
             client.networks.get.side_effect = NotFound("no network")
             client.networks.create.return_value = net
+            def create_network(_name, **kwargs):
+                net.attrs["Labels"] = kwargs.get("labels", {})
+                return net
+            client.networks.create.side_effect = create_network
 
         if proxy is None:
             client.containers.get.side_effect = NotFound("no proxy")
@@ -96,7 +105,11 @@ class TestEnsureEgressProxy(TestCase):
         # "listening on".  Without this, the wait blocks for 10s and
         # then raises — which would make every test slow and noisy.
         new_proxy.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        def create_proxy(_image, **kwargs):
+            new_proxy.labels = kwargs.get("labels", {})
+            return new_proxy
         client.containers.run.return_value = new_proxy
+        client.containers.run.side_effect = create_proxy
         if proxy is not None:
             proxy.attrs = new_proxy.attrs
         return client
@@ -113,9 +126,11 @@ class TestEnsureEgressProxy(TestCase):
 
         SandboxManager._ensure_egress_proxy_running(client)
 
-        client.networks.create.assert_called_once_with(
-            EGRESS_NETWORK, driver="bridge", internal=True,
-        )
+        args, kwargs = client.networks.create.call_args
+        self.assertEqual(args, (EGRESS_NETWORK,))
+        self.assertEqual(kwargs["driver"], "bridge")
+        self.assertTrue(kwargs["internal"])
+        self.assertTrue(kwargs["labels"]["assist.egress-generation"])
 
     def test_creates_proxy_when_absent(self):
         client = self._make_client()
@@ -227,6 +242,11 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
+        self.runtime = tempfile.TemporaryDirectory(prefix="egress-ledger-test-")
+        self.addCleanup(self.runtime.cleanup)
+        env = patch.dict(os.environ, {"ASSIST_EGRESS_RUNTIME_DIR": self.runtime.name})
+        env.start()
+        self.addCleanup(env.stop)
         SandboxManager._docker_client = None
         SandboxManager._containers.clear()
 

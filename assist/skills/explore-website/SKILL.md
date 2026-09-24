@@ -1,14 +1,16 @@
 ---
 name: explore-website
-description: "Explore ONE specific website to find and download a file — a manual, PDF, spec sheet, dataset, image, export. Navigate with read_url, download with curl. EXAMPLES — 'download the user manual PDF from the fellow website'; 'get the CSV linked on this vendor dashboard page'; 'save the spec sheet from acme.com/products/x'. This is NOT general web research (that's the research agent, which searches). MUST load before fetching pages or files from a specific website with read_url or curl."
+description: "Explore ONE specific website to find and download a file — a manual, PDF, spec sheet, dataset, image, export. For static links navigate with read_url and download with curl; JavaScript controls use browse-website and browser_save_download. EXAMPLES — 'download the user manual PDF from the fellow website'; 'get the CSV linked on this vendor dashboard page'; 'save the spec sheet from acme.com/products/x'. This is NOT general web research (that's the research agent, which searches). MUST load before fetching pages or files from a specific website with read_url or curl."
 allowed-tools: read_url
 ---
 
-# Explore a website — read to navigate, curl to download
+# Explore a website — static links or rendered controls
 
 You have a specific website (or a page URL) and need to find and download one
-or more files from it. The rule is simple: **`read_url` finds; `curl`
-downloads.** Never swap them.
+or more files from it. For a static page, **`read_url` finds; `curl`
+downloads.** Do not swap those roles. If JavaScript hides the links or a
+button starts the download, load `browse-website`, use its browser controls,
+and save the returned download ID with `browser_save_download` instead.
 
 ## The failure this skill exists to prevent — read this first
 

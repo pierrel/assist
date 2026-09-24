@@ -22,7 +22,7 @@ import threading
 import time
 import urllib.parse
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import markdown
 import requests
@@ -970,20 +970,42 @@ def render_thread(
     # sent again while the first is on screen hides its queued bubble until
     # the first is claimed — cosmetic, self-resolving.)
     _journal_entries = []
+    _visible_runs = []
     if history_before is None:
-        _journal_entries = [PendingMessage(
-            thread_id=run.thread_id, text=run.text or "", sender=run.sender,
-            rider=run.rider, enqueued_at=run.created_at, origin=run.origin, id=run.id)
-            for run in _runs().peek(tid)
-            if run.status == "pending" and run.text]
+        _visible_runs = _runs().peek(tid)
+        _journal_entries = [run for run in _visible_runs
+                            if run.status in {"pending", "revocation_pending"}
+                            and run.text]
     for r in ([r for r in _journal_entries
                if r.origin is None and r.text not in seen_interjections]
               if history_before is None else []):
+        held = r.status == "revocation_pending"
+        badge = "queued · browser safety reset" if held else "queued"
+        detail = ""
+        if held:
+            detail = ("<div class=\"content\" style=\"font-size:.8rem;\">"
+                      "Not yet delivered. "
+                      + html.escape(r.error or "Closing the previous internal browser")
+                      + ("; retry after " + html.escape(r.revocation_retry_at)
+                         if r.revocation_retry_at else "") + "</div>")
         rendered.insert(0, (
             '<div class="msg user" style="opacity:.8;"><div class="role">user'
             '<span style="margin-left:.5rem; color:#9ca3af; font-size:.75rem;'
-            'font-weight:normal;">queued</span></div><div class="content">'
-            f'{html.escape(r.text).replace(chr(10), "<br/>")}</div></div>'))
+            f'font-weight:normal;">{badge}</span></div><div class="content">'
+            f'{html.escape(r.text).replace(chr(10), "<br/>")}</div>{detail}</div>'))
+    notices = [run for run in _visible_runs if run.browser_reset_notice]
+    if notices:
+        latest = notices[-1]
+        prior = next((run for run in _visible_runs
+                      if run.id == latest.browser_reset_run_id), None)
+        prior_status = prior.status if prior else "unavailable"
+        rendered.insert(0, (
+            '<div class="msg tools"><div class="content">'
+            'Internal browsing stopped; page and form state was lost. '
+            'The earlier task was not canceled by this safety reset '
+            f'(current Run status: {html.escape(prior_status)}). '
+            'A fresh exact-host request is needed unless the new message named that host.'
+            '</div></div>'))
     rendered_body = "\n".join(rendered) or "<p><em>No messages yet.</em></p>"
     cursor_attr = (f' data-history-cursor="{html.escape(history_cursor, quote=True)}"'
                    if history_cursor else "")
@@ -1838,6 +1860,19 @@ def _frame_interjection(rec: "PendingMessage") -> str:
         guide += (" Review your outstanding subagent tasks with list_async_tasks, "
                   "then deliberately keep, update, or cancel them if this message "
                   "changes their relevance.")
+    try:
+        admitted = _runs().get(rec.thread_id, rec.id)
+        if admitted.browser_reset_notice:
+            prior = (_runs().get(rec.thread_id, admitted.browser_reset_run_id)
+                     if admitted.browser_reset_run_id else None)
+            state = prior.status if prior else "unavailable"
+            guide += (" Trusted browser safety reset: internal browsing stopped; "
+                      "page and form state was lost. The earlier task was not "
+                      f"canceled by this reset; its Run status is {state}. "
+                      "A new exact-host user request is needed unless this direct "
+                      "message itself names that host.")
+    except RunNotFound:
+        pass
     return _INTERJECTION_FRAME + rec.text + guide + ")"
 
 
@@ -2092,7 +2127,8 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 cancel_pending=False, max_runs=None,
                 max_pending=None, multitask_strategy="enqueue",
                 delegate_user_urls=(), location: LocationSnapshot | None = None,
-                user_origin: bool = False, user_event_id: str | None = None) -> Run:
+                user_origin: bool = False, user_event_id: str | None = None,
+                revocation_pending: bool = False) -> Run:
     """Commit one web turn before placing its id on a dispatch queue."""
     return _runs().create(
         tid, assistant_id, text, run_id=run_id, work_id=work_id, mode=mode,
@@ -2105,7 +2141,8 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
         max_pending=max_pending, multitask_strategy=multitask_strategy,
         delegate_user_urls=delegate_user_urls,
         location=_location_to_fields(location) if location else None,
-        user_origin=user_origin, user_event_id=user_event_id)
+        user_origin=user_origin, user_event_id=user_event_id,
+        revocation_pending=revocation_pending)
 
 
 def _publish_phone_text(tid: str, work_id: str, text: str) -> None:
@@ -2684,7 +2721,8 @@ def _browser_user_request(run: Run | None, run_history: list[Run]) -> BrowserUse
     if any(prior.user_event_id == prior.id and prior.work_id == run.work_id
            for prior in run_history[source_position + 1:run_position + 1]):
         return None
-    return BrowserUserRequest(source.id, source.work_id, source.text)
+    return BrowserUserRequest(
+        source.id, source.work_id, source.text, source.admission_sequence)
 
 
 def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
@@ -3522,6 +3560,92 @@ def _mark_pending(tid: str, text: str, busy: bool,
 
 
 _RUN_ADMISSION_LOCK = threading.Lock()
+_BROWSER_RETRY_LOCK = threading.Lock()
+_BROWSER_RETRY_TIMERS: dict[str, threading.Timer] = {}
+
+
+def _schedule_browser_revocation_retry(tid: str) -> None:
+    """One bounded retry per thread; held Runs remain durable across restart."""
+    def retry():
+        with _BROWSER_RETRY_LOCK:
+            _BROWSER_RETRY_TIMERS.pop(tid, None)
+        _drain_held_browser_events(tid)
+
+    with _BROWSER_RETRY_LOCK:
+        if tid in _BROWSER_RETRY_TIMERS:
+            return
+        timer = threading.Timer(10, retry)
+        timer.daemon = True
+        _BROWSER_RETRY_TIMERS[tid] = timer
+        timer.start()
+
+
+def _drain_held_browser_events(tid: str) -> None:
+    """Promote direct events in durable sequence only after exact browser reset."""
+    gate = BrowserManager.thread_gate(tid)
+    if not gate.acquire(timeout=20):
+        failure = "Browser safety reset is waiting for an in-flight browser command"
+    else:
+        failure = None
+        try:
+            while True:
+                held = sorted((run for run in _runs().list(tid)
+                               if run.status == "revocation_pending"),
+                              key=lambda run: run.admission_sequence)
+                if not held:
+                    return
+                run = held[0]
+                session = BrowserManager.current_session(tid)
+                try:
+                    if session is not None:
+                        identity = session.identity
+                        if identity is not None and identity.mode == "internal":
+                            if (run.revocation_generation is not None
+                                    and run.revocation_generation != identity.generation):
+                                raise RuntimeError("browser generation changed during safety reset")
+                            _runs().transition(
+                                tid, run.id, "revocation_pending",
+                                revocation_generation=identity.generation,
+                                browser_reset_run_id=session.run_id)
+                            run = _runs().get(tid, run.id)
+                        reset = session.revoke_internal()
+                    else:
+                        reset = run.revocation_generation is not None
+                        if run.revocation_generation is not None:
+                            BrowserManager.confirm_generation_stopped(
+                                run.revocation_generation)
+                    with _RUN_ADMISSION_LOCK:
+                        current = _runs().get(tid, run.id)
+                        if current.status != "revocation_pending":
+                            continue
+                        latest = max((item.admission_sequence
+                                      for item in _runs().list(tid)
+                                      if item.user_event_id == item.id), default=0)
+                        if session is not None and latest == current.admission_sequence:
+                            session.rebind_user_request(BrowserUserRequest(
+                                current.id, current.work_id,
+                                current.text or "", current.admission_sequence))
+                        _runs().transition(
+                            tid, run.id, "pending", browser_reset_notice=reset)
+                    _RESUME_SCHEDULER.promote(tid)
+                    THREAD_QUEUE.promote(tid)
+                    _dispatch_pending_after(tid)
+                except Exception as error:
+                    failure = f"Browser safety reset is unconfirmed ({type(error).__name__})"
+                    break
+        except Exception as error:
+            failure = f"Browser safety reset could not read held Runs ({type(error).__name__})"
+        finally:
+            gate.release()
+    if failure:
+        retry_at = (datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()
+        try:
+            for run in _runs().list(tid):
+                if run.status == "revocation_pending":
+                    _runs().transition(tid, run.id, "revocation_pending",
+                                       error=failure, revocation_retry_at=retry_at)
+        finally:
+            _schedule_browser_revocation_retry(tid)
 
 
 class _EmailApprovalPending(Exception):
@@ -3539,8 +3663,12 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
         raise _EmailApprovalPending
     prior_stage = _get_status(tid).get("stage")
     busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
+    browser_active = BrowserManager.current_session(tid) is not None
+    busy = busy or browser_active
+    pi_thread = False
     try:
-        if _is_pi_thread(tid):
+        pi_thread = _is_pi_thread(tid)
+        if pi_thread:
             _ensure_pi_description(tid, text)
     except ThreadEngineError:
         # Dispatch will make the existing invalid-engine error durable; title
@@ -3549,7 +3677,10 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
     run = _create_run(tid, text, rider=rider, location=location,
                       run_id=run_id, work_id=work_id,
                       dispatch_key=dispatch_key,
-                      max_pending=max_pending, user_origin=True)
+                      max_pending=max_pending, user_origin=True,
+                      revocation_pending=browser_active and not pi_thread)
+    if run.status == "revocation_pending":
+        return run, True
     if busy:
         # Cover both wait points. The paused head may still be queued on
         # the scheduler, or it may already be parked inside the affinity
@@ -3568,8 +3699,13 @@ def _accept_message_run(tid: str, text: str, rider=None,
                         work_id: str | None = None) -> tuple[Run, bool]:
     """Persist one web submission and return whether earlier work owns the thread."""
     with _RUN_ADMISSION_LOCK:
-        return _accept_message_run_locked(tid, text, rider, location, dispatch_key,
-                                          max_pending, run_id, work_id)
+        run, busy = _accept_message_run_locked(tid, text, rider, location,
+                                               dispatch_key, max_pending,
+                                               run_id, work_id)
+    if run.status == "revocation_pending":
+        _drain_held_browser_events(tid)
+        run = _runs().get(tid, run.id)
+    return run, busy
 
 
 def _record_browser_location(rider: ContextRider | None) -> LocationSnapshot | None:
@@ -3969,8 +4105,10 @@ _PROVISIONER = (
 
 
 def _recovery_prep(q: "queue.Queue") -> None:
-    """One-time worker-thread prep before draining recovery jobs (no-op cost when
-    none are queued). (a) Reap THIS deployment's orphaned sandbox containers (by
+    """One-time worker-thread prep before draining recovery jobs. Browser
+    orphan/map reconciliation runs even when the queue is empty; only shell
+    cleanup and model-wait depend on pending jobs. Reap THIS deployment's
+    orphaned sandbox containers (by
     label + /workspace-mount scope — see ``reap_orphans``): a killed web process
     reaps nothing, and a ``docker exec``'d tool command keeps mutating the
     host-bind-mounted /workspace for up to the 3h TTL — a resumed turn's fresh
@@ -3978,10 +4116,13 @@ def _recovery_prep(q: "queue.Queue") -> None:
     (bounded) for the model endpoint: on a cold boot llamacpp loads for minutes
     after assist-web is up, and erroring every recovered thread against a
     still-loading model would defeat recovery."""
+    BrowserManager.reap_orphans(MANAGER.root_dir)
+    for tid in {run.thread_id for run in _runs().scan_all()
+                if run.status == "revocation_pending"}:
+        _drain_held_browser_events(tid)
     if q.empty():
         return
     SandboxManager.reap_orphans(MANAGER.root_dir)
-    BrowserManager.reap_orphans(MANAGER.root_dir)
     if not os.getenv("ASSIST_MODEL_URL"):
         return
     # _llm_reachable requires a 200 — llama-server binds its port immediately on a
@@ -5146,15 +5287,25 @@ def show_file_view(tid: str, path: str, lines: str = "", pages: str = ""):
 @app.post("/thread/{tid}/delete")
 async def delete_thread(tid: str):
     _existing_thread_dir(tid)
-    # Off-loop: hard_delete does rmtree + sqlite deletes, and _evict_egress
-    # takes the egress store lock — none of it belongs on the event loop.
+    # Off-loop: browser teardown, hard_delete's rmtree/SQLite work, and
+    # _evict_egress's store lock do not belong on the event loop.
     await run_in_threadpool(_delete_thread_and_children, tid)
     return RedirectResponse(url="/", status_code=303)
 
 
 def _delete_thread_and_children(tid: str) -> None:
-    """Delete a visible thread and each non-running hidden task directory."""
+    """Stop its browser before deleting a thread and non-running children."""
     _PI_RUNTIME.retire(tid)
+    # A deleted Run journal cannot authorize or recover an internal sidecar.
+    # Wait for Docker outside the Run admission lock, but keep the browser
+    # gate through deletion so another session cannot register in between.
+    with BrowserManager.bounded_thread_gate(tid):
+        BrowserManager.cleanup(tid)
+        _delete_thread_after_browser_stop(tid)
+
+
+def _delete_thread_after_browser_stop(tid: str) -> None:
+    """Erase a thread while its browser gate prevents a replacement sidecar."""
     with _RUN_ADMISSION_LOCK:
         child_ids = {
             child.thread_id for child in _runs().scan_children()

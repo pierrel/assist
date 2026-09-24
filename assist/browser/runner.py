@@ -29,8 +29,8 @@ def http_url(url: str) -> str:
     try:
         parsed = urlsplit(url)
         if (parsed.scheme not in {"http", "https"} or not parsed.hostname
-                or parsed.username or parsed.password
-                or not 1 <= (parsed.port or 80) <= 65535):
+                or parsed.username is not None or parsed.password is not None
+                or (parsed.port is not None and not 1 <= parsed.port <= 65535)):
             raise ValueError
     except ValueError as error:
         raise BrowserInputError("only HTTP(S) URLs without userinfo are supported") from error
@@ -74,16 +74,37 @@ class BrowserWorker:
     def _start(self):
         if self.context is not None:
             return
-        self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(
-            headless=True, chromium_sandbox=True, downloads_path="/downloads",
-            proxy={"server": "http://assist-egress-proxy:8888", "bypass": ""})
-        self.context = self.browser.new_context(
-            accept_downloads=True, service_workers="block")
-        self.context.set_default_timeout(10000)
-        self.context.on("page", self._register_page)
+        try:
+            self.playwright = sync_playwright().start()
+            self.browser = self.playwright.chromium.launch(
+                headless=True, chromium_sandbox=True, downloads_path="/downloads",
+                proxy={"server": "http://assist-egress-proxy:8888", "bypass": ""})
+            self.context = self.browser.new_context(
+                accept_downloads=True, service_workers="block")
+            self.context.set_default_timeout(10000)
+            self.context.on("page", self._register_page)
+        except Exception:
+            for resource, method in ((self.context, "close"),
+                                     (self.browser, "close"),
+                                     (self.playwright, "stop")):
+                if resource is not None:
+                    try:
+                        getattr(resource, method)()
+                    except Exception:
+                        pass
+            self.context = self.browser = self.playwright = None
+            raise
+
+    def _prune_pages(self):
+        for ident, page in list(self.pages.items()):
+            if page.is_closed():
+                del self.pages[ident]
+                self.page_ids.pop(page, None)
+                self.snapshots.pop(ident, None)
+                self.targets.pop(ident, None)
 
     def _register_page(self, page):
+        self._prune_pages()
         if page in self.page_ids:
             return self.page_ids[page]
         if len(self.pages) >= 5:
@@ -101,6 +122,9 @@ class BrowserWorker:
     def _register_download(self, download):
         if len(self.downloads) < 8:
             self.downloads[uuid4().hex[:12]] = download
+        else:
+            self._error("<download>", "download", "download_limit")
+            download.cancel()
 
     def _request_failed(self, request):
         host = host_port(request.url)
@@ -109,7 +133,9 @@ class BrowserWorker:
 
     def _response(self, response):
         if response.status >= 400:
-            self._error(host_port(response.url), response.request.resource_type,
+            host = host_port(response.url)
+            self.failed_hosts.add(host)
+            self._error(host, response.request.resource_type,
                         f"http_{response.status}")
 
     def _error(self, host, resource, reason):
@@ -123,16 +149,38 @@ class BrowserWorker:
             raise BrowserInputError("unknown or closed page ID")
         return page
 
+    @staticmethod
+    def _target_state(handle, base_url):
+        tag = handle.evaluate("element => element.tagName.toLowerCase()")
+        role = handle.get_attribute("role") or {
+            "a": "link", "button": "button", "input": "textbox",
+            "textarea": "textbox"}.get(tag, "button")
+        name = (handle.get_attribute("aria-label")
+                or handle.get_attribute("placeholder")
+                or handle.evaluate("element => element.labels?.[0]?.innerText || ''")
+                or handle.inner_text() or "")[:120]
+        raw_href = handle.get_attribute("href")
+        href = urljoin(base_url, raw_href) if raw_href is not None else None
+        fill_attrs = tuple(handle.get_attribute(attr) for attr in (
+            "type", "name", "id", "autocomplete", "placeholder", "aria-label"))
+        return role, name, href, raw_href, fill_attrs
+
+    @staticmethod
+    def _result_size(result):
+        return len(json.dumps({"result": result}, ensure_ascii=False).encode())
+
     def _observe(self, page_id):
         page = self._page(page_id)
         try:
             page.wait_for_load_state("domcontentloaded", timeout=3000)
         except Exception:
             pass
+        observation_errors = []
         try:
             snapshot = page.locator("body").aria_snapshot(timeout=3000)[:16000]
         except Exception:
             snapshot = ""
+            observation_errors.append("snapshot_unavailable")
         snapshot_id = uuid4().hex[:12]
         targets = {}
         described = []
@@ -142,6 +190,7 @@ class BrowserWorker:
             candidates = min(locator.count(), 60)
         except Exception:
             candidates = 0
+            observation_errors.append("targets_unavailable")
         for index in range(candidates):
             try:
                 handle = locator.nth(index).element_handle()
@@ -149,41 +198,52 @@ class BrowserWorker:
                     continue
                 if not handle.is_visible():
                     continue
-                tag = handle.evaluate("element => element.tagName.toLowerCase()")
-                role = handle.get_attribute("role") or {
-                    "a": "link", "button": "button", "input": "textbox",
-                    "textarea": "textbox"}.get(tag, "button")
-                name = (handle.get_attribute("aria-label")
-                        or handle.get_attribute("placeholder")
-                        or handle.evaluate("element => element.labels?.[0]?.innerText || ''")
-                        or handle.inner_text() or "")[:120]
-                raw_href = handle.get_attribute("href") if role == "link" else None
-                href = urljoin(page.url, raw_href) if raw_href else None
+                role, name, href, raw_href, fill_attrs = self._target_state(
+                    handle, page.url)
                 ref = uuid4().hex[:10]
-                targets[ref] = (handle, role, name, href)
+                targets[ref] = (handle, role, name, href, raw_href, fill_attrs)
                 described.append({"ref": ref, "role": role, "name": name,
-                                  **({"href": href[:2048]} if href else {})})
+                                  **({"href": href[:1024]} if href and role == "link" else {})})
             except Exception:
                 continue
             if len(described) >= 40:
                 break
-        self.snapshots[page_id] = snapshot_id
-        self.targets[page_id] = targets
-        return {
+        self._page(page_id)
+        if candidates and not described:
+            observation_errors.append("targets_unavailable")
+        result = {
             "page_id": page_id, "snapshot_id": snapshot_id,
-            "url": page.url[:4096], "snapshot": snapshot,
-            "targets": described,
-            "pages": [{"page_id": ident, "url": item.url[:4096]}
+            "url": page.url[:512], "snapshot": "",
+            "targets": [],
+            "pages": [{"page_id": ident, "url": item.url[:256]}
                       for ident, item in self.pages.items() if not item.is_closed()],
             "downloads": [{"download_id": ident,
                            "name": value.suggested_filename[:180]}
                           for ident, value in self.downloads.items()],
             "network_errors": self.errors[-12:],
         }
+        if observation_errors:
+            result["observation_errors"] = observation_errors
+        while snapshot and self._result_size({**result, "snapshot": snapshot}) > 32768:
+            snapshot = snapshot[:len(snapshot) // 2]
+            result["truncated"] = True
+        result["snapshot"] = snapshot
+        kept = {}
+        for target in described:
+            result["targets"].append(target)
+            if self._result_size(result) > MAX_RESULT - 512:
+                result["targets"].pop()
+                result["truncated"] = True
+                break
+            kept[target["ref"]] = targets[target["ref"]]
+        self.snapshots[page_id] = snapshot_id
+        self.targets[page_id] = kept
+        return result
 
     def open(self, url):
         http_url(url)
         self._start()
+        self._prune_pages()
         if len(self.pages) >= 5:
             raise BrowserInputError("browser page limit reached")
         page = self.context.new_page()
@@ -209,26 +269,31 @@ class BrowserWorker:
             selected = self.targets.get(page_id, {}).get(ref)
             if selected is None:
                 raise BrowserInputError("unknown or stale target reference")
-            locator, role, name, observed_href = selected
+            locator, role, name, observed_href, raw_href, fill_attrs = selected
         elif href:
             matches = [item for item in self.targets.get(page_id, {}).values()
                        if item[1] == "link" and item[3] == href]
             if len(matches) != 1:
                 raise BrowserInputError("href is absent or ambiguous; use an observed ref")
-            locator, role, name, observed_href = matches[0]
+            locator, role, name, observed_href, raw_href, fill_attrs = matches[0]
         elif isinstance(role, str) and isinstance(name, str):
             matches = [item for item in self.targets.get(page_id, {}).values()
                        if item[1:3] == (role, name)]
             if len(matches) != 1:
                 raise BrowserInputError("role/name target is absent or ambiguous")
-            locator, role, name, observed_href = matches[0]
+            locator, role, name, observed_href, raw_href, fill_attrs = matches[0]
         else:
             raise BrowserInputError("give an observed ref, exact href, or role and name")
         if not locator.is_visible():
             raise BrowserInputError("observed target is no longer visible")
-        if observed_href and urljoin(
-                page.url, locator.get_attribute("href") or "") != observed_href:
+        live_role, live_name, live_href, live_raw_href, live_attrs = self._target_state(
+            locator, page.url)
+        if (live_role, live_name) != (role, name):
+            raise BrowserInputError("observed target changed")
+        if (live_href, live_raw_href) != (observed_href, raw_href):
             raise BrowserInputError("observed link changed")
+        if action == "fill" and live_attrs != fill_attrs:
+            raise BrowserInputError("observed field changed")
         if action == "fill":
             if role not in {"textbox", "searchbox"}:
                 raise BrowserInputError("only nonsecret text fields can be filled")
@@ -270,7 +335,8 @@ class BrowserWorker:
                 "size": stat.st_size}
 
     def probe(self, host, port):
-        if not isinstance(host, str) or not isinstance(port, int):
+        if (not isinstance(host, str) or not isinstance(port, int)
+                or not 1 <= port <= 65535 or re.search(r"\s", host)):
             raise BrowserInputError("invalid probe target")
         host = host.lower()
         if f"{host}:{port}" not in self.failed_hosts:
@@ -278,9 +344,20 @@ class BrowserWorker:
         with socket.create_connection(("assist-egress-proxy", 8888), timeout=3) as conn:
             conn.settimeout(3)
             conn.sendall(f"CONNECT {host}:{port} HTTP/1.1\r\n\r\n".encode())
-            head = conn.recv(4096).decode("latin-1", errors="replace")
+            head = b""
+            while b"\r\n\r\n" not in head and len(head) < 4096:
+                chunk = conn.recv(min(1024, 4096 - len(head)))
+                if not chunk:
+                    break
+                head += chunk
+        if b"\r\n\r\n" not in head:
+            raise BrowserInputError("incomplete proxy probe response")
+        head = head.decode("latin-1", errors="replace")
         match = re.search(r"^X-Assist-Egress-Result: ([a-z_]+)\r?$", head, re.M)
-        status = head.partition("\r\n")[0].split(" ")[1]
+        first_line = head.partition("\r\n")[0].split(" ")
+        if len(first_line) < 2 or not first_line[1].isdigit():
+            raise BrowserInputError("invalid proxy probe response")
+        status = first_line[1]
         return {"host": host, "port": port, "status": status,
                 "reason": match.group(1) if match else "unknown"}
 

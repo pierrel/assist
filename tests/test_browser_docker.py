@@ -1,15 +1,25 @@
-"""Real Docker/proxy integration; opt in with ASSIST_BROWSER_DOCKER_TEST=1."""
+"""Real Docker/proxy integration; build current images before opting in.
+
+`make browser-docker-test` builds them and verifies the browser image contains
+this checkout's runner, so stale image tags cannot supply false evidence.
+"""
+import hashlib
 import os
+import json
 import socket
+import subprocess
+import sys
 import time
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
 from assist.browser import manager as browser
 from assist.egress.client_map import read_client
+from assist.egress import runtime_state
 from assist.sandbox_manager import (SandboxManager, _egress_proxy_config_hash,
-                                    _network_identity)
+                                    _network_identity, _bounded_egress_worker)
 
 
 ORIGIN_SCRIPT = r'''
@@ -35,6 +45,23 @@ class Handler(BaseHTTPRequestHandler):
                      'new Blob([code], {type:"application/javascript"})));'
                      'worker.onmessage=e=>document.querySelector("#state").textContent=e.data;'
                      '</script></body></html>').encode())
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith('/hostile?'):
+            host = parse_qs(urlsplit(self.path).query)['host'][0]
+            target = 'http://' + host + ':8000/post'
+            body = (f'<html><body><button id="fetch" onclick="'
+                    f'fetch(\'{target}\',{{method:\'POST\'}}).catch(()=>{{}})'
+                    f'">Fetch internal</button>'
+                    f'<button id="popup" onclick="window.open(\'{target}\')">'
+                    f'Popup internal</button>'
+                    f'<form action="{target}" method="POST">'
+                    '<button type="submit">Post internal</button></form>'
+                    '</body></html>').encode()
             self.send_response(200)
             self.send_header('Content-Type', 'text/html')
             self.send_header('Content-Length', str(len(body)))
@@ -89,12 +116,70 @@ proxy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(proxy)
 original = proxy.vet_resolved
 def fixture_resolve(host, port, *, global_only=True):
-    if host == 'fixture-public.test' and global_only:
+    if host in ('fixture-public.test', 'fixture-public-forms.test') and global_only:
         return os.environ['BROWSER_TEST_PUBLIC_ORIGIN_IP']
     return original(host, port, global_only=global_only)
 proxy.vet_resolved = fixture_resolve
 proxy.main()
 '''
+
+
+@pytest.mark.skipif(os.getenv("ASSIST_BROWSER_DOCKER_TEST") != "1",
+                    reason="requires Docker Engine 29 isolated bridges and proxy image")
+def test_killable_proxy_worker_recreates_only_exact_generation(tmp_path, monkeypatch):
+    import docker
+
+    client = docker.from_env()
+    suffix = uuid4().hex[:10]
+    ordinary_name = f"assist-browser-worker-ordinary-{suffix}"
+    browser_name = f"assist-browser-worker-isolated-{suffix}"
+    proxy_name = f"assist-browser-worker-proxy-{suffix}"
+    threads_root = tmp_path / "threads"
+    threads_root.mkdir()
+    map_dir = tmp_path / "map"
+    map_dir.mkdir(mode=0o700)
+    allowlist = tmp_path / "allowlist.conf"
+    allowlist.write_text("example.com\n")
+    monkeypatch.setenv("ASSIST_THREADS_DIR", str(threads_root))
+    monkeypatch.setenv("ASSIST_EGRESS_CLIENT_MAP_DIR", str(map_dir))
+    monkeypatch.setenv("ASSIST_EGRESS_RUNTIME_DIR", str(tmp_path / "runtime"))
+    script = (
+        "import assist.sandbox_manager as s, "
+        "assist.egress.runtime_worker as w; "
+        f"s.EGRESS_NETWORK={ordinary_name!r}; "
+        f"s.BROWSER_NETWORK={browser_name!r}; "
+        f"s.EGRESS_PROXY_NAME={proxy_name!r}; "
+        "s.EGRESS_PROXY_IMAGE='assist-egress-proxy'; "
+        f"s.EGRESS_ALLOWLIST_FILE={str(allowlist)!r}; "
+        "raise SystemExit(w.main())")
+
+    def start():
+        result = _bounded_egress_worker(
+            [sys.executable, "-c", script, "proxy"], timeout=20)
+        assert result.returncode == 0, result.stderr[-1000:]
+        assert result.stdout.strip() == proxy_name.encode()
+        return client.containers.get(proxy_name)
+
+    try:
+        first = start()
+        assert start().id == first.id
+        allowlist.write_text("example.com\npypi.org\n")
+        second = start()
+        assert second.id != first.id
+        assert runtime_state.retirement("proxy", first.id) == "remove"
+        attached = second.attrs["NetworkSettings"]["Networks"]
+        assert attached[ordinary_name]["NetworkID"] == client.networks.get(ordinary_name).id
+        assert attached[browser_name]["NetworkID"] == client.networks.get(browser_name).id
+    finally:
+        try:
+            client.containers.get(proxy_name).remove(force=True)
+        except docker.errors.NotFound:
+            pass
+        for name in (browser_name, ordinary_name):
+            try:
+                client.networks.get(name).remove()
+            except docker.errors.NotFound:
+                pass
 
 
 @pytest.mark.skipif(os.getenv("ASSIST_BROWSER_DOCKER_TEST") != "1",
@@ -134,6 +219,14 @@ def test_isolated_browser_reaches_only_attributed_proxy(tmp_path, monkeypatch):
     import docker
 
     client = docker.from_env()
+    expected_runner = hashlib.sha256((Path(__file__).resolve().parents[1]
+                                      / "assist/browser/runner.py").read_bytes()).hexdigest()
+    image_runner = subprocess.run(
+        ["docker", "run", "--rm", "--network", "none", "--entrypoint", "python",
+         "assist-browser", "-c", "import hashlib; print(hashlib.sha256("
+         "open('/opt/assist/browser_runner.py','rb').read()).hexdigest())"],
+        capture_output=True, check=True, timeout=10).stdout.decode().strip()
+    assert image_runner == expected_runner, "browser image is stale; run make browser-smoke"
     suffix = uuid4().hex[:10]
     ordinary_name = f"assist-browser-test-ordinary-{suffix}"
     browser_name = f"assist-browser-test-isolated-{suffix}"
@@ -163,12 +256,13 @@ def test_isolated_browser_reaches_only_attributed_proxy(tmp_path, monkeypatch):
         map_dir.mkdir(mode=0o700)
         monkeypatch.setenv("ASSIST_EGRESS_CLIENT_MAP_DIR", str(map_dir))
         proxy = client.containers.run(
-            "assist-egress-proxy-browser-test", detach=True, remove=True,
+            "assist-egress-proxy", detach=True, remove=True,
             name=proxy_name,
             entrypoint=["python3", "-c", TEST_PROXY_SCRIPT],
             volumes={str(map_dir): {"bind": "/client-map", "mode": "ro"}},
             environment={"EGRESS_ALLOWLIST": (
-                             f"{origin_ip},example.com,fixture-public.test"),
+                             f"{origin_ip},example.com,fixture-public.test,"
+                             "fixture-public-forms.test"),
                          "EGRESS_SANDBOX_CIDR": ordinary_cidr,
                          "EGRESS_BROWSER_CIDR": browser_cidr,
                          "BROWSER_TEST_PUBLIC_ORIGIN_IP": origin_ip})
@@ -188,11 +282,26 @@ def test_isolated_browser_reaches_only_attributed_proxy(tmp_path, monkeypatch):
         time.sleep(2.1)
         monkeypatch.setattr(browser, "BROWSER_NETWORK", browser_name)
         monkeypatch.setattr(browser, "EGRESS_PROXY_NAME", proxy_name)
-        monkeypatch.setattr(browser, "BROWSER_IMAGE", "assist-browser-headless-test")
+        monkeypatch.setattr(browser, "BROWSER_IMAGE", "assist-browser")
         monkeypatch.setattr(browser, "_load_egress_allowlist",
-                            lambda: [origin_ip, "example.com", "fixture-public.test"])
-        monkeypatch.setattr(SandboxManager, "_ensure_egress_proxy_running",
-                            classmethod(lambda _cls, _client: proxy_name))
+                            lambda: [origin_ip, "example.com", "fixture-public.test",
+                                     "fixture-public-forms.test"])
+        script = (
+            "import assist.browser.manager as b, assist.browser.startup_worker as w; "
+            f"b.BROWSER_NETWORK={browser_name!r}; "
+            f"b.EGRESS_PROXY_NAME={proxy_name!r}; "
+            "b.BROWSER_IMAGE='assist-browser'; "
+            "w._launch_sidecar_direct=lambda request: "
+            "b._launch_sidecar_direct(request,ensure_proxy=False); "
+            "raise SystemExit(w.main())")
+
+        def start_in_fixture(request, timeout):
+            result = browser._bounded_cli(
+                [sys.executable, "-c", script],
+                payload=json.dumps(request).encode(), limit=4096, timeout=timeout)
+            return json.loads(result)
+
+        monkeypatch.setattr(browser, "_launch_sidecar_bounded", start_in_fixture)
         work_dir = tmp_path / "workspace"
         work_dir.mkdir()
         session = browser.BrowserSession(
@@ -203,6 +312,7 @@ def test_isolated_browser_reaches_only_attributed_proxy(tmp_path, monkeypatch):
         # The browser network's live Docker settings, not its name, are the gate.
         initial = session.command("open", url=f"http://{origin_ip}:8000/")
         assert "error" not in initial, initial
+        session.identity.container = client.containers.get(session.identity.generation)
         observation = initial["result"]
         assert "Browser fixture" in observation["snapshot"]
         assert read_client(str(map_dir), session.identity.ip).generation == session.identity.generation
@@ -319,12 +429,21 @@ def test_isolated_browser_reaches_only_attributed_proxy(tmp_path, monkeypatch):
             assert direct.exit_code != 0
         public_only = browser.BrowserSession(
             "test-thread", "public-run", str(work_dir), str(tmp_path), None)
-        with pytest.raises(browser.BrowserUnavailable, match="fresh user request"):
+        with pytest.raises(browser.BrowserUnavailable, match="revoked internal browsing"):
             public_only.command("open", url=f"http://{origin_ip}:8000/")
         session.close()
         session = browser.BrowserSession(
             "test-thread", "public-run", str(work_dir), str(tmp_path), None)
+        session.deadline = time.monotonic() + 240
         session._start("public", None)
+        session.identity.container = client.containers.get(session.identity.generation)
+        denied_http = session.command("open", url="http://unlisted.example:8000/")
+        assert "error" not in denied_http, denied_http
+        denied_probe = session.command("probe", host="unlisted.example", port=8000)
+        assert "result" in denied_probe, (denied_probe,
+                                          denied_http["result"]["url"],
+                                          denied_http["result"]["network_errors"])
+        assert denied_probe["result"]["reason"] == "host_not_approved", denied_probe
         # The same proxy gate handles a redirect CONNECT and a worker's
         # absolute-URL WebSocket upgrade; neither can use an internal base host
         # from a public sidecar.
@@ -347,7 +466,8 @@ def test_isolated_browser_reaches_only_attributed_proxy(tmp_path, monkeypatch):
         assert "error" not in redirected, redirected
         denied_after_redirect = proxy.logs().count(
             f"DENY {origin_ip} (browser_internal_policy)".encode())
-        assert denied_after_redirect > denied_before
+        assert denied_after_redirect > denied_before, (
+            redirected, proxy.logs()[-1000:])
         time.sleep(2.1)
         worker = session.command(
             "open", url=f"http://fixture-public.test:8000/worker?host={origin_ip}")
@@ -359,6 +479,28 @@ def test_isolated_browser_reaches_only_attributed_proxy(tmp_path, monkeypatch):
         denied_after_worker = proxy.logs().count(
             f"DENY {origin_ip} (browser_internal_policy)".encode())
         assert denied_after_worker > denied_after_redirect
+        hostile = session.command(
+            "open", url=f"http://fixture-public-forms.test:8000/hostile?host={origin_ip}")
+        assert "error" not in hostile, hostile
+        assert "Fetch internal" in hostile["result"]["snapshot"], hostile
+        hostile_page = hostile["result"]["page_id"]
+        denied_before_action = proxy.logs().count(
+            f"DENY {origin_ip} (browser_internal_policy)".encode())
+        for button_name in ("Fetch internal", "Popup internal", "Post internal"):
+            current = session.command("observe", page_id=hostile_page)["result"]
+            button = next((item for item in current["targets"]
+                           if item["name"] == button_name), None)
+            assert button is not None, (button_name, current)
+            acted = session.command(
+                "act", page_id=hostile_page,
+                snapshot_id=current["snapshot_id"], action="click",
+                target={"ref": button["ref"]})
+            assert "error" not in acted, (button_name, acted)
+            denied_after_action = proxy.logs().count(
+                f"DENY {origin_ip} (browser_internal_policy)".encode())
+            assert denied_after_action > denied_before_action, (
+                button_name, acted, proxy.logs()[-1000:])
+            denied_before_action = denied_after_action
         unregistered = client.containers.run(
             "python:3.13-slim-bookworm", ["python", "-c", "import time;time.sleep(60)"],
             detach=True, network=browser_name, remove=True,

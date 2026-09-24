@@ -16,6 +16,7 @@ Covered here:
 from __future__ import annotations
 
 import itertools
+import os
 import re
 import shutil
 import tempfile
@@ -80,10 +81,12 @@ class TestNoReuse(_SandboxStateBase):
             f"created-{next(ids)}")
         st = MagicMock()
         st.st_uid, st.st_gid = 1000, 1000
+        real_stat = os.stat
         return [
             patch.object(SandboxManager, "_get_docker_client", return_value=client),
             patch.object(SandboxManager, "_ensure_egress_proxy_running"),
-            patch("assist.sandbox_manager.os.stat", return_value=st),
+            patch("assist.sandbox_manager.os.stat", side_effect=lambda path: (
+                st if str(path) == "/ws/t" else real_stat(path))),
             patch("assist.sandbox.DockerSandboxBackend", lambda *a, **k: MagicMock()),
             # the persistent-/tmp dir is created for real; the work_dir here is a
             # fake path, so stub the mkdir like os.stat above.

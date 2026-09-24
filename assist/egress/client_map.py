@@ -6,8 +6,10 @@ import ipaddress
 import json
 import os
 import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Callable
 
 from assist.egress.store import APPROVALS_SUBDIR, approvals_dir_is_safe
 
@@ -70,10 +72,18 @@ def _validate_ip(ip: str) -> str:
 
 
 @contextmanager
-def _locked(directory: str):
+def _locked(directory: str, timeout: float = 5):
     os.makedirs(directory, mode=0o700, exist_ok=True)
     with open(os.path.join(directory, ".client-map.lock"), "a+b") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("proxy client-map lock timed out")
+                time.sleep(0.01)
         try:
             yield os.path.join(directory, CLIENT_MAP_FILE)
         finally:
@@ -127,6 +137,21 @@ def forget_client(directory: str, ip: str, generation: str) -> None:
         if entries.get(ip, {}).get("generation") == generation:
             del entries[ip]
             _write(path, entries)
+
+
+def prune_absent_browser_clients(
+        directory: str, live_generations: Callable[[], set[str]]) -> int:
+    """Remove absent browser generations without racing another map writer."""
+    with _locked(directory) as path:
+        live = live_generations()
+        entries = _read(path)
+        stale = [ip for ip, value in entries.items()
+                 if value["kind"] == "browser" and value["generation"] not in live]
+        for ip in stale:
+            del entries[ip]
+        if stale:
+            _write(path, entries)
+        return len(stale)
 
 
 def read_client(directory: str, ip: str) -> ClientRecord | None:

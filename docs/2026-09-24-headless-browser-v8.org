@@ -1,0 +1,97 @@
+#+title: Headless browser design v8 — durable interjection revocation
+#+date: <2026-09-24>
+#+status: design successor; no product code
+
+* Decision
+
+Keep v7's per-Run browser, exact-host proxy, isolated network, approval and
+resource boundaries. A newer direct owner message revokes the old internal
+browser authority without cancelling the older task. This revision makes
+that revocation durable, ordered, bounded and visible when teardown stalls.
+
+* Durable held message and promotion
+
+When a direct owner message arrives during an active browser Run, journal it
+under a short global admission/persistence lock as a durable
+=revocation_pending= Run with a per-thread monotonically increasing admission
+sequence. It is visible in-thread as queued for browser safety reset, but is
+not ordinary =pending=: the scheduler and =InterjectionMiddleware.peek= must
+exclude it, so it cannot be dispatched, injected, claimed or mistaken for an
+answered message. Never publish it briefly as eligible =pending= before
+revocation. Release the global lock before waiting on a browser or Docker.
+
+A per-thread revocation worker obtains the same ordering gate used by
+browser-command admission, invalidates the old authority generation, stops
+the exact internal sidecar and confirms it is gone. Only then, in a short
+atomic persistence transition, promote the held Run to ordinary =pending=.
+Normal interjection delivery may then observe it. If teardown or gate
+acquisition times out, leave the Run durably held, show it as queued and
+undelivered with the failure reason and next retry, and retry by exact
+generation. Startup recovery scans held Runs; the sidecar's independent PID
+1 TTL and generation-safe orphan reaper are backstops. Confirmation that the
+old generation is absent allows promotion after a crash or failed kill. A
+held message is never silently lost or injected before safety reset.
+
+Process held direct-owner events in durable admission-sequence order. An
+older delayed retry/cleanup may neither restore nor delete authority for a
+newer sequence or sidecar generation. While a newer held event exists, an
+earlier promoted event cannot rebind internal authority. After the ordered
+promotions, only the latest promoted immutable direct event may authorize
+an exact host. Synthetic/system/approval text still supplies none.
+
+* Session, startup and lock order
+
+Tool closures may keep the Run's =BrowserSession=, but revocation is not
+terminal =close()=. Add a revocation/rebind contract on that session (or an
+equivalent generation-checked manager lookup): revocation destroys its
+internal context/sidecar and makes old page IDs, target refs and generation
+unusable; a newer promoted direct event explicitly naming an already-
+allowlisted exact internal host, or fresh real-user exact-host confirmation,
+may create a *new* internal-only context. An unrelated public interjection
+does not inherit the former host. The original 240-second Run deadline is
+unchanged; =close()= remains final at Run exit. Existing work remains in the
+agent's task state even when its browser state is lost.
+
+Lock order is short global persistence window, release, then per-thread
+browser/admission gate, then browser session/registry operations. Never hold
+the global =_RUN_ADMISSION_LOCK= while waiting for Docker or the per-thread
+gate. Deletion must not acquire these locks in the reverse order; it marks
+the Run/thread terminal under a short persistence window and performs
+generation-checked cleanup through the same gate or a bounded follow-up.
+
+All Docker startup operations, including proxy setup, network inspect and
+=containers.run=, as well as exec/wait, have monotonic cancellable transport
+deadlines; gate acquisition has a bounded wait. A timed-out SDK thread is
+not assumed cancelled if it can create a container later. Such a late
+generation remains unregistered/proxy-denied, and is reaped by exact labels
+and generation. On startup/gate timeout the direct message stays held and
+visible, rather than waiting unboundedly or acknowledging it while old
+internal traffic persists. No retry resets the 240-second Run allowance.
+
+* Visible outcome and verification
+
+After successful revocation, a trusted in-thread notice tells the running
+agent and user that internal browsing stopped, page/form state was lost,
+the old task remains pending, and fresh exact-host user confirmation is
+needed unless the new direct event itself named that host. On failed
+teardown, the UI instead identifies the durable new message as queued and
+undelivered with reason and retry time; the agent must not imply it saw or
+answered that message.
+
+Test unrelated and exact-host interjections, both in-flight command/event
+orders, a hung =containers.run= and proxy setup, bounded gate wait, crash
+between journal/stop/promotion, failed kill followed by TTL/recovery,
+deletion race, and two held interjections with delayed first cleanup.
+Both messages must deliver in admission order, but the older event must
+never restore internal permission once the newer event is held. Verify
+visible success and failure notices and that a stale page/generation fails.
+Keep v7's public-page injection and v6's approval-follow-up negatives.
+
+* Historical supersessions
+
+This document directly supersedes
+=docs/2026-09-24-headless-browser-v7.org='s direct-user admission and
+verification sections where immediate revocation was stated without a
+durable ineligible message, bounded startup/gate wait, ordered promotion,
+session rebind or failure visibility. V7's other decisions remain in force;
+earlier dated designs are unchanged historical records.
