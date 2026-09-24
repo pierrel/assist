@@ -1,8 +1,9 @@
 """End-to-end integration tests for the sandbox egress allowlist.
 
-Unlike ``test_sandbox_egress.py`` (which mocks Docker) and the shell
-smoke at ``dockerfiles/test-sandbox-egress.sh`` (which bypasses
-SandboxManager), this exercises the *production* code path:
+``TestDeploySmokeProxyStartup`` runs the shell smoke's ordinary-only network
+and proxy startup path without external hosts.  Unlike that case and
+``test_sandbox_egress.py`` (which mocks Docker),
+``TestSandboxEgressEndToEnd`` exercises the *production* code path:
 
     SandboxManager.get_sandbox_backend(tmp_dir)
         → _ensure_egress_proxy_running (real proxy + network)
@@ -13,18 +14,34 @@ SandboxManager), this exercises the *production* code path:
 If anything in that chain regresses — proxy bring-up, network attach,
 env-var injection, hash-based recreate — these tests catch it.
 
-No skip: the egress contract is too important to silently no-op.
+No skip: both Docker egress contracts are too important to silently no-op.
 Docker is pre-installed on ``ubuntu-latest`` GitHub runners (the
 CI environment) and is always available on the deploy host.  If
-Docker is genuinely missing, setUpClass fails loudly with a real
+Docker is genuinely missing, the relevant test fails loudly with a real
 error — that's better than a silent skip that masks the regression.
 """
 import shutil
 import os
+from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
 from assist.sandbox_manager import SandboxManager
+
+
+class TestDeploySmokeProxyStartup(unittest.TestCase):
+    """Reproduce the deploy smoke's ordinary-only proxy ingress topology."""
+
+    def test_proxy_starts_on_inspected_internal_network(self):
+        repo = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            ["timeout", "--signal=TERM", "--kill-after=5s", "30s",
+             "bash", str(repo / "dockerfiles/test-sandbox-egress.sh"),
+             "--proxy-startup-only"],
+            cwd=repo, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class TestSandboxEgressEndToEnd(unittest.TestCase):
