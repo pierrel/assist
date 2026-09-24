@@ -862,6 +862,9 @@ def _logical_status_locked(
     work = [run for run in runs if run.work_id == accepted.work_id]
     selected = work[-1]
     status = selected.status
+    if (status == "cancelled" and getattr(accepted, "browser_cancel_reset", False)
+            and accepted.cancel_cleanup == "pending"):
+        status = "cancelling"
     if status == "interrupted":
         if thread_status in threads.BUSY_STAGES and not any(
                 run.work_id != accepted.work_id and run.status == "running"
@@ -939,6 +942,13 @@ def _reserve_create(body: _CreateThread, key: str) -> tuple[str, Any, str | None
 
 def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
     """Cancel one accepted logical Run and durably receipt its cleanup."""
+    _thread_dir(tid)
+    with threads.browser_authority.fence(threads.MANAGER.root_dir, tid):
+        return _cancel_logical_run_fenced(tid, run_id)
+
+
+def _cancel_logical_run_fenced(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
+    """Commit cancellation in the same short order as browser admission."""
     with threads._RUN_ADMISSION_LOCK:
         current_status = state._get_status(tid)
         projection, runs = _logical_status_locked(
@@ -949,7 +959,8 @@ def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
         if projection["status"] == "transitioning":
             return 409, {"detail": "Run is transitioning", "outcome": "transitioning",
                          "run": _public_run_projection(projection)}
-        if projection["status"] not in {"pending", "cancelled"}:
+        if projection["status"] not in {
+                "pending", "revocation_pending", "cancelled", "cancelling"}:
             detail = ("Run is awaiting approval"
                       if projection["status"] in AWAITING_APPROVAL_STATUSES
                       else "Run is already terminal")
@@ -957,7 +968,7 @@ def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
                          "run": _public_run_projection(projection)}
         service = threads._runs()
         try:
-            if projection["status"] == "pending":
+            if projection["status"] in {"pending", "revocation_pending"}:
                 # This one write cancels the newest pending slice, retires its
                 # interrupted same-work predecessors, and leaves the accepted
                 # handle with a retry receipt.
@@ -974,36 +985,74 @@ def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
                          "run": _logical_status_locked(tid, run_id)}
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
             raise RunStoreUnavailable("Run store is unavailable") from error
-        work_id = projection["work_id"]
-        # A stale interrupted record must not pin the thread paused.  Only an
-        # interrupted slice with a pending/running same-work successor is resumable.
-        if (state._get_status(tid).get("stage") == "paused"
-                and not any(run.status == "interrupted" and any(
-                    later.work_id == run.work_id
-                    and later.status in {"pending", "running"}
-                    for later in runs)
-                            for run in runs)):
-            threads._set_status(tid, "ready")
-        RUN_STREAMS.finish(tid, work_id)
-        # The initializer owns a partially prepared first workspace.  Its
-        # bounded worker observes this receipt after setup, changes the status
-        # to ready, and dispatches any follower exactly once.
-        if current_status.get("stage") not in {"initializing", "cloning"}:
-            threads._dispatch_pending_after(tid, projection["physical_run_id"])
-        # This is deliberately the last durable write.  If any earlier cleanup
-        # step fails, the pending receipt makes its retry replay that work; once
-        # complete, a repeated DELETE is a no-dispatch success.
+        accepted = next(run for run in runs if run.id == run_id)
+        if (getattr(accepted, "browser_cancel_reset", False)
+                and accepted.cancel_cleanup == "pending"):
+            threads._queue_browser_revocation(tid)
+            projection["status"] = "cancelling"
+            return 202, {"detail": "Browser safety reset is pending",
+                         "outcome": "cancelling", "run": _public_run_projection(projection)}
+        return _finish_cancel_cleanup_locked(
+            tid, run_id, projection, runs, current_status, service)
+
+
+def _finish_cancel_cleanup_locked(tid, run_id, projection, runs,
+                                  current_status, service):
+    """Finish a durable cancellation receipt after any browser reset proof."""
+    work_id = projection["work_id"]
+    accepted = next(run for run in runs if run.id == run_id)
+    browser_reset = getattr(accepted, "browser_cancel_reset", False)
+    # A stale interrupted record must not pin the thread paused. Only an
+    # interrupted slice with a pending/running same-work successor is resumable.
+    if (state._get_status(tid).get("stage") == "paused"
+            and not any(run.status == "interrupted" and any(
+                later.work_id == run.work_id
+                and later.status in {"pending", "running"}
+                for later in runs)
+                        for run in runs)):
+        threads._set_status(tid, "ready")
+    RUN_STREAMS.finish(tid, work_id)
+    completed = None
+    if browser_reset:
+        # A new follower may start its own sidecar as soon as it is dispatched.
+        # Finish the old-owner receipt first, so a late receipt-write failure
+        # cannot make the reset worker mistake that new sidecar for the old one.
         try:
             completed = service.complete_cancel_cleanup(tid, run_id)
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
             raise RunStoreUnavailable("Run store is unavailable") from error
-        selected = next(run for run in runs if run.id == projection["physical_run_id"])
-        if selected.id == completed.id:
-            selected = completed
-        projection["status"] = "cancelled"
-        projection["updated_at"] = selected.updated_at
-        projection["thread_status"] = state._get_status(tid).get("stage", "ready")
-        return 200, {"outcome": "cancelled", "run": _public_run_projection(projection)}
+    # The initializer owns a partially prepared first workspace. Its bounded
+    # worker observes the receipt and dispatches any follower exactly once.
+    if current_status.get("stage") not in {"initializing", "cloning"}:
+        threads._dispatch_pending_after(tid, projection["physical_run_id"])
+    if completed is None:
+        # Ordinary pending-Run cancellation keeps its original last-write
+        # receipt so any earlier cleanup failure is retried.
+        try:
+            completed = service.complete_cancel_cleanup(tid, run_id)
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            raise RunStoreUnavailable("Run store is unavailable") from error
+    selected = next(run for run in runs if run.id == projection["physical_run_id"])
+    if selected.id == completed.id:
+        selected = completed
+    projection["status"] = "cancelled"
+    projection["updated_at"] = selected.updated_at
+    projection["thread_status"] = state._get_status(tid).get("stage", "ready")
+    return 200, {"outcome": "cancelled", "run": _public_run_projection(projection)}
+
+
+def _finish_browser_cancel_cleanup(tid: str, accepted_id: str) -> None:
+    """Reset-worker continuation for a durably cancelled held phone Run."""
+    with threads._RUN_ADMISSION_LOCK:
+        projection, runs = _logical_status_locked(
+            tid, accepted_id, with_runs=True, include_cleanup=True)
+        if projection["cancel_cleanup"] == "complete":
+            return
+        accepted = next(run for run in runs if run.id == accepted_id)
+        if not (accepted.browser_cancel_reset and accepted.cancel_cleanup == "pending"):
+            raise InvalidRunTransition("browser cancellation receipt is missing")
+        _finish_cancel_cleanup_locked(tid, accepted_id, projection, runs,
+                                      state._get_status(tid), threads._runs())
 
 
 def _sse(event: str, value: dict[str, Any]) -> str:

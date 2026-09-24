@@ -8,7 +8,7 @@ import pytest
 from assist.browser import authority, manager as browser
 from assist.run_service import RunService
 from assist.egress.store import EgressRequest, EgressStore, request_key
-from manage.web import threads
+from manage.web import phone_api, threads
 
 
 @pytest.fixture
@@ -136,6 +136,9 @@ def test_crash_after_held_commit_failed_kill_stays_held_then_recovers(
         assert state.lease["owner_run_id"] == old.id
 
     assert threads._drain_held_browser_events("t") is True
+    assert [runs.get("t", item.id).status for item in (first, second)] == [
+        "pending", "revocation_pending"]
+    assert threads._drain_held_browser_events("t") is True
     assert kills == ["old-generation", "old-generation", "old-generation"]
     assert [runs.get("t", item.id).status for item in (first, second)] == [
         "pending", "pending"]
@@ -152,6 +155,198 @@ def test_marked_clean_thread_admits_text_without_global_docker_scan(
     run, _ = threads._accept_message_run("t", "Hello")
     assert run.status == "pending"
     assert runs.get("t", run.id).status == "pending"
+
+
+def test_browser_tool_waits_for_successful_global_orphan_reconciliation(
+        monkeypatch, admitted):
+    root, runs = admitted
+    monkeypatch.setattr(browser.BrowserManager, "_reconciled_roots", set())
+    attempts = []
+
+    def scan(_root):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise browser.BrowserUnavailable("orphan Docker scan failed")
+
+    monkeypatch.setattr(browser.BrowserManager, "reap_orphans", scan)
+    assert browser.BrowserManager.ready_for_browser(str(root), "t") is False
+    text, _ = threads._accept_message_run("t", "Hello")
+    assert text.status == "pending"
+    assert runs.get("t", text.id).status == "pending"
+    assert browser.BrowserManager.ready_for_browser(str(root), "t") is True
+    assert attempts == [1, 1]
+
+
+def test_promoted_pending_is_redispatched_after_notification_failure(
+        monkeypatch, admitted):
+    root, runs = admitted
+    old = runs.create("t", "general-agent", "Visit host.docker.internal",
+                      user_origin=True)
+    with authority.fence(str(root), "t") as state:
+        state.begin(old.id, old.admission_sequence)
+    held, _ = threads._accept_message_run("t", "Read public status")
+    monkeypatch.setattr(browser.BrowserManager, "current_session", lambda _tid: None)
+    monkeypatch.setattr(browser, "_bounded_cli", lambda *_args, **_kwargs: b"")
+    dispatches = []
+
+    def dispatch(_tid):
+        dispatches.append(1)
+        if len(dispatches) == 1:
+            raise RuntimeError("scheduler notification failed")
+
+    monkeypatch.setattr(threads, "_dispatch_pending_after", dispatch)
+    monkeypatch.setattr(threads, "_schedule_browser_revocation_retry",
+                        lambda _tid: None)
+    assert threads._drain_held_browser_events("t") is False
+    assert runs.get("t", held.id).status == "pending"
+    assert threads._drain_held_browser_events("t") is True
+    assert runs.get("t", held.id).status == "pending"
+    assert dispatches == [1, 1]
+
+
+def test_reset_worker_requeues_after_one_held_event_for_fairness(
+        monkeypatch, admitted):
+    root, runs = admitted
+    old = runs.create("t", "general-agent", "Visit host.docker.internal",
+                      user_origin=True)
+    with authority.fence(str(root), "t") as state:
+        state.begin(old.id, old.admission_sequence)
+    held = [threads._accept_message_run("t", f"Message {index}")[0]
+            for index in range(3)]
+    monkeypatch.setattr(browser.BrowserManager, "current_session", lambda _tid: None)
+    monkeypatch.setattr(browser, "_bounded_cli", lambda *_args, **_kwargs: b"")
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda _tid: None)
+    queued = []
+    monkeypatch.setattr(threads, "_queue_browser_revocation", queued.append)
+    assert threads._drain_held_browser_events("t") is True
+    assert [runs.get("t", item.id).status for item in held] == [
+        "pending", "revocation_pending", "revocation_pending"]
+    assert queued == ["t"]
+
+
+def _phone_held_context(monkeypatch, admitted):
+    root, runs = admitted
+    monkeypatch.setattr(phone_api, "_thread_dir", lambda _tid: str(root / "t"))
+    monkeypatch.setattr(phone_api.state, "_get_status", lambda _tid: {"stage": "ready"})
+    monkeypatch.setattr(threads, "_set_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(browser.BrowserManager, "current_session", lambda _tid: None)
+    monkeypatch.setattr(browser, "_bounded_cli",
+                        lambda args, **_kwargs: b"old-generation\n"
+                        if "--all" in args else b"")
+    queued, dispatched, finished = [], [], []
+    monkeypatch.setattr(threads, "_queue_browser_revocation", queued.append)
+    monkeypatch.setattr(threads, "_dispatch_pending_after",
+                        lambda tid, *_args: dispatched.append(tid))
+    monkeypatch.setattr(phone_api.RUN_STREAMS, "finish",
+                        lambda tid, work_id: finished.append((tid, work_id)))
+    monkeypatch.setattr(threads, "_schedule_browser_revocation_retry",
+                        lambda _tid: None)
+    old = runs.create("t", "general-agent", "Visit host.docker.internal",
+                      user_origin=True)
+    with authority.fence(str(root), "t") as state:
+        state.begin(old.id, old.admission_sequence)
+        state.add_generation(old.id, "old-generation")
+    held, _ = threads._accept_message_run("t", "Read public status")
+    assert held.status == "revocation_pending"
+    return root, runs, held, queued, dispatched, finished
+
+
+def test_held_phone_delete_receipt_survives_failed_reset_and_retry(
+        monkeypatch, admitted):
+    root, runs, held, queued, dispatched, finished = _phone_held_context(
+        monkeypatch, admitted)
+    follower, _ = threads._accept_message_run("t", "Then read a second page")
+    kills = []
+
+    def kill(generation):
+        kills.append(generation)
+        if len(kills) == 1:
+            raise browser.BrowserUnavailable("Docker kill failed")
+
+    monkeypatch.setattr(browser, "_kill_container_confirmed", kill)
+    code, response = phone_api._cancel_logical_run("t", held.id)
+    assert code == 202 and response["outcome"] == "cancelling"
+    receipt = runs.get("t", held.id)
+    assert receipt.status == "cancelled" and receipt.browser_cancel_reset
+    assert receipt.cancel_cleanup == "pending"
+    assert phone_api._logical_status("t", held.id)["status"] == "cancelling"
+    assert dispatched == [] and finished == []
+
+    assert threads._drain_held_browser_events("t") is False
+    assert runs.get("t", held.id).cancel_cleanup == "pending"
+    assert runs.get("t", follower.id).status == "revocation_pending"
+    assert dispatched == [] and finished == []
+    retry, _ = phone_api._cancel_logical_run("t", held.id)
+    assert retry == 202 and queued
+
+    assert threads._drain_held_browser_events("t") is True
+    assert kills == ["old-generation", "old-generation"]
+    assert runs.get("t", held.id).cancel_cleanup == "complete"
+    assert phone_api._logical_status("t", held.id)["status"] == "cancelled"
+    assert finished == [("t", held.work_id)]
+    assert runs.get("t", follower.id).status == "revocation_pending"
+    assert threads._drain_held_browser_events("t") is True
+    assert runs.get("t", follower.id).status == "pending"
+    assert dispatched
+    code, response = phone_api._cancel_logical_run("t", held.id)
+    assert code == 200 and response["outcome"] == "cancelled"
+
+
+def test_held_phone_cancel_wins_promotion_race_under_short_fence(
+        monkeypatch, admitted):
+    _, runs, held, _, _, _ = _phone_held_context(monkeypatch, admitted)
+    entered, release = Event(), Event()
+    confirm = browser.BrowserManager.confirm_owner_stopped
+
+    def paused_confirm(*args):
+        entered.set()
+        assert release.wait(3)
+        return confirm(*args)
+
+    monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped",
+                        paused_confirm)
+    monkeypatch.setattr(browser, "_kill_container_confirmed", lambda _gen: None)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        resetting = pool.submit(threads._drain_held_browser_events, "t")
+        assert entered.wait(3)
+        code, _ = phone_api._cancel_logical_run("t", held.id)
+        assert code == 202
+        release.set()
+        assert resetting.result(timeout=3) is True
+    receipt = runs.get("t", held.id)
+    assert receipt.status == "cancelled" and receipt.cancel_cleanup == "complete"
+    assert phone_api._logical_status("t", held.id)["status"] == "cancelled"
+
+
+def test_held_phone_cancel_receipt_precedes_follower_notification_retry(
+        monkeypatch, admitted):
+    _, runs, held, _, _, _ = _phone_held_context(monkeypatch, admitted)
+    monkeypatch.setattr(browser, "_kill_container_confirmed", lambda _gen: None)
+    attempts = []
+
+    def notify(_tid, *_args):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("scheduler temporarily unavailable")
+
+    monkeypatch.setattr(threads, "_dispatch_pending_after", notify)
+    assert phone_api._cancel_logical_run("t", held.id)[0] == 202
+    assert threads._drain_held_browser_events("t") is False
+    assert runs.get("t", held.id).cancel_cleanup == "complete"
+    assert phone_api._logical_status("t", held.id)["status"] == "cancelled"
+    assert threads._drain_held_browser_events("t") is True
+    assert attempts == [1, 1]
+
+
+def test_held_phone_promotion_wins_before_delete(monkeypatch, admitted):
+    _, runs, held, _, _, _ = _phone_held_context(monkeypatch, admitted)
+    monkeypatch.setattr(browser, "_kill_container_confirmed", lambda _gen: None)
+    assert threads._drain_held_browser_events("t") is True
+    assert runs.get("t", held.id).status == "pending"
+    code, result = phone_api._cancel_logical_run("t", held.id)
+    assert code == 200 and result["outcome"] == "cancelled"
+    assert runs.get("t", held.id).cancel_cleanup == "complete"
+    assert not runs.get("t", held.id).browser_cancel_reset
 
 
 def test_legacy_unmarked_thread_stays_held_until_migration_scan(monkeypatch, admitted):

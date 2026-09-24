@@ -2621,7 +2621,9 @@ def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
     pending_runs = [run for run in runs
                     if run.status == "pending" and run.id != run_id]
     held_sequence = min((run.admission_sequence for run in runs
-                         if run.status == "revocation_pending"), default=None)
+                         if (run.status == "revocation_pending" or
+                             (run.status == "cancelled" and run.browser_cancel_reset
+                              and run.cancel_cleanup == "pending"))), default=None)
     if held_sequence is not None:
         pending_runs = [run for run in pending_runs
                         if not (run.user_event_id == run.id
@@ -3559,12 +3561,10 @@ def _mark_pending(tid: str, text: str, busy: bool,
     Called off the asyncio event loop together with durable run creation.
     """
     if busy:
-        # The caller's single busy sample (status stage OR holder==tid) decided
-        # this message is a pending follower — write nothing: the running
-        # turn owns status.json, and a write here would be clobbered by its
-        # writes while its Run already holds this message durably. One
-        # sample drives both Run admission and this skip, so they cannot
-        # disagree (two samples could straddle a turn's acquire).
+        # The caller's one busy sample covers an active turn or a browser
+        # safety hold. The Run already holds this message durably; status.json
+        # remains with the active turn or reset worker. Reusing that sample
+        # keeps journal admission and this skip consistent.
         return
     holder_tid = THREAD_QUEUE.peek_holder()
     stage = "queued" if (holder_tid is not None and holder_tid != tid) else "processing"
@@ -3657,35 +3657,44 @@ def _drain_held_browser_events(tid: str) -> bool:
     else:
         failure = None
         try:
-            while True:
-                held = sorted((run for run in _runs().list(tid)
-                               if run.status == "revocation_pending"),
-                              key=lambda run: run.admission_sequence)
-                if not held:
-                    return True
-                run = held[0]
-                session = BrowserManager.current_session(tid)
-                try:
-                    with browser_authority.fence(MANAGER.root_dir, tid) as state:
-                        owner = (run.browser_reset_run_id
-                                 or (state.lease or {}).get("owner_run_id")
-                                 or (session.run_id if session is not None else None))
-                        covered = state.covered
-                    if session is not None:
-                        reset = session.revoke_internal()
-                    else:
-                        reset = False
-                    if not covered:
-                        BrowserManager.reap_orphans(MANAGER.root_dir)
-                    reset = (BrowserManager.confirm_owner_stopped(
-                        MANAGER.root_dir, tid, owner) or reset)
-                    with browser_authority.fence(MANAGER.root_dir, tid) as state:
-                        if not state.covered or state.lease is not None:
-                            raise RuntimeError("browser lease reconciliation is incomplete")
-                        with _RUN_ADMISSION_LOCK:
-                            current = _runs().get(tid, run.id)
-                            if current.status != "revocation_pending":
-                                continue
+            held = sorted((run for run in _runs().list(tid)
+                           if (run.status == "revocation_pending" or
+                               (run.status == "cancelled" and run.browser_cancel_reset
+                                and run.cancel_cleanup == "pending"))),
+                          key=lambda run: run.admission_sequence)
+            if not held:
+                # A prior attempt may have durably promoted the last held Run
+                # before its volatile scheduler notification failed.
+                _dispatch_pending_after(tid)
+                return True
+            run = held[0]
+            session = BrowserManager.current_session(tid)
+            try:
+                with browser_authority.fence(MANAGER.root_dir, tid) as state:
+                    owner = (run.browser_reset_run_id
+                             or (state.lease or {}).get("owner_run_id")
+                             or (session.run_id if session is not None else None))
+                    covered = state.covered
+                if session is not None and session.run_id == owner:
+                    reset = session.revoke_internal()
+                else:
+                    reset = False
+                if not covered:
+                    BrowserManager.reap_orphans(MANAGER.root_dir)
+                reset = (BrowserManager.confirm_owner_stopped(
+                    MANAGER.root_dir, tid, owner) or reset)
+                with browser_authority.fence(MANAGER.root_dir, tid) as state:
+                    if not state.covered or state.lease is not None:
+                        raise RuntimeError("browser lease reconciliation is incomplete")
+                    with _RUN_ADMISSION_LOCK:
+                        current = _runs().get(tid, run.id)
+                        cancelling = (current.status == "cancelled"
+                                      and current.browser_cancel_reset
+                                      and current.cancel_cleanup == "pending")
+                        if current.status != "revocation_pending" and not cancelling:
+                            _queue_browser_revocation(tid)
+                            return True
+                        if not cancelling:
                             latest = max((item.admission_sequence
                                           for item in _runs().list(tid)
                                           if item.user_event_id == item.id), default=0)
@@ -3696,12 +3705,21 @@ def _drain_held_browser_events(tid: str) -> bool:
                                     current.text or "", current.admission_sequence))
                             _runs().transition(
                                 tid, run.id, "pending", browser_reset_notice=reset)
+                if cancelling:
+                    from manage.web import phone_api
+                    phone_api._finish_browser_cancel_cleanup(tid, run.id)
+                else:
                     _RESUME_SCHEDULER.promote(tid)
                     THREAD_QUEUE.promote(tid)
                     _dispatch_pending_after(tid)
-                except Exception as error:
-                    failure = f"Browser safety reset is unconfirmed ({type(error).__name__})"
-                    break
+                if any(item.status == "revocation_pending" or
+                       (item.status == "cancelled" and item.browser_cancel_reset
+                        and item.cancel_cleanup == "pending")
+                       for item in _runs().list(tid)):
+                    _queue_browser_revocation(tid)
+                return True
+            except Exception as error:
+                failure = f"Browser safety reset is unconfirmed ({type(error).__name__})"
         except Exception as error:
             failure = f"Browser safety reset could not read held Runs ({type(error).__name__})"
         finally:
@@ -3738,7 +3756,9 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
     busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
     previous = _runs().list(tid)
     held = sorted((item for item in previous
-                   if item.status == "revocation_pending"),
+                   if (item.status == "revocation_pending" or
+                       (item.status == "cancelled" and item.browser_cancel_reset
+                        and item.cancel_cleanup == "pending"))),
                   key=lambda item: item.admission_sequence)
     older_web = [item for item in previous
                  if (item.assistant_id == "general-agent" and item.mode == "turn"
@@ -4222,11 +4242,14 @@ def _recovery_prep(q: "queue.Queue") -> None:
     after assist-web is up, and erroring every recovered thread against a
     still-loading model would defeat recovery."""
     try:
-        BrowserManager.reap_orphans(MANAGER.root_dir)
+        if not BrowserManager.reconcile_startup(MANAGER.root_dir):
+            raise RuntimeError("browser orphan reconciliation is incomplete")
     except Exception:
         logging.warning("browser startup reconciliation remains incomplete", exc_info=True)
     for tid in {run.thread_id for run in _runs().scan_all()
-                if run.status == "revocation_pending"}:
+                if (run.status == "revocation_pending" or
+                    (run.status == "cancelled" and run.browser_cancel_reset
+                     and run.cancel_cleanup == "pending"))}:
         _queue_browser_revocation(tid)
     if q.empty():
         return

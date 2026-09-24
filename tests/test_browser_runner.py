@@ -240,6 +240,18 @@ def test_five_page_limit_is_concurrent_and_close_releases_popup_slot(monkeypatch
         worker.open("https://seven.example/", reuse_page_id=page_ids[-1])
 
 
+def test_close_bounds_site_controlled_page_urls():
+    worker = BrowserWorker()
+    for index in range(5):
+        page = _Page()
+        page.url = "https://example.com/" + str(index) + "x" * 100_000
+        worker.pages[str(index)] = page
+    result = worker.close("4")
+    assert len(result["pages"]) == 4
+    assert all(len(item["url"]) <= 256 for item in result["pages"])
+    assert len(json.dumps({"result": result}).encode()) < runner.MAX_RESULT
+
+
 def test_partial_playwright_launch_is_closed(monkeypatch):
     closed = []
 

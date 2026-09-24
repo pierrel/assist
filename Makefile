@@ -88,9 +88,9 @@ pi-preview-status:
 #     the same call path the agent's tool hits.  Requires Docker;
 #     fails loudly if missing (no skip — too important).
 #
-# `deploy-sandbox-build` only runs the two shell harnesses on the
-# remote (no venv there); use `make sandbox-smoke` locally / in CI
-# for shell egress integration and the Chromium runtime gate. The full browser
+# `deploy-sandbox-build` runs the Chromium runtime and two shell harnesses on
+# the remote (no venv there); use `make sandbox-smoke` locally / in CI
+# for shell egress integration too. The full browser
 # Docker/proxy regression is separate: `make browser-docker-test`.
 sandbox-smoke: sandbox-build browser-smoke
 	bash dockerfiles/test-sandbox-shim.sh

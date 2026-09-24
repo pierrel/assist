@@ -7,6 +7,7 @@ import os
 import sqlite3
 import tarfile
 import threading
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,13 @@ from manage.web.app import app
 from manage.web import phone_api
 from manage.web import run_stream
 from manage.web.run_stream import RunStreamJournal, encode_sse
+
+
+@pytest.fixture
+def stub_browser_fence(monkeypatch):
+    """Older unit-only cancellation fixtures have no thread directory."""
+    monkeypatch.setattr(phone_api.threads.browser_authority, "fence",
+                        lambda *_args: nullcontext())
 
 
 def _client(monkeypatch) -> TestClient:
@@ -606,7 +614,17 @@ def test_logical_projection_reads_a_fair_handoff_under_the_admission_lock(monkey
     assert revision == 7
 
 
-def test_logical_cancel_closes_only_its_chain_and_dispatches_one_follower(monkeypatch):
+def test_phone_cancel_unknown_thread_stays_404_before_browser_fence(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(state.MANAGER, "thread_dir",
+                        lambda _tid: str(tmp_path / "missing"))
+    with pytest.raises(phone_api.HTTPException) as error:
+        phone_api._cancel_logical_run("thread-a", "run-a")
+    assert error.value.status_code == 404
+
+
+def test_logical_cancel_closes_only_its_chain_and_dispatches_one_follower(
+        monkeypatch, stub_browser_fence):
     def run(identifier, work_id, status):
         return SimpleNamespace(id=identifier, work_id=work_id, status=status,
                                updated_at=1, error=None, cancel_cleanup=None)
@@ -670,7 +688,8 @@ def test_logical_cancel_closes_only_its_chain_and_dispatches_one_follower(monkey
     assert dispatched == [("thread-a", "run-b")]
 
 
-def test_phone_cancel_names_an_awaiting_approval_run_truthfully(monkeypatch):
+def test_phone_cancel_names_an_awaiting_approval_run_truthfully(
+        monkeypatch, stub_browser_fence):
     awaiting = SimpleNamespace(id="run-a", work_id="work-a", status="awaiting_approval",
                                updated_at=1, error=None, cancel_cleanup=None)
     monkeypatch.setattr(phone_api, "_thread_dir", lambda _tid: None)
@@ -686,7 +705,8 @@ def test_phone_cancel_names_an_awaiting_approval_run_truthfully(monkeypatch):
     assert value["detail"] == "Run is awaiting approval"
 
 
-def test_phone_cancel_returns_running_when_initializer_claim_wins(monkeypatch):
+def test_phone_cancel_returns_running_when_initializer_claim_wins(
+        monkeypatch, stub_browser_fence):
     running = SimpleNamespace(id="run-a", work_id="work-a", status="running",
                               updated_at=1, error=None, cancel_cleanup=None)
     monkeypatch.setattr(phone_api, "_thread_dir", lambda _tid: None)
@@ -702,7 +722,8 @@ def test_phone_cancel_returns_running_when_initializer_claim_wins(monkeypatch):
     assert value["outcome"] == "running"
 
 
-def test_phone_cancel_does_not_replay_an_unrelated_terminal_run(monkeypatch):
+def test_phone_cancel_does_not_replay_an_unrelated_terminal_run(
+        monkeypatch, stub_browser_fence):
     cancelled = SimpleNamespace(id="run-a", work_id="work-a", status="cancelled",
                                 updated_at=1, error=None, cancel_cleanup=None)
     monkeypatch.setattr(phone_api, "_thread_dir", lambda _tid: None)
@@ -718,7 +739,8 @@ def test_phone_cancel_does_not_replay_an_unrelated_terminal_run(monkeypatch):
     assert value["detail"] == "Run is already terminal"
 
 
-def test_phone_cancel_sanitizes_a_mid_cancel_run_store_failure(monkeypatch):
+def test_phone_cancel_sanitizes_a_mid_cancel_run_store_failure(
+        monkeypatch, stub_browser_fence):
     pending = SimpleNamespace(id="run-a", work_id="work-a", status="pending",
                               updated_at=1, error=None, cancel_cleanup=None)
 
@@ -742,7 +764,8 @@ def test_phone_cancel_sanitizes_a_mid_cancel_run_store_failure(monkeypatch):
     assert response.json() == {"detail": "run-store-unavailable"}
 
 
-def test_phone_cancel_retry_replays_a_pending_cleanup_receipt(monkeypatch):
+def test_phone_cancel_retry_replays_a_pending_cleanup_receipt(
+        monkeypatch, stub_browser_fence):
     """A failed final receipt repeats cleanup, then records completion once durable."""
     def run(identifier, work_id, status):
         return SimpleNamespace(id=identifier, work_id=work_id, status=status,

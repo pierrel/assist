@@ -167,7 +167,7 @@ def prune_absent_browser_clients(
 
 
 def browser_records(directory: str, thread_id: str) -> dict[str, ClientRecord]:
-    """Read exact browser records for one thread after a successful scan."""
+    """Read exact browser client-map records for one thread."""
     with _locked(directory) as path:
         return {ip: ClientRecord(**value) for ip, value in _read(path).items()
                 if value["kind"] == "browser" and value["thread_id"] == thread_id}

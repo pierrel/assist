@@ -80,17 +80,31 @@ def _user_requested_host(message: str | None, host: str) -> bool:
     if re.search(r"['\"`]|\b(?:not|never|avoid|without|don.t|cannot|can.t)\b",
                  message, re.I):
         return False
-    host_pattern = r"(?:https?://)?" + re.escape(host) + r"(?=$|[\s/:?#!,])"
     visit = (r"^\s*(?:yes,\s*)?(?:(?:please|can you|could you|would you)\s+)?"
                r"(?:visit|open|browse|go to|look at|inspect|check|show)\s+"
                r"(?:(?:me\s+)?(?:the\s+)?"
                r"(?:site|website|page|dashboard)\s+(?:(?:at|on)\s+)?)?"
-               + host_pattern)
+               r"(?P<target>\S+)")
     outcome = (r"^\s*(?:please\s+)?(?:what(?: is|'s)|find|show me|tell me)\s+"
                r"(?:the\s+)?(?:status|report|dashboard|release|arrival|manual)\s+"
-               r"(?:at|on|from)\s+" + host_pattern)
-    return bool(re.search(visit, message, re.I)
-                or re.search(outcome, message, re.I))
+               r"(?:at|on|from)\s+(?P<target>\S+)")
+    match = re.search(visit, message, re.I) or re.search(outcome, message, re.I)
+    if match is None:
+        return False
+    # Parse the whole authority token: a host-looking prefix before userinfo,
+    # punctuation or another hostname is not consent for the internal host.
+    token = match.group("target").rstrip(".,!?")
+    if not token or len(token) > 4096:
+        return False
+    try:
+        parsed = urlsplit(token if token.lower().startswith(("http://", "https://"))
+                          else "//" + token)
+        return (parsed.hostname is not None and parsed.hostname.lower() == host
+                and parsed.username is None and parsed.password is None
+                and not parsed.netloc.endswith(":")
+                and (parsed.port is None or 1 <= parsed.port <= 65535))
+    except ValueError:
+        return False
 
 
 def _owner_start() -> str:
@@ -297,7 +311,6 @@ class BrowserSession:
                 and user_request.work_id != work_id):
             raise BrowserUnavailable("browser request belongs to another work")
         self.token = uuid4().hex
-        self.deadline = None
         self.boot_id = None
         self.deadline_ns = None
         self.identity: _ContainerIdentity | None = None
@@ -468,18 +481,17 @@ class BrowserSession:
                 raise BrowserUnavailable("browser Run has ended")
             self._fence_internal_command(operation, args)
             if operation == "open":
-                if self.deadline is None:
+                if self.deadline_ns is None:
                     with authority.fence(self.threads_root, self.thread_id):
                         self.boot_id, self.deadline_ns = (
                             self.run_service.bind_browser_deadline(
                                 self.thread_id, self.run_id))
-                    self.deadline = self.deadline_ns / 1_000_000_000
                 if self.identity is None:
                     self._begin_lease()
                 self._ensure_mode(args["url"])
             elif self.identity is None:
                 raise BrowserUnavailable("open a page first")
-            if self.deadline is not None and self._remaining() <= 0:
+            if self.deadline_ns is not None and self._remaining() <= 0:
                 self._stop()
                 raise BrowserUnavailable("browser Run deadline expired")
             identity = self.identity
@@ -555,6 +567,8 @@ class BrowserManager:
     _sessions: dict[str, BrowserSession] = {}
     _gate_lock = threading.Lock()
     _gates = weakref.WeakValueDictionary()
+    _reconcile_lock = threading.Lock()
+    _reconciled_roots: set[str] = set()
 
     @classmethod
     def thread_gate(cls, thread_id: str):
@@ -586,8 +600,28 @@ class BrowserManager:
         _kill_container_confirmed(generation)
 
     @classmethod
+    def reconcile_startup(cls, threads_root: str) -> bool:
+        """Gate all browser tools on one successful process-local orphan sweep."""
+        try:
+            root = os.path.realpath(threads_root)
+            if root not in cls._reconciled_roots:
+                if not cls._reconcile_lock.acquire(timeout=5):
+                    return False
+                try:
+                    if root not in cls._reconciled_roots:
+                        cls.reap_orphans(threads_root)
+                        cls._reconciled_roots.add(root)
+                finally:
+                    cls._reconcile_lock.release()
+            return True
+        except Exception:
+            return False
+
+    @classmethod
     def ready_for_browser(cls, threads_root: str, thread_id: str) -> bool:
-        """A browser tool needs coverage, no old lease, and a valid map."""
+        """A browser tool needs global recovery and exact thread readiness."""
+        if not cls.reconcile_startup(threads_root):
+            return False
         try:
             map_dir = configured_directory()
             if map_dir is None:

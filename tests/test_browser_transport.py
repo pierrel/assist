@@ -161,7 +161,7 @@ def test_command_transport_is_clamped_and_late_result_is_rejected(
     session = browser.BrowserSession("thread", "run", str(tmp_path), str(tmp_path), None)
     session.identity = browser._ContainerIdentity(
         str(tmp_path), "172.20.0.9", "generation", "public", None)
-    session.deadline = 1
+    session.deadline_ns = 1
     remaining = iter((1.0, 0.4, 0.0))
     monkeypatch.setattr(session, "_remaining", lambda: next(remaining))
     observed = []

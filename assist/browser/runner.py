@@ -267,7 +267,7 @@ class BrowserWorker:
         page = self._page(page_id)
         page.close()
         self._prune_pages()
-        live = [{"page_id": ident, "url": item.url}
+        live = [{"page_id": ident, "url": item.url[:256]}
                 for ident, item in self.pages.items()]
         return {"closed_page_id": page_id, "pages": live,
                 "active_page_id": live[-1]["page_id"] if live else None}

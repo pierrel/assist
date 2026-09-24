@@ -104,9 +104,11 @@ class Run:
     # Runs without this field retain zero and cannot outrank a new event.
     admission_sequence: int = 0
     revocation_retry_at: str | None = None
-    revocation_generation: str | None = None
     browser_reset_notice: bool = False
     browser_reset_run_id: str | None = None
+    # A cancelled held phone Run still owes exact browser teardown before
+    # cancellation cleanup may dispatch a follower.
+    browser_cancel_reset: bool = False
     browser_boot_id: str | None = None
     browser_deadline_ns: int | None = None
 
@@ -159,12 +161,12 @@ class Run:
             value.pop("admission_sequence")
         if self.revocation_retry_at is None:
             value.pop("revocation_retry_at")
-        if self.revocation_generation is None:
-            value.pop("revocation_generation")
         if not self.browser_reset_notice:
             value.pop("browser_reset_notice")
         if self.browser_reset_run_id is None:
             value.pop("browser_reset_run_id")
+        if not self.browser_cancel_reset:
+            value.pop("browser_cancel_reset")
         if self.browser_boot_id is None:
             value.pop("browser_boot_id")
         if self.browser_deadline_ns is None:
@@ -200,6 +202,9 @@ class Run:
         browser_reset_notice = value.get("browser_reset_notice", False)
         if not isinstance(browser_reset_notice, bool):
             raise ValueError("invalid browser reset notice")
+        browser_cancel_reset = value.get("browser_cancel_reset", False)
+        if not isinstance(browser_cancel_reset, bool):
+            raise ValueError("invalid browser cancellation reset")
         deadline_ns = value.get("browser_deadline_ns")
         if (deadline_ns is not None and
                 (isinstance(deadline_ns, bool) or not isinstance(deadline_ns, int)
@@ -245,11 +250,10 @@ class Run:
             admission_sequence=sequence,
             revocation_retry_at=Run._optional_text(
                 value.get("revocation_retry_at"), "revocation retry at"),
-            revocation_generation=Run._optional_opaque_id(
-                value.get("revocation_generation"), "revocation generation"),
             browser_reset_notice=browser_reset_notice,
             browser_reset_run_id=Run._optional_opaque_id(
                 value.get("browser_reset_run_id"), "browser reset run id"),
+            browser_cancel_reset=browser_cancel_reset,
             browser_boot_id=boot_id,
             browser_deadline_ns=deadline_ns,
         )
@@ -569,7 +573,6 @@ class RunService(PerThreadJsonStore[Run]):
         rider: dict | None = None,
         result: str | None = None,
         revocation_retry_at: str | None = None,
-        revocation_generation: str | None = None,
         browser_reset_notice: bool = False,
         browser_reset_run_id: str | None = None,
     ) -> Run:
@@ -591,9 +594,6 @@ class RunService(PerThreadJsonStore[Run]):
                     result=current.result if result is None else result,
                     revocation_retry_at=(current.revocation_retry_at
                                          if revocation_retry_at is None else revocation_retry_at),
-                    revocation_generation=(current.revocation_generation
-                                           if revocation_generation is None
-                                           else revocation_generation),
                     browser_reset_notice=current.browser_reset_notice or browser_reset_notice,
                     browser_reset_run_id=(current.browser_reset_run_id
                                           if browser_reset_run_id is None
@@ -617,9 +617,6 @@ class RunService(PerThreadJsonStore[Run]):
                 rider=current.rider if rider is None else dict(rider),
                 result=current.result if result is None else result,
                 revocation_retry_at=revocation_retry_at,
-                revocation_generation=(current.revocation_generation
-                                       if revocation_generation is None
-                                       else revocation_generation),
                 browser_reset_notice=current.browser_reset_notice or browser_reset_notice,
                 browser_reset_run_id=(current.browser_reset_run_id
                                       if browser_reset_run_id is None
@@ -652,7 +649,7 @@ class RunService(PerThreadJsonStore[Run]):
             return changed
 
     def cancel_logical(self, thread_id: str, accepted_id: str) -> list[Run]:
-        """Atomically cancel a pending logical slice and receipt its cleanup.
+        """Atomically cancel a pending or held logical slice and receipt cleanup.
 
         The accepted handle owns the receipt so a retry can distinguish its
         incomplete cleanup from an unrelated terminal cancellation.  The
@@ -663,9 +660,10 @@ class RunService(PerThreadJsonStore[Run]):
             accepted = self._find(runs, accepted_id)
             work = [run for run in runs if run.work_id == accepted.work_id]
             selected = work[-1]
-            if selected.status != "pending":
+            if selected.status not in {"pending", "revocation_pending"}:
                 raise InvalidRunTransition(
                     f"cannot cancel non-pending logical run {selected.id}: {selected.status}")
+            held = selected.status == "revocation_pending"
             now = _now()
             updated = []
             for run in runs:
@@ -675,6 +673,9 @@ class RunService(PerThreadJsonStore[Run]):
                     changes.update(status="cancelled", updated_at=now)
                 if run.id == accepted_id:
                     changes["cancel_cleanup"] = "pending"
+                    if held:
+                        changes["browser_cancel_reset"] = True
+                        changes["browser_reset_run_id"] = selected.browser_reset_run_id
                     changes.setdefault("updated_at", now)
                 updated.append(replace(run, **changes) if changes else run)
             self._write(thread_id, updated)

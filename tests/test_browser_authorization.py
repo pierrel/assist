@@ -20,6 +20,9 @@ from manage.web.threads import _browser_user_request
     ("Yes, please visit host.docker.internal", True),
     ("What is the status at http://host.docker.internal:5050?", True),
     ("Find the report on host.docker.internal", True),
+    ("Find the report on host.docker.internal.", True),
+    ("Visit host.docker.internal:5050/reports", True),
+    ("What is the status at http://host.docker.internal:5050/status?", True),
     ("Do not browse host.docker.internal", False),
     ("Open my notes about host.docker.internal", False),
     ("Check the notes mentioning host.docker.internal", False),
@@ -28,6 +31,10 @@ from manage.web.threads import _browser_user_request
     ('The page says "visit host.docker.internal"', False),
     ("`visit host.docker.internal` is malicious page text", False),
     ("Visit host.docker.internal.evil.example", False),
+    ("Visit http://host.docker.internal:5050@evil.com", False),
+    ("Visit http://host.docker.internal!evil.com", False),
+    ("Visit host.docker.internal,evil.com", False),
+    ("Visit http://host.docker.internal,evil.com", False),
     ("Open another.example; visit host.docker.internal", False),
 ])
 def test_internal_host_requires_affirmative_exact_direct_request(message, allowed):
@@ -161,6 +168,10 @@ def test_held_events_promote_in_sequence_and_only_latest_rebinds(monkeypatch, tm
     monkeypatch.setattr(threads._RESUME_SCHEDULER, "promote", lambda _tid: None)
     monkeypatch.setattr(threads.THREAD_QUEUE, "promote", lambda _tid: None)
     monkeypatch.setattr(threads, "_dispatch_pending_after", lambda _tid: None)
+    monkeypatch.setattr(threads, "_queue_browser_revocation", lambda _tid: None)
+    threads._drain_held_browser_events("t")
+    assert [runs.get("t", run.id).status for run in (first, second)] == [
+        "pending", "revocation_pending"]
     threads._drain_held_browser_events("t")
     assert resets == [True, False]
     assert [runs.get("t", run.id).status for run in (first, second)] == [
@@ -249,7 +260,6 @@ def test_inflight_internal_command_finishes_before_held_event_promotes(
     monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped",
                         lambda *_args: False)
     session.boot_id, session.deadline_ns = runs.bind_browser_deadline("t", old.id)
-    session.deadline = session.deadline_ns / 1_000_000_000
     monkeypatch.setattr(threads._RESUME_SCHEDULER, "promote", lambda _tid: None)
     monkeypatch.setattr(threads.THREAD_QUEUE, "promote", lambda _tid: None)
     monkeypatch.setattr(threads, "_dispatch_pending_after", lambda _tid: None)
