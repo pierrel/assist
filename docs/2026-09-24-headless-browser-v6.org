@@ -1,0 +1,47 @@
+#+title: Headless browser design v6 — approval follow-up authorization
+#+date: <2026-09-24>
+#+status: design candidate; no product code
+
+* Decision
+
+Keep the v5 architecture and its exact-href uniqueness contract. Browser
+internal mode still requires immutable, exact-host real-user authorization
+scoped to the active request lineage; the proxy and isolated sidecar remain
+the network boundary. This revision makes all synthetic approval follow-ups
+fail closed for internal-mode authorization.
+
+* Approval follow-up lineage
+
+=_dispatch_egress_resolution= can combine approvals from distinct pending
+user Runs into one synthetic =origin=system= Run with a fresh =work_id=.
+The current approval record has an originating thread ID and model-composed
+task, not a trusted Run/lineage ID. Therefore *no* internal-host browser
+authorization carries into *any* approval-generated synthetic Run, even a
+single-request follow-up. This avoids adding durable lineage plumbing merely
+for approval replay and makes mixed batches fail closed by construction.
+An internal visit after approval needs fresh real-user confirmation naming
+the exact host, recorded as a new user-origin request/Run; the synthetic Run
+does not gain authorization retroactively. Public-mode browsing and existing
+exact-host egress approval remain available in the synthetic Run. Neither an
+approved egress host nor a copied =main_task= is consent to internal browsing.
+The original real-user Run remains able to visit its explicitly requested
+internal host before approval suspension.
+
+* Verification delta
+
+Create two pending user Runs with distinct lineages, one with an explicit
+internal-host request and one unrelated public task; resolve their approvals
+as a mixed batch. The synthetic follow-up cannot start internal mode from
+either lineage, even if copied text or a public page asks for that host.
+Repeat with a single approval follow-up: it also lacks inherited internal
+authorization. Fresh real-user exact-host confirmation permits only that
+host. Keep all v5 link ambiguity,
+network, proxy, resource and stateful-interaction tests unchanged.
+
+* Historical supersessions
+
+This document directly supersedes
+=docs/2026-09-24-headless-browser-v5.org='s approval-follow-up paragraph
+where it assumed a synthetic follow-up could continue an active lineage's
+internal authorization. V5 and earlier dated designs remain unchanged; their unaffected
+decisions and evidence still apply.

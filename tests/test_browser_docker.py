@@ -1,0 +1,389 @@
+"""Real Docker/proxy integration; opt in with ASSIST_BROWSER_DOCKER_TEST=1."""
+import os
+import socket
+import time
+from uuid import uuid4
+
+import pytest
+
+from assist.browser import manager as browser
+from assist.egress.client_map import read_client
+from assist.sandbox_manager import (SandboxManager, _egress_proxy_config_hash,
+                                    _network_identity)
+
+
+ORIGIN_SCRIPT = r'''
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlsplit
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+    def do_GET(self):
+        if self.path.startswith('/redirect?'):
+            target = parse_qs(urlsplit(self.path).query)['to'][0]
+            self.send_response(302)
+            self.send_header('Location', target)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        if self.path.startswith('/worker?'):
+            host = parse_qs(urlsplit(self.path).query)['host'][0]
+            body = (('<html><body><button id="state">pending</button><script>'
+                     'const code = `let ws = new WebSocket("ws://' + host + ':8000/ws");'
+                     'ws.onerror=()=>postMessage("blocked");'
+                     'ws.onopen=()=>postMessage("opened");`;'
+                     'const worker = new Worker(URL.createObjectURL('
+                     'new Blob([code], {type:"application/javascript"})));'
+                     'worker.onmessage=e=>document.querySelector("#state").textContent=e.data;'
+                     '</script></body></html>').encode())
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == '/download':
+            body = b'Browser fixture download\n'
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain')
+            self.send_header('Content-Disposition', 'attachment; filename="report.txt"')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == '/large':
+            body = b'x' * (20 * 1024 * 1024 + 1)
+            self.send_response(200)
+            self.send_header('Content-Disposition', 'attachment; filename="large.txt"')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        body = (b'<html><body><h1>Browser fixture</h1>'
+                b'<a href="/next" onclick="event.preventDefault();'
+                b'document.querySelector(\'#status\').textContent=\'first\'">First</a>'
+                b'<a href="/next" onclick="event.preventDefault();'
+                b'document.querySelector(\'#status\').textContent=\'second\'">Second</a>'
+                b'<a href="/download">Download report</a>'
+                b'<a href="/large">Download large file</a>'
+                b'<input aria-label="Search" type="text">'
+                b'<input aria-label="Password" type="password">'
+                b'<button onclick="document.querySelector(\'#status\').textContent='
+                b'document.querySelector(\'input[aria-label=Search]\').value">Use search</button>'
+                b'<button onclick="setTimeout(()=>document.querySelector(\'#later\')'
+                b'.innerHTML=\'<button>Ready now</button>\',200)">Load later</button>'
+                b'<button onclick="window.open(\'about:blank\')">Open popup</button>'
+                b'<div id="later"></div>'
+                b'<p id="status">ready</p></body></html>')
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
+'''
+
+TEST_PROXY_SCRIPT = r'''
+import importlib.util, os
+spec = importlib.util.spec_from_file_location('proxy', '/usr/local/bin/egress-proxy.py')
+proxy = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(proxy)
+original = proxy.vet_resolved
+def fixture_resolve(host, port, *, global_only=True):
+    if host == 'fixture-public.test' and global_only:
+        return os.environ['BROWSER_TEST_PUBLIC_ORIGIN_IP']
+    return original(host, port, global_only=global_only)
+proxy.vet_resolved = fixture_resolve
+proxy.main()
+'''
+
+
+@pytest.mark.skipif(os.getenv("ASSIST_BROWSER_DOCKER_TEST") != "1",
+                    reason="requires Docker Engine 29 isolated bridges")
+def test_recreated_browser_network_changes_proxy_identity():
+    import docker
+
+    client = docker.from_env()
+    name = f"assist-browser-recreation-test-{uuid4().hex[:10]}"
+    network = None
+    try:
+        first = client.networks.create(
+            name, driver="bridge", internal=True, enable_ipv6=False,
+            options={"com.docker.network.bridge.gateway_mode_ipv4": "isolated"})
+        network = first
+        first_id, first_cidr = _network_identity(first, isolated=True)
+        first.remove()
+        network = None
+        second = client.networks.create(
+            name, driver="bridge", internal=True, enable_ipv6=False,
+            options={"com.docker.network.bridge.gateway_mode_ipv4": "isolated"})
+        network = second
+        second_id, second_cidr = _network_identity(second, isolated=True)
+        assert first_id != second_id
+        assert _egress_proxy_config_hash(
+            "example.com", None, f"ordinary|{first_id}:{first_cidr}") != (
+                _egress_proxy_config_hash(
+                    "example.com", None, f"ordinary|{second_id}:{second_cidr}"))
+    finally:
+        if network is not None:
+            network.remove()
+
+
+@pytest.mark.skipif(os.getenv("ASSIST_BROWSER_DOCKER_TEST") != "1",
+                    reason="requires locally built browser/proxy test images and Docker")
+def test_isolated_browser_reaches_only_attributed_proxy(tmp_path, monkeypatch):
+    import docker
+
+    client = docker.from_env()
+    suffix = uuid4().hex[:10]
+    ordinary_name = f"assist-browser-test-ordinary-{suffix}"
+    browser_name = f"assist-browser-test-isolated-{suffix}"
+    proxy_name = f"assist-browser-test-proxy-{suffix}"
+    created = []
+    networks = []
+    session = None
+    try:
+        ordinary = client.networks.create(ordinary_name, driver="bridge", internal=True)
+        networks.append(ordinary)
+        isolated = client.networks.create(
+            browser_name, driver="bridge", internal=True, enable_ipv6=False,
+            options={"com.docker.network.bridge.gateway_mode_ipv4": "isolated"})
+        networks.append(isolated)
+        ordinary.reload()
+        isolated.reload()
+        ordinary_cidr = ordinary.attrs["IPAM"]["Config"][0]["Subnet"]
+        browser_cidr = isolated.attrs["IPAM"]["Config"][0]["Subnet"]
+        origin = client.containers.run(
+            "python:3.13-slim-bookworm", ["python", "-u", "-c", ORIGIN_SCRIPT],
+            detach=True, network=ordinary_name, remove=True,
+            name=f"assist-browser-test-origin-{suffix}")
+        created.append(origin)
+        origin.reload()
+        origin_ip = origin.attrs["NetworkSettings"]["Networks"][ordinary_name]["IPAddress"]
+        map_dir = tmp_path / "client-map"
+        map_dir.mkdir(mode=0o700)
+        monkeypatch.setenv("ASSIST_EGRESS_CLIENT_MAP_DIR", str(map_dir))
+        proxy = client.containers.run(
+            "assist-egress-proxy-browser-test", detach=True, remove=True,
+            name=proxy_name,
+            entrypoint=["python3", "-c", TEST_PROXY_SCRIPT],
+            volumes={str(map_dir): {"bind": "/client-map", "mode": "ro"}},
+            environment={"EGRESS_ALLOWLIST": (
+                             f"{origin_ip},example.com,fixture-public.test"),
+                         "EGRESS_SANDBOX_CIDR": ordinary_cidr,
+                         "EGRESS_BROWSER_CIDR": browser_cidr,
+                         "BROWSER_TEST_PUBLIC_ORIGIN_IP": origin_ip})
+        created.append(proxy)
+        ordinary.connect(proxy)
+        isolated.connect(proxy, aliases=["assist-egress-proxy"])
+        SandboxManager._wait_for_egress_proxy_ready(proxy)
+        # With approval grants disabled, an ordinary shell source retains
+        # base-only access. The first admitted connection starts host throttle.
+        for host, status in [(origin_ip, b"200"), ("unlisted.example", b"403")]:
+            raw = origin.exec_run([
+                "python", "-c", "import socket,sys; "
+                f"s=socket.create_connection(('{proxy_name}',8888),3); "
+                f"s.sendall(b'CONNECT {host}:8000 HTTP/1.1\\r\\n\\r\\n'); "
+                "sys.stdout.buffer.write(s.recv(256))"])
+            assert status in raw.output.split(b"\r\n", 1)[0]
+        time.sleep(2.1)
+        monkeypatch.setattr(browser, "BROWSER_NETWORK", browser_name)
+        monkeypatch.setattr(browser, "EGRESS_PROXY_NAME", proxy_name)
+        monkeypatch.setattr(browser, "BROWSER_IMAGE", "assist-browser-headless-test")
+        monkeypatch.setattr(browser, "_load_egress_allowlist",
+                            lambda: [origin_ip, "example.com", "fixture-public.test"])
+        monkeypatch.setattr(SandboxManager, "_ensure_egress_proxy_running",
+                            classmethod(lambda _cls, _client: proxy_name))
+        work_dir = tmp_path / "workspace"
+        work_dir.mkdir()
+        session = browser.BrowserSession(
+            "test-thread", "test-run", str(work_dir), str(tmp_path),
+            browser.BrowserUserRequest(
+                "user-event", "work", f"Please visit http://{origin_ip}:8000 and inspect it."),
+            work_id="work")
+        # The browser network's live Docker settings, not its name, are the gate.
+        initial = session.command("open", url=f"http://{origin_ip}:8000/")
+        assert "error" not in initial, initial
+        observation = initial["result"]
+        assert "Browser fixture" in observation["snapshot"]
+        assert read_client(str(map_dir), session.identity.ip).generation == session.identity.generation
+        links = [target for target in observation["targets"]
+                 if target.get("href") == f"http://{origin_ip}:8000/next"]
+        assert len(links) == 2, repr(observation["network_errors"])
+        ambiguous = session.command(
+            "act", page_id=observation["page_id"],
+            snapshot_id=observation["snapshot_id"], action="click",
+            target={"href": links[0]["href"]})
+        assert "ambiguous" in ambiguous["error"]
+        clicked = session.command(
+            "act", page_id=observation["page_id"],
+            snapshot_id=observation["snapshot_id"], action="click",
+            target={"ref": links[1]["ref"]})
+        assert "second" in clicked["result"]["snapshot"]
+        stale = session.command(
+            "act", page_id=observation["page_id"],
+            snapshot_id=observation["snapshot_id"], action="click",
+            target={"ref": links[0]["ref"]})
+        assert "stale" in stale["error"]
+        observed = clicked["result"]
+        search = next(target for target in observed["targets"]
+                      if target["name"] == "Search")
+        filled = session.command(
+            "act", page_id=observed["page_id"],
+            snapshot_id=observed["snapshot_id"], action="fill",
+            target={"ref": search["ref"], "text": "needle"})["result"]
+        password = next(target for target in filled["targets"]
+                        if target["name"] == "Password")
+        denied_secret = session.command(
+            "act", page_id=filled["page_id"],
+            snapshot_id=filled["snapshot_id"], action="fill",
+            target={"ref": password["ref"], "text": "secret"})
+        assert "secret" in denied_secret["error"]
+        use_search = next(target for target in filled["targets"]
+                          if target["name"] == "Use search")
+        searched = session.command(
+            "act", page_id=filled["page_id"],
+            snapshot_id=filled["snapshot_id"], action="click",
+            target={"ref": use_search["ref"]})["result"]
+        assert "needle" in searched["snapshot"]
+        delayed = next(target for target in searched["targets"]
+                       if target["name"] == "Load later")
+        loading = session.command(
+            "act", page_id=searched["page_id"],
+            snapshot_id=searched["snapshot_id"], action="click",
+            target={"ref": delayed["ref"]})["result"]
+        waited = session.command(
+            "wait", page_id=loading["page_id"], role="button", name="Ready now")
+        assert "Ready now" in waited["result"]["snapshot"]
+        popup_button = next(target for target in waited["result"]["targets"]
+                            if target["name"] == "Open popup")
+        popup = session.command(
+            "act", page_id=waited["result"]["page_id"],
+            snapshot_id=waited["result"]["snapshot_id"], action="click",
+            target={"ref": popup_button["ref"]})["result"]
+        assert popup["page_id"] != observation["page_id"]
+        assert popup["url"] == "about:blank"
+        time.sleep(4.1)
+        observed = session.command("observe", page_id=observation["page_id"])["result"]
+        report = next(target for target in observed["targets"]
+                      if target.get("href") == f"http://{origin_ip}:8000/download")
+        downloaded = session.command(
+            "act", page_id=observed["page_id"],
+            snapshot_id=observed["snapshot_id"], action="click",
+            target={"ref": report["ref"]})["result"]
+        assert downloaded["downloads"]
+        download_id = downloaded["downloads"][-1]["download_id"]
+        assert session.save_download(download_id) == {
+            "path": "/workspace/downloads/report.txt", "bytes": 25}
+        assert (work_dir / "downloads" / "report.txt").read_bytes() == (
+            b"Browser fixture download\n")
+        with pytest.raises(FileExistsError):
+            session.save_download(download_id)
+        with pytest.raises(browser.BrowserUnavailable, match="safe basename"):
+            session.save_download(download_id, "AGENTS.md")
+        large_page = session.command("observe", page_id=observed["page_id"])["result"]
+        time.sleep(8.1)
+        large_link = next(target for target in large_page["targets"]
+                          if target.get("href") == f"http://{origin_ip}:8000/large")
+        large = session.command(
+            "act", page_id=large_page["page_id"],
+            snapshot_id=large_page["snapshot_id"], action="click",
+            target={"ref": large_link["ref"]})["result"]
+        assert "20 MiB" in session.save_download(
+            large["downloads"][-1]["download_id"])["error"]
+        session.identity.container.reload()
+        attrs = session.identity.container.attrs
+        assert attrs["HostConfig"]["Memory"] == 1024 ** 3
+        assert attrs["HostConfig"]["PidsLimit"] == 128
+        assert attrs["HostConfig"]["NanoCpus"] == 1_000_000_000
+        assert attrs["HostConfig"]["ReadonlyRootfs"] is True
+        assert attrs["Mounts"] == []
+        assert not any(item.startswith("ASSIST_") for item in attrs["Config"]["Env"])
+        assert "size=134217728" in attrs["HostConfig"]["Tmpfs"]["/home/browser"]
+        # An exec from the host can inspect routing; the product has no such tool.
+        direct = session.identity.container.exec_run([
+            "python", "-c", "import socket; s=socket.socket(); s.settimeout(2); "
+            f"s.connect(('{origin_ip}',8000))"])
+        assert direct.exit_code != 0
+        direct_v6 = session.identity.container.exec_run([
+            "python", "-c", "import socket; "
+            "s=socket.socket(socket.AF_INET6,socket.SOCK_STREAM); "
+            "s.settimeout(2); s.connect(('2001:4860:4860::8888',53))"])
+        assert direct_v6.exit_code != 0
+        for family, destination in [
+                ("AF_INET", f"('{origin_ip}',8000)"),
+                ("AF_INET6", "('2001:4860:4860::8888',53)")]:
+            direct = session.identity.container.exec_run([
+                "python", "-c", "import socket; "
+                f"s=socket.socket(socket.{family},socket.SOCK_DGRAM); "
+                f"s.settimeout(2); s.connect({destination})"])
+            assert direct.exit_code != 0
+        public_only = browser.BrowserSession(
+            "test-thread", "public-run", str(work_dir), str(tmp_path), None)
+        with pytest.raises(browser.BrowserUnavailable, match="fresh user request"):
+            public_only.command("open", url=f"http://{origin_ip}:8000/")
+        session.close()
+        session = browser.BrowserSession(
+            "test-thread", "public-run", str(work_dir), str(tmp_path), None)
+        session._start("public", None)
+        # The same proxy gate handles a redirect CONNECT and a worker's
+        # absolute-URL WebSocket upgrade; neither can use an internal base host
+        # from a public sidecar.
+        for request in [
+                f"CONNECT {origin_ip}:8000 HTTP/1.1\r\n\r\n",
+                (f"GET http://{origin_ip}:8000/ws HTTP/1.1\r\n"
+                 f"Host: {origin_ip}:8000\r\nUpgrade: websocket\r\n\r\n")]:
+            raw = session.identity.container.exec_run([
+                "python", "-c", "import socket,sys; "
+                "s=socket.create_connection(('assist-egress-proxy',8888),3); "
+                f"s.sendall({request!r}.encode()); "
+                "sys.stdout.buffer.write(s.recv(512))"])
+            assert b"403 Forbidden" in raw.output
+            assert b"browser_internal_policy" in raw.output
+        denied_before = proxy.logs().count(
+            f"DENY {origin_ip} (browser_internal_policy)".encode())
+        redirected = session.command(
+            "open", url=(f"http://fixture-public.test:8000/redirect?"
+                         f"to=http%3A%2F%2F{origin_ip}%3A8000%2F"))
+        assert "error" not in redirected, redirected
+        denied_after_redirect = proxy.logs().count(
+            f"DENY {origin_ip} (browser_internal_policy)".encode())
+        assert denied_after_redirect > denied_before
+        time.sleep(2.1)
+        worker = session.command(
+            "open", url=f"http://fixture-public.test:8000/worker?host={origin_ip}")
+        assert "error" not in worker, worker
+        worker_page = worker["result"]["page_id"]
+        worker_result = session.command(
+            "wait", page_id=worker_page, role="button", name="blocked")
+        assert "error" not in worker_result, worker_result
+        denied_after_worker = proxy.logs().count(
+            f"DENY {origin_ip} (browser_internal_policy)".encode())
+        assert denied_after_worker > denied_after_redirect
+        unregistered = client.containers.run(
+            "python:3.13-slim-bookworm", ["python", "-c", "import time;time.sleep(60)"],
+            detach=True, network=browser_name, remove=True,
+            name=f"assist-browser-test-unregistered-{suffix}")
+        created.append(unregistered)
+        raw = unregistered.exec_run([
+            "python", "-c", "import socket,sys; "
+            "s=socket.create_connection(('assist-egress-proxy',8888),3); "
+            f"s.sendall(b'CONNECT {origin_ip}:8000 HTTP/1.1\\r\\n\\r\\n'); "
+            "sys.stdout.buffer.write(s.recv(512))"])
+        assert b"browser_attribution_missing" in raw.output
+        if os.getenv("ASSIST_BROWSER_PUBLIC_TEST") == "1":
+            public_page = session.command("open", url="https://example.com/")
+            assert "error" not in public_page, public_page
+            assert "Example Domain" in public_page["result"]["snapshot"]
+    finally:
+        if session is not None:
+            session.close()
+        for container in reversed(created):
+            try:
+                container.remove(force=True)
+            except Exception:
+                pass
+        for network in reversed(networks):
+            try:
+                network.remove()
+            except Exception:
+                pass

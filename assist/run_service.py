@@ -95,6 +95,9 @@ class Run:
     # A cancellation receipt belongs to the immutable accepted handle, not a
     # successor slice.  Its absence keeps historical records unchanged.
     cancel_cleanup: CancelCleanup | None = None
+    # Only a directly admitted human turn mints its own immutable Run ID here.
+    # A same-work successor may carry that ID; synthetic follow-ups do not.
+    user_event_id: str | None = None
 
     _MAX_OPAQUE_ID_CHARS = 256
 
@@ -139,6 +142,8 @@ class Run:
             value.pop("location")
         if self.cancel_cleanup is None:
             value.pop("cancel_cleanup")
+        if self.user_event_id is None:
+            value.pop("user_event_id")
         return value
 
     @staticmethod
@@ -195,6 +200,8 @@ class Run:
             delegate_user_urls=tuple(delegate_user_urls),
             location=Run._optional_mapping(value.get("location"), "location"),
             cancel_cleanup=cancel_cleanup,
+            user_event_id=Run._optional_opaque_id(
+                value.get("user_event_id"), "user event id"),
         )
 
 
@@ -353,6 +360,8 @@ class RunService(PerThreadJsonStore[Run]):
         multitask_strategy: str = "enqueue",
         delegate_user_urls: tuple[str, ...] = (),
         location: dict | None = None,
+        user_origin: bool = False,
+        user_event_id: str | None = None,
     ) -> Run:
         """Persist and return a pending run, the work-acceptance commit."""
         if not assistant_id:
@@ -368,6 +377,11 @@ class RunService(PerThreadJsonStore[Run]):
         if mode == "turn" and (parent_thread_id or parent_run_id):
             raise ValueError("a turn run cannot have parent fields")
         rid = run_id or uuid.uuid4().hex
+        if user_origin:
+            if (user_event_id is not None or mode != "turn" or origin is not None
+                    or sender is not None or text is None or resume):
+                raise ValueError("only a fresh direct user turn can create user provenance")
+            user_event_id = rid
         now = _now()
         run = Run(
             thread_id=thread_id, assistant_id=assistant_id, text=text, id=rid,
@@ -383,6 +397,7 @@ class RunService(PerThreadJsonStore[Run]):
             created_at=now, updated_at=now,
             delegate_user_urls=tuple(delegate_user_urls),
             location=dict(location) if location else None,
+            user_event_id=user_event_id,
         )
         with self._lock:
             if mode == "child":

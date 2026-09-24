@@ -96,6 +96,6 @@ Three reads, one download, zero asset crawling.
 Some sites build their links or download buttons with JavaScript, so
 `read_url` (which runs no JS) and `curl` won't see the file. If `read_url`
 shows the page but none of its surfaced links lead to the file and you're
-confident it exists, **say so** — that page needs a headless browser, which
-isn't available yet. Don't curl-crawl trying to work around it; tell the user
-it needs browser rendering.
+confident it exists, load `browse-website` and use the browser tools if they
+are available in this web turn. Otherwise say that browser rendering is
+needed. Do not chase raw JavaScript assets with `curl`.

@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-pi-runtime-build deploy-service deploy-install deploy-speech-models restart status logs setup-sudo help sandbox-build egress-proxy-build pi-runtime-build pi-preview-enable pi-preview-disable pi-preview-status sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-pi-runtime-build deploy-service deploy-install deploy-speech-models restart status logs setup-sudo help sandbox-build browser-build egress-proxy-build pi-runtime-build pi-preview-enable pi-preview-disable pi-preview-status sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
 
 eval:
 	$(call with-dev-env,./scripts/run-evals.sh)
@@ -37,7 +37,7 @@ eval:
 test:
 	$(call with-dev-env,.venv/bin/pytest --junit-xml=tests/history/results-$$(date +%Y%m%d-%H%M).xml tests)
 
-web: sandbox-build pi-runtime-build
+web: sandbox-build browser-build pi-runtime-build
 	$(call with-dev-env,.venv/bin/python -m manage.web)
 
 smoke:
@@ -52,9 +52,11 @@ pull-eval-history:
 sandbox-build: egress-proxy-build
 	docker build -t assist-sandbox -f dockerfiles/Dockerfile.sandbox .
 
-# Egress allowlist proxy.  Tiny image (python:3-alpine + ~150 LOC of
-# stdlib).  Used by SandboxManager._ensure_egress_proxy_running to
-# gate every byte leaving the sandbox.  See
+browser-build:
+	docker build -t assist-browser -f dockerfiles/Dockerfile.browser .
+
+# Egress allowlist proxy. Tiny stdlib Python image, shared by shell and
+# browser containers. SandboxManager starts it for exact-host policy. See
 # dockerfiles/egress-proxy.py and docs/2026-05-08-sandbox-network-allowlist.org.
 egress-proxy-build:
 	docker build -t assist-egress-proxy -f dockerfiles/Dockerfile.egress-proxy .
@@ -119,6 +121,8 @@ deploy-sandbox-build:
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-egress-proxy -f dockerfiles/Dockerfile.egress-proxy .'
 	@echo "→ Building sandbox image on $(DEPLOY_HOST)..."
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-sandbox -f dockerfiles/Dockerfile.sandbox .'
+	@echo "→ Building browser image on $(DEPLOY_HOST)..."
+	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-browser -f dockerfiles/Dockerfile.browser .'
 	@echo "→ Running sandbox-smoke on $(DEPLOY_HOST) (push-refusal regression gate)..."
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && bash dockerfiles/test-sandbox-shim.sh'
 	@echo "→ Running egress-smoke on $(DEPLOY_HOST) (allowlist regression gate)..."

@@ -68,15 +68,20 @@ class TestEnsureEgressProxy(TestCase):
     def _make_client(self, network_exists=True, proxy=None):
         client = MagicMock()
         from docker.errors import NotFound
+        net = MagicMock()
+        net.attrs = {
+            "Id": "ordinary-network-id", "Driver": "bridge", "Internal": True,
+            "EnableIPv6": False,
+            "IPAM": {"Config": [{"Subnet": "172.30.0.0/16"}]},
+        }
         if network_exists:
             # Real Docker returns attrs with Internal=True for our network;
             # match that so the manager's "is this internal?" validation
             # passes by intent, not by MagicMock truthiness coincidence.
-            net = MagicMock()
-            net.attrs = {"Internal": True}
             client.networks.get.return_value = net
         else:
             client.networks.get.side_effect = NotFound("no network")
+            client.networks.create.return_value = net
 
         if proxy is None:
             client.containers.get.side_effect = NotFound("no proxy")
@@ -85,11 +90,15 @@ class TestEnsureEgressProxy(TestCase):
 
         new_proxy = MagicMock()
         new_proxy.id = "proxyabc1234"
+        new_proxy.attrs = {"NetworkSettings": {"Networks": {
+            EGRESS_NETWORK: {"NetworkID": "ordinary-network-id"}}}}
         # _wait_for_egress_proxy_ready polls proxy.logs() looking for
         # "listening on".  Without this, the wait blocks for 10s and
         # then raises — which would make every test slow and noisy.
         new_proxy.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
         client.containers.run.return_value = new_proxy
+        if proxy is not None:
+            proxy.attrs = new_proxy.attrs
         return client
 
     def _allowlist_hash(self):
@@ -97,7 +106,7 @@ class TestEnsureEgressProxy(TestCase):
         from assist.sandbox_manager import _egress_proxy_config_hash
         return _egress_proxy_config_hash(
             ",".join(_load_egress_allowlist()),
-            None)   # ASSIST_EGRESS_APPROVALS_DIR unset in tests
+            None, "ordinary-network-id:172.30.0.0/16|:")
 
     def test_creates_network_if_missing(self):
         client = self._make_client(network_exists=False)
@@ -238,12 +247,20 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
 
         client = MagicMock()
         client.networks.get.return_value = MagicMock()
+        client.networks.get.return_value.attrs = {
+            "Id": "ordinary-network-id", "Driver": "bridge", "Internal": True,
+            "EnableIPv6": False,
+            "IPAM": {"Config": [{"Subnet": "172.30.0.0/16"}]},
+        }
         proxy = MagicMock()
         proxy.status = "running"
+        proxy.attrs = {"NetworkSettings": {"Networks": {
+            EGRESS_NETWORK: {"NetworkID": "ordinary-network-id"}}}}
         from assist.sandbox_manager import _egress_proxy_config_hash
         proxy.labels = {"assist.egress-allowlist-hash":
                         _egress_proxy_config_hash(
-                            ",".join(_load_egress_allowlist()), None)}
+                            ",".join(_load_egress_allowlist()), None,
+                            "ordinary-network-id:172.30.0.0/16|:")}
         proxy.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
         client.containers.get.return_value = proxy
         sandbox_container = MagicMock()
@@ -279,12 +296,20 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
 
         client = MagicMock()
         client.networks.get.return_value = MagicMock()
+        client.networks.get.return_value.attrs = {
+            "Id": "ordinary-network-id", "Driver": "bridge", "Internal": True,
+            "EnableIPv6": False,
+            "IPAM": {"Config": [{"Subnet": "172.30.0.0/16"}]},
+        }
         proxy = MagicMock()
         proxy.status = "running"
+        proxy.attrs = {"NetworkSettings": {"Networks": {
+            EGRESS_NETWORK: {"NetworkID": "ordinary-network-id"}}}}
         from assist.sandbox_manager import _egress_proxy_config_hash
         proxy.labels = {"assist.egress-allowlist-hash":
                         _egress_proxy_config_hash(
-                            ",".join(_load_egress_allowlist()), None)}
+                            ",".join(_load_egress_allowlist()), None,
+                            "ordinary-network-id:172.30.0.0/16|:")}
         proxy.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
         client.containers.get.return_value = proxy
         sandbox_container = MagicMock()

@@ -763,6 +763,8 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).warning("capture worker shutdown failed", exc_info=True)
         # Clean up Docker sandbox containers
         try:
+            from assist.browser.manager import BrowserManager
+            BrowserManager.cleanup_all()
             SandboxManager.cleanup_all()
         except Exception:
             pass

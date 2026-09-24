@@ -52,11 +52,14 @@ logger = logging.getLogger(__name__)
 # route keeps its historical render-skill name.
 _RENDER_SKILL_ROUTE = "/render-skill/"
 _RENDER_SKILLS_DIR = os.path.join(os.path.dirname(__file__), "web_skills")
+_BROWSER_SKILL_ROUTE = "/browser-skill/"
+_BROWSER_SKILLS_DIR = os.path.join(os.path.dirname(__file__), "browser", "skills")
 _render_skill_sources = None
+_browser_skill_source = None
 _triage_skill_sources_cache = None
 
 
-def web_main_skill_sources() -> dict:
+def web_main_skill_sources(*, browser: bool = False) -> dict:
     """Route -> backend for the web AgentSpec's web-only skills.
 
     The route keeps its historical ``render-skill`` name although it serves both
@@ -64,13 +67,18 @@ def web_main_skill_sources() -> dict:
     construction and deepagents' transitive imports stay off module load (same
     pattern as emacsos-server's ``_skill_sources``).
     """
-    global _render_skill_sources
+    global _render_skill_sources, _browser_skill_source
     if _render_skill_sources is None:
         from assist.backends import create_bundled_skills_backend
         _render_skill_sources = {
             _RENDER_SKILL_ROUTE: create_bundled_skills_backend(_RENDER_SKILLS_DIR)
         }
-    return _render_skill_sources
+    if not browser:
+        return _render_skill_sources
+    if _browser_skill_source is None:
+        from assist.backends import create_bundled_skills_backend
+        _browser_skill_source = create_bundled_skills_backend(_BROWSER_SKILLS_DIR)
+    return {**_render_skill_sources, _BROWSER_SKILL_ROUTE: _browser_skill_source}
 
 
 # Compatibility for focused middleware fixtures; new callers use the explicit
@@ -313,7 +321,8 @@ class ThreadManager:
             on_queue_state: Callable[[str], None] | None = None,
             configurable: dict | None = None,
             triage: bool = False,
-            assistant_id: str = "general-agent") -> Thread:
+            assistant_id: str = "general-agent",
+            browser_tools: tuple = ()) -> Thread:
         tdir = self.thread_dir(thread_id)
         if not os.path.isdir(tdir):
             raise FileNotFoundError(f"thread directory not found: {thread_id}, {tdir}")
@@ -322,7 +331,8 @@ class ThreadManager:
 
         # A triage turn (untrusted inbound message) gets the reduced reply-only tool set +
         # its distinct reply HITL gate; normal turns get the full web tools and email HITL.
-        tools = _web_triage_tools if triage else _web_tools
+        tools = (_web_triage_tools if triage else
+                 _web_tools + (browser_tools if assistant_id == "general-agent" else ()))
         interrupt_on = _web_triage_interrupt_on if triage else _web_interrupt_on
         specialized = None
         if assistant_id == "context-agent":
@@ -370,7 +380,7 @@ class ThreadManager:
             working_dir, **thread_kwargs,
             spec=AgentSpec(
                 skill_sources=(_triage_skill_sources() if triage
-                               else web_main_skill_sources()),
+                               else web_main_skill_sources(browser=bool(browser_tools))),
                 tools=tools,
                 async_subagent_tools=async_tools,
                 web_main=(assistant_id == "general-agent" and not triage),
@@ -378,6 +388,8 @@ class ThreadManager:
                 interrupt_on=interrupt_on))
 
     def remove(self, thread_id: str) -> None:
+        from assist.browser.manager import BrowserManager
+        BrowserManager.cleanup(thread_id)
         tdir = self.thread_dir(thread_id)
         if os.path.isdir(tdir):
             # Best-effort delete

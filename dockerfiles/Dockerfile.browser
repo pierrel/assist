@@ -1,0 +1,13 @@
+FROM python:3.13-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
+    HOME=/home/browser
+
+RUN pip install --no-cache-dir playwright==1.58.0 \
+    && python -m playwright install --with-deps --only-shell chromium \
+    && useradd --uid 10001 --create-home browser
+
+COPY assist/browser/runner.py /opt/assist/browser_runner.py
+USER 10001:10001
+ENTRYPOINT ["python", "/opt/assist/browser_runner.py", "serve"]

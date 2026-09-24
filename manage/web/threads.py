@@ -67,6 +67,7 @@ from assist.events.email import email_identity, valid_email_content
 from assist.schedule.scheduler import Scheduler
 from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
+from assist.browser.manager import BrowserManager, BrowserSession, BrowserUserRequest, browser_tools
 from assist.thread import Thread
 from assist.safe_markdown import render_markdown
 from assist.visible_conversation import (
@@ -1877,7 +1878,8 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
         for rec in claimed:
             fresh = _create_run(
                 rec.thread_id, rec.text,
-                rider=_rider_from_fields(rec.rider), sender=rec.sender)
+                rider=_rider_from_fields(rec.rider), sender=rec.sender,
+                user_origin=rec.sender is None)
             # The retried turn keeps the ORIGINAL message's context rider
             # (sent_at/tz/lat/lon from the journal entry — recovery fidelity,
             # like the restart drain); fall back to a fresh rider with the
@@ -2089,7 +2091,8 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 parent_run_id=None, dispatch_key=None,
                 cancel_pending=False, max_runs=None,
                 max_pending=None, multitask_strategy="enqueue",
-                delegate_user_urls=(), location: LocationSnapshot | None = None) -> Run:
+                delegate_user_urls=(), location: LocationSnapshot | None = None,
+                user_origin: bool = False, user_event_id: str | None = None) -> Run:
     """Commit one web turn before placing its id on a dispatch queue."""
     return _runs().create(
         tid, assistant_id, text, run_id=run_id, work_id=work_id, mode=mode,
@@ -2101,7 +2104,8 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
         cancel_pending=cancel_pending, max_runs=max_runs,
         max_pending=max_pending, multitask_strategy=multitask_strategy,
         delegate_user_urls=delegate_user_urls,
-        location=_location_to_fields(location) if location else None)
+        location=_location_to_fields(location) if location else None,
+        user_origin=user_origin, user_event_id=user_event_id)
 
 
 def _publish_phone_text(tid: str, work_id: str, text: str) -> None:
@@ -2626,6 +2630,7 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
                 tid, None, rider=_rider_from_fields(run.rider), sender=run.sender,
                 resume=True, active_ms=run.active_ms, pending_text=pending_text,
                 origin=run.origin, work_id=run.work_id,
+                user_event_id=run.user_event_id,
                 location=_location_from_fields(run.location))
         _RESUME_SCHEDULER.submit(
             successor.id, tid, user_priority=user_priority)
@@ -2653,8 +2658,33 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
         resume=(decision == "resume"), active_ms=run.active_ms,
         pending_text=pending_text if decision == "resume" else None,
         origin=run.origin, work_id=run.work_id,
+        user_event_id=run.user_event_id,
         location=_location_from_fields(run.location))
     _RESUME_SCHEDULER.submit(successor.id, tid, user_priority=user_priority)
+
+
+def _browser_user_request(run: Run | None, run_history: list[Run]) -> BrowserUserRequest | None:
+    """Resolve this work's recorded direct event ID, never copied task text."""
+    if (run is None or run.origin is not None or run.mode != "turn"
+            or run.sender is not None or run.user_event_id is None):
+        return None
+    source_position = next((index for index, prior in enumerate(run_history)
+                            if prior.id == run.user_event_id), None)
+    run_position = next((index for index, prior in enumerate(run_history)
+                         if prior.id == run.id), None)
+    if (source_position is None or run_position is None
+            or source_position > run_position):
+        return None
+    source = run_history[source_position]
+    if (source is None or source.user_event_id != source.id
+            or source.thread_id != run.thread_id or source.work_id != run.work_id
+            or source.origin is not None or source.sender is not None
+            or source.mode != "turn" or source.text is None):
+        return None
+    if any(prior.user_event_id == prior.id and prior.work_id == run.work_id
+           for prior in run_history[source_position + 1:run_position + 1]):
+        return None
+    return BrowserUserRequest(source.id, source.work_id, source.text)
 
 
 def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
@@ -2714,6 +2744,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         pending_kwargs["rider"] = _rider_to_fields(rider)
     if origin:
         pending_kwargs["origin"] = origin
+    if _run is not None:
+        pending_kwargs["work_id"] = _run.work_id
+        if _run.user_event_id is not None:
+            pending_kwargs["user_event_id"] = _run.user_event_id
     # Turn-start origin for the elapsed badge + live WIP timer: reuse the started_at already
     # in status (a queued/paused/resumed turn keeps the original submit time, so elapsed
     # spans the queue wait + any pause) or stamp now for turns with no upstream setter
@@ -2841,6 +2875,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             _set_status(tid, "starting_sandbox", **pending_kwargs)
             sandbox = None
             sandbox_generation = None
+            browser_session = None
             try:
                 # Inside the try so the `finally` reaps even if sandbox
                 # creation registers a container and then raises — cleanup
@@ -2854,6 +2889,19 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         MANAGER.thread_default_working_dir(tid))
                     raise
                 try:
+                    # Only a direct user-origin event in this active work lineage
+                    # can authorize an internal host. Approval-generated system
+                    # Runs deliberately inherit no such authorization.
+                    user_request = _browser_user_request(
+                        _run, _runs().list(tid) if _run is not None else [])
+                    extra_browser_tools = ()
+                    if sandbox is not None and not sender and assistant_id == "general-agent":
+                        browser_session = BrowserSession(
+                            tid, _run.id if _run is not None else event_id or "legacy",
+                            MANAGER.thread_default_working_dir(tid), MANAGER.root_dir,
+                            user_request, work_id=_run.work_id if _run else None)
+                        BrowserManager.register(browser_session)
+                        extra_browser_tools = tuple(browser_tools(browser_session))
                     # on_queue_state=None: the outer acquire above already
                     # owns the callback; the inner acquire is the reentrant
                     # no-op fast path (no state callback fires from it).
@@ -2870,6 +2918,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     # A triage turn (sender set) gets the reduced, HITL-gated tool surface.
                     assistant_kwargs = ({"assistant_id": assistant_id}
                                         if assistant_id != "general-agent" else {})
+                    if extra_browser_tools:
+                        assistant_kwargs["browser_tools"] = extra_browser_tools
                     chat = MANAGER.get(tid, sandbox_backend=sandbox,
                                        on_queue_state=None,
                                        configurable=(_cfg or None),
@@ -2958,6 +3008,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # cleanup() SIGKILLs (the response is already committed to the
                 # checkpoint here, and the sandbox has nothing to flush).
                 _work_dir = MANAGER.thread_default_working_dir(tid)
+                BrowserManager.cleanup(tid, browser_session)
                 SandboxManager.cleanup(_work_dir, sandbox_generation)
         MANAGER.touch(tid)
 
@@ -3039,6 +3090,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         tid, None, rider=rider, sender=sender, resume=True,
                         active_ms=carry, pending_text=pending_kwargs.get("pending_message"),
                         origin=origin, work_id=_run.work_id,
+                        user_event_id=_run.user_event_id,
                         location=_location_from_fields(_run.location))
                 else:
                     # Compatibility for direct low-level callers during the migration.
@@ -3293,7 +3345,7 @@ def create_thread_with_message_core(
                     started_at=started_at)
         run = _create_run(tid, text, rider=rider, location=location,
                           run_id=run_id, work_id=work_id,
-                          dispatch_key=dispatch_key)
+                          dispatch_key=dispatch_key, user_origin=True)
         # A first Run needs its slow clone before execution.  Persist that relation so
         # startup recovery replays initialization rather than running in a missing worktree.
         _set_status(tid, "initializing", pending_message=text, domain=selected or "",
@@ -3497,7 +3549,7 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
     run = _create_run(tid, text, rider=rider, location=location,
                       run_id=run_id, work_id=work_id,
                       dispatch_key=dispatch_key,
-                      max_pending=max_pending)
+                      max_pending=max_pending, user_origin=True)
     if busy:
         # Cover both wait points. The paused head may still be queued on
         # the scheduler, or it may already be parked inside the affinity
@@ -3929,6 +3981,7 @@ def _recovery_prep(q: "queue.Queue") -> None:
     if q.empty():
         return
     SandboxManager.reap_orphans(MANAGER.root_dir)
+    BrowserManager.reap_orphans(MANAGER.root_dir)
     if not os.getenv("ASSIST_MODEL_URL"):
         return
     # _llm_reachable requires a 200 — llama-server binds its port immediately on a
@@ -4163,7 +4216,9 @@ def queue_recovery_runs() -> None:
                     resume=(decision == "resume"),
                     active_ms=float(status.get("accumulated_active_ms") or 0.0),
                     pending_text=pending if decision == "resume" else None,
-                    origin=status.get("origin") or None)
+                    origin=status.get("origin") or None,
+                    work_id=status.get("work_id") or None,
+                    user_event_id=status.get("user_event_id") or None)
                 _RESUME_SCHEDULER.submit(recovered.id, tid)
                 continue
         _dispatch_pending_after(tid)
