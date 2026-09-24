@@ -239,6 +239,22 @@ def test_resume_scheduler_dedupes_only_queued_run_ids():
         q.get_nowait()
 
 
+@pytest.mark.parametrize("via_reservation", [False, True])
+def test_duplicate_run_wake_upgrades_existing_background_ticket(via_reservation):
+    q = threads._PriorityRunQueue()
+    q.put({"kind": "run", "run_id": "sms", "tid": "thread"})
+    q.put({"kind": "run", "run_id": "unrelated", "tid": "other"})
+    upgraded = {"kind": "run", "run_id": "sms", "tid": "thread",
+                "user_priority": True}
+    if via_reservation:
+        q.commit(q.reserve(upgraded))
+    else:
+        q.put(upgraded)
+    assert [q.get_nowait()["run_id"] for _ in range(2)] == ["sms", "unrelated"]
+    with pytest.raises(threads.queue.Empty):
+        q.get_nowait()
+
+
 def test_resume_scheduler_promotes_reservations_on_both_sides_of_commit():
     q = threads._PriorityRunQueue()
     q.put({"run_id": "user-first", "tid": "user", "user_priority": True})

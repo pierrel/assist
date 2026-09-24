@@ -783,6 +783,18 @@ def test_phone_cancel_surviving_thread_fence_failure_is_503(tmp_path, monkeypatc
     assert response.json() == {"detail": "run-store-unavailable"}
 
 
+def test_phone_cancel_malformed_authority_state_is_503(tmp_path, monkeypatch):
+    directory = tmp_path / "thread-a"
+    directory.mkdir()
+    (directory / "browser-authority.json").write_text("{")
+    monkeypatch.setattr(phone_api, "_thread_dir", lambda _tid: str(directory))
+    monkeypatch.setattr(phone_api.threads.MANAGER, "root_dir", str(tmp_path))
+    response = _client(monkeypatch).delete(
+        "/api/v1/phone/threads/thread-a/runs/run-a", headers=_auth())
+    assert response.status_code == 503
+    assert response.json() == {"detail": "run-store-unavailable"}
+
+
 def test_phone_cancel_retry_replays_a_pending_cleanup_receipt(
         monkeypatch, stub_browser_fence):
     """A failed final receipt repeats cleanup, then records completion once durable."""

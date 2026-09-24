@@ -1933,12 +1933,16 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
 # the web layer is the only embedder that does (CLI/emacsos/evals keep today's
 # behavior by construction). The journal read is the locked one — the
 # middleware hook runs on the turn's worker thread, never the event loop.
+def _runs_before_browser_reset(runs: list[Run]) -> list[Run]:
+    """Only journal entries before the first owed reset may run or interject."""
+    first_reset = next((index for index, run in enumerate(runs)
+                        if browser_reset_owed(run)), len(runs))
+    return runs[:first_reset]
+
+
 def _pending_run_records(tid: str) -> list[PendingMessage]:
     """Interjection adapter; never expose a follower across a reset debt."""
-    runs = _runs().list(tid)
-    first_reset = next((index for index, run in enumerate(runs)
-                        if browser_reset_owed(run)), None)
-    eligible = runs if first_reset is None else runs[:first_reset]
+    eligible = _runs_before_browser_reset(_runs().list(tid))
     return [PendingMessage(
         thread_id=run.thread_id, text=run.text or "", sender=run.sender,
         rider=run.rider, enqueued_at=run.created_at, origin=run.origin, id=run.id)
@@ -2435,14 +2439,12 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
     except RunNotFound:
         logging.info("run %s on %s disappeared before dispatch", run_id, tid)
         return
-    if run.status == "pending":
-        preceding = _runs().list(tid)
-        run_index = next((index for index, item in enumerate(preceding)
-                          if item.id == run.id), len(preceding))
-        if any(browser_reset_owed(item) for item in preceding[:run_index]):
-            # Schedules, SMS and synthetic approval turns may dispatch directly.
-            # Leave the ticket pending; reset completion replays it in order.
-            return
+    if (run.status == "pending" and not any(
+            item.id == run.id for item in _runs_before_browser_reset(
+                _runs().list(tid)))):
+        # Schedules, SMS and synthetic approval turns may dispatch directly.
+        # Leave the ticket pending; reset completion replays it in order.
+        return
     try:
         if _is_pi_thread(tid):
             _execute_pi_run(run, user_priority=user_priority)
@@ -2630,9 +2632,7 @@ def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
     if (status.get("stage") == "paused"
             and any(run.status == "interrupted" for run in runs)):
         return
-    first_reset = next((index for index, run in enumerate(runs)
-                        if browser_reset_owed(run)), None)
-    eligible = runs if first_reset is None else runs[:first_reset]
+    eligible = _runs_before_browser_reset(runs)
     pending_runs = [run for run in eligible
                     if run.status == "pending" and run.id != run_id]
     if not pending_runs:
@@ -4529,10 +4529,22 @@ class _PriorityRunQueue:
     def _key(item: dict) -> tuple[str, str]:
         return item["tid"], item["run_id"]
 
+    def _promote_queued(self, key: tuple[str, str]) -> None:
+        """Upgrade one exact queued Run without creating a second wake."""
+        for queued in self._background:
+            if self._key(queued) == key:
+                self._background.remove(queued)
+                queued["user_priority"] = True
+                self._user.append(queued)
+                self._cond.notify()
+                return
+
     def put(self, item: dict) -> None:
         with self._cond:
             key = self._key(item)
             if key in self._queued:
+                if item.get("user_priority"):
+                    self._promote_queued(key)
                 return
             target = self._user if item.get("user_priority") else self._background
             target.append(item)
@@ -4554,6 +4566,8 @@ class _PriorityRunQueue:
                 return
             key = self._key(item)
             if key in self._queued:
+                if item.get("user_priority"):
+                    self._promote_queued(key)
                 return
             target = self._user if item.get("user_priority") else self._background
             target.append(item)

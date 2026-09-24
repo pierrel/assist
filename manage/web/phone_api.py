@@ -946,7 +946,7 @@ def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
     try:
         with threads.browser_authority.fence(threads.MANAGER.root_dir, tid):
             return _cancel_logical_run_fenced(tid, run_id)
-    except (OSError, RuntimeError) as error:
+    except (OSError, RuntimeError, json.JSONDecodeError) as error:
         if (isinstance(directory, (str, bytes, os.PathLike))
                 and not os.path.isdir(directory)):
             raise HTTPException(status_code=404, detail="Thread not found") from error
