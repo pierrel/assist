@@ -1,8 +1,9 @@
 """Natural web-main browser journeys against deterministic offline fixtures.
 
 The browser site, static requests.get response, shell network, and research
-specialist are stubbed. The real main graph chooses whether to load skills,
-try static navigation, and use stateful browser tools. Set
+specialist are stubbed; the approval journey uses a real local EgressStore.
+The real main graph chooses whether to load skills, try static navigation,
+and use stateful browser tools. Set
 ASSIST_BROWSER_EVAL_BASELINE=1 to remove browser tools for a comparison.
 """
 import os
@@ -18,6 +19,9 @@ from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
 from assist.agent import AgentHarness, create_agent
 from assist.browser.manager import browser_tools
 from assist.checkpoint_rollback import invoke_with_rollback
+from assist.egress.store import EgressStore, request_key
+from assist.egress import tools as egress_tools_module
+from assist.egress.tools import egress_tools
 from assist.model_manager import select_assistant_model
 from assist.thread_manager import web_main_skill_sources
 
@@ -54,6 +58,8 @@ class _BrowserSite:
         self.scenario = scenario
         self.root = Path(root)
         self.calls = []
+        self.approved = False
+        self.session_open = False
 
     def _page(self, snapshot, targets=(), downloads=(), snapshot_id="first",
               page_id="page-1", network_errors=()):
@@ -68,6 +74,21 @@ class _BrowserSite:
     def command(self, operation, **args):
         self.calls.append((operation, args))
         if operation == "open":
+            if self.scenario == "approval":
+                self.session_open = True
+                if args.get("url", "").startswith("https://partner.fern.example/"):
+                    if self.approved:
+                        return self._page("Latest report: October Reliability Review.",
+                                          snapshot_id="approved")
+                    return self._page("The partner report did not load.",
+                                      network_errors=[{
+                                          "host": "partner.fern.example:443",
+                                          "resource": "document", "reason": "http_403"}])
+                return self._page("Fern reports. The latest report is on our partner site.",
+                                  [{"ref": "partner-report", "role": "link",
+                                    "name": "Latest report",
+                                    "href": "https://partner.fern.example/report"}],
+                                  snapshot_id="approved" if self.approved else "first")
             if self.scenario == "static":
                 return self._page("Fern support hours: 9 a.m. to 5 p.m. Pacific, weekdays.")
             if self.scenario == "status":
@@ -92,6 +113,20 @@ class _BrowserSite:
                                 "name": "Download manual"}])
         if operation == "act":
             target = args.get("target") or {}
+            if self.scenario == "approval":
+                if not self.session_open:
+                    return {"error": "browser state expired; reopen the page"}
+                if (target.get("ref") == "partner-report" or
+                        target.get("href") == "https://partner.fern.example/report"):
+                    if self.approved and args.get("snapshot_id") == "approved":
+                        return self._page("Latest report: October Reliability Review.",
+                                          snapshot_id="report")
+                    if self.approved:
+                        return {"error": "stale target; re-observe the page"}
+                    return self._page("The partner report did not load.",
+                                      snapshot_id="denied", network_errors=[{
+                                          "host": "partner.fern.example:443",
+                                          "resource": "document", "reason": "http_403"}])
             report_target = (target.get("ref") == "reports-button" or
                              (target.get("role"), target.get("name")) ==
                              ("button", "Reports"))
@@ -127,6 +162,12 @@ class _BrowserSite:
         if operation == "probe" and self.scenario == "blocked":
             return {"result": {"host": "host.docker.internal", "port": 8000,
                                "status": "403", "reason": "browser_internal_policy"}}
+        if operation == "probe" and self.scenario == "approval":
+            if (args.get("host"), args.get("port")) != (
+                    "partner.fern.example", 443):
+                return {"error": "host was not observed as denied"}
+            return {"result": {"host": "partner.fern.example", "port": 443,
+                               "status": "403", "reason": "host_not_approved"}}
         return {"error": "unsupported fixture action"}
 
     def save_download(self, download_id, filename=None):
@@ -248,6 +289,72 @@ class TestBrowserAgent(TestCase):
         self.assertFalse(agent_tool_calls(agent, "request_egress"), agent.all_messages())
         self.assertTrue(any(word in answer.lower() for word in
                             ("blocked", "cannot", "couldn't", "not load")), answer)
+
+    def test_approval_pause_then_reopens_on_followup(self):
+        """A real-looking approval pauses navigation; a later turn reopens it."""
+        with tempfile.TemporaryDirectory(prefix="browser_approval_eval_") as root, \
+             tempfile.TemporaryDirectory(prefix="browser_approval_store_") as approval_root:
+            create_filesystem(root, {"README.org": "Personal workspace."})
+            site = _BrowserSite("approval", root)
+            store = EgressStore(approval_root)
+            tid = "browser-approval-eval"
+            tools = egress_tools(store, frozenset())
+            spec = replace(
+                prompt_rewrite_web_main_spec(
+                    tools=tuple(browser_tools(site))),
+                web_main=True, main_guidance_skills=True,
+                skill_sources=web_main_skill_sources(browser=True))
+            with mock.patch("assist.agent._execution_egress_tools", tuple(tools)), \
+                 mock.patch.object(egress_tools_module, "_thread_id", lambda: tid), \
+                 mock.patch("assist.tools.requests.get",
+                            return_value=_StaticShell("approval")), \
+                 stub_research_subagent():
+                agent = AgentHarness(create_agent(
+                    self.model, root, sandbox_backend=_OfflineBackend(root), spec=spec))
+
+                def turn(prompt):
+                    previous = signal.signal(
+                        signal.SIGALRM,
+                        lambda _signum, _frame: (_ for _ in ()).throw(
+                            TimeoutError("browser approval eval turn exceeded 150 seconds")))
+                    signal.alarm(150)
+                    try:
+                        result = invoke_with_rollback(
+                            agent.agent, {"messages": [{"role": "user", "content": prompt}]},
+                            {"configurable": {"thread_id": agent.thread_id},
+                             "recursion_limit": 120})
+                        return str(result["messages"][-1].content)
+                    finally:
+                        signal.alarm(0)
+                        signal.signal(signal.SIGALRM, previous)
+
+                first = turn("What is the latest report linked from "
+                             "https://approval.fern.example/?")
+                key = request_key(tid, "partner.fern.example", 443)
+                pending = store.get(key)
+                self.assertIsNotNone(pending, (first, site.calls,
+                                               agent_tool_calls(agent)))
+                self.assertEqual(pending.state, "pending")
+                self.assertTrue(agent_tool_calls(agent, "request_egress"))
+                self.assertTrue(any(op == "probe" and args == {
+                    "host": "partner.fern.example", "port": 443}
+                    for op, args in site.calls), site.calls)
+                self.assertNotIn("October Reliability Review", first)
+                self.assertIn("approv", first.lower())
+                before_followup = len(site.calls)
+
+                # External approval and per-Run browser expiry are fixture
+                # events, not instructions embedded in either user prompt.
+                store.resolve(key, "hour")
+                site.approved = True
+                site.session_open = False
+                second = turn("I approved that site. What is the report called?")
+
+            followup_calls = site.calls[before_followup:]
+            self.assertTrue(any(op == "open" for op, _ in followup_calls),
+                            (second, followup_calls))
+            self.assertIn("October Reliability Review", second)
+            self.assertEqual(len(agent_tool_calls(agent, "request_egress")), 1)
 
     def test_broad_comparison_still_delegates_research(self):
         agent, site, _ = self._run(
