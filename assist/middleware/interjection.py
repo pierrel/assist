@@ -1,8 +1,10 @@
 """Mid-turn interjection — deliver journaled user messages to the RUNNING turn.
 
 A direct owner message overlapping a browser-capable turn first lands durably
-as ``revocation_pending`` until the old browser is confirmed safe, then becomes
-``pending``. Other eligible mid-turn messages land as ``pending`` immediately.
+as ``revocation_pending`` until the old browser is confirmed safe. An
+uncancelled held message then becomes ``pending``; phone cancellation instead
+completes a durable reset receipt without interjection. Other eligible
+mid-turn messages land as ``pending`` immediately.
 This middleware's ``before_model`` hook reads the pending run projection at every
 main-loop model-call boundary and, when unconsumed eligible
 entries exist, appends them to graph state as individually framed

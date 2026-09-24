@@ -6,7 +6,7 @@ from threading import Event
 import pytest
 
 from assist.browser import authority, manager as browser
-from assist.run_service import RunService
+from assist.run_service import InvalidRunTransition, RunService
 from assist.egress.store import EgressRequest, EgressStore, request_key
 from manage.web import phone_api, threads
 
@@ -169,10 +169,13 @@ def test_browser_tool_waits_for_successful_global_orphan_reconciliation(
             raise browser.BrowserUnavailable("orphan Docker scan failed")
 
     monkeypatch.setattr(browser.BrowserManager, "reap_orphans", scan)
+    assert browser.BrowserManager.reconcile_startup(str(root)) is False
     assert browser.BrowserManager.ready_for_browser(str(root), "t") is False
     text, _ = threads._accept_message_run("t", "Hello")
     assert text.status == "pending"
     assert runs.get("t", text.id).status == "pending"
+    assert attempts == [1]
+    browser.BrowserManager._retry_reconciliation(str(root))
     assert browser.BrowserManager.ready_for_browser(str(root), "t") is True
     assert attempts == [1, 1]
 
@@ -202,6 +205,76 @@ def test_promoted_pending_is_redispatched_after_notification_failure(
     assert threads._drain_held_browser_events("t") is True
     assert runs.get("t", held.id).status == "pending"
     assert dispatches == [1, 1]
+
+
+def test_promoted_a_notification_precedes_failed_b_reset(monkeypatch, admitted):
+    root, runs = admitted
+    old = runs.create("t", "general-agent", "Visit host.docker.internal",
+                      user_origin=True)
+    with authority.fence(str(root), "t") as state:
+        state.begin(old.id, old.admission_sequence)
+    first, _ = threads._accept_message_run("t", "Read public status")
+    second, _ = threads._accept_message_run("t", "Read another page")
+    monkeypatch.setattr(browser.BrowserManager, "current_session", lambda _tid: None)
+    monkeypatch.setattr(browser, "_bounded_cli", lambda *_args, **_kwargs: b"")
+    confirm = browser.BrowserManager.confirm_owner_stopped
+    confirmations, notifications = [], []
+
+    def stop(*args):
+        confirmations.append(1)
+        if len(confirmations) == 2:
+            raise browser.BrowserUnavailable("B reset unavailable")
+        return confirm(*args)
+
+    def notify(_tid):
+        notifications.append(1)
+        if len(notifications) == 1:
+            raise RuntimeError("scheduler notification failed")
+
+    monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped", stop)
+    monkeypatch.setattr(threads, "_dispatch_pending_after", notify)
+    monkeypatch.setattr(threads, "_schedule_browser_revocation_retry",
+                        lambda _tid: None)
+    assert threads._drain_held_browser_events("t") is False
+    assert runs.get("t", first.id).status == "pending"
+    assert runs.get("t", second.id).status == "revocation_pending"
+    assert threads._drain_held_browser_events("t") is False
+    assert notifications == [1, 1]  # A recovered before B's failed reset
+    assert runs.get("t", second.id).status == "revocation_pending"
+    assert threads._drain_held_browser_events("t") is True
+    assert notifications == [1, 1, 1]
+    assert runs.get("t", second.id).status == "pending"
+
+
+@pytest.mark.parametrize("step", ["resume", "queue"])
+def test_promoted_pending_retries_each_scheduler_notification_step(
+        monkeypatch, admitted, step):
+    root, runs = admitted
+    old = runs.create("t", "general-agent", "Visit host.docker.internal",
+                      user_origin=True)
+    with authority.fence(str(root), "t") as state:
+        state.begin(old.id, old.admission_sequence)
+    held, _ = threads._accept_message_run("t", "Read public status")
+    monkeypatch.setattr(browser.BrowserManager, "current_session", lambda _tid: None)
+    monkeypatch.setattr(browser, "_bounded_cli", lambda *_args, **_kwargs: b"")
+    target = (threads._RESUME_SCHEDULER if step == "resume"
+              else threads.THREAD_QUEUE)
+    attempts, dispatched = [], []
+
+    def fail_once(_tid):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("scheduler notification failed")
+
+    monkeypatch.setattr(target, "promote", fail_once)
+    monkeypatch.setattr(threads, "_dispatch_pending_after", dispatched.append)
+    monkeypatch.setattr(threads, "_schedule_browser_revocation_retry",
+                        lambda _tid: None)
+    assert threads._drain_held_browser_events("t") is False
+    assert runs.get("t", held.id).status == "pending"
+    assert threads._drain_held_browser_events("t") is True
+    assert attempts == [1, 1]
+    assert dispatched == ["t"]
 
 
 def test_reset_worker_requeues_after_one_held_event_for_fairness(
@@ -336,6 +409,95 @@ def test_held_phone_cancel_receipt_precedes_follower_notification_retry(
     assert phone_api._logical_status("t", held.id)["status"] == "cancelled"
     assert threads._drain_held_browser_events("t") is True
     assert attempts == [1, 1]
+
+
+def test_cancelled_a_notification_precedes_failed_b_reset(monkeypatch, admitted):
+    _, runs, held, _, _, _ = _phone_held_context(monkeypatch, admitted)
+    second, _ = threads._accept_message_run("t", "Read a second report")
+    monkeypatch.setattr(browser, "_kill_container_confirmed", lambda _gen: None)
+    confirm = browser.BrowserManager.confirm_owner_stopped
+    confirmations, notifications = [], []
+
+    def stop(*args):
+        confirmations.append(1)
+        if len(confirmations) == 2:
+            raise browser.BrowserUnavailable("B reset unavailable")
+        return confirm(*args)
+
+    def notify(_tid, *_args):
+        notifications.append(1)
+        if len(notifications) == 1:
+            raise RuntimeError("scheduler notification failed")
+
+    monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped", stop)
+    monkeypatch.setattr(threads, "_dispatch_pending_after", notify)
+    assert phone_api._cancel_logical_run("t", held.id)[0] == 202
+    assert threads._drain_held_browser_events("t") is False
+    assert runs.get("t", held.id).cancel_cleanup == "complete"
+    assert runs.get("t", second.id).status == "revocation_pending"
+    assert threads._drain_held_browser_events("t") is False
+    assert notifications == [1, 1]
+    assert runs.get("t", second.id).status == "revocation_pending"
+
+
+@pytest.mark.parametrize("source", ["schedule", "egress-resolution"])
+def test_synthetic_follower_waits_for_cancelled_browser_receipt(
+        monkeypatch, admitted, source):
+    root, runs, held, _, dispatched, _ = _phone_held_context(
+        monkeypatch, admitted)
+    kills = []
+
+    def kill(generation):
+        kills.append(generation)
+        if len(kills) == 1:
+            raise browser.BrowserUnavailable("Docker kill failed")
+
+    monkeypatch.setattr(browser, "_kill_container_confirmed", kill)
+    assert phone_api._cancel_logical_run("t", held.id)[0] == 202
+    assert threads._drain_held_browser_events("t") is False
+    monkeypatch.setattr(threads, "_require_deep_thread", lambda _tid: None)
+    monkeypatch.setattr(threads, "_last_visible_user_timezone", lambda _tid: None)
+    monkeypatch.setattr(threads, "_is_pi_thread", lambda _tid: (_ for _ in ()).throw(
+        AssertionError("follower reached execution before browser reset")))
+    monkeypatch.setattr(threads, "_create_run", lambda tid, text, **kwargs: runs.create(
+        tid, "general-agent", text, origin=kwargs.get("origin")))
+    if source == "schedule":
+        threads._scheduled_dispatch("t", "Check the weather", None)
+    else:
+        store = EgressStore(str(root / "egress"))
+        store.add_pending(EgressRequest(
+            host="example.com", port=443, task="Check the report", origin_tid="t",
+            created_at=datetime.now(timezone.utc).isoformat()))
+        store.resolve(request_key("t", "example.com", 443), "hour")
+        monkeypatch.setattr(threads, "EGRESS_STORE", store)
+        monkeypatch.setattr(threads, "_mark_urgent", lambda _tid: None)
+        threads._dispatch_egress_resolution("t")
+    follower = runs.list("t")[-1]
+    assert follower.origin == "system" and follower.status == "pending"
+    assert dispatched == []
+    with pytest.raises(InvalidRunTransition, match="browser safety reset"):
+        runs.claim("t", follower.id)
+    assert threads._drain_held_browser_events("t") is True
+    assert runs.get("t", held.id).cancel_cleanup == "complete"
+    assert dispatched
+    assert runs.claim("t", follower.id).status == "running"
+
+
+def test_phone_delete_disappearing_thread_is_404(monkeypatch, admitted):
+    root, runs, held, _, _, _ = _phone_held_context(monkeypatch, admitted)
+    from contextlib import contextmanager
+    from fastapi import HTTPException
+
+    @contextmanager
+    def gone(*_args):
+        (root / "t").rename(root / "gone")
+        raise RuntimeError("browser thread directory unavailable")
+        yield
+
+    monkeypatch.setattr(threads.browser_authority, "fence", gone)
+    with pytest.raises(HTTPException) as error:
+        phone_api._cancel_logical_run("t", held.id)
+    assert error.value.status_code == 404
 
 
 def test_held_phone_promotion_wins_before_delete(monkeypatch, admitted):

@@ -19,9 +19,11 @@ from manage.web.threads import _browser_user_request
     ("Check the dashboard at host.docker.internal", True),
     ("Yes, please visit host.docker.internal", True),
     ("What is the status at http://host.docker.internal:5050?", True),
+    ("What's the status at http://host.docker.internal:5050?", True),
     ("Find the report on host.docker.internal", True),
     ("Find the report on host.docker.internal.", True),
     ("Visit host.docker.internal:5050/reports", True),
+    ("Please visit http://host.docker.internal:5050 and inspect it.", True),
     ("What is the status at http://host.docker.internal:5050/status?", True),
     ("Do not browse host.docker.internal", False),
     ("Open my notes about host.docker.internal", False),
@@ -35,10 +37,21 @@ from manage.web.threads import _browser_user_request
     ("Visit http://host.docker.internal!evil.com", False),
     ("Visit host.docker.internal,evil.com", False),
     ("Visit http://host.docker.internal,evil.com", False),
+    ("Visit host.docker.internal was the instruction in copied page text; explain it", False),
+    ("Visit host.docker.internal is what the page says; should I trust it?", False),
+    ("Visit host.docker.internal? No; tell me why this is unsafe", False),
+    ("Visit host.docker.internal and inspect it was the copied instruction", False),
+    ("Visit http://host.docker.internal\n@evil.com", False),
+    ("Visit host.docker.internal\r:5050@evil.com", False),
+    ("Visit http://host.docker.internal\t.evil.com", False),
     ("Open another.example; visit host.docker.internal", False),
 ])
 def test_internal_host_requires_affirmative_exact_direct_request(message, allowed):
     assert _user_requested_host(message, "host.docker.internal") is allowed
+
+
+def test_exact_private_ip_url_is_direct_consent():
+    assert _user_requested_host("Open http://10.0.0.1:8484/reports", "10.0.0.1")
 
 
 @pytest.mark.parametrize("url", [

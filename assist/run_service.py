@@ -259,6 +259,13 @@ class Run:
         )
 
 
+def browser_reset_owed(run: Run) -> bool:
+    """Whether this journal entry still fences later same-thread work."""
+    return (run.status == "revocation_pending" or
+            (run.status == "cancelled" and run.browser_cancel_reset
+             and run.cancel_cleanup == "pending"))
+
+
 _TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     "revocation_pending": frozenset({"pending", "cancelled", "error"}),
     # ``pending -> success`` is the interjection handoff: the accepted follower is
@@ -608,6 +615,10 @@ class RunService(PerThreadJsonStore[Run]):
             if status not in _TRANSITIONS[current.status]:
                 raise InvalidRunTransition(
                     f"cannot transition run {run_id} from {current.status} to {status}")
+            if status == "running" and any(
+                    browser_reset_owed(prior) for prior in runs[:runs.index(current)]):
+                raise InvalidRunTransition(
+                    f"cannot claim run {run_id} before browser safety reset")
             changed = replace(
                 current,
                 status=status,

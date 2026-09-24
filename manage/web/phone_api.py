@@ -942,9 +942,15 @@ def _reserve_create(body: _CreateThread, key: str) -> tuple[str, Any, str | None
 
 def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
     """Cancel one accepted logical Run and durably receipt its cleanup."""
-    _thread_dir(tid)
-    with threads.browser_authority.fence(threads.MANAGER.root_dir, tid):
-        return _cancel_logical_run_fenced(tid, run_id)
+    directory = _thread_dir(tid)
+    try:
+        with threads.browser_authority.fence(threads.MANAGER.root_dir, tid):
+            return _cancel_logical_run_fenced(tid, run_id)
+    except (OSError, RuntimeError) as error:
+        if (isinstance(directory, (str, bytes, os.PathLike))
+                and not os.path.isdir(directory)):
+            raise HTTPException(status_code=404, detail="Thread not found") from error
+        raise
 
 
 def _cancel_logical_run_fenced(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
@@ -969,7 +975,7 @@ def _cancel_logical_run_fenced(tid: str, run_id: str) -> tuple[int, dict[str, An
         service = threads._runs()
         try:
             if projection["status"] in {"pending", "revocation_pending"}:
-                # This one write cancels the newest pending slice, retires its
+                # This one write cancels the newest pending or held slice, retires its
                 # interrupted same-work predecessors, and leaves the accepted
                 # handle with a retry receipt.
                 runs = service.cancel_logical(tid, run_id)

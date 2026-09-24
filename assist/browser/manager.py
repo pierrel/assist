@@ -73,8 +73,9 @@ def _internal_host(host: str) -> bool:
 
 def _user_requested_host(message: str | None, host: str) -> bool:
     """Accept only a direct visit or narrow outcome-at-exact-host request."""
-    if not message:
+    if not message or any(character in message for character in "\r\n\t"):
         return False
+    message = re.sub(r"^\s*what's\b", "What is", message, flags=re.I)
     # Reject quoted text and prohibitions before the host. False negatives
     # require a fresh exact-host request; false positives grant LAN access.
     if re.search(r"['\"`]|\b(?:not|never|avoid|without|don.t|cannot|can.t)\b",
@@ -88,8 +89,12 @@ def _user_requested_host(message: str | None, host: str) -> bool:
     outcome = (r"^\s*(?:please\s+)?(?:what(?: is|'s)|find|show me|tell me)\s+"
                r"(?:the\s+)?(?:status|report|dashboard|release|arrival|manual)\s+"
                r"(?:at|on|from)\s+(?P<target>\S+)")
-    match = re.search(visit, message, re.I) or re.search(outcome, message, re.I)
+    match = re.search(visit, message, re.I)
+    continuation = r"(?:\s+and\s+inspect\s+it)?" if match else ""
     if match is None:
+        match = re.search(outcome, message, re.I)
+    if match is None or not re.fullmatch(
+            continuation + r"\s*[.!?]*\s*", message[match.end():], re.I):
         return False
     # Parse the whole authority token: a host-looking prefix before userinfo,
     # punctuation or another hostname is not consent for the internal host.
@@ -457,7 +462,7 @@ class BrowserSession:
                 raise BrowserUnavailable("newer user message revoked internal browsing")
 
     def revoke_internal(self):
-        """Under the thread gate, destroy old browser state before event promotion."""
+        """Under the thread gate, destroy old state before promotion or cancel cleanup."""
         with self._lock:
             self.user_request = None
             reset = self.identity is not None
@@ -569,6 +574,7 @@ class BrowserManager:
     _gates = weakref.WeakValueDictionary()
     _reconcile_lock = threading.Lock()
     _reconciled_roots: set[str] = set()
+    _reconcile_timers: dict[str, threading.Timer] = {}
 
     @classmethod
     def thread_gate(cls, thread_id: str):
@@ -601,7 +607,7 @@ class BrowserManager:
 
     @classmethod
     def reconcile_startup(cls, threads_root: str) -> bool:
-        """Gate all browser tools on one successful process-local orphan sweep."""
+        """Sweep orphans off the model slot before enabling browser tools."""
         try:
             root = os.path.realpath(threads_root)
             if root not in cls._reconciled_roots:
@@ -618,9 +624,28 @@ class BrowserManager:
             return False
 
     @classmethod
+    def schedule_reconciliation(cls, threads_root: str) -> None:
+        """Keep one daemon retry wake for an incomplete startup sweep."""
+        root = os.path.realpath(threads_root)
+        with cls._reconcile_lock:
+            if root in cls._reconciled_roots or root in cls._reconcile_timers:
+                return
+            timer = threading.Timer(10, cls._retry_reconciliation, args=(root,))
+            timer.daemon = True
+            cls._reconcile_timers[root] = timer
+            timer.start()
+
+    @classmethod
+    def _retry_reconciliation(cls, root: str) -> None:
+        with cls._reconcile_lock:
+            cls._reconcile_timers.pop(root, None)
+        if not cls.reconcile_startup(root):
+            cls.schedule_reconciliation(root)
+
+    @classmethod
     def ready_for_browser(cls, threads_root: str, thread_id: str) -> bool:
         """A browser tool needs global recovery and exact thread readiness."""
-        if not cls.reconcile_startup(threads_root):
+        if os.path.realpath(threads_root) not in cls._reconciled_roots:
             return False
         try:
             map_dir = configured_directory()
@@ -635,7 +660,7 @@ class BrowserManager:
     @classmethod
     def confirm_owner_stopped(cls, threads_root: str, thread_id: str,
                               owner_run_id: str | None) -> bool:
-        """Positive scoped teardown proof; failure must leave a held event held."""
+        """Positive proof; failure retains a held or cancelled reset obligation."""
         map_dir = configured_directory()
         if map_dir is None:
             raise BrowserUnavailable("browser client map is unavailable")

@@ -48,7 +48,7 @@ import anyio.to_thread
 from langchain_core.messages import HumanMessage
 
 from assist.backlog import PendingMessage
-from assist.run_service import InvalidRunTransition, Run, RunNotFound
+from assist.run_service import InvalidRunTransition, Run, RunNotFound, browser_reset_owed
 from assist.async_subagents import AsyncTaskContext, async_task_context
 from assist.egress.store import EgressWaiter, resolution_prompt
 from assist.egress.tools import (EGRESS_ORIGIN_THREAD_ID,
@@ -2431,6 +2431,14 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
     except RunNotFound:
         logging.info("run %s on %s disappeared before dispatch", run_id, tid)
         return
+    if run.status == "pending":
+        preceding = _runs().list(tid)
+        run_index = next((index for index, item in enumerate(preceding)
+                          if item.id == run.id), len(preceding))
+        if any(browser_reset_owed(item) for item in preceding[:run_index]):
+            # Schedules, SMS and synthetic approval turns may dispatch directly.
+            # Leave the ticket pending; reset completion replays it in order.
+            return
     try:
         if _is_pi_thread(tid):
             _execute_pi_run(run, user_priority=user_priority)
@@ -2618,16 +2626,11 @@ def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
     if (status.get("stage") == "paused"
             and any(run.status == "interrupted" for run in runs)):
         return
-    pending_runs = [run for run in runs
+    first_reset = next((index for index, run in enumerate(runs)
+                        if browser_reset_owed(run)), None)
+    eligible = runs if first_reset is None else runs[:first_reset]
+    pending_runs = [run for run in eligible
                     if run.status == "pending" and run.id != run_id]
-    held_sequence = min((run.admission_sequence for run in runs
-                         if (run.status == "revocation_pending" or
-                             (run.status == "cancelled" and run.browser_cancel_reset
-                              and run.cancel_cleanup == "pending"))), default=None)
-    if held_sequence is not None:
-        pending_runs = [run for run in pending_runs
-                        if not (run.user_event_id == run.id
-                                and run.admission_sequence > held_sequence)]
     if not pending_runs:
         return
     user = next((run for run in pending_runs
@@ -3583,6 +3586,7 @@ _BROWSER_REQUEUE: set[str] = set()
 _BROWSER_WORKERS_STARTED = False
 _BROWSER_RETRY_DUE: dict[str, float] = {}
 _BROWSER_RETRY_TIMER: threading.Timer | None = None
+_BROWSER_NOTIFY_PENDING: set[str] = set()
 
 
 def _queue_browser_revocation(tid: str) -> None:
@@ -3650,22 +3654,32 @@ def _schedule_browser_revocation_retry(tid: str) -> None:
 
 
 def _drain_held_browser_events(tid: str) -> bool:
-    """Promote direct events in durable sequence only after exact browser reset."""
+    """Complete one exact reset, then promote an uncancelled held event."""
     gate = BrowserManager.thread_gate(tid)
     if not gate.acquire(timeout=20):
         failure = "Browser safety reset is waiting for an in-flight browser command"
     else:
         failure = None
         try:
+            # A prior reset can have committed A while its scheduler notification
+            # failed. Retry A before attempting held B, whose reset may fail too.
+            with _BROWSER_RETRY_LOCK:
+                notify_pending = tid in _BROWSER_NOTIFY_PENDING
+            if notify_pending:
+                _RESUME_SCHEDULER.promote(tid)
+                THREAD_QUEUE.promote(tid)
+                _dispatch_pending_after(tid)
+                with _BROWSER_RETRY_LOCK:
+                    _BROWSER_NOTIFY_PENDING.discard(tid)
             held = sorted((run for run in _runs().list(tid)
-                           if (run.status == "revocation_pending" or
-                               (run.status == "cancelled" and run.browser_cancel_reset
-                                and run.cancel_cleanup == "pending"))),
+                           if browser_reset_owed(run)),
                           key=lambda run: run.admission_sequence)
             if not held:
                 # A prior attempt may have durably promoted the last held Run
-                # before its volatile scheduler notification failed.
-                _dispatch_pending_after(tid)
+                # before its volatile scheduler notification failed. The
+                # marker above already retried that path when present.
+                if not notify_pending:
+                    _dispatch_pending_after(tid)
                 return True
             run = held[0]
             session = BrowserManager.current_session(tid)
@@ -3705,17 +3719,22 @@ def _drain_held_browser_events(tid: str) -> bool:
                                     current.text or "", current.admission_sequence))
                             _runs().transition(
                                 tid, run.id, "pending", browser_reset_notice=reset)
+                            with _BROWSER_RETRY_LOCK:
+                                _BROWSER_NOTIFY_PENDING.add(tid)
                 if cancelling:
                     from manage.web import phone_api
+                    with _BROWSER_RETRY_LOCK:
+                        _BROWSER_NOTIFY_PENDING.add(tid)
                     phone_api._finish_browser_cancel_cleanup(tid, run.id)
+                    with _BROWSER_RETRY_LOCK:
+                        _BROWSER_NOTIFY_PENDING.discard(tid)
                 else:
                     _RESUME_SCHEDULER.promote(tid)
                     THREAD_QUEUE.promote(tid)
                     _dispatch_pending_after(tid)
-                if any(item.status == "revocation_pending" or
-                       (item.status == "cancelled" and item.browser_cancel_reset
-                        and item.cancel_cleanup == "pending")
-                       for item in _runs().list(tid)):
+                    with _BROWSER_RETRY_LOCK:
+                        _BROWSER_NOTIFY_PENDING.discard(tid)
+                if any(browser_reset_owed(item) for item in _runs().list(tid)):
                     _queue_browser_revocation(tid)
                 return True
             except Exception as error:
@@ -3755,10 +3774,7 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
     prior_stage = _get_status(tid).get("stage")
     busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
     previous = _runs().list(tid)
-    held = sorted((item for item in previous
-                   if (item.status == "revocation_pending" or
-                       (item.status == "cancelled" and item.browser_cancel_reset
-                        and item.cancel_cleanup == "pending"))),
+    held = sorted((item for item in previous if browser_reset_owed(item)),
                   key=lambda item: item.admission_sequence)
     older_web = [item for item in previous
                  if (item.assistant_id == "general-agent" and item.mode == "turn"
@@ -4243,13 +4259,12 @@ def _recovery_prep(q: "queue.Queue") -> None:
     still-loading model would defeat recovery."""
     try:
         if not BrowserManager.reconcile_startup(MANAGER.root_dir):
+            BrowserManager.schedule_reconciliation(MANAGER.root_dir)
             raise RuntimeError("browser orphan reconciliation is incomplete")
     except Exception:
         logging.warning("browser startup reconciliation remains incomplete", exc_info=True)
     for tid in {run.thread_id for run in _runs().scan_all()
-                if (run.status == "revocation_pending" or
-                    (run.status == "cancelled" and run.browser_cancel_reset
-                     and run.cancel_cleanup == "pending"))}:
+                if browser_reset_owed(run)}:
         _queue_browser_revocation(tid)
     if q.empty():
         return
