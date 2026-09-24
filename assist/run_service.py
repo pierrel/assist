@@ -615,10 +615,11 @@ class RunService(PerThreadJsonStore[Run]):
             if status not in _TRANSITIONS[current.status]:
                 raise InvalidRunTransition(
                     f"cannot transition run {run_id} from {current.status} to {status}")
-            if status == "running" and any(
+            if (status == "running" or
+                    (status == "success" and current.status == "pending")) and any(
                     browser_reset_owed(prior) for prior in runs[:runs.index(current)]):
                 raise InvalidRunTransition(
-                    f"cannot claim run {run_id} before browser safety reset")
+                    f"cannot advance run {run_id} before browser safety reset")
             changed = replace(
                 current,
                 status=status,

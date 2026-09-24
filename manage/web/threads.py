@@ -1934,11 +1934,15 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
 # behavior by construction). The journal read is the locked one — the
 # middleware hook runs on the turn's worker thread, never the event loop.
 def _pending_run_records(tid: str) -> list[PendingMessage]:
-    """Interjection adapter over pending runs (the middleware needs record shape)."""
+    """Interjection adapter; never expose a follower across a reset debt."""
+    runs = _runs().list(tid)
+    first_reset = next((index for index, run in enumerate(runs)
+                        if browser_reset_owed(run)), None)
+    eligible = runs if first_reset is None else runs[:first_reset]
     return [PendingMessage(
         thread_id=run.thread_id, text=run.text or "", sender=run.sender,
         rider=run.rider, enqueued_at=run.created_at, origin=run.origin, id=run.id)
-        for run in _runs().list(tid)
+        for run in eligible
         if (run.status == "pending" and run.mode == "turn" and run.text
             and run.assistant_id == "general-agent")]
 
@@ -4512,18 +4516,27 @@ def queue_recovery_runs() -> None:
 
 
 class _PriorityRunQueue:
-    """Blocking two-tier FIFO with promotable dormant reservations."""
+    """Blocking two-tier FIFO; one queued wake per Run, but requeue after get."""
 
     def __init__(self) -> None:
         self._cond = threading.Condition()
         self._user = deque()
         self._background = deque()
         self._reserved: dict[object, dict] = {}
+        self._queued: set[tuple[str, str]] = set()
+
+    @staticmethod
+    def _key(item: dict) -> tuple[str, str]:
+        return item["tid"], item["run_id"]
 
     def put(self, item: dict) -> None:
         with self._cond:
+            key = self._key(item)
+            if key in self._queued:
+                return
             target = self._user if item.get("user_priority") else self._background
             target.append(item)
+            self._queued.add(key)
             self._cond.notify()
 
     def reserve(self, item: dict) -> object:
@@ -4539,21 +4552,29 @@ class _PriorityRunQueue:
             item = self._reserved.pop(ticket, None)
             if item is None:
                 return
+            key = self._key(item)
+            if key in self._queued:
+                return
             target = self._user if item.get("user_priority") else self._background
             target.append(item)
+            self._queued.add(key)
             self._cond.notify()
 
     def get(self) -> dict:
         with self._cond:
             while not self._user and not self._background:
                 self._cond.wait()
-            return (self._user if self._user else self._background).popleft()
+            item = (self._user if self._user else self._background).popleft()
+            self._queued.discard(self._key(item))
+            return item
 
     def get_nowait(self) -> dict:
         with self._cond:
             if not self._user and not self._background:
                 raise queue.Empty
-            return (self._user if self._user else self._background).popleft()
+            item = (self._user if self._user else self._background).popleft()
+            self._queued.discard(self._key(item))
+            return item
 
     def empty(self) -> bool:
         with self._cond:

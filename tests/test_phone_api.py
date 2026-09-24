@@ -764,6 +764,25 @@ def test_phone_cancel_sanitizes_a_mid_cancel_run_store_failure(
     assert response.json() == {"detail": "run-store-unavailable"}
 
 
+def test_phone_cancel_surviving_thread_fence_failure_is_503(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    directory = tmp_path / "thread-a"
+    directory.mkdir()
+    monkeypatch.setattr(phone_api, "_thread_dir", lambda _tid: str(directory))
+
+    @contextmanager
+    def broken_fence(*_args):
+        raise RuntimeError("browser authority state is invalid")
+        yield
+
+    monkeypatch.setattr(phone_api.threads.browser_authority, "fence", broken_fence)
+    response = _client(monkeypatch).delete(
+        "/api/v1/phone/threads/thread-a/runs/run-a", headers=_auth())
+    assert response.status_code == 503
+    assert response.json() == {"detail": "run-store-unavailable"}
+
+
 def test_phone_cancel_retry_replays_a_pending_cleanup_receipt(
         monkeypatch, stub_browser_fence):
     """A failed final receipt repeats cleanup, then records completion once durable."""

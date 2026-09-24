@@ -76,7 +76,7 @@ def _user_requested_host(message: str | None, host: str) -> bool:
     if not message or any(character in message for character in "\r\n\t"):
         return False
     message = re.sub(r"^\s*what's\b", "What is", message, flags=re.I)
-    # Reject quoted text and prohibitions before the host. False negatives
+    # Reject quoted text and prohibitions anywhere in the request. False negatives
     # require a fresh exact-host request; false positives grant LAN access.
     if re.search(r"['\"`]|\b(?:not|never|avoid|without|don.t|cannot|can.t)\b",
                  message, re.I):

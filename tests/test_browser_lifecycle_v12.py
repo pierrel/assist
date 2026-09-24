@@ -10,6 +10,8 @@ from assist.run_service import InvalidRunTransition, RunService
 from assist.egress.store import EgressRequest, EgressStore, request_key
 from manage.web import phone_api, threads
 
+_ORIGINAL_DISPATCH_PENDING = threads._dispatch_pending_after
+
 
 @pytest.fixture
 def admitted(monkeypatch, tmp_path):
@@ -295,6 +297,32 @@ def test_reset_worker_requeues_after_one_held_event_for_fairness(
     assert [runs.get("t", item.id).status for item in held] == [
         "pending", "revocation_pending", "revocation_pending"]
     assert queued == ["t"]
+
+
+def test_two_held_promotions_queue_the_first_run_once(monkeypatch, admitted):
+    root, runs = admitted
+    old = runs.create("t", "general-agent", "Visit host.docker.internal",
+                      user_origin=True)
+    runs.transition("t", old.id, "success")
+    with authority.fence(str(root), "t") as state:
+        state.begin(old.id, old.admission_sequence)
+    first, _ = threads._accept_message_run("t", "Read public status")
+    second, _ = threads._accept_message_run("t", "Read another page")
+    monkeypatch.setattr(browser.BrowserManager, "current_session", lambda _tid: None)
+    monkeypatch.setattr(browser, "_bounded_cli", lambda *_args, **_kwargs: b"")
+    queue = threads._PriorityRunQueue()
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "_q", queue)
+    monkeypatch.setattr(threads, "_dispatch_pending_after",
+                        _ORIGINAL_DISPATCH_PENDING)
+    assert threads._drain_held_browser_events("t") is True
+    assert threads._drain_held_browser_events("t") is True
+    assert queue.get_nowait()["run_id"] == first.id
+    with pytest.raises(threads.queue.Empty):
+        queue.get_nowait()
+    runs.claim("t", first.id)
+    runs.transition("t", first.id, "success")
+    threads._dispatch_pending_after("t")
+    assert queue.get_nowait()["run_id"] == second.id
 
 
 def _phone_held_context(monkeypatch, admitted):

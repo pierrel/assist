@@ -221,6 +221,24 @@ def test_resume_scheduler_reservation_is_invisible_until_committed_once():
         q.get_nowait()
 
 
+def test_resume_scheduler_dedupes_only_queued_run_ids():
+    q = threads._PriorityRunQueue()
+    item = {"kind": "run", "run_id": "same", "tid": "thread"}
+    q.put(item)
+    q.put(dict(item))
+    reserved = q.reserve(dict(item))
+    q.commit(reserved)
+    assert q.get_nowait()["run_id"] == "same"
+    with pytest.raises(threads.queue.Empty):
+        q.get_nowait()
+    # Once the scheduler has taken the item, a paused turn can legitimately
+    # queue its next wake before this invocation has fully unwound.
+    q.put(dict(item))
+    assert q.get_nowait()["run_id"] == "same"
+    with pytest.raises(threads.queue.Empty):
+        q.get_nowait()
+
+
 def test_resume_scheduler_promotes_reservations_on_both_sides_of_commit():
     q = threads._PriorityRunQueue()
     q.put({"run_id": "user-first", "tid": "user", "user_priority": True})

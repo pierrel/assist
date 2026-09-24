@@ -950,7 +950,9 @@ def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
         if (isinstance(directory, (str, bytes, os.PathLike))
                 and not os.path.isdir(directory)):
             raise HTTPException(status_code=404, detail="Thread not found") from error
-        raise
+        if isinstance(error, RunStoreUnavailable):
+            raise
+        raise RunStoreUnavailable("Browser cancellation state is unavailable") from error
 
 
 def _cancel_logical_run_fenced(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:

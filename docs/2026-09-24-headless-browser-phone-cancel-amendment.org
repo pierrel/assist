@@ -28,10 +28,11 @@ explicitly. This Assist amendment does not change EmacsOS.
 
 * Historical supersessions
 
-- [[file:2026-09-24-headless-browser-v12.org][Browser lifecycle v12]], =Short
-  commit/publication fence= and =Durable browser lease and scoped readiness=: held
-  direct-user Runs normally promote in sequence, but a phone-cancelled held
-  Run retains a reset obligation and completes a cancellation receipt instead.
+- [[file:2026-09-24-headless-browser-v12.org][Browser lifecycle v12]], =Bounded
+  reset work and one first-open deadline=: held Runs remain the durable reset
+  queue source of truth, but a phone-cancelled held Run retains its reset
+  obligation under a cancelled receipt and completes that receipt instead
+  of promoting to pending.
 - [[file:2026-09-09-phone-run-cancellation-receipt-amendment.org][Phone Run cancellation receipt amendment]], =Correction=: its
   pending-only cancellation and immediate cleanup path now has the narrow
   browser-held exception above. Its ordinary pending-Run receipt semantics
