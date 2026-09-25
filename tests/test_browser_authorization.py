@@ -1,4 +1,5 @@
 """User-origin attribution and affirmative exact-host admission."""
+import json
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, RLock
@@ -10,6 +11,22 @@ from assist.browser import authority
 from assist.run_service import RunService
 from manage.web import threads
 from manage.web.threads import _browser_user_request
+
+
+@pytest.mark.parametrize("sequence,valid", [(True, False), (False, False), (1, True)])
+def test_persisted_browser_lease_requires_numeric_sequence(tmp_path, sequence, valid):
+    (tmp_path / "t").mkdir()
+    (tmp_path / "t" / authority.STATE_FILE).write_text(json.dumps({
+        "covered": True,
+        "lease": {"owner_run_id": "run", "sequence": sequence, "generations": []},
+    }), encoding="utf-8")
+    if valid:
+        with authority.fence(str(tmp_path), "t") as state:
+            assert state.lease["sequence"] == 1
+    else:
+        with pytest.raises(RuntimeError, match="browser lease is invalid"):
+            with authority.fence(str(tmp_path), "t"):
+                pass
 
 
 @pytest.mark.parametrize("message,allowed", [

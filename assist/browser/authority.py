@@ -44,7 +44,7 @@ def _read(path: str) -> dict:
                 or not isinstance(lease["owner_run_id"], str)
                 or not lease["owner_run_id"]
                 or len(lease["owner_run_id"]) > 256
-                or not isinstance(lease["sequence"], int)
+                or type(lease["sequence"]) is not int
                 or lease["sequence"] < 0
                 or not isinstance(lease["generations"], list)
                 or any(not isinstance(item, str) or not item or len(item) > 128
