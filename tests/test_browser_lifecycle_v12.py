@@ -6,6 +6,7 @@ from threading import Event
 import pytest
 
 from assist.browser import authority, manager as browser
+from assist.egress.client_map import ClientRecord, record_client
 from assist.run_service import InvalidRunTransition, RunService
 from assist.egress.store import EgressRequest, EgressStore, request_key
 from manage.web import phone_api, threads
@@ -62,6 +63,77 @@ def test_held_commit_between_create_and_map_publication_denies_old_startup(
         assert state.lease["owner_run_id"] == old.id
         assert state.lease["generations"] == []
     assert browser.browser_records(str(root), "t") == {}
+
+
+@pytest.mark.parametrize("invalid_map", [False, True])
+def test_missing_or_invalid_map_promotes_clean_never_browser_held_event(
+        monkeypatch, admitted, invalid_map):
+    root, runs = admitted
+    runs.create("t", "general-agent", "Read a public site", user_origin=True)
+    held, _ = threads._accept_message_run("t", "Read another page")
+    assert held.status == "revocation_pending"
+    if invalid_map:
+        monkeypatch.setattr(browser, "configured_directory", lambda: (_ for _ in ()).throw(
+            RuntimeError("unsafe map path")))
+    else:
+        monkeypatch.setattr(browser, "configured_directory", lambda: None)
+    monkeypatch.setattr(browser.BrowserManager, "current_session", lambda _tid: None)
+    monkeypatch.setattr(browser, "_bounded_cli", lambda *_a, **_k: (_ for _ in ()).throw(
+        AssertionError("covered clean thread needs no Docker scan")))
+    assert threads._drain_held_browser_events("t") is True
+    assert runs.get("t", held.id).status == "pending"
+
+
+@pytest.mark.parametrize("invalid_map", [False, True])
+def test_map_disabled_old_browser_requires_exact_kill_and_base_only_proxy(
+        monkeypatch, admitted, invalid_map):
+    root, runs = admitted
+    old = runs.create("t", "general-agent", "Visit host.docker.internal:5050",
+                      user_origin=True)
+    with authority.fence(str(root), "t") as state:
+        state.begin(old.id, old.admission_sequence)
+        state.add_generation(old.id, "old-generation")
+    record_client(str(root), "172.20.0.2", ClientRecord(
+        "t", "old-generation", "browser", "internal", "host.docker.internal", 5050))
+    held, _ = threads._accept_message_run("t", "Read a public page")
+    if invalid_map:
+        monkeypatch.setattr(browser, "configured_directory", lambda: (_ for _ in ()).throw(
+            RuntimeError("unsafe map path")))
+    else:
+        monkeypatch.setattr(browser, "configured_directory", lambda: None)
+    monkeypatch.setattr(browser.BrowserManager, "current_session", lambda _tid: None)
+    scans, killed, proxies = [], [], []
+
+    def scan(argv, **_kwargs):
+        scans.append(argv)
+        return b"old-generation\n"
+
+    monkeypatch.setattr(browser, "_bounded_cli", scan)
+    monkeypatch.setattr(browser, "_kill_container_confirmed", killed.append)
+    monkeypatch.setattr(browser.SandboxManager, "_ensure_egress_proxy_bounded",
+                        lambda: proxies.append("base-only"))
+    assert threads._drain_held_browser_events("t") is True
+    assert runs.get("t", held.id).status == "pending"
+    assert scans and "label=assist.browser-run=" + old.id in scans[0]
+    assert killed == ["old-generation"] and proxies == ["base-only"]
+    with authority.fence(str(root), "t") as state:
+        assert state.lease is None
+
+
+def test_map_disabled_failed_owner_scan_keeps_held_event(monkeypatch, admitted):
+    root, runs = admitted
+    old = runs.create("t", "general-agent", "Visit host.docker.internal:5050",
+                      user_origin=True)
+    with authority.fence(str(root), "t") as state:
+        state.begin(old.id, old.admission_sequence)
+    held, _ = threads._accept_message_run("t", "Read a public page")
+    monkeypatch.setattr(browser, "configured_directory", lambda: None)
+    monkeypatch.setattr(browser.BrowserManager, "current_session", lambda _tid: None)
+    monkeypatch.setattr(browser, "_bounded_cli", lambda *_a, **_k: (_ for _ in ()).throw(
+        browser.BrowserUnavailable("Docker owner scan failed")))
+    monkeypatch.setattr(threads, "_schedule_browser_revocation_retry", lambda _tid: None)
+    assert threads._drain_held_browser_events("t") is False
+    assert runs.get("t", held.id).status == "revocation_pending"
 
 
 def test_first_open_deadline_write_cannot_overwrite_direct_held_commit(

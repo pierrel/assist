@@ -5,7 +5,6 @@ from threading import Event, RLock
 
 import pytest
 
-from assist.browser.manager import _user_requested_host
 from assist.browser import manager as browser
 from assist.browser import authority
 from assist.run_service import RunService
@@ -47,11 +46,64 @@ from manage.web.threads import _browser_user_request
     ("Open another.example; visit host.docker.internal", False),
 ])
 def test_internal_host_requires_affirmative_exact_direct_request(message, allowed):
-    assert _user_requested_host(message, "host.docker.internal") is allowed
+    assert bool(browser._user_requested_ports(message, "host.docker.internal")) is allowed
 
 
 def test_exact_private_ip_url_is_direct_consent():
-    assert _user_requested_host("Open http://10.0.0.1:8484/reports", "10.0.0.1")
+    assert browser._user_requested_ports(
+        "Open http://10.0.0.1:8484/reports", "10.0.0.1") == (8484,)
+
+
+@pytest.mark.parametrize("message,ports", [
+    ("Visit http://host.docker.internal:5050/reports", (5050,)),
+    ("Visit host.docker.internal:5050", (5050,)),
+    ("Visit http://host.docker.internal", (80,)),
+    ("Visit https://host.docker.internal", (443,)),
+    ("Visit host.docker.internal", (80, 443)),
+    ("Visit http://host.docker.internal:5050@evil.com", ()),
+    ("Visit host.docker.internal:0", ()),
+])
+def test_direct_internal_consent_binds_effective_ports(message, ports):
+    assert browser._user_requested_ports(message, "host.docker.internal") == ports
+
+
+def test_internal_open_rejects_other_port_before_sidecar_start(monkeypatch, tmp_path):
+    monkeypatch.setattr(browser, "_load_egress_allowlist",
+                        lambda: ["host.docker.internal"])
+    request = browser.BrowserUserRequest(
+        "event", "work", "Visit http://host.docker.internal:5050", 1)
+    session = browser.BrowserSession(
+        "thread", "run", str(tmp_path), str(tmp_path), request, work_id="work")
+    started = []
+    monkeypatch.setattr(session, "_start", lambda *args: started.append(args))
+    with pytest.raises(browser.BrowserUnavailable, match="host and port"):
+        session._ensure_mode("http://host.docker.internal:8000/")
+    assert started == []
+    session._ensure_mode("http://host.docker.internal:5050/")
+    assert started == [("internal", "host.docker.internal", 5050)]
+
+
+def test_bare_host_switches_default_ports_with_new_internal_identity(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(browser, "_load_egress_allowlist",
+                        lambda: ["host.docker.internal"])
+    request = browser.BrowserUserRequest(
+        "event", "work", "Visit host.docker.internal", 1)
+    session = browser.BrowserSession(
+        "thread", "run", str(tmp_path), str(tmp_path), request, work_id="work")
+    session.identity = browser._ContainerIdentity(
+        str(tmp_path), "172.20.0.2", "first", "internal",
+        "host.docker.internal", 80)
+    events = []
+
+    def stop():
+        events.append("stop-80")
+        session.identity = None
+
+    monkeypatch.setattr(session, "_stop", stop)
+    monkeypatch.setattr(session, "_start", lambda *args: events.append(args))
+    session._ensure_mode("https://host.docker.internal/")
+    assert events == ["stop-80", ("internal", "host.docker.internal", 443)]
 
 
 @pytest.mark.parametrize("url", [

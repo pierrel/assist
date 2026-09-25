@@ -275,7 +275,7 @@ def client_record(client_ip: str, kind: str) -> dict | None:
     if kind == "browser":
         required.add("browser_mode")
         if value.get("browser_mode") == "internal":
-            required.add("internal_host")
+            required.update({"internal_host", "internal_port"})
         elif value.get("browser_mode") != "public":
             return None
     if set(value) != required:
@@ -289,7 +289,9 @@ def client_record(client_ip: str, kind: str) -> dict | None:
         internal_host = value["internal_host"]
         if (not isinstance(internal_host, str) or not internal_host
                 or internal_host != internal_host.lower()
-                or internal_host not in ALLOWLIST):
+                or internal_host not in ALLOWLIST
+                or type(value["internal_port"]) is not int
+                or not 1 <= value["internal_port"] <= 65535):
             return None
     return value
 
@@ -340,7 +342,8 @@ def target_policy(host: str, port: int, client_ip: str) -> tuple[str | None, str
     if kind == "browser" and record is None:
         return None, "browser_attribution_missing"
     if kind == "browser" and record["browser_mode"] == "internal":
-        if host != record["internal_host"] or host not in ALLOWLIST:
+        if (host != record["internal_host"]
+                or port != record["internal_port"] or host not in ALLOWLIST):
             return None, "browser_internal_policy"
         address = vet_resolved(host, port, global_only=False)
         return (address, None) if address else (None, "browser_internal_address")

@@ -37,6 +37,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Length', '0')
             self.end_headers()
             return
+        if self.path.startswith('/cross-port?'):
+            host = parse_qs(urlsplit(self.path).query)['host'][0]
+            body = (f'<html><img src="http://{host}:8001/pixel"></html>').encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith('/worker?'):
             host = parse_qs(urlsplit(self.path).query)['host'][0]
             body = (('<html><body><button id="state">pending</button><script>'
@@ -122,6 +131,11 @@ def fixture_resolve(host, port, *, global_only=True):
         return os.environ['BROWSER_TEST_PUBLIC_ORIGIN_IP']
     return original(host, port, global_only=global_only)
 proxy.vet_resolved = fixture_resolve
+# Fixture pages intentionally make many rapid origin requests. Keep the
+# production target policy, but do not let unrelated host throttling mask
+# redirect/subresource port-denial assertions (throttle has unit coverage).
+proxy._UNTHROTTLED_HOSTS = proxy._UNTHROTTLED_HOSTS | {
+    os.environ['BROWSER_TEST_PUBLIC_ORIGIN_IP']}
 proxy.main()
 '''
 
@@ -323,6 +337,36 @@ def test_isolated_browser_reaches_only_attributed_proxy(tmp_path, monkeypatch):
         initial = session.command("open", url=f"http://{origin_ip}:8000/")
         assert "error" not in initial, initial
         sidecar = client.containers.get(session.identity.generation)
+        # Consent for :8000 never grants another port on the same host,
+        # including an agent open, proxy request, redirect or subresource.
+        with pytest.raises(browser.BrowserUnavailable, match="host and port"):
+            session.command("open", url=f"http://{origin_ip}:8001/")
+        for request in [
+                f"CONNECT {origin_ip}:8001 HTTP/1.1\r\n\r\n",
+                (f"GET http://{origin_ip}:8001/pixel HTTP/1.1\r\n"
+                 f"Host: {origin_ip}:8001\r\n\r\n")]:
+            raw = sidecar.exec_run([
+                "python", "-c", "import socket,sys; "
+                "s=socket.create_connection(('assist-egress-proxy',8888),3); "
+                f"s.sendall({request!r}.encode()); "
+                "sys.stdout.buffer.write(s.recv(512))"])
+            assert b"browser_internal_policy" in raw.output
+        denied_cross_port = proxy.logs().count(
+            f"DENY {origin_ip} (browser_internal_policy)".encode())
+        redirected_cross_port = session.command(
+            "open", url=(f"http://{origin_ip}:8000/redirect?"
+                         f"to=http%3A%2F%2F{origin_ip}%3A8001%2F"))
+        assert "error" not in redirected_cross_port, redirected_cross_port
+        denied_after_redirect = proxy.logs().count(
+            f"DENY {origin_ip} (browser_internal_policy)".encode())
+        assert denied_after_redirect > denied_cross_port, (
+            redirected_cross_port, proxy.logs()[-1200:])
+        subresource = session.command(
+            "open", url=f"http://{origin_ip}:8000/cross-port?host={origin_ip}")
+        assert "error" not in subresource, subresource
+        assert proxy.logs().count(
+            f"DENY {origin_ip} (browser_internal_policy)".encode()) > denied_after_redirect, (
+                subresource, proxy.logs()[-1200:])
         observation = initial["result"]
         assert "Browser fixture" in observation["snapshot"]
         assert read_client(str(map_dir), session.identity.ip).generation == session.identity.generation
@@ -524,7 +568,7 @@ def test_isolated_browser_reaches_only_attributed_proxy(tmp_path, monkeypatch):
         old.reload()
         old_ip = old.attrs["NetworkSettings"]["Networks"][browser_name]["IPAddress"]
         record_client(str(map_dir), old_ip, ClientRecord(
-            "test-thread", old.id, "browser", "internal", origin_ip))
+            "test-thread", old.id, "browser", "internal", origin_ip, 8000))
         old.stop(timeout=3)
         old.reload()
         assert old.status == "exited"

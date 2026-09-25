@@ -47,7 +47,9 @@ where reliability is harder than with frontier APIs.
   with JavaScript pages using a short-lived Chromium sidecar. It is isolated
   from the shell container and can reach only the existing egress proxy.
   Public visits use the same exact-host list and approvals; private/local
-  visits require a fresh user request naming an operator-allowlisted host.
+  visits require a fresh user request naming an operator-allowlisted host
+  and exact port. A bare host permits only HTTP 80 or HTTPS 443; a
+  nondefault port must be explicit, such as `http://host.docker.internal:5050`.
   Browser pages cannot approve access.
 
 - **Specialized agents and skills out of the box.**

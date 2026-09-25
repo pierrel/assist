@@ -414,8 +414,9 @@ def test_proxy_browser_source_and_mode_policy(proxy_mod, tmp_path, monkeypatch):
     assert proxy_mod.target_policy("pypi.org", 443, "172.22.0.8")[1] == "unknown_proxy_source"
 
     record_client(str(tmp_path), ip, ClientRecord(
-        "t1", "g2", "browser", "internal", "host.docker.internal"))
+        "t1", "g2", "browser", "internal", "host.docker.internal", 80))
     assert proxy_mod.target_policy("host.docker.internal", 80, ip) == ("172.17.0.1", None)
+    assert proxy_mod.target_policy("host.docker.internal", 8000, ip)[1] == "browser_internal_policy"
     assert proxy_mod.target_policy("pypi.org", 443, ip)[1] == "browser_internal_policy"
 
     # A new network CIDR never reclassifies an old browser address as shell.
@@ -432,6 +433,11 @@ def test_proxy_rejects_legacy_and_kind_mismatched_records(proxy_mod, tmp_path):
     record = ClientRecord("t1", "g1", "sandbox").to_dict()
     path.write_text(json.dumps({ip: record}))
     assert proxy_mod.target_policy("pypi.org", 443, ip)[1] == "browser_attribution_missing"
+    # A pre-port internal record must lose access after policy upgrade.
+    legacy_internal = {"thread_id": "t1", "generation": "old", "kind": "browser",
+                       "browser_mode": "internal", "internal_host": "host.docker.internal"}
+    path.write_text(json.dumps({ip: legacy_internal}))
+    assert proxy_mod.target_policy("host.docker.internal", 80, ip)[1] == "browser_attribution_missing"
 
 
 def test_recycled_browser_ip_cannot_use_previous_thread_grant(

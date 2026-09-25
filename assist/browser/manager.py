@@ -48,7 +48,7 @@ class BrowserUserRequest:
     admission_sequence: int = 0
 
 
-def _url_host(url: str) -> str:
+def _url_target(url: str) -> tuple[str, int]:
     if not isinstance(url, str) or len(url) > 4096:
         raise BrowserUnavailable("invalid browser URL")
     try:
@@ -59,7 +59,11 @@ def _url_host(url: str) -> str:
             raise ValueError
     except ValueError as error:
         raise BrowserUnavailable("use an HTTP(S) URL without userinfo") from error
-    return parsed.hostname.lower()
+    return parsed.hostname.lower(), parsed.port or (443 if parsed.scheme == "https" else 80)
+
+
+def _url_host(url: str) -> str:
+    return _url_target(url)[0]
 
 
 def _internal_host(host: str) -> bool:
@@ -71,16 +75,16 @@ def _internal_host(host: str) -> bool:
         return False
 
 
-def _user_requested_host(message: str | None, host: str) -> bool:
-    """Accept only a direct visit or narrow outcome-at-exact-host request."""
+def _user_requested_ports(message: str | None, host: str) -> tuple[int, ...]:
+    """Return explicit port, scheme default, or both web defaults for a bare host."""
     if not message or any(character in message for character in "\r\n\t"):
-        return False
+        return ()
     message = re.sub(r"^\s*what's\b", "What is", message, flags=re.I)
     # Reject quoted text and prohibitions anywhere in the request. False negatives
     # require a fresh exact-host request; false positives grant LAN access.
     if re.search(r"['\"`]|\b(?:not|never|avoid|without|don.t|cannot|can.t)\b",
                  message, re.I):
-        return False
+        return ()
     visit = (r"^\s*(?:yes,\s*)?(?:(?:please|can you|could you|would you)\s+)?"
                r"(?:visit|open|browse|go to|look at|inspect|check|show)\s+"
                r"(?:(?:me\s+)?(?:the\s+)?"
@@ -95,21 +99,28 @@ def _user_requested_host(message: str | None, host: str) -> bool:
         match = re.search(outcome, message, re.I)
     if match is None or not re.fullmatch(
             continuation + r"\s*[.!?]*\s*", message[match.end():], re.I):
-        return False
+        return ()
     # Parse the whole authority token: a host-looking prefix before userinfo,
     # punctuation or another hostname is not consent for the internal host.
     token = match.group("target").rstrip(".,!?")
     if not token or len(token) > 4096:
-        return False
+        return ()
     try:
         parsed = urlsplit(token if token.lower().startswith(("http://", "https://"))
                           else "//" + token)
-        return (parsed.hostname is not None and parsed.hostname.lower() == host
-                and parsed.username is None and parsed.password is None
-                and not parsed.netloc.endswith(":")
-                and (parsed.port is None or 1 <= parsed.port <= 65535))
+        if (parsed.hostname is None or parsed.hostname.lower() != host
+                or parsed.username is not None or parsed.password is not None
+                or parsed.netloc.endswith(":")):
+            return ()
+        if parsed.port is not None:
+            return (parsed.port,) if 1 <= parsed.port <= 65535 else ()
+        if parsed.scheme == "http":
+            return (80,)
+        if parsed.scheme == "https":
+            return (443,)
+        return (80, 443)
     except ValueError:
-        return False
+        return ()
 
 
 def _owner_start() -> str:
@@ -157,16 +168,22 @@ def _bounded_cli(argv: list[str], *, payload: bytes = b"",
                             raise BrowserUnavailable("browser response exceeds limit")
                         else:
                             output.write(chunk)
-            if process.wait(timeout=max(0.1, deadline - time.monotonic())):
+            try:
+                status = process.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired as error:
+                raise BrowserUnavailable("browser transport timed out") from error
+            if status:
                 raise BrowserUnavailable("browser sidecar command failed")
             return output.getvalue()
         finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=5)
-            if process.stdin and not process.stdin.closed:
-                process.stdin.close()
-            process.stdout.close()
+            try:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+            finally:
+                if process.stdin and not process.stdin.closed:
+                    process.stdin.close()
+                process.stdout.close()
 
 
 def _docker_exec(container_id: str, payload: bytes, timeout: float = 20) -> bytes:
@@ -298,6 +315,7 @@ class _ContainerIdentity:
     generation: str
     mode: str
     internal_host: str | None
+    internal_port: int | None = None
 
 
 class BrowserSession:
@@ -323,7 +341,8 @@ class BrowserSession:
         self.closed = False
         self._lock = threading.RLock()
 
-    def _start(self, mode: str, internal_host: str | None):
+    def _start(self, mode: str, internal_host: str | None,
+               internal_port: int | None):
         if self.startup_uncertain:
             raise BrowserUnavailable("browser startup outcome is unconfirmed for this Run")
         map_dir = configured_directory()
@@ -358,13 +377,14 @@ class BrowserSession:
                     raise BrowserUnavailable("newer user message revoked browser startup")
                 state.add_generation(self.run_id, generation)
                 record_client(map_dir, ip, ClientRecord(
-                    self.thread_id, generation, "browser", mode, internal_host))
+                    self.thread_id, generation, "browser", mode,
+                    internal_host, internal_port))
         except Exception:
             self.startup_uncertain = True
             _kill_container(generation)
             raise
         self.identity = _ContainerIdentity(
-            map_dir, ip, generation, mode, internal_host)
+            map_dir, ip, generation, mode, internal_host, internal_port)
 
     def _stop(self):
         identity = self.identity
@@ -417,24 +437,26 @@ class BrowserSession:
                     state.clear(self.run_id)
 
     def _ensure_mode(self, url: str):
-        host = _url_host(url)
+        host, port = _url_target(url)
         allowlist = frozenset(_load_egress_allowlist())
         if _internal_host(host):
             if host not in allowlist:
                 raise BrowserUnavailable("internal host is outside the base allowlist")
             if (self.user_request is None
-                    or not _user_requested_host(self.user_request.text, host)):
+                    or port not in _user_requested_ports(
+                        self.user_request.text, host)):
                 raise BrowserUnavailable(
-                    "internal browsing needs a fresh user request naming this exact host")
-            mode, internal_host = "internal", host
+                    "internal browsing needs a fresh user request naming this exact host and port")
+            mode, internal_host, internal_port = "internal", host, port
         else:
-            mode, internal_host = "public", None
+            mode, internal_host, internal_port = "public", None, None
         if (self.identity is not None
-                and (self.identity.mode, self.identity.internal_host)
-                != (mode, internal_host)):
+                and (self.identity.mode, self.identity.internal_host,
+                     self.identity.internal_port)
+                != (mode, internal_host, internal_port)):
             self._stop()
         if self.identity is None:
-            self._start(mode, internal_host)
+            self._start(mode, internal_host, internal_port)
 
     def _direct_authority_state(self, bound_sequence):
         try:
@@ -661,9 +683,24 @@ class BrowserManager:
     def confirm_owner_stopped(cls, threads_root: str, thread_id: str,
                               owner_run_id: str | None) -> bool:
         """Positive proof; failure retains a held or cancelled reset obligation."""
-        map_dir = configured_directory()
-        if map_dir is None:
-            raise BrowserUnavailable("browser client map is unavailable")
+        try:
+            map_dir = configured_directory()
+        except (OSError, RuntimeError):
+            # An unsafe/unreadable browser-only map disables browser admission,
+            # but cannot strand an ordinary held Run after safe base-only reset.
+            map_dir = None
+        with authority.fence(threads_root, thread_id) as state:
+            lease = state.lease
+            if map_dir is None and state.covered and lease is None:
+                # A covered thread could not launch without first journaling a
+                # lease. No browser map or Docker reset is needed here.
+                return False
+            if lease is not None:
+                if owner_run_id is not None and owner_run_id != lease["owner_run_id"]:
+                    raise BrowserUnavailable("browser owner changed during reset")
+                owner_run_id = lease["owner_run_id"]
+            if map_dir is None and owner_run_id is None:
+                raise BrowserUnavailable("browser migration reconciliation is incomplete")
         label_root = hashlib.sha256(
             os.path.realpath(threads_root).encode()).hexdigest()[:20]
         if owner_run_id:
@@ -684,9 +721,15 @@ class BrowserManager:
         for generation in generations:
             _kill_container_confirmed(generation)
             reset = True
-        cls.prune_absent_clients(map_dir)
-        if browser_records(map_dir, thread_id):
-            raise BrowserUnavailable("browser attribution teardown is unconfirmed")
+        if map_dir is None:
+            # The old proxy may still mount the former map and hold established
+            # tunnels. Replace it with the independently fenced base-only
+            # generation before releasing this held direct-user event.
+            SandboxManager._ensure_egress_proxy_bounded()
+        else:
+            cls.prune_absent_clients(map_dir)
+            if browser_records(map_dir, thread_id):
+                raise BrowserUnavailable("browser attribution teardown is unconfirmed")
         with authority.fence(threads_root, thread_id) as state:
             if owner_run_id and state.lease is not None:
                 state.clear_reconciled(owner_run_id)

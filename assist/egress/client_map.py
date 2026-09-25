@@ -44,6 +44,7 @@ class ClientRecord:
     kind: str
     browser_mode: str | None = None
     internal_host: str | None = None
+    internal_port: int | None = None
 
     def __post_init__(self) -> None:
         if (not self.thread_id or len(self.thread_id) > 128
@@ -51,19 +52,26 @@ class ClientRecord:
                 or self.kind not in {"sandbox", "browser"}):
             raise ValueError("invalid proxy client identity")
         if self.kind == "sandbox":
-            if self.browser_mode is not None or self.internal_host is not None:
+            if (self.browser_mode is not None or self.internal_host is not None
+                    or self.internal_port is not None):
                 raise ValueError("sandbox has browser policy fields")
         elif (self.browser_mode not in {"public", "internal"}
-              or (self.browser_mode == "internal") != bool(self.internal_host)):
+              or (self.browser_mode == "internal") != bool(self.internal_host)
+              or (self.browser_mode == "internal") != (type(self.internal_port) is int)
+              or (self.internal_port is not None
+                  and not 1 <= self.internal_port <= 65535)):
             raise ValueError("invalid browser policy")
 
-    def to_dict(self) -> dict[str, str]:
-        value = {"thread_id": self.thread_id, "generation": self.generation,
-                 "kind": self.kind}
+    def to_dict(self) -> dict[str, str | int]:
+        value: dict[str, str | int] = {
+            "thread_id": self.thread_id, "generation": self.generation,
+            "kind": self.kind}
         if self.browser_mode is not None:
             value["browser_mode"] = self.browser_mode
         if self.internal_host is not None:
             value["internal_host"] = self.internal_host
+        if self.internal_port is not None:
+            value["internal_port"] = self.internal_port
         return value
 
 
@@ -90,7 +98,7 @@ def _locked(directory: str, timeout: float = 5):
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def _read(path: str) -> dict[str, dict[str, str]]:
+def _read(path: str) -> dict[str, dict[str, str | int]]:
     try:
         with open(path, encoding="utf-8") as stream:
             entries = json.load(stream)
@@ -98,16 +106,25 @@ def _read(path: str) -> dict[str, dict[str, str]]:
         return {}
     if not isinstance(entries, dict):
         raise ValueError("invalid proxy client map")
+    current = {}
     for ip, value in entries.items():
         if not isinstance(ip, str) or not isinstance(value, dict):
             raise ValueError("invalid proxy client map entry")
         _validate_ip(ip)
+        if (value.get("kind") == "browser"
+                and value.get("browser_mode") == "internal"
+                and set(value) == {"thread_id", "generation", "kind",
+                                   "browser_mode", "internal_host"}):
+            # Pre-port records have no bounded internal authority. The new
+            # proxy denies them; omit them from host writes and recovery too.
+            continue
         if value != ClientRecord(**value).to_dict():
             raise ValueError("invalid proxy client map record")
-    return entries
+        current[ip] = value
+    return current
 
 
-def _write(path: str, entries: dict[str, dict[str, str]]) -> None:
+def _write(path: str, entries: dict[str, dict[str, str | int]]) -> None:
     fd, temp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".client-map-")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:

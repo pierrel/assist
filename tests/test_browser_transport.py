@@ -58,6 +58,15 @@ def test_transport_rejects_oversized_child_output():
             limit=64, timeout=2)
 
 
+def test_stdout_eof_without_process_exit_obeys_transport_deadline():
+    started = time.monotonic()
+    with pytest.raises(browser.BrowserUnavailable, match="timed out"):
+        browser._bounded_cli(
+            [sys.executable, "-c", "import os,time; os.close(1); time.sleep(30)"],
+            limit=64, timeout=0.15)
+    assert time.monotonic() - started < 2
+
+
 def test_auto_removed_sidecar_inspect_is_confirmed_with_lowercase_docker_error(
         monkeypatch):
     calls = []

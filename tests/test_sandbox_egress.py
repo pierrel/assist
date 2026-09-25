@@ -193,6 +193,24 @@ class TestEnsureEgressProxy(TestCase):
         stale_proxy.remove.assert_called_once_with(force=True)
         client.containers.run.assert_called_once()
 
+    def test_replaces_running_host_only_proxy_before_port_policy_admission(self):
+        """A rebuilt image alone cannot update an already-running v5 proxy."""
+        old_hash = hashlib.sha256((
+            ",".join(_load_egress_allowlist())
+            + "|v5-browser-policy:||ordinary-network-id:172.30.0.0/16|:"
+        ).encode()).hexdigest()[:16]
+        stale_proxy = MagicMock()
+        stale_proxy.id = "old-host-only-proxy"
+        stale_proxy.status = "running"
+        stale_proxy.labels = {"assist.egress-allowlist-hash": old_hash}
+        client = self._make_client(proxy=stale_proxy)
+
+        SandboxManager._ensure_egress_proxy_running(client)
+
+        stale_proxy.remove.assert_called_once_with(force=True)
+        client.containers.run.assert_called_once()
+        self.assertNotEqual(old_hash, self._allowlist_hash())
+
     def test_recreates_when_proxy_stopped(self):
         stopped_proxy = MagicMock()
         stopped_proxy.id = "stopped"

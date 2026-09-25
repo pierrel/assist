@@ -71,10 +71,34 @@ def test_recycled_ip_survives_delayed_old_cleanup(tmp_path):
     assert json.loads((tmp_path / "client-map.json").read_text()) == {}
 
 
+def test_internal_record_requires_one_valid_effective_port():
+    with pytest.raises(ValueError, match="browser policy"):
+        ClientRecord("thread", "generation", "browser", "internal",
+                     "host.docker.internal")
+    for port in (0, 65536, True):
+        with pytest.raises(ValueError, match="browser policy"):
+            ClientRecord("thread", "generation", "browser", "internal",
+                         "host.docker.internal", port)
+    record = ClientRecord("thread", "generation", "browser", "internal",
+                          "host.docker.internal", 5050)
+    assert record.to_dict()["internal_port"] == 5050
+
+
+def test_restart_drops_legacy_portless_internal_record_without_grant(tmp_path):
+    ip = "172.20.0.2"
+    (tmp_path / "client-map.json").write_text(json.dumps({ip: {
+        "thread_id": "old", "generation": "old-generation", "kind": "browser",
+        "browser_mode": "internal", "internal_host": "host.docker.internal"}}))
+    assert read_client(str(tmp_path), ip) is None
+    record_client(str(tmp_path), "172.20.0.3", ClientRecord(
+        "new", "new-generation", "browser", "public"))
+    assert set(json.loads((tmp_path / "client-map.json").read_text())) == {"172.20.0.3"}
+
+
 def test_absent_browser_generations_are_pruned_without_touching_sandbox(tmp_path):
     directory = str(tmp_path)
     record_client(directory, "172.20.0.2", ClientRecord(
-        "thread", "gone", "browser", "internal", "host.docker.internal"))
+        "thread", "gone", "browser", "internal", "host.docker.internal", 80))
     record_client(directory, "172.20.0.3", ClientRecord(
         "thread", "live", "browser", "public"))
     record_client(directory, "172.20.0.4", ClientRecord(
@@ -88,7 +112,7 @@ def test_absent_browser_generations_are_pruned_without_touching_sandbox(tmp_path
 def test_stopped_or_moved_generation_loses_exact_ip_attribution(tmp_path):
     directory = str(tmp_path)
     record_client(directory, "172.20.0.2", ClientRecord(
-        "thread", "same-object", "browser", "internal", "host.docker.internal"))
+        "thread", "same-object", "browser", "internal", "host.docker.internal", 80))
     # The Docker object may still exist or even restart on a different IP.
     assert prune_absent_browser_clients(
         directory, lambda: {("same-object", "172.20.0.9")}) == 1
@@ -99,7 +123,7 @@ def test_scan_race_keeps_new_exact_ip_owner_without_holding_map_lock(tmp_path):
     directory = str(tmp_path)
     ip = "172.20.0.2"
     record_client(directory, ip, ClientRecord(
-        "old", "old-generation", "browser", "internal", "host.docker.internal"))
+        "old", "old-generation", "browser", "internal", "host.docker.internal", 80))
 
     def scan_outside_lock():
         # A new container is published at the recycled IP during the scan.
