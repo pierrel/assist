@@ -22,11 +22,11 @@ from uuid import uuid4
 from assist.browser import authority
 from assist.egress.client_map import (
     ClientRecord, browser_records, configured_directory, forget_client,
-    prune_absent_browser_clients, record_client)
+    prune_absent_browser_clients, read_client, record_browser_client)
 from assist.egress import runtime_state
 from assist.sandbox_manager import (
     BROWSER_NETWORK, EGRESS_PROXY_NAME, SandboxManager, _load_egress_allowlist,
-    _network_identity)
+    _network_identity, _bounded_egress_worker, _proxy_setup_lock)
 from assist.run_service import RunService
 
 logger = logging.getLogger(__name__)
@@ -203,6 +203,72 @@ def _docker_download(container_id: str, source: str, timeout: float = 20) -> byt
         limit=MAX_DOWNLOAD, timeout=timeout)
 
 
+def _register_browser_client_direct(client, map_dir: str, ip: str,
+                                    record: ClientRecord, threads_root: str,
+                                    run_id: str, *, proxy_name: str | None = None,
+                                    network_name: str | None = None) -> None:
+    """Publish only against the same running proxy/browser network generation."""
+    from docker.errors import NotFound
+    proxy_name = proxy_name or EGRESS_PROXY_NAME
+    network_name = network_name or BROWSER_NETWORK
+    with _proxy_setup_lock():
+        proxy = client.containers.get(proxy_name)
+        proxy.reload()
+        sidecar = client.containers.get(record.generation)
+        sidecar.reload()
+        mounted = [mount.get("Source") for mount in proxy.attrs.get("Mounts", [])
+                   if mount.get("Destination") == "/client-map"]
+        proxy_network = proxy.attrs["NetworkSettings"]["Networks"][network_name]
+        endpoint = sidecar.attrs["NetworkSettings"]["Networks"][network_name]
+        if (proxy.status != "running" or sidecar.status != "running"
+                or mounted != [map_dir]
+                or endpoint["NetworkID"] != proxy_network["NetworkID"]
+                or endpoint["IPAddress"] != ip):
+            raise BrowserUnavailable("browser endpoint changed before attribution")
+        prior = read_client(map_dir, ip)
+        if prior is not None and prior != record and prior.kind == "browser":
+            try:
+                old = client.containers.get(prior.generation)
+                old.reload()
+            except NotFound:
+                old_endpoint = None
+            else:
+                old_endpoint = (old.attrs.get("NetworkSettings", {})
+                                .get("Networks", {}).get(network_name))
+                if old.status != "running":
+                    old_endpoint = None
+            if (old_endpoint is None or old_endpoint.get("IPAddress") != ip
+                    or old_endpoint.get("NetworkID") != proxy_network["NetworkID"]):
+                forget_client(map_dir, ip, prior.generation)
+        with authority.fence(threads_root, record.thread_id) as state:
+            runs = RunService(threads_root).list(record.thread_id)
+            if any(run.status == "revocation_pending" for run in runs):
+                raise BrowserUnavailable("newer user message revoked browser startup")
+            latest = max((run.admission_sequence for run in runs
+                          if run.user_event_id == run.id), default=0)
+            if (state.lease is None or state.lease["owner_run_id"] != run_id
+                    or latest != state.lease["sequence"]):
+                raise BrowserUnavailable("newer user message revoked browser startup")
+            state.add_generation(run_id, record.generation)
+            record_browser_client(map_dir, ip, record)
+
+
+def _register_browser_client_bounded(map_dir: str, ip: str,
+                                     record: ClientRecord, threads_root: str,
+                                     run_id: str, timeout: float) -> None:
+    """Cancel Docker inspect/setup-lock stalls before the Run can continue."""
+    argv = [sys.executable, "-m", "assist.egress.runtime_worker", "browser-record",
+            record.generation, map_dir, ip, record.thread_id,
+            record.browser_mode or "public", record.internal_host or "-",
+            str(record.internal_port or 0), threads_root, run_id,
+            EGRESS_PROXY_NAME, BROWSER_NETWORK]
+    result = _bounded_egress_worker(argv, timeout=timeout)
+    if result.returncode or result.stdout.strip() != b"ok":
+        raise BrowserUnavailable(
+            "browser attribution failed: "
+            + result.stderr.decode("utf-8", errors="replace")[-500:])
+
+
 def _kill_container(container_id: str) -> None:
     try:
         killed = subprocess.run(["docker", "kill", container_id],
@@ -371,14 +437,11 @@ class BrowserSession:
         try:
             if self._remaining() <= 0:
                 raise BrowserUnavailable("browser Run deadline expired")
-            with authority.fence(self.threads_root, self.thread_id) as state:
-                if (state.lease is None or state.lease["owner_run_id"] != self.run_id
-                        or self._latest_direct_sequence() != state.lease["sequence"]):
-                    raise BrowserUnavailable("newer user message revoked browser startup")
-                state.add_generation(self.run_id, generation)
-                record_client(map_dir, ip, ClientRecord(
-                    self.thread_id, generation, "browser", mode,
-                    internal_host, internal_port))
+            _register_browser_client_bounded(
+                map_dir, ip, ClientRecord(self.thread_id, generation,
+                                          "browser", mode, internal_host,
+                                          internal_port), self.threads_root,
+                self.run_id, timeout=min(20, self._remaining()))
         except Exception:
             self.startup_uncertain = True
             _kill_container(generation)

@@ -1,8 +1,8 @@
 """Unit tests for the sandbox egress allowlist plumbing.
 
-Docker is mocked — these tests assert that SandboxManager passes the
-right kwargs to ``containers.run`` and that ``_ensure_egress_proxy_running``
-is idempotent.  The actual policy enforcement is exercised in the
+Docker is mocked: proxy tests cover the low-level create request and
+idempotent setup; shell tests cover ``containers.run`` and map admission.
+The actual policy enforcement is exercised in the
 build-time smoke (``dockerfiles/test-sandbox-egress.sh``).
 """
 import hashlib
@@ -72,6 +72,7 @@ class TestEnsureEgressProxy(TestCase):
 
     def _make_client(self, network_exists=True, proxy=None):
         client = MagicMock()
+        client.api._version = "1.43"
         from docker.errors import NotFound
         net = MagicMock()
         net.attrs = {
@@ -85,17 +86,27 @@ class TestEnsureEgressProxy(TestCase):
             # passes by intent, not by MagicMock truthiness coincidence.
             client.networks.get.return_value = net
         else:
-            client.networks.get.side_effect = NotFound("no network")
-            client.networks.create.return_value = net
-            def create_network(_name, **kwargs):
-                net.attrs["Labels"] = kwargs.get("labels", {})
+            created = {"network": False}
+            def get_network(key):
+                if not created["network"]:
+                    raise NotFound("no network")
                 return net
-            client.networks.create.side_effect = create_network
+            client.networks.get.side_effect = get_network
+            def create_network(_name, **kwargs):
+                created["network"] = True
+                net.attrs["Labels"] = kwargs.get("labels", {})
+                return {"Id": "ordinary-network-id"}
+            client.api.create_network.side_effect = create_network
 
+        current = {"proxy": proxy}
         if proxy is None:
-            client.containers.get.side_effect = NotFound("no proxy")
-        else:
-            client.containers.get.return_value = proxy
+            pass
+        def get_proxy(key):
+            selected = current["proxy"]
+            if selected is None:
+                raise NotFound("no proxy")
+            return selected
+        client.containers.get.side_effect = get_proxy
 
         new_proxy = MagicMock()
         new_proxy.id = "proxyabc1234"
@@ -105,11 +116,12 @@ class TestEnsureEgressProxy(TestCase):
         # "listening on".  Without this, the wait blocks for 10s and
         # then raises — which would make every test slow and noisy.
         new_proxy.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
-        def create_proxy(_image, **kwargs):
+        client.test_proxy = new_proxy
+        def create_proxy(**kwargs):
             new_proxy.labels = kwargs.get("labels", {})
-            return new_proxy
-        client.containers.run.return_value = new_proxy
-        client.containers.run.side_effect = create_proxy
+            current["proxy"] = new_proxy
+            return {"Id": new_proxy.id}
+        client.api.create_container.side_effect = create_proxy
         if proxy is not None:
             proxy.attrs = new_proxy.attrs
         return client
@@ -126,7 +138,7 @@ class TestEnsureEgressProxy(TestCase):
 
         SandboxManager._ensure_egress_proxy_running(client)
 
-        args, kwargs = client.networks.create.call_args
+        args, kwargs = client.api.create_network.call_args
         self.assertEqual(args, (EGRESS_NETWORK,))
         self.assertEqual(kwargs["driver"], "bridge")
         self.assertTrue(kwargs["internal"])
@@ -138,16 +150,35 @@ class TestEnsureEgressProxy(TestCase):
         result = SandboxManager._ensure_egress_proxy_running(client)
 
         self.assertEqual(result, EGRESS_PROXY_NAME)
-        # containers.run called for the proxy
-        args, kwargs = client.containers.run.call_args
-        self.assertEqual(args[0], "assist-egress-proxy")
+        # The low-level POST is followed by inspect and a separate start.
+        kwargs = client.api.create_container.call_args.kwargs
+        self.assertEqual(kwargs["image"], "assist-egress-proxy")
         self.assertEqual(kwargs["name"], EGRESS_PROXY_NAME)
-        self.assertEqual(kwargs["extra_hosts"],
-                         {"host.docker.internal": "host-gateway"})
+        self.assertIn("host.docker.internal:host-gateway",
+                      kwargs["host_config"]["ExtraHosts"])
         self.assertIn("EGRESS_ALLOWLIST", kwargs["environment"])
         self.assertIn("EGRESS_THROTTLE_BODY", kwargs["environment"])
         self.assertEqual(kwargs["labels"]["assist.egress-allowlist-hash"],
                          self._allowlist_hash())
+        client.test_proxy.start.assert_called_once()
+
+    def test_proxy_runs_as_nondefault_service_uid(self):
+        from assist.egress import runtime_state
+        client = self._make_client()
+        with (patch("assist.sandbox_manager.os.getuid", return_value=1001),
+              patch("assist.sandbox_manager.os.getgid", return_value=1002),
+              patch.object(runtime_state, "runtime_directory", return_value=self.runtime.name)):
+            SandboxManager._ensure_egress_proxy_running(client)
+        self.assertEqual(client.api.create_container.call_args.kwargs["user"], "1001:1002")
+
+    def test_proxy_never_overrides_nonroot_image_user_with_root(self):
+        from assist.egress import runtime_state
+        client = self._make_client()
+        with (patch("assist.sandbox_manager.os.getuid", return_value=0),
+              patch.object(runtime_state, "runtime_directory", return_value=self.runtime.name)):
+            with self.assertRaisesRegex(RuntimeError, "cannot run as root"):
+                SandboxManager._ensure_egress_proxy_running(client)
+        client.api.create_container.assert_not_called()
 
     def test_skips_recreate_when_hash_matches_and_running(self):
         running_proxy = MagicMock()
@@ -158,7 +189,7 @@ class TestEnsureEgressProxy(TestCase):
         SandboxManager._ensure_egress_proxy_running(client)
 
         # No new container was created.
-        client.containers.run.assert_not_called()
+        client.api.create_container.assert_not_called()
         running_proxy.remove.assert_not_called()
 
     def test_recreates_when_allowlist_hash_changes(self):
@@ -171,7 +202,7 @@ class TestEnsureEgressProxy(TestCase):
         SandboxManager._ensure_egress_proxy_running(client)
 
         stale_proxy.remove.assert_called_once_with(force=True)
-        client.containers.run.assert_called_once()
+        client.api.create_container.assert_called_once()
 
     def test_recreates_when_proxy_policy_schema_changes(self):
         """An older image cannot stay alive behind a matching allowlist.
@@ -191,7 +222,7 @@ class TestEnsureEgressProxy(TestCase):
         SandboxManager._ensure_egress_proxy_running(client)
 
         stale_proxy.remove.assert_called_once_with(force=True)
-        client.containers.run.assert_called_once()
+        client.api.create_container.assert_called_once()
 
     def test_replaces_running_host_only_proxy_before_port_policy_admission(self):
         """A rebuilt image alone cannot update an already-running v5 proxy."""
@@ -208,7 +239,7 @@ class TestEnsureEgressProxy(TestCase):
         SandboxManager._ensure_egress_proxy_running(client)
 
         stale_proxy.remove.assert_called_once_with(force=True)
-        client.containers.run.assert_called_once()
+        client.api.create_container.assert_called_once()
         self.assertNotEqual(old_hash, self._allowlist_hash())
 
     def test_recreates_when_proxy_stopped(self):
@@ -221,7 +252,7 @@ class TestEnsureEgressProxy(TestCase):
         SandboxManager._ensure_egress_proxy_running(client)
 
         stopped_proxy.remove.assert_called_once_with(force=True)
-        client.containers.run.assert_called_once()
+        client.api.create_container.assert_called_once()
 
     def test_attaches_new_proxy_to_egress_network(self):
         client = self._make_client()
@@ -235,7 +266,7 @@ class TestEnsureEgressProxy(TestCase):
         # without it the proxy lives only on the default bridge and
         # sandboxes can't reach it.
         egress_net = client.networks.get.return_value
-        new_proxy = client.containers.run.return_value
+        new_proxy = client.test_proxy
         egress_net.connect.assert_called_once_with(new_proxy)
 
     def test_rejects_non_internal_egress_network(self):
@@ -271,8 +302,65 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
     def tearDown(self):
         SandboxManager._docker_client = None
         SandboxManager._containers.clear()
+        SandboxManager._egress_client_ips.clear()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
+
+    def _backend_client(self, mounts):
+        client = MagicMock()
+        proxy = MagicMock()
+        proxy.status = "running"
+        proxy.attrs = {"Mounts": mounts}
+        client.containers.get.return_value = proxy
+        sandbox = MagicMock()
+        sandbox.id = "sandbox-generation"
+        client.containers.run.return_value = sandbox
+        return client, sandbox
+
+    @patch("assist.sandbox.DockerSandboxBackend")
+    def test_invalid_browser_map_preserves_verified_base_only_shell(self, _backend):
+        work_dir = os.path.join(self.temp_dir, "thread", "domain")
+        os.makedirs(work_dir)
+        client, sandbox = self._backend_client([])
+        with (patch.object(SandboxManager, "_get_docker_client", return_value=client),
+              patch.object(SandboxManager, "_ensure_egress_proxy_running",
+                           return_value=EGRESS_PROXY_NAME),
+              patch("assist.egress.client_map.configured_directory",
+                    side_effect=RuntimeError("unsafe browser map"))):
+            self.assertIsNotNone(SandboxManager.get_sandbox_backend(work_dir))
+        sandbox.kill.assert_not_called()
+
+    @patch("assist.sandbox.DockerSandboxBackend")
+    def test_map_mounted_proxy_cannot_expose_unattributed_shell(self, _backend):
+        work_dir = os.path.join(self.temp_dir, "thread", "domain")
+        os.makedirs(work_dir)
+        for unavailable in (None, RuntimeError("unsafe browser map")):
+            client, sandbox = self._backend_client([
+                {"Destination": "/client-map", "Source": "/host/old-map"}])
+            with (patch.object(SandboxManager, "_get_docker_client", return_value=client),
+                  patch.object(SandboxManager, "_ensure_egress_proxy_running",
+                               return_value=EGRESS_PROXY_NAME),
+                  patch("assist.egress.client_map.configured_directory",
+                        side_effect=unavailable if isinstance(unavailable, Exception)
+                        else None, return_value=unavailable)):
+                with self.assertRaisesRegex(RuntimeError, "map mode is unconfirmed"):
+                    SandboxManager.get_sandbox_backend(work_dir)
+            sandbox.kill.assert_called_once()
+
+    @patch("assist.sandbox.DockerSandboxBackend")
+    def test_proxy_map_path_must_match_record_path(self, _backend):
+        work_dir = os.path.join(self.temp_dir, "thread", "domain")
+        os.makedirs(work_dir)
+        client, sandbox = self._backend_client([
+            {"Destination": "/client-map", "Source": "/host/old-map"}])
+        with (patch.object(SandboxManager, "_get_docker_client", return_value=client),
+              patch.object(SandboxManager, "_ensure_egress_proxy_running",
+                           return_value=EGRESS_PROXY_NAME),
+              patch("assist.egress.client_map.configured_directory",
+                    return_value="/host/new-map")):
+            with self.assertRaisesRegex(RuntimeError, "map mode is unconfirmed"):
+                SandboxManager.get_sandbox_backend(work_dir)
+        sandbox.kill.assert_called_once()
 
     @patch("assist.sandbox.DockerSandboxBackend")
     def test_sandbox_joins_internal_network(self, _mock_backend):
@@ -292,7 +380,7 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
         }
         proxy = MagicMock()
         proxy.status = "running"
-        proxy.attrs = {"NetworkSettings": {"Networks": {
+        proxy.attrs = {"Mounts": [], "NetworkSettings": {"Networks": {
             EGRESS_NETWORK: {"NetworkID": "ordinary-network-id"}}}}
         from assist.sandbox_manager import _egress_proxy_config_hash
         proxy.labels = {"assist.egress-allowlist-hash":
@@ -341,7 +429,7 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
         }
         proxy = MagicMock()
         proxy.status = "running"
-        proxy.attrs = {"NetworkSettings": {"Networks": {
+        proxy.attrs = {"Mounts": [], "NetworkSettings": {"Networks": {
             EGRESS_NETWORK: {"NetworkID": "ordinary-network-id"}}}}
         from assist.sandbox_manager import _egress_proxy_config_hash
         proxy.labels = {"assist.egress-allowlist-hash":

@@ -1,21 +1,25 @@
 """Exact-generation retirement of shared Docker egress mutations."""
 import fcntl
+import os
 import sys
+import threading
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from assist.egress import runtime_state
 from assist.sandbox_manager import (
     BROWSER_NETWORK, EGRESS_NETWORK, EGRESS_PROXY_NAME, SandboxManager,
-    _bounded_egress_worker, _egress_proxy_config_hash, _load_egress_allowlist)
+    _bounded_egress_worker, _egress_proxy_config_hash, _load_egress_allowlist,
+    _proxy_setup_lock)
 
 
 def _client():
     from docker.errors import NotFound
 
     client = MagicMock()
+    client.api._version = "1.43"
     ordinary = MagicMock()
     ordinary.id = "ordinary-id"
     ordinary.attrs = {
@@ -46,7 +50,7 @@ def _client():
             return proxy
         raise NotFound("no such proxy")
 
-    def create(_image, **kwargs):
+    def create(**kwargs):
         new = MagicMock()
         new.id = "proxy-generation-B"
         new.status = "running"
@@ -57,10 +61,10 @@ def _client():
                if kwargs["environment"]["EGRESS_BROWSER_CIDR"] else {})}}}
         new.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888"
         current["proxy"] = new
-        return new
+        return {"Id": new.id}
 
     client.containers.get.side_effect = get
-    client.containers.run.side_effect = create
+    client.api.create_container.side_effect = create
     return client, ordinary, old, current
 
 
@@ -135,7 +139,7 @@ def test_unsafe_runtime_directory_blocks_mutation(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="inside container mounts"):
         SandboxManager._ensure_egress_proxy_running_direct(client)
     old.remove.assert_not_called()
-    client.containers.run.assert_not_called()
+    client.api.create_container.assert_not_called()
 
 
 @pytest.mark.parametrize("mount_name", [
@@ -154,7 +158,7 @@ def test_ledger_inside_proxy_mount_blocks_mutation(tmp_path, monkeypatch,
     with pytest.raises(RuntimeError, match="inside container mounts"):
         SandboxManager._ensure_egress_proxy_running_direct(client)
     old.remove.assert_not_called()
-    client.containers.run.assert_not_called()
+    client.api.create_container.assert_not_called()
 
 
 def test_ledger_inside_run_mount_rejected(tmp_path, monkeypatch):
@@ -179,7 +183,7 @@ def test_missing_initialized_ledger_fails_closed_before_mutation(tmp_path,
     with pytest.raises(RuntimeError, match="ledger disappeared"):
         SandboxManager._ensure_egress_proxy_running_direct(client)
     old.remove.assert_not_called()
-    client.containers.run.assert_not_called()
+    client.api.create_container.assert_not_called()
 
 
 def test_repeated_worker_timeout_releases_interprocess_lock(tmp_path):
@@ -199,3 +203,225 @@ def test_repeated_worker_timeout_releases_interprocess_lock(tmp_path):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(lock, fcntl.LOCK_UN)
     assert time.monotonic() - started < 4
+
+
+def test_real_client_attribution_uses_killable_worker():
+    class Client:
+        pass
+
+    with (patch("docker.DockerClient", Client),
+          patch("assist.sandbox_manager._bounded_egress_worker",
+                side_effect=RuntimeError("egress Docker setup timed out")) as worker):
+        with pytest.raises(RuntimeError, match="timed out"):
+            SandboxManager._record_egress_client(
+                Client(), MagicMock(id="a" * 64), "/tmp/thread/domain",
+                kind="sandbox")
+    assert worker.call_args.args[0][3:] == [
+        "record", "a" * 64, "/tmp/thread/domain", "sandbox"]
+
+
+def test_record_publication_precedes_network_replacement_and_map_clear(
+        tmp_path, monkeypatch):
+    from assist.egress import client_map
+    map_dir = tmp_path / "map"
+    map_dir.mkdir()
+    monkeypatch.setenv("ASSIST_EGRESS_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setattr(client_map, "configured_directory", lambda: str(map_dir))
+    client = MagicMock()
+    proxy = MagicMock(status="running")
+    proxy.attrs = {
+        "Mounts": [{"Destination": "/client-map", "Source": str(map_dir)}],
+        "NetworkSettings": {"Networks": {
+            EGRESS_NETWORK: {"NetworkID": "ordinary-N1"}}}}
+    client.containers.get.return_value = proxy
+    sandbox = MagicMock(id="sandbox-S", status="running")
+    sandbox.attrs = {"NetworkSettings": {"Networks": {
+        EGRESS_NETWORK: {"NetworkID": "ordinary-N1", "IPAddress": "172.30.0.2"}}}}
+    attempted, replaced = threading.Event(), threading.Event()
+    replacement = None
+    original_record = client_map.record_client
+
+    def race(directory, ip, record):
+        nonlocal replacement
+
+        def replace():
+            attempted.set()
+            with _proxy_setup_lock():
+                proxy.attrs["NetworkSettings"]["Networks"][EGRESS_NETWORK][
+                    "NetworkID"] = "ordinary-N2"
+                client_map.clear_clients(directory)
+                replaced.set()
+
+        replacement = threading.Thread(target=replace, daemon=True)
+        replacement.start()
+        assert attempted.wait(1)
+        assert not replaced.wait(0.05), "replacement crossed record fence"
+        original_record(directory, ip, record)
+
+    with patch.object(client_map, "record_client", side_effect=race):
+        assert SandboxManager._record_egress_client_direct(
+            client, sandbox, "/tmp/thread/domain", kind="sandbox") == (
+                str(map_dir), "172.30.0.2", "sandbox-S")
+    replacement.join(2)
+    assert replaced.is_set()
+    assert client_map.read_client(str(map_dir), "172.30.0.2") is None
+
+
+def test_missing_proxy_image_fails_before_old_proxy_removal_or_create_token(
+        tmp_path, monkeypatch):
+    from docker.errors import NotFound
+    monkeypatch.setenv("ASSIST_EGRESS_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.delenv("ASSIST_EGRESS_CLIENT_MAP_DIR", raising=False)
+    client, _, old, _ = _client()
+    client.images.get.side_effect = NotFound("image missing")
+    with pytest.raises(NotFound):
+        SandboxManager._ensure_egress_proxy_running_direct(client)
+    old.remove.assert_not_called()
+    client.api.create_container.assert_not_called()
+    assert runtime_state.pending_creation("proxy", EGRESS_PROXY_NAME) is None
+
+
+def test_daemon_rejected_proxy_create_settles_token_but_timeout_does_not(
+        tmp_path, monkeypatch):
+    from docker.errors import APIError
+    from unittest.mock import MagicMock
+    monkeypatch.setenv("ASSIST_EGRESS_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.delenv("ASSIST_EGRESS_CLIENT_MAP_DIR", raising=False)
+    client, _, old, current = _client()
+    old.remove.side_effect = lambda *, force: current.update(proxy=None)
+    create = client.api.create_container.side_effect
+    rejected = MagicMock(status_code=400)
+    client.api.create_container.side_effect = APIError("invalid create config", response=rejected)
+    with pytest.raises(APIError):
+        SandboxManager._ensure_egress_proxy_running_direct(client)
+    assert runtime_state.pending_creation("proxy", EGRESS_PROXY_NAME) is None
+    client.api.create_container.side_effect = create
+    assert SandboxManager._ensure_egress_proxy_running_direct(client) == EGRESS_PROXY_NAME
+
+    # An I/O timeout has no terminal daemon response; recovery must retain
+    # its durable pending token rather than trusting a clean name lookup.
+    current["proxy"] = None
+    client.api.create_container.side_effect = TimeoutError("create pending")
+    with pytest.raises(TimeoutError):
+        SandboxManager._ensure_egress_proxy_running_direct(client)
+    assert runtime_state.pending_creation("proxy", EGRESS_PROXY_NAME)
+    with pytest.raises(RuntimeError, match="creation outcome is uncertain"):
+        SandboxManager._ensure_egress_proxy_running_direct(client)
+
+
+def test_post_create_proxy_inspect_error_keeps_pending_token(tmp_path, monkeypatch):
+    from docker.errors import NotFound
+    monkeypatch.setenv("ASSIST_EGRESS_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.delenv("ASSIST_EGRESS_CLIENT_MAP_DIR", raising=False)
+    client, _, old, current = _client()
+    old.remove.side_effect = lambda *, force: current.update(proxy=None)
+    original_get = client.containers.get.side_effect
+
+    def get(key):
+        if key == "proxy-generation-B":
+            raise NotFound("inspect failed after successful POST")
+        return original_get(key)
+
+    client.containers.get.side_effect = get
+    with pytest.raises(NotFound, match="inspect failed"):
+        SandboxManager._ensure_egress_proxy_running_direct(client)
+    assert runtime_state.pending_creation("proxy", EGRESS_PROXY_NAME)
+
+
+def test_local_proxy_argument_error_never_journals_create(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASSIST_EGRESS_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.delenv("ASSIST_EGRESS_CLIENT_MAP_DIR", raising=False)
+    client, _, old, _ = _client()
+    monkeypatch.setattr("docker.models.containers._create_container_args",
+                        lambda _kwargs: (_ for _ in ()).throw(ValueError("bad local args")))
+    with pytest.raises(ValueError, match="bad local args"):
+        SandboxManager._ensure_egress_proxy_running_direct(client)
+    assert runtime_state.pending_creation("proxy", EGRESS_PROXY_NAME) is None
+    client.api.create_container.assert_not_called()
+    old.remove.assert_called_once_with(force=True)
+
+
+def test_daemon_rejected_network_create_settles_token(tmp_path, monkeypatch):
+    from docker.errors import APIError, NotFound
+    from unittest.mock import MagicMock
+    monkeypatch.setenv("ASSIST_EGRESS_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.delenv("ASSIST_EGRESS_CLIENT_MAP_DIR", raising=False)
+    client, _, _, _ = _client()
+    original_get = client.networks.get.side_effect
+
+    def get(key):
+        if key == EGRESS_NETWORK:
+            raise NotFound("network missing")
+        return original_get(key)
+
+    client.networks.get.side_effect = get
+    client.api.create_network.side_effect = APIError(
+        "invalid network config", response=MagicMock(status_code=400))
+    with pytest.raises(APIError):
+        SandboxManager._ensure_egress_proxy_running_direct(client)
+    assert runtime_state.pending_creation("network", EGRESS_NETWORK) is None
+
+
+def test_post_create_network_inspect_error_keeps_pending_token(tmp_path, monkeypatch):
+    from docker.errors import NotFound
+    monkeypatch.setenv("ASSIST_EGRESS_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.delenv("ASSIST_EGRESS_CLIENT_MAP_DIR", raising=False)
+    client, _, _, _ = _client()
+    client.networks.get.side_effect = NotFound("inspect failed after POST")
+    client.api.create_network.return_value = {"Id": "new-network-id"}
+    with pytest.raises(NotFound):
+        SandboxManager._ensure_egress_proxy_running_direct(client)
+    assert runtime_state.pending_creation("network", EGRESS_NETWORK)
+
+
+def test_failed_old_proxy_remove_preserves_active_map(tmp_path, monkeypatch):
+    from docker.errors import APIError
+    from assist.egress.client_map import ClientRecord, read_client, record_client
+    map_dir = tmp_path / "map"
+    monkeypatch.setenv("ASSIST_EGRESS_CLIENT_MAP_DIR", str(map_dir))
+    monkeypatch.setenv("ASSIST_EGRESS_RUNTIME_DIR", str(tmp_path / "runtime"))
+    ip = "172.31.0.2"
+    record_client(str(map_dir), ip, ClientRecord("active", "generation", "browser",
+                                                 "public"))
+    client, _, old, _ = _client()
+    old.remove.side_effect = APIError(
+        "remove rejected", response=MagicMock(status_code=500))
+    with pytest.raises(RuntimeError, match="removal is unconfirmed"):
+        SandboxManager._ensure_egress_proxy_running_direct(client)
+    assert read_client(str(map_dir), ip).generation == "generation"
+
+
+@pytest.mark.parametrize("old_status", ["running", "exited"])
+def test_same_map_and_network_replacement_preserves_active_browser_record(
+        tmp_path, monkeypatch, old_status):
+    from assist.egress.client_map import ClientRecord, read_client, record_client
+    map_dir = tmp_path / "map"
+    monkeypatch.setenv("ASSIST_EGRESS_CLIENT_MAP_DIR", str(map_dir))
+    monkeypatch.setenv("ASSIST_EGRESS_RUNTIME_DIR", str(tmp_path / "runtime"))
+    ip = "172.31.0.2"
+    record_client(str(map_dir), ip, ClientRecord("active", "generation", "browser",
+                                                 "public"))
+    client, _, old, current = _client()
+    old.status = old_status
+    old.attrs["Mounts"] = [{"Destination": "/client-map", "Source": str(map_dir)}]
+    old.attrs["Config"] = {"User": f"{os.getuid()}:{os.getgid()}"}
+    old.remove.side_effect = lambda *, force: current.update(proxy=None)
+    assert SandboxManager._ensure_egress_proxy_running_direct(client) == EGRESS_PROXY_NAME
+    assert read_client(str(map_dir), ip).generation == "generation"
+
+
+def test_new_network_clears_target_map_after_confirmed_remove(tmp_path, monkeypatch):
+    from assist.egress.client_map import ClientRecord, read_client, record_client
+    map_dir = tmp_path / "map"
+    monkeypatch.setenv("ASSIST_EGRESS_CLIENT_MAP_DIR", str(map_dir))
+    monkeypatch.setenv("ASSIST_EGRESS_RUNTIME_DIR", str(tmp_path / "runtime"))
+    ip = "172.31.0.2"
+    record_client(str(map_dir), ip, ClientRecord("old", "old-generation", "browser",
+                                                 "public"))
+    client, _, old, current = _client()
+    old.attrs["Mounts"] = [{"Destination": "/client-map", "Source": str(map_dir)}]
+    old.attrs["Config"] = {"User": f"{os.getuid()}:{os.getgid()}"}
+    old.attrs["NetworkSettings"]["Networks"][EGRESS_NETWORK]["NetworkID"] = "old-network"
+    old.remove.side_effect = lambda *, force: current.update(proxy=None)
+    assert SandboxManager._ensure_egress_proxy_running_direct(client) == EGRESS_PROXY_NAME
+    assert read_client(str(map_dir), ip) is None

@@ -91,11 +91,14 @@ class TestNoReuse(_SandboxStateBase):
             # the persistent-/tmp dir is created for real; the work_dir here is a
             # fake path, so stub the mkdir like os.stat above.
             patch("assist.sandbox_manager.os.makedirs"),
+            # Attribution is covered separately; this lifecycle test uses a
+            # fake proxy without inspectable Docker mount attributes.
+            patch.object(SandboxManager, "_record_egress_client"),
         ]
 
     def test_second_call_reaps_stale_and_creates_fresh(self):
         p = self._patches()
-        with p[0], p[1], p[2], p[3], p[4]:
+        with p[0], p[1], p[2], p[3], p[4], p[5]:
             SandboxManager.get_sandbox_backend("/ws/t")
             first = SandboxManager._containers["/ws/t"]
             # Second turn for the SAME thread: must NOT reuse `first`.

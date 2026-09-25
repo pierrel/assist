@@ -2,11 +2,14 @@
 import json
 import multiprocessing
 import fcntl
+import threading
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from assist.egress.client_map import (
-    ClientRecord, _locked, forget_client, prune_absent_browser_clients,
+    ClientRecord, _locked, clear_clients, forget_client, prune_absent_browser_clients,
+    record_browser_client,
     record_client, read_client)
 
 
@@ -33,6 +36,67 @@ def test_client_map_lock_wait_is_bounded(tmp_path):
         with pytest.raises(TimeoutError, match="lock timed out"):
             with _locked(str(tmp_path), timeout=0.05):
                 pass
+
+
+def test_proxy_replacement_revokes_old_ip_records(tmp_path):
+    record_client(str(tmp_path), "172.20.0.2", ClientRecord(
+        "old", "old-generation", "sandbox"))
+    clear_clients(str(tmp_path))
+    assert json.loads((tmp_path / "client-map.json").read_text()) == {}
+
+
+def test_pi_registration_overwrites_recycled_shell_grant(tmp_path):
+    ip = "172.20.0.2"
+    record_client(str(tmp_path), ip, ClientRecord("approved", "old", "sandbox"))
+    record_client(str(tmp_path), ip, ClientRecord("approved", "pi-generation", "pi"))
+    assert read_client(str(tmp_path), ip).kind == "pi"
+
+
+def test_late_browser_a_cannot_overwrite_recycled_ip_owner_b(tmp_path):
+    ip = "172.20.0.2"
+    a = ClientRecord("A", "generation-A", "browser", "internal",
+                     "host.docker.internal", 5050)
+    b = ClientRecord("B", "generation-B", "browser", "public")
+    a_ready, b_published = threading.Event(), threading.Event()
+    failures = []
+
+    def late_a():
+        a_ready.set()
+        assert b_published.wait(2)
+        try:
+            record_browser_client(str(tmp_path), ip, a)
+        except RuntimeError as error:
+            failures.append(str(error))
+
+    thread = threading.Thread(target=late_a)
+    thread.start()
+    assert a_ready.wait(2)
+    record_browser_client(str(tmp_path), ip, b)
+    b_published.set()
+    thread.join(2)
+    assert not thread.is_alive()
+    assert failures == ["browser IP is already attributed to another generation"]
+    assert read_client(str(tmp_path), ip) == b
+
+
+def test_browser_endpoint_must_still_be_running_at_observed_ip(tmp_path):
+    from assist.browser import manager as browser
+    client = MagicMock()
+    proxy = MagicMock(status="running")
+    proxy.attrs = {
+        "Mounts": [{"Destination": "/client-map", "Source": str(tmp_path)}],
+        "NetworkSettings": {"Networks": {
+            browser.BROWSER_NETWORK: {"NetworkID": "network-N2"}}}}
+    sidecar = MagicMock(status="running")
+    sidecar.attrs = {"NetworkSettings": {"Networks": {
+        browser.BROWSER_NETWORK: {
+            "NetworkID": "network-N1", "IPAddress": "172.20.0.2"}}}}
+    client.containers.get.side_effect = lambda key: (
+        proxy if key == browser.EGRESS_PROXY_NAME else sidecar)
+    record = ClientRecord("t", "generation", "browser", "public")
+    with pytest.raises(browser.BrowserUnavailable, match="endpoint changed"):
+        browser._register_browser_client_direct(
+            client, str(tmp_path), "172.20.0.2", record, str(tmp_path), "run")
 
 
 def test_two_processes_preserve_both_records(tmp_path):
@@ -93,6 +157,27 @@ def test_restart_drops_legacy_portless_internal_record_without_grant(tmp_path):
     record_client(str(tmp_path), "172.20.0.3", ClientRecord(
         "new", "new-generation", "browser", "public"))
     assert set(json.loads((tmp_path / "client-map.json").read_text())) == {"172.20.0.3"}
+
+
+def test_historical_string_records_are_denied_and_dropped_on_next_write(tmp_path):
+    legacy_ip = "172.20.0.2"
+    current_ip = "172.20.0.3"
+    current = ClientRecord("thread", "generation", "sandbox")
+    (tmp_path / "client-map.json").write_text(json.dumps({
+        legacy_ip: "old-thread", current_ip: current.to_dict()}))
+    assert read_client(str(tmp_path), legacy_ip) is None
+    assert read_client(str(tmp_path), current_ip) == current
+    record_client(str(tmp_path), "172.20.0.4", ClientRecord(
+        "new", "new-generation", "sandbox"))
+    assert legacy_ip not in json.loads((tmp_path / "client-map.json").read_text())
+
+
+@pytest.mark.parametrize("legacy_value", [7, [], None, {"thread_id": "old"}])
+def test_malformed_nonlegacy_map_entries_still_fail_closed(tmp_path, legacy_value):
+    (tmp_path / "client-map.json").write_text(json.dumps({
+        "172.20.0.2": legacy_value}))
+    with pytest.raises((ValueError, TypeError)):
+        read_client(str(tmp_path), "172.20.0.2")
 
 
 def test_absent_browser_generations_are_pruned_without_touching_sandbox(tmp_path):

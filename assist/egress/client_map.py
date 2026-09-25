@@ -1,4 +1,4 @@
-"""Generation-bound proxy client attribution shared by shell and browser containers."""
+"""Generation-bound proxy attribution for shell, Pi and browser containers."""
 from __future__ import annotations
 
 import fcntl
@@ -49,9 +49,9 @@ class ClientRecord:
     def __post_init__(self) -> None:
         if (not self.thread_id or len(self.thread_id) > 128
                 or not self.generation or len(self.generation) > 128
-                or self.kind not in {"sandbox", "browser"}):
+                or self.kind not in {"sandbox", "browser", "pi"}):
             raise ValueError("invalid proxy client identity")
-        if self.kind == "sandbox":
+        if self.kind in {"sandbox", "pi"}:
             if (self.browser_mode is not None or self.internal_host is not None
                     or self.internal_port is not None):
                 raise ValueError("sandbox has browser policy fields")
@@ -108,9 +108,15 @@ def _read(path: str) -> dict[str, dict[str, str | int]]:
         raise ValueError("invalid proxy client map")
     current = {}
     for ip, value in entries.items():
-        if not isinstance(ip, str) or not isinstance(value, dict):
+        if not isinstance(ip, str):
             raise ValueError("invalid proxy client map entry")
         _validate_ip(ip)
+        if isinstance(value, str):
+            # Legacy maps stored only an IP -> thread ID. They carry no
+            # generation or policy and cannot authorize a current client.
+            continue
+        if not isinstance(value, dict):
+            raise ValueError("invalid proxy client map entry")
         if (value.get("kind") == "browser"
                 and value.get("browser_mode") == "internal"
                 and set(value) == {"thread_id", "generation", "kind",
@@ -144,6 +150,28 @@ def record_client(directory: str, ip: str, record: ClientRecord) -> None:
         entries = _read(path)
         entries[ip] = record.to_dict()
         _write(path, entries)
+
+
+def record_browser_client(directory: str, ip: str, record: ClientRecord,
+                          *, timeout: float = 1) -> None:
+    """A late browser launch cannot overwrite another live IP generation."""
+    if record.kind != "browser":
+        raise ValueError("browser record required")
+    ip = _validate_ip(ip)
+    value = record.to_dict()
+    with _locked(directory, timeout=timeout) as path:
+        entries = _read(path)
+        if ip in entries and entries[ip] != value:
+            raise RuntimeError("browser IP is already attributed to another generation")
+        entries[ip] = value
+        _write(path, entries)
+
+
+def clear_clients(directory: str) -> None:
+    """Revoke old IP attribution before a replacement proxy serves this map."""
+    with _locked(directory) as path:
+        _read(path)  # malformed map state must fail closed, not be erased
+        _write(path, {})
 
 
 def forget_client(directory: str, ip: str, generation: str) -> None:

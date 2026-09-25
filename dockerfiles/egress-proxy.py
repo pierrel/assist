@@ -267,7 +267,7 @@ def _grant_live(expires_at) -> bool:
 
 
 def client_record(client_ip: str, kind: str) -> dict | None:
-    """Read one current-schema attribution record; legacy values grant nothing."""
+    """Read exact-kind attribution; a Pi marker never grants shell approval."""
     value = _read_small_json("client-map.json", CLIENT_MAP_DIR).get(client_ip)
     if not isinstance(value, dict) or value.get("kind") != kind:
         return None

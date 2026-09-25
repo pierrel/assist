@@ -351,6 +351,17 @@ def test_proxy_approved_target_matrix(proxy_mod, tmp_path):
     assert not ok("api.example.com", 443, "t2")
 
 
+def test_pi_recycled_ip_never_inherits_old_shell_approval(proxy_mod, tmp_path,
+                                                          monkeypatch):
+    _write_approval(tmp_path)
+    monkeypatch.setattr(proxy_mod, "vet_resolved", lambda *_args, **_kwargs: "93.184.216.34")
+    ip = "172.20.0.9"
+    assert proxy_mod.target_policy("api.example.com", 443, ip) == (
+        "93.184.216.34", None)
+    record_client(str(tmp_path), ip, ClientRecord("t1", "pi-generation", "pi"))
+    assert proxy_mod.target_policy("api.example.com", 443, ip)[1] == "host_not_approved"
+
+
 def test_proxy_duration_fail_closed(proxy_mod, tmp_path):
     live = proxy_mod._grant_live
     assert live(proxy_mod.REVOKED_ONLY)

@@ -2,11 +2,13 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from threading import Event
+from unittest.mock import MagicMock
+import time
 
 import pytest
 
 from assist.browser import authority, manager as browser
-from assist.egress.client_map import ClientRecord, record_client
+from assist.egress.client_map import ClientRecord, read_client, record_client
 from assist.run_service import InvalidRunTransition, RunService
 from assist.egress.store import EgressRequest, EgressStore, request_key
 from manage.web import phone_api, threads
@@ -49,6 +51,23 @@ def test_held_commit_between_create_and_map_publication_denies_old_startup(
     monkeypatch.setattr(browser, "_launch_sidecar_bounded", create)
     monkeypatch.setattr(browser, "_kill_container", killed.append)
     monkeypatch.setattr(browser, "_load_egress_allowlist", lambda: [])
+    client = MagicMock()
+    proxy = MagicMock(status="running")
+    proxy.attrs = {
+        "Mounts": [{"Destination": "/client-map", "Source": str(root)}],
+        "NetworkSettings": {"Networks": {
+            browser.BROWSER_NETWORK: {"NetworkID": "network"}}}}
+    sidecar = MagicMock(status="running")
+    sidecar.attrs = {"NetworkSettings": {"Networks": {
+        browser.BROWSER_NETWORK: {
+            "NetworkID": "network", "IPAddress": "172.20.0.2"}}}}
+    client.containers.get.side_effect = lambda key: (
+        proxy if key == browser.EGRESS_PROXY_NAME else sidecar)
+    monkeypatch.setattr(
+        browser, "_register_browser_client_bounded",
+        lambda map_dir, ip, record, threads_root, run_id, timeout:
+            browser._register_browser_client_direct(
+                client, map_dir, ip, record, threads_root, run_id))
     with ThreadPoolExecutor(max_workers=1) as pool:
         opening = pool.submit(session.command, "open", url="https://example.com/")
         assert started.wait(3)
@@ -63,6 +82,129 @@ def test_held_commit_between_create_and_map_publication_denies_old_startup(
         assert state.lease["owner_run_id"] == old.id
         assert state.lease["generations"] == []
     assert browser.browser_records(str(root), "t") == {}
+
+
+def test_proxy_setup_wait_does_not_hold_direct_message_admission(
+        monkeypatch, admitted):
+    root, runs = admitted
+    old = runs.create("t", "general-agent", "Open a public page", user_origin=True)
+    with authority.fence(str(root), "t") as state:
+        state.begin(old.id, old.admission_sequence)
+    client = MagicMock()
+    proxy = MagicMock(status="running")
+    proxy.attrs = {
+        "Mounts": [{"Destination": "/client-map", "Source": str(root)}],
+        "NetworkSettings": {"Networks": {
+            browser.BROWSER_NETWORK: {"NetworkID": "network"}}}}
+    sidecar = MagicMock(status="running")
+    sidecar.attrs = {"NetworkSettings": {"Networks": {
+        browser.BROWSER_NETWORK: {
+            "NetworkID": "network", "IPAddress": "172.20.0.2"}}}}
+    client.containers.get.side_effect = lambda key: (
+        proxy if key == browser.EGRESS_PROXY_NAME else sidecar)
+    record = ClientRecord("t", "generation", "browser", "public")
+    attempting = Event()
+
+    def register():
+        attempting.set()
+        return browser._register_browser_client_direct(
+            client, str(root), "172.20.0.2", record, str(root), old.id)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with browser._proxy_setup_lock():
+            registering = pool.submit(register)
+            assert attempting.wait(2)
+            started = time.monotonic()
+            held, _ = threads._accept_message_run("t", "Now read another page")
+            assert time.monotonic() - started < 2
+            assert held.status == "revocation_pending"
+        with pytest.raises(browser.BrowserUnavailable, match="newer user message"):
+            registering.result(timeout=3)
+    assert browser.browser_records(str(root), "t") == {}
+
+
+def test_stale_a_dies_after_prune_and_b_claims_recycled_browser_ip(admitted):
+    from docker.errors import NotFound
+    root, runs = admitted
+    b_run = runs.create("t", "general-agent", "Open a public page", user_origin=True)
+    with authority.fence(str(root), "t") as state:
+        state.begin(b_run.id, b_run.admission_sequence)
+    ip = "172.20.0.2"
+    record_client(str(root), ip, ClientRecord(
+        "t", "generation-A", "browser", "internal", "host.docker.internal", 5050))
+    client = MagicMock()
+    proxy = MagicMock(status="running")
+    proxy.attrs = {
+        "Mounts": [{"Destination": "/client-map", "Source": str(root)}],
+        "NetworkSettings": {"Networks": {
+            browser.BROWSER_NETWORK: {"NetworkID": "network"}}}}
+    b_sidecar = MagicMock(status="running")
+    b_sidecar.attrs = {"NetworkSettings": {"Networks": {
+        browser.BROWSER_NETWORK: {"NetworkID": "network", "IPAddress": ip}}}}
+
+    def get(key):
+        if key == browser.EGRESS_PROXY_NAME:
+            return proxy
+        if key == "generation-B":
+            return b_sidecar
+        raise NotFound("A exited after B's prelaunch prune")
+
+    client.containers.get.side_effect = get
+    browser._register_browser_client_direct(
+        client, str(root), ip, ClientRecord("t", "generation-B", "browser", "public"),
+        str(root), b_run.id)
+    assert read_client(str(root), ip).generation == "generation-B"
+
+
+def test_browser_publication_precedes_n1_to_n2_proxy_replacement(
+        monkeypatch, admitted):
+    from assist.egress import client_map
+    root, runs = admitted
+    run = runs.create("t", "general-agent", "Open a public page", user_origin=True)
+    with authority.fence(str(root), "t") as state:
+        state.begin(run.id, run.admission_sequence)
+    ip = "172.20.0.2"
+    client = MagicMock()
+    proxy = MagicMock(status="running")
+    proxy.attrs = {
+        "Mounts": [{"Destination": "/client-map", "Source": str(root)}],
+        "NetworkSettings": {"Networks": {
+            browser.BROWSER_NETWORK: {"NetworkID": "network-N1"}}}}
+    sidecar = MagicMock(status="running")
+    sidecar.attrs = {"NetworkSettings": {"Networks": {
+        browser.BROWSER_NETWORK: {
+            "NetworkID": "network-N1", "IPAddress": ip}}}}
+    client.containers.get.side_effect = lambda key: (
+        proxy if key == browser.EGRESS_PROXY_NAME else sidecar)
+    attempted, replaced = Event(), Event()
+    original_record = browser.record_browser_client
+    replacement = None
+
+    def record_then_replace(directory, address, identity):
+        nonlocal replacement
+
+        def replace():
+            attempted.set()
+            with browser._proxy_setup_lock():
+                proxy.attrs["NetworkSettings"]["Networks"][browser.BROWSER_NETWORK][
+                    "NetworkID"] = "network-N2"
+                client_map.clear_clients(directory)
+                replaced.set()
+
+        from threading import Thread
+        replacement = Thread(target=replace, daemon=True)
+        replacement.start()
+        assert attempted.wait(2)
+        assert not replaced.wait(0.05), "replacement crossed publication fence"
+        original_record(directory, address, identity)
+
+    monkeypatch.setattr(browser, "record_browser_client", record_then_replace)
+    browser._register_browser_client_direct(
+        client, str(root), ip, ClientRecord("t", "generation-N1", "browser", "public"),
+        str(root), run.id)
+    replacement.join(2)
+    assert replaced.is_set()
+    assert read_client(str(root), ip) is None
 
 
 @pytest.mark.parametrize("invalid_map", [False, True])
