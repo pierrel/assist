@@ -748,6 +748,10 @@ class SandboxManager:
                     != (proxy.attrs["NetworkSettings"]["Networks"]
                         [EGRESS_NETWORK]["NetworkID"])):
                 raise RuntimeError("sandbox proxy network identity changed")
+            runtime_state.assert_admissible("proxy", proxy.id)
+            runtime_state.assert_admissible(
+                "network", proxy.attrs["NetworkSettings"]["Networks"]
+                [EGRESS_NETWORK]["NetworkID"])
             ip = (container.attrs["NetworkSettings"]["Networks"]
                   [EGRESS_NETWORK]["IPAddress"])
             tid = os.path.basename(os.path.dirname(work_dir))

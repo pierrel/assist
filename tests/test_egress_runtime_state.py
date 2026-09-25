@@ -267,6 +267,31 @@ def test_record_publication_precedes_network_replacement_and_map_clear(
     assert client_map.read_client(str(map_dir), "172.30.0.2") is None
 
 
+@pytest.mark.parametrize("retired_kind, identity", [
+    ("proxy", "proxy-P"), ("network", "ordinary-N1")])
+def test_shell_publication_rejects_retired_generation(
+        tmp_path, monkeypatch, retired_kind, identity):
+    from assist.egress import client_map
+    map_dir = tmp_path / "map"
+    map_dir.mkdir()
+    monkeypatch.setenv("ASSIST_EGRESS_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setattr(client_map, "configured_directory", lambda: str(map_dir))
+    proxy = MagicMock(id="proxy-P", status="running")
+    proxy.attrs = {"Mounts": [{"Destination": "/client-map", "Source": str(map_dir)}],
+                   "NetworkSettings": {"Networks": {
+                       EGRESS_NETWORK: {"NetworkID": "ordinary-N1"}}}}
+    client = MagicMock()
+    client.containers.get.return_value = proxy
+    sandbox = MagicMock(id="sandbox-S", status="running")
+    sandbox.attrs = {"NetworkSettings": {"Networks": {
+        EGRESS_NETWORK: {"NetworkID": "ordinary-N1", "IPAddress": "172.30.0.2"}}}}
+    runtime_state.retire(retired_kind, identity, "uncertain mutation")
+    with pytest.raises(RuntimeError, match="retired"):
+        SandboxManager._record_egress_client_direct(
+            client, sandbox, "/tmp/thread/domain", kind="sandbox")
+    assert client_map.read_client(str(map_dir), "172.30.0.2") is None
+
+
 def test_missing_proxy_image_fails_before_old_proxy_removal_or_create_token(
         tmp_path, monkeypatch):
     from docker.errors import NotFound

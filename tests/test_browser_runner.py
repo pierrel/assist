@@ -126,6 +126,113 @@ def test_invalid_userinfo_and_port_zero(url):
         http_url(url)
 
 
+@pytest.mark.parametrize("url", ["data:text/html,secret", "file:///etc/passwd",
+                                     "javascript:alert(1)"])
+def test_non_http_observation_closes_page_before_content_is_read(url):
+    worker = BrowserWorker()
+    page = _Page()
+    page.url = url
+    worker.pages["page"] = page
+    with pytest.raises(BrowserInputError, match="non-HTTP page"):
+        worker.observe("page")
+    assert page.closed
+    assert worker.pages == {}
+
+
+def test_non_http_observed_link_is_not_clicked():
+    worker = BrowserWorker()
+    link = _Link("data:text/html,secret")
+    _observed(worker, link)
+    with pytest.raises(BrowserInputError, match="only HTTP"):
+        worker.act("page", "snapshot", "click", {"ref": "observed"})
+    assert not link.clicked
+
+
+def test_non_http_popup_is_closed_at_registration():
+    worker = BrowserWorker()
+    popup = _Page()
+    popup.url = "file:///etc/passwd"
+    with pytest.raises(BrowserInputError, match="non-HTTP page"):
+        worker._register_page(popup)
+    assert popup.closed
+    assert worker.pages == {}
+
+
+def test_page_driven_non_http_navigation_closes_observed_page():
+    class EventPage(_Page):
+        main_frame = object()
+
+        def on(self, event, callback):
+            if event == "framenavigated":
+                self.navigation = callback
+
+    worker = BrowserWorker()
+    page = EventPage()
+    page_id = worker._register_page(page)
+    page.url = "data:text/html,secret"
+    page.navigation(page.main_frame)
+    assert page.closed
+    assert page_id not in worker.pages
+    assert worker.errors[-1]["reason"] == "non_http_navigation"
+
+
+def test_page_returning_to_about_blank_is_closed_after_web_navigation():
+    class EventPage(_Page):
+        main_frame = object()
+
+        def on(self, event, callback):
+            if event == "framenavigated":
+                self.navigation = callback
+
+    worker = BrowserWorker()
+    page = EventPage()
+    page.url = "about:blank"
+    worker._register_page(page)
+    page.url = "https://example.com/"
+    page.navigation(page.main_frame)
+    page.url = "about:blank"
+    page.navigation(page.main_frame)
+    assert page.closed
+    assert worker.pages == {}
+
+
+def test_navigation_during_snapshot_cannot_return_non_http_content():
+    class Body:
+        def aria_snapshot(self, **_kwargs):
+            page.url = "about:blank"
+            return "secret"
+
+    class Page(_Page):
+        def wait_for_load_state(self, **_kwargs):
+            pass
+
+        def locator(self, selector):
+            return Body() if selector == "body" else SimpleNamespace(count=lambda: 0)
+
+    worker = BrowserWorker()
+    page = Page()
+    worker.pages["page"] = page
+    with pytest.raises(BrowserInputError, match="non-HTTP page"):
+        worker.observe("page")
+    assert page.closed
+
+
+def test_denied_http_navigation_keeps_probe_evidence_without_observing_error_page(
+        monkeypatch):
+    worker = BrowserWorker()
+    page = _Page()
+    page.url = "about:blank"
+    def denied(_url, **_kwargs):
+        raise RuntimeError("proxy denied")
+    page.goto = denied
+    worker.context = SimpleNamespace(new_page=lambda: page)
+    result = worker.open("http://unlisted.example/")
+    assert result["snapshot"] == ""
+    assert result["observation_errors"] == ["navigation_failed"]
+    assert page.closed
+    assert "unlisted.example:80" in worker.failed_hosts
+
+
 def test_http_403_response_is_probeable_with_fragmented_proxy_headers(monkeypatch):
     worker = BrowserWorker()
     worker._response(SimpleNamespace(

@@ -8,6 +8,7 @@ import time
 import pytest
 
 from assist.browser import authority, manager as browser
+from assist.egress import runtime_state
 from assist.egress.client_map import ClientRecord, read_client, record_client
 from assist.run_service import InvalidRunTransition, RunService
 from assist.egress.store import EgressRequest, EgressStore, request_key
@@ -121,6 +122,36 @@ def test_proxy_setup_wait_does_not_hold_direct_message_admission(
         with pytest.raises(browser.BrowserUnavailable, match="newer user message"):
             registering.result(timeout=3)
     assert browser.browser_records(str(root), "t") == {}
+
+
+@pytest.mark.parametrize("retired_kind, identity", [
+    ("proxy", "proxy-P"), ("network", "browser-N1")])
+def test_browser_publication_rejects_retired_generation(
+        monkeypatch, admitted, retired_kind, identity):
+    root, runs = admitted
+    monkeypatch.setenv("ASSIST_EGRESS_RUNTIME_DIR", str(root / "runtime"))
+    run = runs.create("t", "general-agent", "Open a public page", user_origin=True)
+    with authority.fence(str(root), "t") as state:
+        state.begin(run.id, run.admission_sequence)
+    ip = "172.20.0.2"
+    proxy = MagicMock(id="proxy-P", status="running")
+    proxy.attrs = {
+        "Mounts": [{"Destination": "/client-map", "Source": str(root)}],
+        "NetworkSettings": {"Networks": {
+            browser.BROWSER_NETWORK: {"NetworkID": "browser-N1"}}}}
+    sidecar = MagicMock(status="running")
+    sidecar.attrs = {"NetworkSettings": {"Networks": {
+        browser.BROWSER_NETWORK: {"NetworkID": "browser-N1", "IPAddress": ip}}}}
+    client = MagicMock()
+    client.containers.get.side_effect = lambda key: (
+        proxy if key == browser.EGRESS_PROXY_NAME else sidecar)
+    runtime_state.retire(retired_kind, identity, "uncertain mutation")
+    with pytest.raises(RuntimeError, match="retired"):
+        browser._register_browser_client_direct(
+            client, str(root), ip,
+            ClientRecord("t", "sidecar-S", "browser", "public"),
+            str(root), run.id)
+    assert read_client(str(root), ip) is None
 
 
 def test_stale_a_dies_after_prune_and_b_claims_recycled_browser_ip(admitted):

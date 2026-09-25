@@ -66,6 +66,7 @@ class BrowserWorker:
         self.context = None
         self.pages = {}
         self.page_ids = {}
+        self.web_pages = set()
         self.snapshots = {}
         self.targets = {}
         self.downloads = {}
@@ -101,6 +102,7 @@ class BrowserWorker:
             if page.is_closed():
                 del self.pages[ident]
                 self.page_ids.pop(page, None)
+                self.web_pages.discard(page)
                 self.snapshots.pop(ident, None)
                 self.targets.pop(ident, None)
 
@@ -118,7 +120,28 @@ class BrowserWorker:
         page.on("download", self._register_download)
         page.on("requestfailed", self._request_failed)
         page.on("response", self._response)
+        page.on("framenavigated", lambda frame: self._check_navigation(page, frame))
+        if page.url != "about:blank":
+            self._check_page_url(page)
         return page_id
+
+    def _check_page_url(self, page):
+        try:
+            http_url(page.url)
+        except BrowserInputError:
+            if not page.is_closed():
+                page.close()
+            self._prune_pages()
+            raise BrowserInputError("non-HTTP page navigation is unsupported") from None
+        self.web_pages.add(page)
+
+    def _check_navigation(self, page, frame):
+        if frame == page.main_frame and (page.url != "about:blank"
+                                         or page in self.web_pages):
+            try:
+                self._check_page_url(page)
+            except BrowserInputError:
+                self._error("<page>", "document", "non_http_navigation")
 
     def _register_download(self, download):
         if len(self.downloads) < 8:
@@ -172,6 +195,7 @@ class BrowserWorker:
 
     def _observe(self, page_id):
         page = self._page(page_id)
+        self._check_page_url(page)
         try:
             page.wait_for_load_state("domcontentloaded", timeout=3000)
         except Exception:
@@ -237,6 +261,7 @@ class BrowserWorker:
                 result["truncated"] = True
                 break
             kept[target["ref"]] = targets[target["ref"]]
+        self._check_page_url(page)
         self.snapshots[page_id] = snapshot_id
         self.targets[page_id] = kept
         return result
@@ -260,7 +285,20 @@ class BrowserWorker:
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=10000)
         except Exception:
-            self._error(host_port(url), "document", "navigation_failed")
+            host = host_port(url)
+            self.failed_hosts.add(host)
+            self._error(host, "document", "navigation_failed")
+            try:
+                http_url(page.url)
+            except BrowserInputError:
+                if not page.is_closed():
+                    page.close()
+                self._prune_pages()
+                return {"page_id": page_id, "snapshot_id": uuid4().hex[:12],
+                        "url": url[:512], "snapshot": "", "targets": [],
+                        "pages": [], "downloads": [],
+                        "network_errors": self.errors[-12:],
+                        "observation_errors": ["navigation_failed"]}
         return self._observe(page_id)
 
     def close(self, page_id):
@@ -312,6 +350,8 @@ class BrowserWorker:
             raise BrowserInputError("observed link changed")
         if action == "fill" and live_attrs != fill_attrs:
             raise BrowserInputError("observed field changed")
+        if action == "click" and live_href is not None:
+            http_url(live_href)
         if action == "fill":
             if role not in {"textbox", "searchbox"}:
                 raise BrowserInputError("only nonsecret text fields can be filled")

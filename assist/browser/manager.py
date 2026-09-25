@@ -225,6 +225,8 @@ def _register_browser_client_direct(client, map_dir: str, ip: str,
                 or endpoint["NetworkID"] != proxy_network["NetworkID"]
                 or endpoint["IPAddress"] != ip):
             raise BrowserUnavailable("browser endpoint changed before attribution")
+        runtime_state.assert_admissible("proxy", proxy.id)
+        runtime_state.assert_admissible("network", proxy_network["NetworkID"])
         prior = read_client(map_dir, ip)
         if prior is not None and prior != record and prior.kind == "browser":
             try:

@@ -11,14 +11,18 @@ or controls, use this turn's browser tools yourself. Do not delegate browser
 navigation to a child agent. The browser is stateful only within this Run and
 has a short lifetime; reopen a page after a later turn or an approval pause.
 
-`browser_open(url)` renders one HTTP(S) page and returns its page ID, actual URL,
-snapshot ID, readable accessibility snapshot, link/control targets, popup page
-IDs, download IDs, and network errors. For another visit, pass an observed live
-page ID as `reuse_page_id` to navigate that page in place; its old snapshot and
+`browser_open(url)` renders one HTTP(S) page. On success it returns the page ID,
+actual URL, snapshot ID, readable accessibility snapshot, link/control targets,
+popup page IDs, download IDs, and network errors. For another visit, pass an
+observed live page ID as `reuse_page_id` to navigate that page in place; its old snapshot and
 targets become invalid. `browser_close(page_id)` releases a finished page or
 popup. The limit is five concurrently live pages, not five total visits.
-Only existing allowlisted or approved
-hosts are reachable. If a host is denied, use the existing egress approval
+If HTTP navigation fails, the result may have an empty snapshot, the attempted
+URL, and a closed page ID; use `browser_probe` for the attempted host or open
+another page.
+
+Only existing allowlisted or approved hosts are reachable. If a host is denied,
+use the existing egress approval
 flow only when `browser_probe` returns `host_not_approved`; do not work around
 the proxy or request approval for a different denial reason. A private/local
 host requires the user's fresh explicit request naming that exact host and
