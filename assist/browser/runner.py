@@ -195,6 +195,14 @@ class BrowserWorker:
 
     def _observe(self, page_id):
         page = self._page(page_id)
+        if page.url == "about:blank" and page not in self.web_pages:
+            return {
+                "page_id": page_id, "snapshot_id": uuid4().hex[:12],
+                "url": "about:blank", "snapshot": "", "targets": [],
+                "pages": [{"page_id": ident, "url": item.url[:256]}
+                          for ident, item in self.pages.items() if not item.is_closed()],
+                "downloads": [], "network_errors": self.errors[-12:],
+            }
         self._check_page_url(page)
         try:
             page.wait_for_load_state("domcontentloaded", timeout=3000)

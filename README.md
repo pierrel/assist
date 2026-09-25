@@ -50,8 +50,8 @@ where reliability is harder than with frontier APIs.
   visits require a fresh user request naming an operator-allowlisted host
   and exact port. A bare host permits only HTTP 80 or HTTPS 443; a
   nondefault port must be explicit, such as `http://host.docker.internal:5050`.
-  Browser pages cannot approve access. Browser tools close non-HTTP(S) pages
-  before returning their content.
+  Browser pages cannot approve access. Browser tools do not return non-HTTP(S)
+  page content. An empty new popup can be reused for an HTTP(S) visit.
 
 - **Specialized agents and skills out of the box.**
   - **Research agent** rigorous fact-checking and critiquing with

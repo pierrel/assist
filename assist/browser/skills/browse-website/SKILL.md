@@ -36,6 +36,8 @@ works if only one link has it; duplicate links need the reference. To enter
 ordinary nonsecret text, use `browser_act(..., "fill", {"ref": "...", "text":
 "..."})`. Re-observe after a stale-target error. `browser_wait(page_id, role,
 name)` waits briefly for one named control. Popups return their own page ID.
+A new blank popup has an empty snapshot; reuse its page ID to open an HTTP(S)
+URL.
 
 For a failed network request, `browser_probe(host, port)` reports the proxy's
 reason only for a host the browser already tried. Do not treat a failed asset

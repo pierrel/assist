@@ -1,0 +1,14 @@
+State: In progress
+
+* Historical supersessions
+The =Solution= section of =2026-09-25-headless-browser-round4-corrections.org=
+said non-HTTP(S) main-frame navigation closes its page. A newly opened
+=about:blank= popup is now retained with an empty observation so existing
+popup reuse works. No page content or targets are returned until it reaches
+HTTP(S). A return to =about:blank= after HTTP(S), or navigation to another
+non-HTTP(S) scheme, still closes the page.
+
+* Verification
+The original real-Docker test already expects an =about:blank= popup with a
+reusable page ID. The new unit regression checks that its content is not read.
+Protected real-Docker execution remains pending.

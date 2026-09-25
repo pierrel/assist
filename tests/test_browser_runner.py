@@ -196,6 +196,23 @@ def test_page_returning_to_about_blank_is_closed_after_web_navigation():
     assert worker.pages == {}
 
 
+def test_initial_about_blank_popup_is_reusable_without_exposing_its_content():
+    class Popup(_Page):
+        def locator(self, _selector):
+            raise AssertionError("blank popup content must not be read")
+
+    worker = BrowserWorker()
+    popup = Popup()
+    popup.url = "about:blank"
+    page_id = worker._register_page(popup)
+    result = worker.observe(page_id)
+    assert result["page_id"] == page_id
+    assert result["url"] == "about:blank"
+    assert result["snapshot"] == ""
+    assert result["targets"] == []
+    assert not popup.closed
+
+
 def test_navigation_during_snapshot_cannot_return_non_http_content():
     class Body:
         def aria_snapshot(self, **_kwargs):
