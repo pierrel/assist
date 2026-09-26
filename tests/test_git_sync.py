@@ -469,7 +469,7 @@ def test_pi_turn_uses_same_preflight_commit_and_publication(repos, monkeypatch):
     result = PiRuntimeResult("saved Pi answer", 1)
 
     def runtime(**kwargs):
-        pending = sync.read_state(str(repos[3]))["pending"]
+        pending = next(iter(sync.read_state(str(repos[3]))["preflights"].values()))
         assert pending["base"] == git(repos[1], "rev-parse", "HEAD")
         model = threads._get_sandbox_backend("state", before_start=kwargs["sandbox_starting"])
         (repos[1] / "pi").write_text("Pi committed change\n")
@@ -681,3 +681,158 @@ def test_flight_fence_starts_at_docker_create_not_preconditions(repos, monkeypat
 def test_shared_repository_labels_are_basename_only():
     from manage.web import state
     assert state._domain_label("git@secret-host:repo.git") == "repo"
+
+
+def test_child_publication_preserves_suspended_parent_preflight(repos):
+    remote, thread, _, binding = repos
+    parent = sync.GitSync(str(binding), str(thread))
+    parent.prepare(LocalBackend(thread), "parent")
+    parent_floor = git(thread, "rev-parse", "HEAD")
+    child = sync.GitSync(str(binding), str(thread))
+    child.prepare(LocalBackend(thread), "child")
+    (thread / "child").write_text("child\n")
+    child.commit(LocalBackend(thread), "child")
+    child.publish()
+    child_tip = git(remote, "rev-parse", "thread/test")
+    remaining = sync.read_state(str(binding))["preflights"]
+    assert list(remaining) == ["parent"]
+    assert remaining["parent"] == {"branch": "thread/test", "expected": child_tip, "base": parent_floor}
+    resumed = sync.GitSync(str(binding), str(thread))
+    resumed.select_work("parent")  # A resume must not fetch or fast-forward.
+    (thread / "parent").write_text("parent after child\n")
+    resumed.commit(LocalBackend(thread), "parent resume")
+    resumed.publish()
+    assert git(remote, "merge-base", child_tip, "thread/test") == child_tip
+    assert not sync.read_state(str(binding))["preflights"]
+
+
+def test_failed_child_preflight_never_erases_parent_work(repos):
+    _, thread, _, binding = repos
+    parent = sync.GitSync(str(binding), str(thread))
+    parent.prepare(LocalBackend(thread), "parent")
+    (thread / "parent").write_text("preserve parent edits\n")
+    with pytest.raises(sync.GitSyncError, match="uncommitted"):
+        sync.GitSync(str(binding), str(thread)).prepare(LocalBackend(thread), "child")
+    assert list(sync.read_state(str(binding))["preflights"]) == ["parent"]
+    parent.commit(LocalBackend(thread), "parent")
+    parent.publish()
+
+
+def test_post_commit_hook_dirty_work_never_claims_publication(repos):
+    remote, thread, _, _ = repos
+    owner, backend = turn(repos)
+    hook = thread / ".git" / "hooks" / "post-commit"
+    hook.write_text("#!/bin/sh\nprintf 'hook dirt\\n' > tracked\npython -c 'print(\"x\" * 200000)'\n")
+    hook.chmod(0o700)
+    (thread / "agent").write_text("agent\n")
+    with pytest.raises(sync.GitSyncError, match="uncommitted"):
+        owner.commit(backend, "agent")
+    assert (thread / "tracked").read_text() == "hook dirt\n"
+    assert git(remote, "for-each-ref", "--format=%(refname)") == "refs/heads/main"
+
+
+@pytest.mark.parametrize("failure", ["model-teardown", "commit-start"])
+def test_child_git_failure_preserves_result_without_success_wake(repos, monkeypatch, tmp_path, failure):
+    def model():
+        (repos[1] / "child").write_text("preserve child\n")
+        return "saved child result"
+
+    threads, events, _ = web_turn(repos, monkeypatch, model)
+    child_dir = tmp_path / "sub-child"
+    child_dir.mkdir()
+    monkeypatch.setattr(threads.MANAGER, "thread_dir",
+                        lambda tid: str(child_dir if tid == "sub-child" else repos[3]))
+    monkeypatch.setattr(threads, "_child_waits_for_egress", lambda _run: False)
+    outcomes = []
+    monkeypatch.setattr(threads, "_complete_child_handoff", lambda run: outcomes.append(run))
+    if failure == "model-teardown":
+        original = threads.SandboxManager.cleanup_verified
+
+        def cleanup(worktree, generation):
+            if len(events) == 3:
+                raise RuntimeError("daemon failure")
+            original(worktree, generation)
+
+        monkeypatch.setattr(threads.SandboxManager, "cleanup_verified", cleanup)
+    else:
+        original = threads.SandboxManager.get_pi_sandbox_backend
+        calls = []
+
+        def backend(*args, **kwargs):
+            calls.append(None)
+            return original(*args, **kwargs) if len(calls) == 1 else None
+
+        monkeypatch.setattr(threads.SandboxManager, "get_pi_sandbox_backend", backend)
+    run = threads._create_run("sub-child", "probe", mode="child", parent_thread_id="state",
+                              parent_run_id="parent", dispatch_key="failure-child",
+                              assistant_id="delegate-agent")
+    threads._execute_child_run(run)
+    assert outcomes[-1].status == "error"
+    assert outcomes[-1].result == "saved child result"
+    assert (repos[1] / "child").read_text() == "preserve child\n"
+    assert not sync.has_commit_receipt(str(child_dir), run.work_id)
+    threads.SandboxManager._containers.pop(str(repos[1]), None)
+
+
+def test_child_crash_after_commit_recovers_saved_result_without_model_replay(repos, monkeypatch, tmp_path):
+    calls = []
+
+    def model():
+        calls.append(None)
+        (repos[1] / "child").write_text("committed child\n")
+        return "saved child result"
+
+    threads, _, _ = web_turn(repos, monkeypatch, model)
+    child_dir = tmp_path / "sub-child"
+    child_dir.mkdir()
+    monkeypatch.setattr(threads.MANAGER, "thread_dir",
+                        lambda tid: str(child_dir if tid == "sub-child" else repos[3]))
+    monkeypatch.setattr(threads, "_child_waits_for_egress", lambda _run: False)
+    wakes = []
+
+    def wake(run):
+        assert run.status == "success"
+        owner = sync.GitSync(str(repos[3]), str(repos[1]))
+        owner.prepare(LocalBackend(repos[1]), "parent-wake")
+        owner.publish()
+        wakes.append(run.result)
+
+    monkeypatch.setattr(threads, "_complete_child_handoff", wake)
+    run = threads._create_run("sub-child", "probe", mode="child", parent_thread_id="state",
+                              parent_run_id="parent", dispatch_key="crash-child",
+                              assistant_id="delegate-agent")
+    with monkeypatch.context() as patch:
+        original = sync._Store.fetch
+
+        def crash_after_receipt(store, *args):
+            if (child_dir / "git-commit-receipt.json").exists():
+                raise SystemExit("crash")
+            return original(store, *args)
+
+        patch.setattr(sync._Store, "fetch", crash_after_receipt)
+        with pytest.raises(SystemExit, match="crash"):
+            threads._execute_child_run(run)
+    saved = threads._runs().get("sub-child", run.id)
+    assert saved.status == "running" and saved.result == "saved child result"
+    assert sync.has_commit_receipt(str(child_dir), run.work_id)
+    threads._recover_child_run(saved)
+    assert calls == [None]
+    assert wakes == ["saved child result"]
+    assert git(repos[0], "show", "thread/test:child") == "committed child"
+
+
+def test_pi_lock_io_error_terminalizes_exact_pending_ticket(repos, monkeypatch):
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: pytest.fail("Model ran"))
+    monkeypatch.setattr(threads, "PI_PREVIEW", SimpleNamespace(admits=lambda _engine: True))
+    original = sync.os.open
+
+    def fail_lock(path, *args, **kwargs):
+        if path == "git-sync.lock":
+            raise PermissionError("lock denied")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(sync.os, "open", fail_lock)
+    run = threads._create_run("state", "probe")
+    threads._execute_pi_run(run, user_priority=False)
+    saved = threads._runs().get("state", run.id)
+    assert saved.status == "error" and "ownership" in saved.error

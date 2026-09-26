@@ -117,7 +117,8 @@ def read_state(thread_dir: str) -> dict | None:
         raise GitSyncError("Git source binding is unavailable") from error
     if (not isinstance(value, dict) or value.get("version") != 1
             or not isinstance(value.get("source"), str)
-            or not isinstance(value.get("published"), dict)):
+            or not isinstance(value.get("published"), dict)
+            or not isinstance(value.get("preflights"), dict)):
         raise GitSyncError("Git source binding is unavailable")
     branch = value.get("branch")
     if branch is not None:
@@ -136,16 +137,16 @@ def read_state(thread_dir: str) -> dict | None:
         raise GitSyncError("Git source binding is unavailable")
     if published_branch is not None and value["published"].get(published_branch) != published_revision:
         raise GitSyncError("Git source binding is unavailable")
-    for field in ("pending", "intent"):
-        entry = value.get(field)
-        if entry is None:
-            continue
+    records = [("preflight", entry) for entry in value["preflights"].values()]
+    if value.get("intent") is not None:
+        records.append(("intent", value["intent"]))
+    for field, entry in records:
         if not isinstance(entry, dict) or entry.get("branch") != branch:
             raise GitSyncError("Git source binding is unavailable")
         expected = entry.get("expected")
         if expected is not None and (not isinstance(expected, str) or not _OID.fullmatch(expected)):
             raise GitSyncError("Git source binding is unavailable")
-        if field == "pending" and (not isinstance(entry.get("base"), str)
+        if field == "preflight" and (not isinstance(entry.get("base"), str)
                                     or not _OID.fullmatch(entry["base"])):
             raise GitSyncError("Git source binding is unavailable")
         if field == "intent" and (not isinstance(entry.get("desired"), str)
@@ -154,7 +155,7 @@ def read_state(thread_dir: str) -> dict | None:
     return value
 
 
-def _write_state(thread_dir: str, value: dict) -> None:
+def _write_state(thread_dir: str, value: dict, filename: str = _BINDING) -> None:
     data = json.dumps(value, sort_keys=True).encode()
     if len(data) > 65_536:
         raise GitSyncError("Git publication metadata is full")
@@ -166,7 +167,7 @@ def _write_state(thread_dir: str, value: dict) -> None:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(name, os.path.join(thread_dir, _BINDING))
+        os.replace(name, os.path.join(thread_dir, filename))
         with _directory(thread_dir) as directory:
             os.fsync(directory)
     finally:
@@ -192,7 +193,7 @@ def bind(thread_dir: str, source: str) -> None:
         return
     _write_state(thread_dir, {"version": 1, "source": source, "published": {},
                               "published_branch": None, "published_revision": None,
-                              "branch": None, "intent": None, "pending": None, "error": None})
+                              "branch": None, "intent": None, "preflights": {}, "error": None})
 
 
 def authorize_branch(thread_dir: str, worktree: str) -> None:
@@ -202,7 +203,7 @@ def authorize_branch(thread_dir: str, worktree: str) -> None:
         raise GitSyncError("Git source binding is unavailable")
     with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
         branch, _ = _Store(path).snapshot(worktree)
-    state.update(branch=branch, pending=None)
+    state.update(branch=branch, preflights={})
     _write_state(thread_dir, state)
 
 
@@ -215,9 +216,12 @@ def ownership(thread_dir: str, worktree: str):
             raise GitSyncError("Existing Git repository needs an operator-verified source binding")
         yield None
         return
-    with _directory(thread_dir) as directory:
-        fd = os.open("git-sync.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
-                     0o600, dir_fd=directory)
+    try:
+        with _directory(thread_dir) as directory:
+            fd = os.open("git-sync.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                         0o600, dir_fd=directory)
+    except OSError as error:
+        raise GitSyncError("Git workspace ownership is unavailable") from error
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise GitSyncError("Git workspace ownership is unavailable")
@@ -225,6 +229,8 @@ def ownership(thread_dir: str, worktree: str):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise GitSyncError("A previous turn still owns this Git workspace") from error
+        except OSError as error:
+            raise GitSyncError("Git workspace ownership is unavailable") from error
         yield GitSync(thread_dir, worktree)
     finally:
         os.close(fd)
@@ -329,13 +335,15 @@ class _Store:
             return False
 
 
-def _sandbox_git(sandbox, command: str) -> str:
+def _sandbox_git(sandbox, command: str) -> None:
     if sandbox is None:
         raise GitSyncError("Git sync requires the restricted sandbox")
-    result = sandbox.execute("timeout -k 2s 25s sh -c " + shlex.quote(command))
-    if result.exit_code != 0:
+    # Hooks execute only in the restricted container, and cannot stream their
+    # output through Docker's unbounded exec_run materialization on the host.
+    result = sandbox.execute("timeout -k 2s 25s sh -c " + shlex.quote(command)
+                             + " >/dev/null 2>&1")
+    if result.exit_code != 0 or getattr(result, "truncated", False):
         raise GitSyncError("Git worktree needs reconciliation in the restricted sandbox")
-    return result.output.strip()
 
 
 def _require_clean(sandbox) -> None:
@@ -367,16 +375,13 @@ with subprocess.Popen(args + ["status", "--porcelain", "--untracked-files=normal
         sys.exit(1)
     if process.wait():
         sys.exit(1)
-print("clean")
 '''
     if sandbox is None:
         raise GitSyncError("Git sync requires the restricted sandbox")
     try:
-        receipt = _sandbox_git(sandbox, "python -I -c " + shlex.quote(probe) + " " + _WORKTREE_GIT)
+        _sandbox_git(sandbox, "python -I -c " + shlex.quote(probe) + " " + _WORKTREE_GIT)
     except GitSyncError as error:
         raise GitSyncError("Thread worktree has hidden or uncommitted changes; reconcile before the next turn") from error
-    if receipt != "clean":
-        raise GitSyncError("Thread worktree has hidden or uncommitted changes; reconcile before the next turn")
 
 
 class GitSync:
@@ -384,6 +389,7 @@ class GitSync:
 
     def __init__(self, thread_dir: str, worktree: str):
         self.thread_dir, self.worktree = thread_dir, worktree
+        self.work_id = None
         self.state = read_state(thread_dir)
         if self.state is None:
             raise GitSyncError("Existing Git repository needs an operator-verified source binding")
@@ -393,6 +399,23 @@ class GitSync:
     def sandbox_started(self) -> None:
         self.state["sandbox_in_flight"] = True
         _write_state(self.thread_dir, self.state)
+
+    def select_work(self, work_id: str) -> None:
+        """Select only this durable work's preflight, including resumed slices."""
+        if not isinstance(work_id, str) or not work_id or len(work_id) > 256:
+            raise GitSyncError("Git work identity is unavailable")
+        self.work_id = work_id
+
+    def receipt(self, child_thread_dir: str) -> None:
+        """Durable proof of local child commit/teardown before its terminal handoff."""
+        branch, revision = self._branch()
+        _write_state(child_thread_dir, {"work_id": self.work_id, "branch": branch,
+                                       "revision": revision}, "git-commit-receipt.json")
+
+    def forget_work(self) -> None:
+        """Drop only an already terminal child's retained preflight."""
+        if self.state["preflights"].pop(self.work_id, None) is not None:
+            _write_state(self.thread_dir, self.state)
 
     def sandbox_stopped(self) -> None:
         self.state["sandbox_in_flight"] = False
@@ -409,7 +432,8 @@ class GitSync:
         _write_state(self.thread_dir, self.state)
 
     def prepare(self, sandbox, work_id: str) -> None:
-        """Fetch and reconcile before a fresh visible model turn, never mid-resume."""
+        """Fetch and reconcile before a fresh Git-backed writer, never mid-resume."""
+        self.select_work(work_id)
         with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
             store = _Store(path)
             branch, local = store.snapshot(self.worktree)
@@ -422,6 +446,9 @@ class GitSync:
                         or not store.ancestor(intent["desired"], remote)):
                     raise GitSyncError("Previous publication outcome is unknown; reconcile explicitly")
                 self.state["published"][branch] = intent["desired"]
+                for record in self.state["preflights"].values():
+                    if record["branch"] == branch and record["expected"] == intent["expected"]:
+                        record["expected"] = intent["desired"]
                 self.state.update(published_branch=branch, published_revision=intent["desired"], intent=None)
                 _write_state(self.thread_dir, self.state)
             floor = self.state["published"].get(branch)
@@ -454,15 +481,15 @@ class GitSync:
             if self._branch() != (branch, expected_local):
                 raise GitSyncError("Git preflight did not leave the expected clean thread checkout")
             _require_clean(sandbox)
-            self.state["pending"] = {"work_id": work_id, "branch": branch,
-                                     "expected": remote, "base": self._branch()[1]}
+            self.state["preflights"][work_id] = {"branch": branch,
+                                                "expected": remote, "base": self._branch()[1]}
             self.state["error"] = None
             _write_state(self.thread_dir, self.state)
 
     def commit(self, sandbox, message: str) -> None:
         """Commit inside a fresh restricted Git-only generation after model teardown."""
         branch, _ = self._branch()
-        pending = self.state.get("pending")
+        pending = self.state["preflights"].get(self.work_id)
         if not pending or pending["branch"] != branch:
             raise GitSyncError("Thread branch changed; reconcile before publication")
         _sandbox_git(sandbox, _WORKTREE_GIT + " add -A && { " + _WORKTREE_GIT
@@ -472,10 +499,11 @@ class GitSync:
                      + _WORKTREE_GIT + " -c commit.gpgSign=false commit -m "
                      + shlex.quote(message[:4096] or "assistant update")
                      + "; else exit \"$code\"; fi; }")
+        _require_clean(sandbox)
 
-    def publish(self) -> None:
+    def publish(self, *, on_committed=None) -> None:
         """Publish exact FF branch only; callers have already verified sandbox teardown."""
-        pending = self.state.get("pending")
+        pending = self.state["preflights"].get(self.work_id)
         if not pending:
             raise GitSyncError("Git turn has no verified remote preflight")
         with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
@@ -485,10 +513,13 @@ class GitSync:
                 raise GitSyncError("Thread branch changed during publication")
             if branch != pending["branch"]:
                 raise GitSyncError("Thread branch changed; reconcile before publication")
+            if not store.ancestor(pending["base"], desired):
+                raise GitSyncError("Local thread history changed; sync is pending")
+            if on_committed is not None:
+                on_committed()
             remote = store.fetch(self.state["source"], branch)
             expected = pending["expected"]
-            if (remote != expected or (remote and not store.ancestor(remote, desired))
-                    or not store.ancestor(pending["base"], desired)):
+            if remote != expected or (remote and not store.ancestor(remote, desired)):
                 raise GitSyncError("Remote thread branch advanced or local history changed; sync is pending")
             if desired != remote:
                 self.state["intent"] = {"branch": branch, "expected": expected, "desired": desired}
@@ -504,8 +535,15 @@ class GitSync:
             if listing.split() != [desired, "refs/heads/" + branch]:
                 raise GitSyncError("Remote publication is not yet verified; sync is pending")
             self.state["published"][branch] = desired
+            del self.state["preflights"][self.work_id]
+            # Other suspended work shares this thread branch. Advance its exact
+            # expectation only across our own verified FF publication, never a
+            # merely observed user move. Keep its original ancestry floor.
+            for record in self.state["preflights"].values():
+                if record["branch"] == branch and record["expected"] == expected:
+                    record["expected"] = desired
             self.state.update(published_branch=branch, published_revision=desired,
-                              pending=None, intent=None, error=None)
+                              intent=None, error=None)
             _write_state(self.thread_dir, self.state)
 
     def failed(self, error: Exception) -> None:
@@ -517,6 +555,23 @@ def source_label(source: str) -> str:
     """Only a repository basename, including scp-style SSH sources."""
     path = urlsplit(source).path if "://" in source else source.split(":", 1)[-1]
     return path.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")[:200]
+
+
+def has_commit_receipt(child_thread_dir: str, work_id: str) -> bool:
+    """A fixed host-only record proves this exact child work committed locally."""
+    try:
+        with _directory(child_thread_dir) as directory:
+            value = json.loads(_read_at(directory, "git-commit-receipt.json", 1024))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError, UnicodeError) as error:
+        raise GitSyncError("Child Git completion receipt is unavailable") from error
+    if (not isinstance(value, dict) or not isinstance(value.get("branch"), str)
+            or not isinstance(value.get("revision"), str)
+            or not _OID.fullmatch(value["revision"])):
+        raise GitSyncError("Child Git completion receipt is unavailable")
+    _branch(value["branch"])
+    return value.get("work_id") == work_id
 
 
 def workspace(thread_dir: str, worktree: str) -> dict:

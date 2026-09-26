@@ -2190,6 +2190,8 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                         run.parent_thread_id)
                     git_owner = git_scope.enter_context(git_ownership(
                         MANAGER.thread_dir(run.parent_thread_id), parent_working_dir))
+                    if git_owner:
+                        git_owner.select_work(run.work_id)
                     if git_owner and not (resume or run.resume or run.resume_decision is not None):
                         _git_prepare(git_owner, run.work_id, None)
                     try:
@@ -2216,11 +2218,17 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                         run = _runs().transition(
                             run.thread_id, run.id,
                             "awaiting_approval" if waits_for_egress
-                            else "success", result=result)
+                            else "running" if git_owner else "success", result=result)
                     if git_owner and not waits_for_egress:
                         _git_cleanup(git_owner, sandbox_generation)
                         sandbox_generation = None
-                        _git_finish(git_owner, str(result or "assistant task update"), None)
+                        if not _git_finish(git_owner, str(result or "assistant task update"), None,
+                                           on_committed=lambda: git_owner.receipt(
+                                               MANAGER.thread_dir(run.thread_id))):
+                            raise GitSyncError("Child Git commit is pending; saved result and files are preserved")
+                        with _RUN_ADMISSION_LOCK:
+                            run = _runs().transition(run.thread_id, run.id, "success")
+                        git_owner.forget_work()
                     if waits_for_egress and run.parent_thread_id is not None:
                         _resume_egress_waiters(run.parent_thread_id)
     except ThreadPauseRequested:
@@ -2317,22 +2325,36 @@ def _recover_child_run(run: Run) -> None:
             return
     parent_working_dir = MANAGER.thread_default_working_dir(run.parent_thread_id)
     try:
-        chat = MANAGER.get(
-            run.thread_id, working_dir=parent_working_dir, sandbox_backend=None,
-            assistant_id=run.assistant_id,
-        configurable=_child_configurable(run))
-        snap = chat.agent.get_state(chat.runconfig)
-        if (getattr(snap, "next", None) or ()
-                or (getattr(snap, "interrupts", None) or ())):
-            _execute_child_run(run, resume=True)
-            return
-        raw = chat.get_raw_messages()
-        result = next((message.content for message in reversed(raw)
-                       if getattr(message, "type", None) == "ai"
-                       and isinstance(message.content, str) and message.content), None)
+        result = run.result
+        if result is None:
+            chat = MANAGER.get(
+                run.thread_id, working_dir=parent_working_dir, sandbox_backend=None,
+                assistant_id=run.assistant_id, configurable=_child_configurable(run))
+            snap = chat.agent.get_state(chat.runconfig)
+            if (getattr(snap, "next", None) or ()
+                    or (getattr(snap, "interrupts", None) or ())):
+                _execute_child_run(run, resume=True)
+                return
+            raw = chat.get_raw_messages()
+            result = next((message.content for message in reversed(raw)
+                           if getattr(message, "type", None) == "ai"
+                           and isinstance(message.content, str) and message.content), None)
         if result is not None:
             with _RUN_ADMISSION_LOCK:
-                _runs().transition(run.thread_id, run.id, "success", result=result)
+                _runs().transition(run.thread_id, run.id, "running", result=result)
+            with THREAD_QUEUE.acquire(run.thread_id), git_ownership(
+                    MANAGER.thread_dir(run.parent_thread_id), parent_working_dir) as git_owner:
+                if git_owner:
+                    from assist.git_sync import has_commit_receipt
+                    git_owner.select_work(run.work_id)
+                    if not has_commit_receipt(MANAGER.thread_dir(run.thread_id), run.work_id) and not _git_finish(
+                            git_owner, str(result), None, on_committed=lambda: git_owner.receipt(
+                                MANAGER.thread_dir(run.thread_id))):
+                        raise GitSyncError("Child Git commit is pending; saved result and files are preserved")
+                with _RUN_ADMISSION_LOCK:
+                    _runs().transition(run.thread_id, run.id, "success", result=result)
+                if git_owner:
+                    git_owner.forget_work()
         else:
             _execute_child_run(run)
             return
@@ -2533,6 +2555,8 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
     try:
         with THREAD_QUEUE.acquire(tid, user_priority=user_priority), git_ownership(
                 MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid)) as git_owner:
+            if git_owner:
+                git_owner.select_work(run.work_id)
             # The selector's earlier check only permits reservation. This
             # authority-bearing recheck prevents a queued Pi Run from starting
             # after the operator disables the preview.
@@ -2723,8 +2747,16 @@ def _git_prepare(owner, work_id: str, timezone: str | None) -> None:
         raise reason from error
 
 
-def _git_finish(owner, message: str, timezone: str | None) -> None:
-    """Best-effort bounded publication; never discard a saved successful answer."""
+def _git_finish(owner, message: str, timezone: str | None, *, on_committed=None) -> bool:
+    """Attempt publication, returning whether local commit and teardown completed."""
+    committed = False
+
+    def verified_local_commit():
+        nonlocal committed
+        if on_committed is not None:
+            on_committed()
+        committed = True
+
     try:
         if owner.state.get("quarantine") or owner.state.get("sandbox_in_flight"):
             raise GitSyncError("Git sandbox teardown needs operator verification")
@@ -2736,11 +2768,12 @@ def _git_finish(owner, message: str, timezone: str | None) -> None:
             owner.commit(backend, message)
         finally:
             _git_cleanup(owner, backend.container)
-        owner.publish()
+        owner.publish(on_committed=verified_local_commit)
     except Exception as error:
         owner.failed(error if isinstance(error, GitSyncError) else GitSyncError(
             "Branch publication is pending; work and answer are preserved"))
         logging.warning("Thread branch publication pending", exc_info=True)
+    return committed
 
 
 def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
@@ -2869,6 +2902,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                    and _run.mode == "turn"
                                    and _run.text is not None))), git_ownership(
                 MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid)) as git_owner:
+            if git_owner:
+                git_owner.select_work(_run.work_id if _run else tid)
             # A queued run remains pending until it actually owns THREAD_QUEUE. This
             # is what makes it visible to the active turn's interjection reader. Two
             # dispatchers for one run serialize here; only the first can claim it.
