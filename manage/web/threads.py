@@ -3122,7 +3122,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # while we still hold the queue, so the next turn always starts
                 # in a fresh sandbox and no container outlives its turn.  This,
                 # plus the >2h backstop TTL, is what makes the mid-flight reap
-                # impossible: container age == turn age, capped by the queue.
+                # impossible: container age <= turn age, capped by the queue.
                 # cleanup() SIGKILLs (the response is already committed to the
                 # checkpoint here, and the sandbox has nothing to flush).
                 _work_dir = MANAGER.thread_default_working_dir(tid)
