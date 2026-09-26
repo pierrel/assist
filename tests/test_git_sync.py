@@ -1018,6 +1018,8 @@ def test_git_verification_profile_mounts_only_readonly_workspace(repos, monkeypa
     monkeypatch.setattr(SandboxManager, "_containers", {})
     monkeypatch.setattr(SandboxManager, "_get_docker_client", lambda: client)
     monkeypatch.setattr(SandboxManager, "_ensure_egress_proxy_running", lambda _client: None)
+    # This mount-profile fixture has no real proxy or inspectable attribution map.
+    monkeypatch.setattr(SandboxManager, "_record_egress_client", lambda *_args, **_kw: None)
     starts = []
     SandboxManager.get_git_verification_backend(str(repos[1]), before_start=lambda: starts.append(True))
     call = client.containers.run.call_args.kwargs
