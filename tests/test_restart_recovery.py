@@ -298,6 +298,11 @@ def test_cancelled_initializer_finishes_its_owned_setup_before_releasing_a_follo
     started, release = threading.Event(), threading.Event()
     executed, dispatched = [], []
 
+    from assist.git_sync import bind
+    bind(str(tmp_path / tid), "https://example.invalid/repo.git")
+    # This test doubles the slow clone; real branch authorization has separate Git probes.
+    monkeypatch.setattr(threads, "authorize_branch", lambda *_args: None)
+
     class BlockingDomain:
         def __init__(self, *_args, **_kwargs):
             started.set()
@@ -312,7 +317,7 @@ def test_cancelled_initializer_finishes_its_owned_setup_before_releasing_a_follo
     monkeypatch.setattr(threads._INITIALIZATION_SCHEDULER, "complete", lambda *_args: None)
 
     worker = threading.Thread(
-        target=threads._initialize_thread, args=(tid, head.id, "repo://example"))
+        target=threads._initialize_thread, args=(tid, head.id, "https://example.invalid/repo.git"))
     worker.start()
     assert started.wait(1)
 

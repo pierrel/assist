@@ -43,7 +43,7 @@ from assist.domain_manager import (
     OriginAdvancedError,
 )
 from assist.git_sync import (GitSyncError, authorize_branch, bind as bind_git,
-                             ownership as git_ownership)
+                             ownership as git_ownership, read_state as read_git_binding)
 from contextlib import ExitStack
 from langgraph.errors import GraphRecursionError
 import anyio
@@ -1655,6 +1655,9 @@ def _initialize_thread(
             _INITIALIZATION_SCHEDULER.complete(run_id, tid)
             return
         if domain:
+            binding = read_git_binding(MANAGER.thread_dir(tid))
+            if binding is None or binding["source"] != domain:
+                raise GitSyncError("Thread setup needs an operator-verified Git source binding")
             # Carry the durable initializer identity and started_at through this
             # full-replace status write.  The former lets cancellation settle only
             # its original head after a clone; the latter keeps clone time in the
