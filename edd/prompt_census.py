@@ -1241,6 +1241,7 @@ def _write_skill(root: Path, name: str, description: str, marker: str,
 def _web_toolset(root: Path, *, full: bool) -> list:
     from assist.events.email import email_tools
     from assist.events.notify import notify_tools
+    from assist.events.quiet import quiet_tools
     from assist.events.store import SubscriptionStore
     from assist.events.tools import subscription_tools
     from assist.frequency import FrequencyDecisionStore, frequency_tools
@@ -1253,6 +1254,7 @@ def _web_toolset(root: Path, *, full: bool) -> list:
         schedule_tools(ScheduleStore(str(root)))
         + subscription_tools(SubscriptionStore(str(root)))
         + notify_tools(lambda _tid: None)
+        + quiet_tools(lambda _tid, _run_id: False)
         + email_tools()
         + [get_location]
         + frequency_tools(FrequencyDecisionStore(str(root)))
@@ -1693,6 +1695,7 @@ _TOOL_ORIGINS = {
     "open_thread": "assist.receptionist",
     "pause_schedule": "assist.schedule.tools",
     "propose_region_download": "assist.geo.tools",
+    "quiet": "assist.events.quiet",
     "read_file": "deepagents.middleware.filesystem",
     "read_url": "assist.tools",
     "remove_allowed_host": "assist.egress.tools",
@@ -1980,6 +1983,7 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "open_thread": {"d9d2c013e8759960c87b9114d1cbac06e9f606b18cc956d7b9b25acfd49c9722"},
     "pause_schedule": {"f4650ba6d1e6b58948b8a09821a1cf1dbfcfb8820a3ae5e63b64dc5841eb2265"},
     "propose_region_download": {"638cb587cde24979bcd6ee36a7169d8b61bec09afd2ab7adf2afecb3f1695d58"},
+    "quiet": {"37edd06eeaad498ac37a8509d6dfe30bb094bed2aa71e858f45b4990445bb715"},
     "read_file": {"2e139ac315b65f5b6614591642b26defae959ab6878fff990f26f0b997feb5af"},
     "read_url": {"a4e5eae871d9956ee0227f48f8e86eb1c96b1740cb73a7e1a1e57a8cfae18716"},
     "remove_allowed_host": {"4bc5319afb9de4381fdd059f5bb35034caccacee5eb52b7443a6af2c27ed0498"},
@@ -2124,9 +2128,9 @@ _TOOL_RESULT_METADATA = {
 }
 
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "aa148c9f2cd1a1d933047a5d6ab0451777832eb1af259f92891624b938da489f"
+    "b83832c07ad98424cc27c49c2a8ab962333d5fdee863eea9de5c75b4e4596823"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "616e32ad80787acc8986bd8260f4da5add3dcfd763c20fc8aa68824668a1194e"
+    "8a84e4503eda611862995f1d8b10e43de07babfa6c8c59c891df858f5b8d4e95"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
@@ -3066,7 +3070,7 @@ def _tool_classification(path: str, name: str, origin: str) -> str:
         return "fixed-role tool"
     if origin.startswith("deepagents") or name == "load_skill" \
             or origin.startswith("langchain.agents.middleware") \
-            or origin == "assist.async_subagents":
+            or origin == "assist.async_subagents" or name == "quiet":
         return "framework-kernel candidate"
     return "skill-scoped candidate"
 
