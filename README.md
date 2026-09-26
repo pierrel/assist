@@ -922,6 +922,9 @@ changes attempt a commit inside the restricted sandbox and the server attempts p
 of only that thread branch. No-file-change turns also attempt publication; main
 and tags are not automatically pushed. Dirty, divergent, rewritten, or unavailable
 Git state holds for explicit reconciliation while preserving work and saved answers.
+Local commit or verified teardown failure reports a turn error with the saved
+answer retained. Remote-only publication failure remains best-effort and does
+not discard a finalized local answer; the pending Git error/fences remain.
 Legacy threads need an operator-verified binding and independent object storage.
 The phone uses normal Git credentials, not an Assist-web Git proxy; pending sync
 is reported through bounded `workspace.sync_error` metadata.

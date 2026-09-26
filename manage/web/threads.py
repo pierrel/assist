@@ -2607,7 +2607,10 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
                 if git_owner else None,
                 sandbox_starting=git_owner.sandbox_started if git_owner else None)
             if git_owner:
-                _git_finish(git_owner, result.reply, (run.rider or {}).get("tz"))
+                with _RUN_ADMISSION_LOCK:
+                    _runs().transition(tid, run.id, "running", result=result.reply)
+                if not _git_finish(git_owner, result.reply, (run.rider or {}).get("tz")):
+                    raise GitSyncError("Git commit is pending; saved answer and files are preserved")
             with _RUN_ADMISSION_LOCK:
                 _runs().transition(tid, run.id, "success", result=result.reply)
             _set_status(tid, "ready")
@@ -3135,7 +3138,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 else:
                     SandboxManager.cleanup(_work_dir, sandbox_generation)
             if git_owner and not chat.pending_reply() and not _pending_email(chat):
-                _git_finish(git_owner, resp or "assistant update", rider.tz if rider else None)
+                if not _git_finish(git_owner, resp or "assistant update", rider.tz if rider else None):
+                    _terminal = ("error", resp)
+                    raise GitSyncError("Git commit is pending; saved answer and files are preserved")
         MANAGER.touch(tid)
 
         # Generate description if there is none
@@ -3282,7 +3287,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 if current.status == "pending":
                     current = _runs().claim(tid, current.id)
                 if current.status == "running":
-                    _runs().transition(tid, current.id, "error", error=str(error))
+                    _runs().transition(tid, current.id, "error", error=str(error),
+                                       **({"result": _terminal[1]} if _terminal is not None else {}))
                 other_running = any(candidate.id != _run.id and candidate.status == "running"
                                     for candidate in _runs().list(tid))
         if not other_running:

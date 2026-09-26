@@ -63,6 +63,9 @@ show the latest published commits with a may-change warning, without waiting.
 
 Dirty worktrees, divergent or rewritten history, missing legacy source bindings,
 and uncertain publication or sandbox teardown hold for explicit reconciliation.
+Local commit or verified teardown failure reports a turn error with the saved
+answer retained. Remote-only publication failure remains best-effort and does
+not discard a finalized local answer; pending Git error/fences remain.
 Saved answers and work are preserved; =workspace.sync_error= explains pending
 Git sync. Legacy threads require an operator-verified binding. Git snapshots
 are capped at 128 MiB and 10,000 scanned object entries, with bounded subprocesses;

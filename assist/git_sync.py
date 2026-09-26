@@ -120,6 +120,9 @@ def read_state(thread_dir: str) -> dict | None:
             or not isinstance(value.get("published"), dict)
             or not isinstance(value.get("preflights"), dict)):
         raise GitSyncError("Git source binding is unavailable")
+    error = value.get("error")
+    if error is not None and (not isinstance(error, str) or len(error) > 256):
+        raise GitSyncError("Git source binding is unavailable")
     branch = value.get("branch")
     if branch is not None:
         if not isinstance(branch, str):
@@ -203,7 +206,7 @@ def bind(thread_dir: str, source: str) -> None:
 
 
 def authorize_branch(thread_dir: str, worktree: str) -> None:
-    """Trusted initializer/operator authorizes an independently stored clone."""
+    """Authorize an independent clone without rebinding an existing thread branch."""
     state = read_state(thread_dir)
     if state is None:
         raise GitSyncError("Git source binding is unavailable")
@@ -211,6 +214,8 @@ def authorize_branch(thread_dir: str, worktree: str) -> None:
                         os.path.join(thread_dir, "agent")))
     with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
         branch, revision = _Store(path).snapshot(worktree)
+    if state["branch"] is not None and state["branch"] != branch:
+        raise GitSyncError("Thread branch changed; explicit branch reconciliation is required")
     state.update(branch=branch, local_revision=revision, preflights={})
     _write_state(thread_dir, state)
 

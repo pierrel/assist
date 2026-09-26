@@ -452,7 +452,7 @@ def test_failed_model_teardown_preserves_answer_and_quarantines(repos, monkeypat
 
     monkeypatch.setattr(threads.SandboxManager, "cleanup_verified", fail_model_cleanup)
     threads._process_message("state", "probe")
-    assert outcomes[-1][1:4] == ("ready", None, "saved answer")
+    assert outcomes[-1][1:4] == ("error", None, "saved answer")
     assert sync.read_state(str(repos[3]))["quarantine"]
     assert len(events) == 5  # No Git-only generation or host publication after failed exit.
     assert git(repos[0], "for-each-ref", "--format=%(refname)") == "refs/heads/main"
@@ -1099,3 +1099,117 @@ def test_late_writer_after_clean_probe_cannot_reach_child_success(repos, monkeyp
     assert calls == ([True] if phase == "commit" else [])
     assert (repos[1] / "tracked").read_text() == "late writer dirt\n"
     assert not sync.read_commit_receipt(str(child_dir), run.work_id)
+
+
+@pytest.mark.parametrize("engine", ["deep", "pi"])
+def test_visible_commit_failure_preserves_answer_and_reports_error(repos, monkeypatch, engine):
+    def model():
+        (repos[1] / "answer-work").write_text("preserve work\n")
+        return "saved answer"
+
+    threads, _, outcomes = web_turn(repos, monkeypatch, model)
+    monkeypatch.setattr(sync.GitSync, "commit", lambda *_args: (
+        _ for _ in ()).throw(sync.GitSyncError("restricted commit failed")))
+    run = threads._create_run("state", "probe")
+    if engine == "pi":
+        from assist.pi_runtime import PiRuntimeResult
+        from assist.pi_conversation import PiConversationStore
+        monkeypatch.setattr(threads, "PI_PREVIEW", SimpleNamespace(admits=lambda _engine: True))
+        monkeypatch.setattr(threads, "_pi_system_prompt", lambda: "be useful")
+        monkeypatch.setattr(threads, "_PI_CONVERSATIONS", PiConversationStore())
+
+        def runtime(**kwargs):
+            backend = threads._get_sandbox_backend("state", before_start=kwargs["sandbox_starting"])
+            result = PiRuntimeResult(model(), 1)
+            kwargs["commit"](result)
+            kwargs["sandbox_cleanup"](backend.container)
+            return result
+
+        monkeypatch.setattr(threads, "_PI_RUNTIME", SimpleNamespace(run=runtime))
+        threads._execute_pi_run(run, user_priority=False)
+        assert threads._PI_CONVERSATIONS.completed_reply(str(repos[3]), run.id).text == "saved answer"
+    else:
+        threads._process_message("state", "probe", _run=run)
+        assert outcomes[-1][1:4] == ("error", None, "saved answer")
+    saved = threads._runs().get("state", run.id)
+    assert saved.status == "error" and saved.result == "saved answer"
+    assert (repos[1] / "answer-work").read_text() == "preserve work\n"
+    assert sync.read_state(str(repos[3]))["sandbox_in_flight"]
+    assert git(repos[0], "for-each-ref", "--format=%(refname)") == "refs/heads/main"
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_authorization_rejects_rebranch_without_erasing_publication_fences(repos, pending):
+    owner, backend = turn(repos)
+    owner.commit(backend, "noop")
+    owner.publish()
+    before = sync.read_state(str(repos[3]))
+    if pending:
+        before["intent"] = {"branch": "thread/test", "expected": before["published_revision"],
+                            "desired": before["local_revision"]}
+        before["preflights"]["retained"] = {"branch": "thread/test", "expected": before["published_revision"],
+                                             "base": before["local_revision"]}
+        sync._write_state(str(repos[3]), before)
+    git(repos[1], "checkout", "-b", "different-thread")
+    with pytest.raises(sync.GitSyncError, match="branch"):
+        sync.authorize_branch(str(repos[3]), str(repos[1]))
+    assert sync.read_state(str(repos[3])) == before
+
+
+@pytest.mark.parametrize("error", ["x" * 257, {"private": "invalid type"}, 7])
+def test_malformed_sync_error_metadata_is_unavailable(repos, error):
+    state = sync.read_state(str(repos[3]))
+    state["error"] = error
+    sync._write_state(str(repos[3]), state)
+    with pytest.raises(sync.GitSyncError, match="binding"):
+        sync.read_state(str(repos[3]))
+    value = sync.workspace(str(repos[3]), str(repos[1]))
+    assert value["repo_label"] == "Repository unavailable"
+    assert isinstance(value["sync_error"], str) and len(value["sync_error"]) <= 256
+
+
+@pytest.mark.parametrize("failure", ["rejected", "unknown"])
+def test_remote_only_child_failure_keeps_local_success_and_retry_fences(repos, monkeypatch, tmp_path, failure):
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: "unused")
+    backend = LocalBackend(repos[1])
+    parent = sync.GitSync(str(repos[3]), str(repos[1]))
+    parent.prepare(backend, "parent")
+    child = sync.GitSync(str(repos[3]), str(repos[1]))
+    child.prepare(backend, "child")
+    (repos[1] / "child").write_text("saved child work\n")
+    child_dir = tmp_path / "child-state"
+    child_dir.mkdir()
+    original = sync._Store.git
+
+    def fail_push(store, *args, **kwargs):
+        if args[0] == "push":
+            if failure == "unknown":
+                raise sync.GitSyncError("push outcome unknown")
+            return "!\tHEAD:refs/heads/thread/test\t[remote rejected]"
+        return original(store, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sync._Store, "git", fail_push)
+        assert threads._git_finish(child, "saved child result", None,
+                                   on_committed=lambda: child.receipt(str(child_dir)))
+    assert child.verified_receipt(str(child_dir))
+    child.forget_work()
+    state = sync.read_state(str(repos[3]))
+    assert list(state["preflights"]) == ["parent"]
+    assert state["local_revision"] == git(repos[1], "rev-parse", "HEAD")
+    assert state["error"] and state["published_revision"] is None
+    parent = sync.GitSync(str(repos[3]), str(repos[1]))
+    parent.select_work("parent")
+    if failure == "unknown":
+        with pytest.raises(sync.GitSyncError, match="unknown"):
+            parent.admit()
+        with pytest.raises(sync.GitSyncError, match="unknown"):
+            parent.prepare(backend, "next")
+        assert sync.read_state(str(repos[3]))["intent"] == state["intent"]
+    else:
+        parent.admit()
+        later = sync.GitSync(str(repos[3]), str(repos[1]))
+        later.prepare(backend, "next")
+        later.commit(backend, "no further change")
+        later.publish()
+        assert git(repos[0], "show", "thread/test:child") == "saved child work"
