@@ -47,7 +47,7 @@ def repos(tmp_path):
     git(seed, "commit", "-m", "base")
     git(seed, "push", "origin", "main")
     for path in (thread, phone):
-        subprocess.run(["git", "clone", str(remote), str(path)], check=True, capture_output=True)
+        subprocess.run(["git", "clone", "--no-hardlinks", str(remote), str(path)], check=True, capture_output=True)
         git(path, "config", "user.email", "test@example.invalid")
         git(path, "config", "user.name", "Test")
     git(thread, "checkout", "-b", "thread/test")
@@ -376,6 +376,8 @@ def web_turn(repos, monkeypatch, model):
     events = []
 
     def backend(*_args, **_kwargs):
+        if _kwargs.get("before_start"):
+            _kwargs["before_start"]()
         value = LocalBackend(thread)
         value.container = object()
         threads.SandboxManager._containers[str(thread)] = value.container
@@ -434,7 +436,7 @@ def test_deep_missing_sandbox_never_runs_model_or_host_sync(repos, monkeypatch):
     monkeypatch.setattr(threads.SandboxManager, "get_pi_sandbox_backend", lambda *_a, **_k: None)
     threads._process_message("state", "probe")
     assert outcomes[-1][1] == "error"
-    assert sync.read_state(str(repos[3]))["sandbox_in_flight"]
+    assert not sync.read_state(str(repos[3])).get("sandbox_in_flight")
     assert git(repos[0], "for-each-ref", "--format=%(refname)") == "refs/heads/main"
 
 
@@ -469,7 +471,7 @@ def test_pi_turn_uses_same_preflight_commit_and_publication(repos, monkeypatch):
     def runtime(**kwargs):
         pending = sync.read_state(str(repos[3]))["pending"]
         assert pending["base"] == git(repos[1], "rev-parse", "HEAD")
-        model = threads._get_sandbox_backend("state")
+        model = threads._get_sandbox_backend("state", before_start=kwargs["sandbox_starting"])
         (repos[1] / "pi").write_text("Pi committed change\n")
         kwargs["commit"](result)
         kwargs["sandbox_cleanup"](model.container)
@@ -513,3 +515,169 @@ def test_worktree_redirection_and_hidden_index_cannot_hide_dirty_files(repos, tm
     with pytest.raises(sync.GitSyncError, match="hidden"):
         turn(repos)
     assert (thread / "tracked").read_text() == "user dirty work\n"
+
+
+def test_changed_turn_commits_without_clone_identity(repos):
+    remote, thread, _, _ = repos
+    git(thread, "config", "--unset", "user.name")
+    git(thread, "config", "--unset", "user.email")
+    owner, backend = turn(repos)
+    (thread / "new").write_text("change\n")
+    owner.commit(backend, "changed")
+    owner.publish()
+    assert git(remote, "log", "-1", "--format=%an <%ae>|%cn <%ce>", "thread/test") == (
+        "Assist <assist@localhost>|Assist <assist@localhost>")
+
+
+def test_legacy_hardlinked_clone_cannot_be_authorized(repos, tmp_path):
+    legacy = tmp_path / "legacy"
+    subprocess.run(["git", "clone", str(repos[0]), str(legacy)], check=True, capture_output=True)
+    git(legacy, "checkout", "-b", "legacy")
+    with pytest.raises(sync.GitSyncError, match="hardlinks"):
+        sync.authorize_branch(str(repos[3]), str(legacy))
+    assert sync.read_state(str(repos[3]))["branch"] == "thread/test"
+
+
+def test_long_index_cannot_hide_flag_after_backend_truncation(repos):
+    thread = repos[1]
+    for index in range(2000):
+        (thread / (f"file-{index:04d}-" + "x" * 55)).touch()
+    (thread / "zz-hidden").write_text("original\n")
+    git(thread, "add", ".")
+    git(thread, "commit", "-m", "large index")
+    git(thread, "update-index", "--assume-unchanged", "zz-hidden")
+    (thread / "zz-hidden").write_text("preserve dirty\n")
+
+    class TruncatingBackend(LocalBackend):
+        def execute(self, command):
+            result = super().execute(command)
+            if len(result.output) > 100_000:
+                result.output = result.output[:100_000] + " [truncated]"
+            return result
+
+    assert len(git(thread, "ls-files", "-v", "-z")) > 100_000
+    owner = sync.GitSync(str(repos[3]), str(thread))
+    with pytest.raises(sync.GitSyncError, match="hidden"):
+        owner.prepare(TruncatingBackend(thread), "large")
+    assert (thread / "zz-hidden").read_text() == "preserve dirty\n"
+
+
+def test_post_fast_forward_hook_cannot_hide_dirty_worktree(repos):
+    remote, thread, phone, _ = repos
+    owner, _ = turn(repos)
+    owner.publish()
+    git(phone, "fetch", "origin", "thread/test")
+    git(phone, "checkout", "-b", "thread/test", "FETCH_HEAD")
+    (phone / "tracked").write_text("phone version\n")
+    git(phone, "add", ".")
+    git(phone, "commit", "-m", "phone")
+    git(phone, "push", "origin", "thread/test")
+    hook = thread / ".git" / "hooks" / "post-merge"
+    hook.write_text("#!/bin/sh\nprintf 'hook dirt\\n' > tracked\ngit update-index --assume-unchanged tracked\n")
+    hook.chmod(0o700)
+    with pytest.raises(sync.GitSyncError, match="hidden"):
+        turn(repos)
+    assert git(thread, "rev-parse", "HEAD") == git(remote, "rev-parse", "thread/test")
+    assert (thread / "tracked").read_text() == "hook dirt\n"
+
+
+def test_malformed_published_pair_is_unavailable_not_type_error(repos):
+    state = sync.read_state(str(repos[3]))
+    state.update(published_branch=[], published_revision="a" * 40)
+    sync._write_state(str(repos[3]), state)
+    with pytest.raises(sync.GitSyncError, match="binding"):
+        sync.read_state(str(repos[3]))
+    assert sync.workspace(str(repos[3]), str(repos[1]))["repo_label"] == "Repository unavailable"
+
+
+def test_metadata_write_failure_removes_private_temporary(repos, monkeypatch):
+    original = sync.os.fsync
+    state = sync.read_state(str(repos[3]))
+
+    def fail(_fd):
+        raise OSError("disk failure")
+
+    monkeypatch.setattr(sync.os, "fsync", fail)
+    with pytest.raises(OSError, match="disk"):
+        sync._write_state(str(repos[3]), state)
+    monkeypatch.setattr(sync.os, "fsync", original)
+    assert not list(repos[3].glob(".git-sync-*"))
+    assert sync.read_state(str(repos[3])) == state
+
+
+@pytest.mark.parametrize("fault", ["missing-git", "lost-sandbox", "dirty"])
+def test_pi_preflight_fault_terminalizes_and_exposes_reason(repos, monkeypatch, fault):
+    from assist.sandbox import SandboxContainerLostError
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: pytest.fail("Deep model ran"))
+    monkeypatch.setattr(threads, "PI_PREVIEW", SimpleNamespace(admits=lambda _engine: True))
+    monkeypatch.setattr(threads, "_PI_RUNTIME", SimpleNamespace(
+        run=lambda **_kwargs: pytest.fail("Pi model ran after failed preflight")))
+    if fault == "missing-git":
+        (repos[1] / ".git").rename(repos[1] / "preserved-git")
+    elif fault == "lost-sandbox":
+        monkeypatch.setattr(sync, "_require_clean", lambda _backend: (
+            _ for _ in ()).throw(SandboxContainerLostError("lost sandbox")))
+    else:
+        (repos[1] / "dirty").write_text("preserve\n")
+    run = threads._create_run("state", "probe")
+    threads._execute_pi_run(run, user_priority=False)
+    assert threads._runs().get("state", run.id).status == "error"
+    assert sync.workspace(str(repos[3]), str(repos[1]))["sync_error"]
+    assert not sync.read_state(str(repos[3])).get("sandbox_in_flight")
+
+
+def test_hidden_child_commits_before_parent_wake_preflight(repos, monkeypatch, tmp_path):
+    def child_model():
+        (repos[1] / "child-file").write_text("child output\n")
+        return "child result"
+
+    threads, events, _ = web_turn(repos, monkeypatch, child_model)
+    child_dir = tmp_path / "child"
+    child_dir.mkdir()
+    monkeypatch.setattr(threads.MANAGER, "thread_dir",
+                        lambda tid: str(child_dir if tid == "sub-child" else repos[3]))
+    monkeypatch.setattr(threads, "_child_waits_for_egress", lambda _run: False)
+    wakes = []
+
+    def wake(_run):
+        owner = sync.GitSync(str(repos[3]), str(repos[1]))
+        owner.prepare(LocalBackend(repos[1]), "parent-wake")
+        wakes.append((repos[1] / "child-file").read_text())
+
+    monkeypatch.setattr(threads, "_complete_child_handoff", wake)
+    run = threads._create_run("sub-child", "probe", mode="child", parent_thread_id="state",
+                              parent_run_id="parent", dispatch_key="probe-child",
+                              assistant_id="delegate-agent")
+    threads._execute_child_run(run)
+    assert threads._runs().get("sub-child", run.id).status == "success"
+    assert wakes == ["child output\n"]
+    assert git(repos[0], "show", "thread/test:child-file") == "child output"
+    assert [event[0] for event in events] == ["start", "exit"] * 3
+
+
+@pytest.mark.parametrize("failure", ["before-create", "during-create"])
+def test_flight_fence_starts_at_docker_create_not_preconditions(repos, monkeypatch, failure):
+    from unittest.mock import MagicMock
+    from docker.errors import DockerException
+    from assist.sandbox_manager import SandboxManager
+    owner = sync.GitSync(str(repos[3]), str(repos[1]))
+    client = MagicMock()
+    if failure == "before-create":
+        monkeypatch.setattr(SandboxManager, "_get_docker_client",
+                            lambda: (_ for _ in ()).throw(DockerException("offline")))
+    else:
+        monkeypatch.setattr(SandboxManager, "_get_docker_client", lambda: client)
+        monkeypatch.setattr(SandboxManager, "_ensure_egress_proxy_running", lambda _client: None)
+        client.containers.run.side_effect = DockerException("ambiguous create")
+    assert SandboxManager.get_pi_sandbox_backend(
+        str(repos[1]), before_start=owner.sandbox_started) is None
+    assert bool(sync.read_state(str(repos[3])).get("sandbox_in_flight")) == (failure == "during-create")
+    if failure == "before-create":
+        client.containers.run.assert_not_called()
+    else:
+        client.containers.run.assert_called_once()
+
+
+def test_shared_repository_labels_are_basename_only():
+    from manage.web import state
+    assert state._domain_label("git@secret-host:repo.git") == "repo"

@@ -36,12 +36,14 @@ class GitSyncError(RuntimeError):
     """Git sync is unavailable; preserve the worktree and show a fixed reason."""
 
 
-def _read_at(directory: int, name: str, limit: int = 65_536) -> bytes:
+def _read_at(directory: int, name: str, limit: int = 65_536, *, independent=False) -> bytes:
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
             raise GitSyncError("Git metadata is not a bounded regular file")
+        if independent and info.st_nlink != 1:
+            raise GitSyncError("Git objects share hardlinks; migrate to an independent clone")
         value = os.read(fd, limit + 1)
         if len(value) > limit:
             raise GitSyncError("Git metadata is too large")
@@ -129,6 +131,9 @@ def read_state(thread_dir: str) -> dict | None:
     published_branch, published_revision = value.get("published_branch"), value.get("published_revision")
     if (published_branch is None) != (published_revision is None):
         raise GitSyncError("Git source binding is unavailable")
+    if published_branch is not None and (not isinstance(published_branch, str)
+                                         or not isinstance(published_revision, str)):
+        raise GitSyncError("Git source binding is unavailable")
     if published_branch is not None and value["published"].get(published_branch) != published_revision:
         raise GitSyncError("Git source binding is unavailable")
     for field in ("pending", "intent"):
@@ -153,18 +158,19 @@ def _write_state(thread_dir: str, value: dict) -> None:
     data = json.dumps(value, sort_keys=True).encode()
     if len(data) > 65_536:
         raise GitSyncError("Git publication metadata is full")
-    with tempfile.NamedTemporaryFile(dir=thread_dir, prefix=".git-sync-", delete=False) as stream:
-        name = stream.name
-        os.chmod(name, 0o600)
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
+    name = None
     try:
+        with tempfile.NamedTemporaryFile(dir=thread_dir, prefix=".git-sync-", delete=False) as stream:
+            name = stream.name
+            os.chmod(name, 0o600)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(name, os.path.join(thread_dir, _BINDING))
         with _directory(thread_dir) as directory:
             os.fsync(directory)
     finally:
-        if os.path.exists(name):
+        if name is not None and os.path.exists(name):
             os.unlink(name)
 
 
@@ -190,11 +196,12 @@ def bind(thread_dir: str, source: str) -> None:
 
 
 def authorize_branch(thread_dir: str, worktree: str) -> None:
-    """Called only by trusted initialization or the user-gated rebranch transition."""
+    """Trusted initializer/operator authorizes an independently stored clone."""
     state = read_state(thread_dir)
     if state is None:
         raise GitSyncError("Git source binding is unavailable")
-    branch, _ = identity(worktree)
+    with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
+        branch, _ = _Store(path).snapshot(worktree)
     state.update(branch=branch, pending=None)
     _write_state(thread_dir, state)
 
@@ -280,7 +287,7 @@ class _Store:
                         count += 1
                         if count > MAX_OBJECT_FILES or time.monotonic() > deadline:
                             raise GitSyncError("Git object snapshot exceeds its bound")
-                        data = _read_at(entries, name, MAX_BYTES - copied)
+                        data = _read_at(entries, name, MAX_BYTES - copied, independent=True)
                         copied += len(data)
                         if copied > MAX_BYTES:
                             raise GitSyncError("Git object snapshot is too large")
@@ -331,6 +338,47 @@ def _sandbox_git(sandbox, command: str) -> str:
     return result.output.strip()
 
 
+def _require_clean(sandbox) -> None:
+    # Inspect the full index in-container. The backend truncates large stdout,
+    # so only a fixed receipt may cross that boundary, never a path listing.
+    probe = '''import subprocess, sys
+args = sys.argv[1:]
+with subprocess.Popen(args + ["ls-files", "-v", "-z"], stdout=subprocess.PIPE,
+                      stderr=subprocess.DEVNULL) as process:
+    total = 0
+    pending = b""
+    while chunk := process.stdout.read(65536):
+        total += len(chunk)
+        if total > 134217728:
+            process.kill()
+            sys.exit(1)
+        entries = (pending + chunk).split(b"\\0")
+        pending = entries.pop()
+        if len(pending) > 8192 or any(not item.startswith(b"H ") for item in entries):
+            process.kill()
+            sys.exit(1)
+    if pending or process.wait():
+        sys.exit(1)
+with subprocess.Popen(args + ["status", "--porcelain", "--untracked-files=normal",
+                              "--ignore-submodules=none"], stdout=subprocess.PIPE,
+                      stderr=subprocess.DEVNULL) as process:
+    if process.stdout.read(1):
+        process.kill()
+        sys.exit(1)
+    if process.wait():
+        sys.exit(1)
+print("clean")
+'''
+    if sandbox is None:
+        raise GitSyncError("Git sync requires the restricted sandbox")
+    try:
+        receipt = _sandbox_git(sandbox, "python -I -c " + shlex.quote(probe) + " " + _WORKTREE_GIT)
+    except GitSyncError as error:
+        raise GitSyncError("Thread worktree has hidden or uncommitted changes; reconcile before the next turn") from error
+    if receipt != "clean":
+        raise GitSyncError("Thread worktree has hidden or uncommitted changes; reconcile before the next turn")
+
+
 class GitSync:
     """Preflight and publication for one bound thread, called under workspace ownership."""
 
@@ -379,13 +427,7 @@ class GitSync:
             floor = self.state["published"].get(branch)
             if floor and (remote is None or not store.ancestor(floor, remote)):
                 raise GitSyncError("Remote thread branch was deleted or rewritten; reconcile explicitly")
-            flags = _sandbox_git(sandbox, _WORKTREE_GIT + " ls-files -v -z")
-            if any(not entry.startswith("H ") for entry in flags.split("\0") if entry):
-                raise GitSyncError("Thread index has hidden or unmerged changes; reconcile explicitly")
-            status = _WORKTREE_GIT + " status --porcelain --untracked-files=normal --ignore-submodules=none"
-            dirty = _sandbox_git(sandbox, status)
-            if dirty:
-                raise GitSyncError("Thread worktree has uncommitted changes; reconcile before the next turn")
+            _require_clean(sandbox)
             if remote and local != remote and not (store.ancestor(local, remote) or store.ancestor(remote, local)):
                 raise GitSyncError("Local and remote thread branches diverged; reconcile explicitly")
             bundle = os.path.join(path, "incoming.bundle")
@@ -409,8 +451,9 @@ class GitSync:
             commands.append("rm -- " + shlex.quote(transfer))
             _sandbox_git(sandbox, " && ".join(commands))
             expected_local = remote if remote and store.ancestor(local, remote) else local
-            if self._branch() != (branch, expected_local) or _sandbox_git(sandbox, status):
+            if self._branch() != (branch, expected_local):
                 raise GitSyncError("Git preflight did not leave the expected clean thread checkout")
+            _require_clean(sandbox)
             self.state["pending"] = {"work_id": work_id, "branch": branch,
                                      "expected": remote, "base": self._branch()[1]}
             self.state["error"] = None
@@ -424,7 +467,9 @@ class GitSync:
             raise GitSyncError("Thread branch changed; reconcile before publication")
         _sandbox_git(sandbox, _WORKTREE_GIT + " add -A && { " + _WORKTREE_GIT
                      + " diff --cached --quiet; code=$?; if [ \"$code\" = 1 ]; then "
-                     + _WORKTREE_GIT + " commit -m "
+                     + "GIT_AUTHOR_NAME=Assist GIT_AUTHOR_EMAIL=assist@localhost "
+                     + "GIT_COMMITTER_NAME=Assist GIT_COMMITTER_EMAIL=assist@localhost "
+                     + _WORKTREE_GIT + " -c commit.gpgSign=false commit -m "
                      + shlex.quote(message[:4096] or "assistant update")
                      + "; else exit \"$code\"; fi; }")
 

@@ -269,13 +269,14 @@ class SandboxManager:
     @classmethod
     def _get_sandbox_backend(cls, work_dir: str, tz: str | None,
                              agent_dir: str | None, include_assist_env: bool,
-                             include_egress_approvals: bool):
+                             include_egress_approvals: bool, before_start=None):
         """Create one per-turn sandbox from a named authority profile.
 
         ``include_assist_env`` is the line between ordinary Deep Agents work and
         Pi preview work.  A Pi sandbox retains Docker's workspace and egress
         containment but receives no generic application environment or private
-        agent mount.
+        agent mount. ``before_start`` records a Git recovery fence immediately
+        before Docker create; earlier policy/setup failures cannot strand it.
         """
         # Per-turn lifecycle: never reuse a container across turns.  The web
         # layer tears each container down at the end of its turn
@@ -412,6 +413,8 @@ class SandboxManager:
                     "mode": "rw",
                 }
 
+            if before_start is not None:
+                before_start()
             container = client.containers.run(
                 SANDBOX_IMAGE,
                 detach=True,
@@ -438,16 +441,18 @@ class SandboxManager:
 
     @classmethod
     def get_sandbox_backend(cls, work_dir: str, tz: str | None = None,
-                            agent_dir: str | None = None):
+                            agent_dir: str | None = None, before_start=None):
         """Return the ordinary Docker sandbox, including its established app env."""
         return cls._get_sandbox_backend(
-            work_dir, tz, agent_dir, include_assist_env=True, include_egress_approvals=True)
+            work_dir, tz, agent_dir, include_assist_env=True, include_egress_approvals=True,
+            before_start=before_start)
 
     @classmethod
-    def get_pi_sandbox_backend(cls, work_dir: str, tz: str | None = None):
+    def get_pi_sandbox_backend(cls, work_dir: str, tz: str | None = None, before_start=None):
         """Return Pi's workspace-only Docker sandbox, without app secrets or `/agent`."""
         return cls._get_sandbox_backend(
-            work_dir, tz, None, include_assist_env=False, include_egress_approvals=False)
+            work_dir, tz, None, include_assist_env=False, include_egress_approvals=False,
+            before_start=before_start)
 
     # work_dir -> egress-network IP for the client-attribution map (thread-
     # scoped egress grants; docs/2026-07-21-egress-approval-hitl.org).

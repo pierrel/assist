@@ -914,6 +914,17 @@ ASSIST_DOMAINS=/path/to/repo1.git,/path/to/repo2.git
 
 When enabled, each thread creates a git branch and can merge changes back to main.
 
+New Git-backed web threads bind their configured source and actual non-main
+thread branch outside the agent workspace. Before fresh turns, clean phone-pushed
+commits fast-forward locally. After successful Deep, Pi, or hidden child work,
+changes commit inside the restricted sandbox and the server attempts publication
+of only that thread branch. No-file-change turns also attempt publication; main
+and tags are not automatically pushed. Dirty, divergent, rewritten, or unavailable
+Git state holds for explicit reconciliation while preserving work and saved answers.
+Legacy threads need an operator-verified binding and independent object storage.
+The phone uses normal Git credentials, not an Assist-web Git proxy; pending sync
+is reported through bounded `workspace.sync_error` metadata.
+
 ## Docker Sandbox
 
 On the web path, the agent executes shell commands inside a Docker container rather than on the host. Each turn gets a fresh container with the domain repository bind-mounted at `/workspace`, also exposed as `/user`; persistent thread scratch at `/tmp`; and, for visible main-agent turns, private state at `/agent`. The current sandbox also inherits the configured `ASSIST_*` environment, so it is not yet a credential-free boundary. The CLI path remains host-backed.
@@ -923,7 +934,8 @@ The sandbox image is built automatically by `make web` (and `make deploy`). To b
 make sandbox-build
 ```
 
-If Docker is unavailable, the agent falls back to running without a sandbox.
+If Docker is unavailable, non-Git work can retain the established host fallback.
+Git-bound web turns fail closed instead of running unsafe host worktree commands.
 
 ---
 

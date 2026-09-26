@@ -1,0 +1,47 @@
+#+title: Direct thread Git sync implementation review corrections
+#+date: 2026-09-26
+
+* Current per-turn boundaries
+The private-store, workspace-config isolation and bounded host subprocess
+guarantees apply to the new per-turn Git sync path only. They are not claims
+about existing rendering, review, CLI or user-gated main-merge host Git calls.
+Those pre-existing sinks and main-merge ancestry behavior remain separate debt.
+
+Restricted commits use the fixed Assist identity, without mounting host Git
+credentials. The flight marker is persisted immediately before Docker create,
+not before ownership checks or known pre-container failures. Ambiguous creation
+or teardown still retains the recovery hold. Preflight failures are converted
+to bounded sync reasons and terminalize the accepted Pi Run.
+
+Fresh hidden child writers use the same Git preflight as visible writers. After
+saving their result, they prove model teardown, commit in a restricted generation
+and attempt branch publication before releasing ownership or waking the parent.
+This prevents child-produced files from permanently blocking the parent wake.
+Paused/approval resumes do not fast-forward an in-flight workspace.
+
+Clean checks inspect bounded index output inside the container and return only
+a fixed receipt, before and after fast-forward. Backend output truncation cannot
+hide an index flag. Object reads and branch authorization reject shared hardlinks.
+
+* Legacy recovery condition
+Before binding an older local clone, verify its configured source, non-main
+branch, absence of live sandbox writers and independent Git object storage.
+If its object files share inodes with another repository, preserve dirty files
+and commit identities and migrate to an independent clone before authorization.
+New local clones already use =--no-hardlinks=. Never infer a trusted source from
+agent-writable origin or silently drop dirty work during migration.
+
+* Deferred model guidance
+The older =git-sync= rebase and =git-history= reset guidance conflict with
+ancestry-preserving publication. They are not repaired or claimed accepted by
+this code candidate. Their measured replacement must cover merge and undo
+requests and adjacent behavior under the required matched eval stages. The
+current deterministic publisher rejects ancestry loss rather than rewriting
+phone commits; an affected model request can remain pending for reconciliation.
+
+* Historical supersessions
+This document directly corrects the =Boundaries= and =Recovery notes= sections
+of =2026-09-26-direct-thread-git-sync.org=: host-only/private-store assertions
+are scoped to per-turn sync, and legacy binding requires independent objects.
+It also expands that document's =Concrete separate follow-up= to name the
+pre-existing =git-history= rollback guidance, alongside =git-sync= guidance.
