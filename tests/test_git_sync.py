@@ -770,7 +770,7 @@ def test_child_git_failure_preserves_result_without_success_wake(repos, monkeypa
     assert outcomes[-1].status == "error"
     assert outcomes[-1].result == "saved child result"
     assert (repos[1] / "child").read_text() == "preserve child\n"
-    assert not sync.has_commit_receipt(str(child_dir), run.work_id)
+    assert not sync.read_commit_receipt(str(child_dir), run.work_id)
     threads.SandboxManager._containers.pop(str(repos[1]), None)
 
 
@@ -814,7 +814,7 @@ def test_child_crash_after_commit_recovers_saved_result_without_model_replay(rep
             threads._execute_child_run(run)
     saved = threads._runs().get("sub-child", run.id)
     assert saved.status == "running" and saved.result == "saved child result"
-    assert sync.has_commit_receipt(str(child_dir), run.work_id)
+    assert sync.read_commit_receipt(str(child_dir), run.work_id)
     threads._recover_child_run(saved)
     assert calls == [None]
     assert wakes == ["saved child result"]
@@ -836,3 +836,137 @@ def test_pi_lock_io_error_terminalizes_exact_pending_ticket(repos, monkeypatch):
     threads._execute_pi_run(run, user_priority=False)
     saved = threads._runs().get("state", run.id)
     assert saved.status == "error" and "ownership" in saved.error
+
+
+def test_unresolved_child_intent_blocks_parent_resume_and_push(repos, monkeypatch):
+    remote, thread, _, binding = repos
+    backend = LocalBackend(thread)
+    parent = sync.GitSync(str(binding), str(thread))
+    parent.prepare(backend, "parent")
+    child = sync.GitSync(str(binding), str(thread))
+    child.prepare(backend, "child")
+    (thread / "child").write_text("child\n")
+    child.commit(backend, "child")
+    original = sync._Store.git
+
+    def lose_response(store, *args, **kwargs):
+        if args[0] == "push":
+            raise sync.GitSyncError("unknown push outcome")
+        return original(store, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sync._Store, "git", lose_response)
+        with pytest.raises(sync.GitSyncError, match="unknown"):
+            child.publish()
+    intent = sync.read_state(str(binding))["intent"]
+    resumed = sync.GitSync(str(binding), str(thread))
+    resumed.select_work("parent")
+    with pytest.raises(sync.GitSyncError, match="unknown"):
+        resumed.admit()
+    with pytest.raises(sync.GitSyncError, match="unknown"):
+        resumed.publish()
+    assert sync.read_state(str(binding))["intent"] == intent
+    assert git(remote, "for-each-ref", "--format=%(refname)") == "refs/heads/main"
+
+
+def test_unpublished_child_floor_survives_rejection_and_parent_reset(repos, monkeypatch):
+    remote, thread, _, binding = repos
+    backend = LocalBackend(thread)
+    base = git(thread, "rev-parse", "HEAD")
+    parent = sync.GitSync(str(binding), str(thread))
+    parent.prepare(backend, "parent")
+    child = sync.GitSync(str(binding), str(thread))
+    child.prepare(backend, "child")
+    (thread / "child").write_text("child\n")
+    child.commit(backend, "child")
+    child_revision = git(thread, "rev-parse", "HEAD")
+    original = sync._Store.git
+
+    def reject(store, *args, **kwargs):
+        if args[0] == "push":
+            return "!\tHEAD:refs/heads/thread/test\t[remote rejected]"
+        return original(store, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sync._Store, "git", reject)
+        with pytest.raises(sync.GitSyncError, match="rejected"):
+            child.publish()
+    child.forget_work()
+    assert sync.read_state(str(binding))["local_revision"] == child_revision
+    git(thread, "reset", "--hard", base)  # Disposable adversarial resumed-model action.
+    (thread / "parent").write_text("wrong ancestry\n")
+    git(thread, "add", ".")
+    git(thread, "commit", "-m", "parent reset")
+    resumed = sync.GitSync(str(binding), str(thread))
+    resumed.select_work("parent")
+    with pytest.raises(sync.GitSyncError, match="history"):
+        resumed.admit()
+    with pytest.raises(sync.GitSyncError, match="history"):
+        resumed.publish()
+    assert git(remote, "for-each-ref", "--format=%(refname)") == "refs/heads/main"
+    assert sync.read_state(str(binding))["local_revision"] == child_revision
+
+
+def test_stale_child_receipt_cannot_certify_dropped_commit(repos, tmp_path):
+    _, thread, _, binding = repos
+    base = git(thread, "rev-parse", "HEAD")
+    owner, backend = turn(repos)
+    (thread / "child").write_text("child\n")
+    owner.commit(backend, "child")
+    child_dir = tmp_path / "child-state"
+    child_dir.mkdir()
+    owner.publish(on_committed=lambda: owner.receipt(str(child_dir)))
+    assert owner.verified_receipt(str(child_dir))
+    git(thread, "reset", "--hard", base)
+    with pytest.raises(sync.GitSyncError, match="Child commit"):
+        owner.verified_receipt(str(child_dir))
+    assert sync.read_commit_receipt(str(child_dir), "work-1")["revision"] != base
+
+
+def test_child_crash_after_teardown_before_floor_keeps_parent_fenced(repos, monkeypatch, tmp_path):
+    def model():
+        (repos[1] / "child").write_text("keep committed child\n")
+        return "saved child result"
+
+    threads, _, _ = web_turn(repos, monkeypatch, model)
+    child_dir = tmp_path / "sub-child"
+    child_dir.mkdir()
+    monkeypatch.setattr(threads.MANAGER, "thread_dir",
+                        lambda tid: str(child_dir if tid == "sub-child" else repos[3]))
+    monkeypatch.setattr(threads, "_child_waits_for_egress", lambda _run: False)
+    outcomes = []
+    monkeypatch.setattr(threads, "_complete_child_handoff", lambda run: outcomes.append(run))
+    run = threads._create_run("sub-child", "probe", mode="child", parent_thread_id="state",
+                              parent_run_id="parent", dispatch_key="gap-child",
+                              assistant_id="delegate-agent")
+    with monkeypatch.context() as patch:
+        patch.setattr(sync.GitSync, "publish", lambda _owner, **_kw: (
+            _ for _ in ()).throw(SystemExit("after teardown")))
+        with pytest.raises(SystemExit, match="after teardown"):
+            threads._execute_child_run(run)
+    saved = threads._runs().get("sub-child", run.id)
+    assert saved.status == "running" and saved.result == "saved child result"
+    assert sync.read_state(str(repos[3]))["sandbox_in_flight"]
+    assert not sync.read_commit_receipt(str(child_dir), run.work_id)
+    with pytest.raises(sync.GitSyncError, match="verification"):
+        sync.GitSync(str(repos[3]), str(repos[1]))
+    threads._recover_child_run(saved)
+    assert outcomes[-1].status == "error" and outcomes[-1].result == "saved child result"
+    assert (repos[1] / "child").read_text() == "keep committed child\n"
+
+
+def test_missing_bound_local_floor_fails_closed(repos):
+    state = sync.read_state(str(repos[3]))
+    state.pop("local_revision")
+    sync._write_state(str(repos[3]), state)
+    with pytest.raises(sync.GitSyncError, match="binding"):
+        sync.GitSync(str(repos[3]), str(repos[1]))
+    assert sync.workspace(str(repos[3]), str(repos[1]))["repo_label"] == "Repository unavailable"
+
+
+def test_standard_git_repack_bitmap_does_not_block_snapshot(repos):
+    git(repos[1], "repack", "-adb", "--write-bitmap-index")
+    assert list((repos[1] / ".git" / "objects" / "pack").glob("*.bitmap"))
+    owner, _ = turn(repos)
+    owner.publish()
+    assert git(repos[0], "rev-parse", "thread/test") == git(repos[1], "rev-parse", "HEAD")

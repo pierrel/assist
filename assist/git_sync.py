@@ -125,6 +125,11 @@ def read_state(thread_dir: str) -> dict | None:
         if not isinstance(branch, str):
             raise GitSyncError("Git source binding is unavailable")
         _branch(branch)
+    local_revision = value.get("local_revision")
+    if ((branch is not None and local_revision is None)
+            or (local_revision is not None and (not isinstance(local_revision, str)
+                                                or not _OID.fullmatch(local_revision)))):
+        raise GitSyncError("Git source binding is unavailable")
     for name, revision in value["published"].items():
         if not isinstance(name, str) or not isinstance(revision, str) or not _OID.fullmatch(revision):
             raise GitSyncError("Git source binding is unavailable")
@@ -193,7 +198,8 @@ def bind(thread_dir: str, source: str) -> None:
         return
     _write_state(thread_dir, {"version": 1, "source": source, "published": {},
                               "published_branch": None, "published_revision": None,
-                              "branch": None, "intent": None, "preflights": {}, "error": None})
+                              "branch": None, "local_revision": None,
+                              "intent": None, "preflights": {}, "error": None})
 
 
 def authorize_branch(thread_dir: str, worktree: str) -> None:
@@ -202,8 +208,8 @@ def authorize_branch(thread_dir: str, worktree: str) -> None:
     if state is None:
         raise GitSyncError("Git source binding is unavailable")
     with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
-        branch, _ = _Store(path).snapshot(worktree)
-    state.update(branch=branch, preflights={})
+        branch, revision = _Store(path).snapshot(worktree)
+    state.update(branch=branch, local_revision=revision, preflights={})
     _write_state(thread_dir, state)
 
 
@@ -288,11 +294,13 @@ class _Store:
                     target.mkdir(exist_ok=True)
                     for entry in os.scandir(entries):
                         name = entry.name
-                        if not _OBJECT.fullmatch(name):
-                            raise GitSyncError("Unsupported Git object entry")
                         count += 1
                         if count > MAX_OBJECT_FILES or time.monotonic() > deadline:
                             raise GitSyncError("Git object snapshot exceeds its bound")
+                        if directory == "pack" and re.fullmatch(r"pack-[0-9a-f]{40}\.(?:bitmap|keep)", name):
+                            continue  # Inert local repack accelerators/pins are never imported.
+                        if not _OBJECT.fullmatch(name):
+                            raise GitSyncError("Unsupported Git object entry")
                         data = _read_at(entries, name, MAX_BYTES - copied, independent=True)
                         copied += len(data)
                         if copied > MAX_BYTES:
@@ -348,7 +356,7 @@ def _sandbox_git(sandbox, command: str) -> None:
 
 def _require_clean(sandbox) -> None:
     # Inspect the full index in-container. The backend truncates large stdout,
-    # so only a fixed receipt may cross that boundary, never a path listing.
+    # so only exit status crosses that boundary, never a path listing.
     probe = '''import subprocess, sys
 args = sys.argv[1:]
 with subprocess.Popen(args + ["ls-files", "-v", "-z"], stdout=subprocess.PIPE,
@@ -394,7 +402,7 @@ class GitSync:
         if self.state is None:
             raise GitSyncError("Existing Git repository needs an operator-verified source binding")
         if self.state.get("quarantine") or self.state.get("sandbox_in_flight"):
-            raise GitSyncError("Previous Git sandbox teardown needs operator verification")
+            raise GitSyncError("Previous Git teardown or commit finalization needs operator verification")
 
     def sandbox_started(self) -> None:
         self.state["sandbox_in_flight"] = True
@@ -411,6 +419,36 @@ class GitSync:
         branch, revision = self._branch()
         _write_state(child_thread_dir, {"work_id": self.work_id, "branch": branch,
                                        "revision": revision}, "git-commit-receipt.json")
+
+    def admit(self) -> tuple[str, str]:
+        """Authenticate retained local work before model admission, including resumes."""
+        if self.state.get("intent"):
+            raise GitSyncError("Previous publication outcome is unknown; reconcile before resuming")
+        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
+            store = _Store(path)
+            branch, revision = store.snapshot(self.worktree)
+            pending = self.state["preflights"].get(self.work_id)
+            floor = self.state.get("local_revision")
+            if (branch != self.state.get("branch") or not pending
+                    or not store.ancestor(pending["base"], revision)
+                    or (floor and not store.ancestor(floor, revision))):
+                raise GitSyncError("Retained local Git history changed; reconcile before resuming")
+            return branch, revision
+
+    def verified_receipt(self, child_thread_dir: str) -> bool:
+        """A child's exact receipt commit must remain in authenticated local history."""
+        receipt = read_commit_receipt(child_thread_dir, self.work_id)
+        if receipt is None:
+            return False
+        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
+            store = _Store(path)
+            branch, revision = store.snapshot(self.worktree)
+            floor = self.state.get("local_revision")
+            if (branch != self.state.get("branch") or branch != receipt["branch"]
+                    or not store.ancestor(receipt["revision"], revision)
+                    or (floor and not store.ancestor(floor, revision))):
+                raise GitSyncError("Child commit left the thread history; retain result and reconcile")
+        return True
 
     def forget_work(self) -> None:
         """Drop only an already terminal child's retained preflight."""
@@ -439,6 +477,8 @@ class GitSync:
             branch, local = store.snapshot(self.worktree)
             if (branch, local) != self._branch():
                 raise GitSyncError("Thread branch changed during preflight")
+            if self.state.get("local_revision") and not store.ancestor(self.state["local_revision"], local):
+                raise GitSyncError("Retained local Git history changed; reconcile explicitly")
             remote = store.fetch(self.state["source"], branch)
             intent = self.state.get("intent")
             if intent:
@@ -484,6 +524,7 @@ class GitSync:
             self.state["preflights"][work_id] = {"branch": branch,
                                                 "expected": remote, "base": self._branch()[1]}
             self.state["error"] = None
+            self.state["local_revision"] = self._branch()[1]
             _write_state(self.thread_dir, self.state)
 
     def commit(self, sandbox, message: str) -> None:
@@ -506,6 +547,8 @@ class GitSync:
         pending = self.state["preflights"].get(self.work_id)
         if not pending:
             raise GitSyncError("Git turn has no verified remote preflight")
+        if self.state.get("intent"):
+            raise GitSyncError("Previous publication outcome is unknown; reconcile before publication")
         with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
             store = _Store(path)
             branch, desired = store.snapshot(self.worktree)
@@ -513,8 +556,12 @@ class GitSync:
                 raise GitSyncError("Thread branch changed during publication")
             if branch != pending["branch"]:
                 raise GitSyncError("Thread branch changed; reconcile before publication")
-            if not store.ancestor(pending["base"], desired):
+            floor = self.state.get("local_revision")
+            if (not store.ancestor(pending["base"], desired)
+                    or (floor and not store.ancestor(floor, desired))):
                 raise GitSyncError("Local thread history changed; sync is pending")
+            self.state["local_revision"] = desired
+            _write_state(self.thread_dir, self.state)
             if on_committed is not None:
                 on_committed()
             remote = store.fetch(self.state["source"], branch)
@@ -557,13 +604,13 @@ def source_label(source: str) -> str:
     return path.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")[:200]
 
 
-def has_commit_receipt(child_thread_dir: str, work_id: str) -> bool:
-    """A fixed host-only record proves this exact child work committed locally."""
+def read_commit_receipt(child_thread_dir: str, work_id: str) -> dict | None:
+    """Read a bounded exact-work receipt; callers must authenticate its ancestry."""
     try:
         with _directory(child_thread_dir) as directory:
             value = json.loads(_read_at(directory, "git-commit-receipt.json", 1024))
     except FileNotFoundError:
-        return False
+        return None
     except (OSError, ValueError, UnicodeError) as error:
         raise GitSyncError("Child Git completion receipt is unavailable") from error
     if (not isinstance(value, dict) or not isinstance(value.get("branch"), str)
@@ -571,7 +618,7 @@ def has_commit_receipt(child_thread_dir: str, work_id: str) -> bool:
             or not _OID.fullmatch(value["revision"])):
         raise GitSyncError("Child Git completion receipt is unavailable")
     _branch(value["branch"])
-    return value.get("work_id") == work_id
+    return value if value.get("work_id") == work_id else None
 
 
 def workspace(thread_dir: str, worktree: str) -> dict:

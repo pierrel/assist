@@ -2194,6 +2194,8 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                         git_owner.select_work(run.work_id)
                     if git_owner and not (resume or run.resume or run.resume_decision is not None):
                         _git_prepare(git_owner, run.work_id, None)
+                    elif git_owner:
+                        _git_admit(git_owner)
                     try:
                         sandbox = _get_sandbox_backend(
                             run.parent_thread_id, include_agent=False,
@@ -2345,9 +2347,8 @@ def _recover_child_run(run: Run) -> None:
             with THREAD_QUEUE.acquire(run.thread_id), git_ownership(
                     MANAGER.thread_dir(run.parent_thread_id), parent_working_dir) as git_owner:
                 if git_owner:
-                    from assist.git_sync import has_commit_receipt
                     git_owner.select_work(run.work_id)
-                    if not has_commit_receipt(MANAGER.thread_dir(run.thread_id), run.work_id) and not _git_finish(
+                    if not git_owner.verified_receipt(MANAGER.thread_dir(run.thread_id)) and not _git_finish(
                             git_owner, str(result), None, on_committed=lambda: git_owner.receipt(
                                 MANAGER.thread_dir(run.thread_id))):
                         raise GitSyncError("Child Git commit is pending; saved result and files are preserved")
@@ -2718,15 +2719,31 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
     _RESUME_SCHEDULER.submit(successor.id, tid, user_priority=user_priority)
 
 
-def _git_cleanup(owner, generation) -> None:
-    """Persist a recovery fence if this exact sandbox cannot be proved exited."""
+def _git_reap(owner, generation) -> None:
+    """Prove exact generation exit, retaining the Git flight/finalization fence."""
     try:
         SandboxManager.cleanup_verified(owner.worktree, generation)
-        owner.sandbox_stopped()
     except Exception as error:
         owner.quarantine()
         owner.failed(GitSyncError("Git sandbox teardown needs operator verification"))
         raise GitSyncError("Git sandbox teardown needs operator verification") from error
+
+
+def _git_cleanup(owner, generation) -> None:
+    """Prove model/preflight generation exit and clear its flight fence."""
+    _git_reap(owner, generation)
+    owner.sandbox_stopped()
+
+
+def _git_admit(owner):
+    """Fail closed with a bounded persisted reason before a resumed model runs."""
+    try:
+        return owner.admit()
+    except Exception as error:
+        reason = error if isinstance(error, GitSyncError) else GitSyncError(
+            "Git admission failed; preserve the workspace and reconcile before retrying")
+        owner.failed(reason)
+        raise reason from error
 
 
 def _git_prepare(owner, work_id: str, timezone: str | None) -> None:
@@ -2740,6 +2757,9 @@ def _git_prepare(owner, work_id: str, timezone: str | None) -> None:
             owner.prepare(backend, work_id)
         finally:
             _git_cleanup(owner, backend.container)
+        _, revision = owner.admit()
+        if revision != owner.state["preflights"][work_id]["base"]:
+            raise GitSyncError("Git checkout changed during preflight teardown; reconcile before the turn")
     except Exception as error:
         reason = error if isinstance(error, GitSyncError) else GitSyncError(
             "Git preflight failed; preserve the workspace and reconcile before retrying")
@@ -2755,11 +2775,12 @@ def _git_finish(owner, message: str, timezone: str | None, *, on_committed=None)
         nonlocal committed
         if on_committed is not None:
             on_committed()
+        owner.sandbox_stopped()
         committed = True
 
     try:
         if owner.state.get("quarantine") or owner.state.get("sandbox_in_flight"):
-            raise GitSyncError("Git sandbox teardown needs operator verification")
+            raise GitSyncError("Git teardown or commit finalization needs operator verification")
         backend = SandboxManager.get_pi_sandbox_backend(
             owner.worktree, tz=timezone, before_start=owner.sandbox_started)
         if backend is None:
@@ -2767,7 +2788,7 @@ def _git_finish(owner, message: str, timezone: str | None, *, on_committed=None)
         try:
             owner.commit(backend, message)
         finally:
-            _git_cleanup(owner, backend.container)
+            _git_reap(owner, backend.container)
         owner.publish(on_committed=verified_local_commit)
     except Exception as error:
         owner.failed(error if isinstance(error, GitSyncError) else GitSyncError(
@@ -2964,6 +2985,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             if git_owner and not resume and resume_decision is None:
                 _git_prepare(git_owner, _run.work_id if _run else tid,
                              rider.tz if rider else None)
+            elif git_owner:
+                _git_admit(git_owner)
             sandbox = None
             sandbox_generation = None
             try:
