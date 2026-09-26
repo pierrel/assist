@@ -277,7 +277,8 @@ class SandboxManager:
         Pi preview work.  A Pi sandbox retains Docker's workspace and egress
         containment but receives no generic application environment or private
         agent mount. ``before_start`` records a Git recovery fence immediately
-        before Docker create; earlier policy/setup failures cannot strand it.
+        before Docker create; earlier policy/setup failures create no new fence.
+        A preceding Git generation's retained fence is cleared only after verification.
         Read-only Git verification omits persistent scratch/private mounts, so
         configured filters cannot mutate the checked worktree through an alias.
         """
