@@ -13,9 +13,11 @@ import os
 import sqlite3
 import tempfile
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from assist.browser.manager import BrowserManager
 from assist.thread_manager import ThreadManager
+from assist.browser.authority import mark_new_thread
 
 
 def _seed_thread(manager: ThreadManager, tid: str) -> str:
@@ -28,6 +30,7 @@ def _seed_thread(manager: ThreadManager, tid: str) -> str:
     """
     tdir = os.path.join(manager.root_dir, tid)
     os.makedirs(os.path.join(tdir, "domain"), exist_ok=True)
+    mark_new_thread(manager.root_dir, tid)
     # Drop a sentinel file so we can verify rmtree happened.
     with open(os.path.join(tdir, "marker.txt"), "w") as f:
         f.write("seed")
@@ -102,6 +105,73 @@ class TestHardDeleteRemovesAllThree(TestCase):
                 self.assertFalse(os.path.exists(agent_dir))
                 self.assertEqual(_count_rows(mgr, "checkpoints", tid), 0)
                 self.assertEqual(_count_rows(mgr, "writes", tid), 0)
+            finally:
+                mgr.close()
+
+
+class TestHardDeleteBrowserStop(TestCase):
+    """Direct deletion proves browser teardown before deleting durable state."""
+
+    def test_browser_stop_precedes_sandbox_and_directory_deletion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = ThreadManager(root_dir=tmp)
+            try:
+                tid = "20260504000009-browser"
+                tdir = _seed_thread(mgr, tid)
+                calls = []
+
+                def stop(_tid):
+                    self.assertTrue(os.path.isdir(tdir))
+                    calls.append("browser")
+
+                def confirm(root, thread_id, owner):
+                    self.assertEqual((root, thread_id, owner), (tmp, tid, None))
+                    calls.append("confirmed")
+
+                session = Mock()
+                session.close.side_effect = lambda: stop(tid)
+                with patch.object(BrowserManager, "_sessions", {tid: session}), \
+                     patch("assist.browser.manager.BrowserManager.confirm_owner_stopped",
+                           side_effect=confirm), \
+                     patch("assist.thread_manager.SandboxManager.cleanup",
+                           side_effect=lambda _work_dir: calls.append("sandbox")):
+                    mgr.hard_delete(tid)
+
+                self.assertEqual(calls, ["browser", "confirmed", "sandbox"])
+                session.close.assert_called_once_with()
+                self.assertFalse(os.path.exists(tdir))
+            finally:
+                mgr.close()
+
+    def test_unconfirmed_browser_stop_preserves_thread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = ThreadManager(root_dir=tmp)
+            try:
+                tid = "20260504000010-browser"
+                tdir = _seed_thread(mgr, tid)
+                with patch("assist.browser.manager.BrowserManager.cleanup"), \
+                     patch("assist.browser.manager.BrowserManager.confirm_owner_stopped",
+                           side_effect=RuntimeError("browser stop unconfirmed")), \
+                     patch("assist.thread_manager.SandboxManager.cleanup") as sandbox:
+                    with self.assertRaisesRegex(RuntimeError, "stop unconfirmed"):
+                        mgr.hard_delete(tid)
+                sandbox.assert_not_called()
+                self.assertTrue(os.path.isdir(tdir))
+                self.assertEqual(_count_rows(mgr, "checkpoints", tid), 1)
+            finally:
+                mgr.close()
+
+
+class TestThreadReservationBrowserAuthority(TestCase):
+    def test_failed_authority_write_does_not_publish_generic_thread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = ThreadManager(root_dir=tmp)
+            try:
+                with patch("assist.browser.authority.mark_new_thread",
+                           side_effect=OSError("disk full")):
+                    with self.assertRaisesRegex(OSError, "disk full"):
+                        mgr.reserve("new-thread")
+                self.assertFalse(os.path.exists(mgr.thread_dir("new-thread")))
             finally:
                 mgr.close()
 

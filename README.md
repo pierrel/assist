@@ -52,6 +52,7 @@ where reliability is harder than with frontier APIs.
   nondefault port must be explicit, such as `http://host.docker.internal:5050`.
   Browser pages cannot approve access. Browser tools do not return non-HTTP(S)
   page content. An empty new popup can be reused for an HTTP(S) visit.
+  Deleting a thread stops its browser sidecar before removing the thread state.
 
 - **Specialized agents and skills out of the box.**
   - **Research agent** rigorous fact-checking and critiquing with

@@ -1,5 +1,6 @@
 """Regression tests for safe service-install configuration transport."""
 import os
+import shutil
 import subprocess
 
 
@@ -90,3 +91,16 @@ def test_make_exports_egress_host_paths_to_deploy_recipe():
              if key not in {"ASSIST_EGRESS_CLIENT_MAP_DIR", "ASSIST_EGRESS_RUNTIME_DIR"}},
         capture_output=True, text=True, check=True)
     assert result.stdout == "/var/lib/assist/proxy-map|/var/lib/assist/egress-runtime"
+
+
+def test_make_leaves_unconfigured_runtime_directory_unset(tmp_path):
+    repo = os.path.dirname(os.path.dirname(__file__))
+    shutil.copyfile(os.path.join(repo, "Makefile"), tmp_path / "Makefile")
+    environment = {key: value for key, value in os.environ.items()
+                   if key != "ASSIST_EGRESS_RUNTIME_DIR"}
+    result = subprocess.run(
+        ["make", "-s", "--eval",
+         'show-egress-runtime:;@python -c \'import os; print("ASSIST_EGRESS_RUNTIME_DIR" in os.environ)\'',
+         "show-egress-runtime"],
+        cwd=tmp_path, env=environment, capture_output=True, text=True, check=True)
+    assert result.stdout == "False\n"

@@ -216,7 +216,21 @@ class ThreadManager:
         tid: str,
         on_delete: List[Callable[[str], None]] | None = None,
     ) -> None:
-        """Permanently delete a thread: sandbox container, DB rows, dir.
+        """Stop any browser before permanently deleting a thread."""
+        from assist.browser.manager import BrowserManager
+
+        with BrowserManager.bounded_thread_gate(tid):
+            if os.path.isdir(self.thread_dir(tid)):
+                BrowserManager.cleanup(tid)
+                BrowserManager.confirm_owner_stopped(self.root_dir, tid, None)
+            self._hard_delete_after_browser_stop(tid, on_delete)
+
+    def _hard_delete_after_browser_stop(
+        self,
+        tid: str,
+        on_delete: List[Callable[[str], None]] | None = None,
+    ) -> None:
+        """Permanently delete the sandbox container, DB rows and directory.
 
         Layer 0 of the threads.db growth plan
         (docs/2026-05-04-threads-db-layer-0-thread-retention.org).
@@ -224,6 +238,8 @@ class ThreadManager:
         The order of operations is load-bearing.  See the design doc
         "Approach" section for why each step happens before the next.
         Briefly:
+
+        Browser teardown is proved by ``hard_delete`` before these steps.
 
         1. ``SandboxManager.cleanup`` first so any in-flight agent run
            hits the existing ``SandboxContainerLostError`` path
@@ -446,6 +462,8 @@ class ThreadManager:
                     json.dump(hidden, stream)
                     stream.flush()
                     os.fsync(stream.fileno())
+                from assist.browser.authority import mark_new_thread
+                mark_new_thread(self.root_dir, os.path.basename(pending))
                 directory_fd = os.open(pending, os.O_RDONLY)
                 try:
                     os.fsync(directory_fd)
@@ -461,7 +479,18 @@ class ThreadManager:
                 if os.path.isdir(pending):
                     shutil.rmtree(pending)
             return tid
-        os.makedirs(tdir, exist_ok=True)
+        try:
+            os.mkdir(tdir)
+        except FileExistsError:
+            if not os.path.isdir(tdir):
+                raise
+        else:
+            from assist.browser.authority import mark_new_thread
+            try:
+                mark_new_thread(self.root_dir, tid)
+            except Exception:
+                shutil.rmtree(tdir)
+                raise
         return tid
 
     def reserve_visible(self, engine: EngineName,

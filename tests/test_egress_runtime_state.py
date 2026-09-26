@@ -68,6 +68,12 @@ def _client():
     return client, ordinary, old, current
 
 
+def test_explicit_relative_runtime_directory_remains_rejected(monkeypatch):
+    monkeypatch.setenv("ASSIST_EGRESS_RUNTIME_DIR", "relative-runtime")
+    with pytest.raises(RuntimeError, match="must be absolute"):
+        runtime_state.runtime_directory()
+
+
 def test_late_proxy_remove_cannot_readmit_old_generation_after_restart(tmp_path,
                                                                      monkeypatch):
     threads = tmp_path / "threads"

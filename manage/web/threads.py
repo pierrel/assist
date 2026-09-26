@@ -4443,7 +4443,8 @@ def queue_recovery_runs() -> None:
     # start replay recreates the same task ID.
     for child_tid in os.listdir(MANAGER.root_dir):
         if child_tid.startswith(".subagent-"):
-            MANAGER.hard_delete(child_tid)
+            # Unpublished staging has no accepted Run or browser authority.
+            shutil.rmtree(MANAGER.thread_dir(child_tid))
             continue
         marker = os.path.join(MANAGER.thread_dir(child_tid), ".subagent")
         if os.path.isfile(marker) and not _runs().list(child_tid):
