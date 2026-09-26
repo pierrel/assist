@@ -624,7 +624,10 @@ def test_pi_preflight_fault_terminalizes_and_exposes_reason(repos, monkeypatch, 
     threads._execute_pi_run(run, user_priority=False)
     assert threads._runs().get("state", run.id).status == "error"
     assert sync.workspace(str(repos[3]), str(repos[1]))["sync_error"]
-    assert not sync.read_state(str(repos[3])).get("sandbox_in_flight")
+    # An incomplete preflight cannot let suspended work bypass clean proof.
+    assert sync.read_state(str(repos[3])).get("sandbox_in_flight")
+    with pytest.raises(sync.GitSyncError, match="verification"):
+        sync.GitSync(str(repos[3]), str(repos[1]))
 
 
 def test_hidden_child_commits_before_parent_wake_preflight(repos, monkeypatch, tmp_path):
