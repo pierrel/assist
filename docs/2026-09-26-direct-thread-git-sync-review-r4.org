@@ -1,0 +1,39 @@
+#+title: Direct thread Git sync retained commits and recovery gates
+#+date: 2026-09-26
+
+* Retained local history
+The sidecar keeps one authenticated local revision floor for its authorized
+branch, separate from the remote publication floor and per-work bases. Every
+new model admission and publication must preserve it. Preparation advances it
+after safe FF; finalization advances it after verified commit teardown and a
+private authenticated object snapshot, before a remote operation can fail.
+Thus rejected or uncertain child publication cannot let a suspended writer
+silently drop the child's committed work. Explicit reconciliation is required.
+
+Unresolved publication intent blocks resumed model admission and all further
+publication, not only fresh preflight. Only preflight's verified reconciliation
+may clear it. Suspended expectations never substitute for that unknown outcome.
+
+* Commit-to-receipt crash boundary
+Verified commit-container exit does not clear the flight/finalization fence.
+The fence stays durable while the private snapshot authenticates local objects,
+the local floor is fsynced, and the child receipt is fsynced. Only then is it
+cleared, before bounded host publication. A crash in this gap holds later writers
+and preserves the saved result and worktree instead of certifying a different HEAD.
+Model and preflight containers retain their existing verified-cleanup behavior;
+fresh preflight also authenticates its expected checkout after generation exit.
+
+Child receipt recovery authenticates current Git objects and requires the
+recorded branch and commit to remain in that branch's ancestry, including its
+local floor. A stale receipt retains the result but produces reconciliation,
+never a false success. A valid receipt still avoids model re-execution.
+
+The in-container clean predicate exports exit status only, with all automatic
+Git stdout/stderr suppressed. It does not export an output receipt or path list.
+
+* Historical supersessions
+This document directly replaces =Child completion= and receipt-recovery claims
+in =2026-09-26-direct-thread-git-sync-review-r3.org= with ancestry-authenticated
+receipt validation and the retained commit-finalization fence. It also directly
+corrects =Current per-turn boundaries= clean-check output-receipt wording in
+=2026-09-26-direct-thread-git-sync-review-r2.org=: the boundary uses exit status.

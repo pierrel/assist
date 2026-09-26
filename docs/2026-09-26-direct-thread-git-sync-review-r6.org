@@ -1,0 +1,18 @@
+#+title: Direct thread Git preflight crash fence
+#+date: 2026-09-26
+
+* Continuous preflight fence
+Mutable preparation exit retains the durable flight fence through read-only
+verification and authenticated admission. A crash before the verifier starts
+cannot leave a saved preflight usable by a suspended model without clean proof.
+The exact generation is dead, but operator recovery remains required until all
+preflight verification completes. A deterministic SystemExit cut proves this.
+Known incomplete preflight errors also retain this fence: partial preparation
+can execute hooks before failing, so ancestry alone cannot admit a paused model.
+Pi error fixtures require the visible reason and no resumed admission, not just
+proof the old container exited. Files and saved answers remain preserved.
+
+* Historical supersessions
+This directly corrects the preparation assumption in =Stable post-generation
+verification= of =2026-09-26-direct-thread-git-sync-review-r5.org=: its first
+mutable teardown must retain, not clear then recreate, the flight fence.

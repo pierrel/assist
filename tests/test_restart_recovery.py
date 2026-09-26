@@ -298,6 +298,11 @@ def test_cancelled_initializer_finishes_its_owned_setup_before_releasing_a_follo
     started, release = threading.Event(), threading.Event()
     executed, dispatched = [], []
 
+    from assist.git_sync import bind
+    bind(str(tmp_path / tid), "https://example.invalid/repo.git")
+    # This test doubles the slow clone; real branch authorization has separate Git probes.
+    monkeypatch.setattr(threads, "authorize_branch", lambda *_args: None)
+
     class BlockingDomain:
         def __init__(self, *_args, **_kwargs):
             started.set()
@@ -312,7 +317,7 @@ def test_cancelled_initializer_finishes_its_owned_setup_before_releasing_a_follo
     monkeypatch.setattr(threads._INITIALIZATION_SCHEDULER, "complete", lambda *_args: None)
 
     worker = threading.Thread(
-        target=threads._initialize_thread, args=(tid, head.id, "repo://example"))
+        target=threads._initialize_thread, args=(tid, head.id, "https://example.invalid/repo.git"))
     worker.start()
     assert started.wait(1)
 
@@ -667,6 +672,19 @@ def test_recover_finalizes_completed_turn(wired, monkeypatch):
 
     assert calls == []                               # nothing re-run
     assert _get_status(tid)["stage"] == "ready"
+
+
+def test_legacy_git_completed_projection_is_not_ready_after_restart(wired, monkeypatch):
+    tid, root = wired
+    from assist.git_sync import bind, read_state
+    bind(str(root / tid), "https://example.invalid/repo.git")
+    before = read_state(str(root / tid))
+    monkeypatch.setattr(threads, "_recovery_decision", lambda *_: "finalize")
+    _set_status(tid, "processing", pending_message="saved checkpoint answer")
+    threads.queue_recovery_runs()
+    assert _get_status(tid)["stage"] == "error"
+    assert "unverified" in _get_status(tid)["error"]
+    assert read_state(str(root / tid)) == before
 
 
 def test_recover_unrecoverable_errors_with_message_surfaced(wired, monkeypatch):

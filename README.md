@@ -40,8 +40,9 @@ where reliability is harder than with frontier APIs.
 - **Web-path sandboxing.** When Docker is available, web turns run filesystem
   and code tools inside a per-turn container with the workspace bind-mounted at
   `/workspace`. The current CLI path is host-backed, and the web path falls back
-  to the host when Docker is unavailable; fail-closed cross-surface isolation is
-  planned rather than shipped.
+  to the host for non-Git work when Docker is unavailable. Git-bound web turns
+  instead fail closed without the restricted sandbox; broader cross-surface
+  isolation remains planned rather than shipped.
 
 - **Specialized agents and skills out of the box.**
   - **Research agent** rigorous fact-checking and critiquing with
@@ -914,16 +915,34 @@ ASSIST_DOMAINS=/path/to/repo1.git,/path/to/repo2.git
 
 When enabled, each thread creates a git branch and can merge changes back to main.
 
+New Git-backed web threads bind their configured source and actual non-main
+thread branch outside the agent workspace. Before fresh turns, clean phone-pushed
+commits fast-forward locally. After successful Deep, Pi, or hidden child work,
+changes attempt a commit inside the restricted sandbox and the server attempts publication
+of only that thread branch. No-file-change turns also attempt publication; main
+and tags are not automatically pushed. Dirty, divergent, rewritten, or unavailable
+Git state holds for explicit reconciliation while preserving work and saved answers.
+Local commit or verified teardown failure reports a turn error with the saved
+answer retained. Remote-only publication failure remains best-effort and does
+not discard a finalized local answer; the pending Git error/fences remain.
+After restart, a saved reply alone is not Git finalization proof. Completed
+visible Git-bound Deep/Pi recovery reports an explicit reconciliation error, preserves the
+answer/work/fences, and does not replay the model or reconstruct the commit.
+Legacy threads need an operator-verified binding and independent object storage.
+The phone uses normal Git credentials, not an Assist-web Git proxy; pending sync
+is reported through bounded `workspace.sync_error` metadata.
+
 ## Docker Sandbox
 
-On the web path, the agent executes shell commands inside a Docker container rather than on the host. Each turn gets a fresh container with the domain repository bind-mounted at `/workspace`, also exposed as `/user`; persistent thread scratch at `/tmp`; and, for visible main-agent turns, private state at `/agent`. The current sandbox also inherits the configured `ASSIST_*` environment, so it is not yet a credential-free boundary. The CLI path remains host-backed.
+On the web path, the agent executes shell commands inside a Docker container rather than on the host. Each turn gets a fresh container with the domain repository bind-mounted at `/workspace`, also exposed as `/user`; persistent thread scratch at `/tmp`; and, for ordinary visible Deep main-agent turns, private state at `/agent`. Ordinary Deep sandboxes inherit the configured `ASSIST_*` environment, so that profile is not yet a credential-free boundary. Pi and Git preparation/commit profiles omit the generic application environment and private agent mount. The CLI path remains host-backed.
 
 The sandbox image is built automatically by `make web` (and `make deploy`). To build it manually:
 ```bash
 make sandbox-build
 ```
 
-If Docker is unavailable, the agent falls back to running without a sandbox.
+If Docker is unavailable, non-Git work can retain the established host fallback.
+Git-bound web turns fail closed instead of running unsafe host worktree commands.
 
 ---
 

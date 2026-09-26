@@ -269,18 +269,22 @@ class SandboxManager:
     @classmethod
     def _get_sandbox_backend(cls, work_dir: str, tz: str | None,
                              agent_dir: str | None, include_assist_env: bool,
-                             include_egress_approvals: bool):
-        """Create one per-turn sandbox from a named authority profile.
+                             include_egress_approvals: bool, before_start=None,
+                             readonly_workspace=False):
+        """Create a sandbox generation from a named authority profile.
 
         ``include_assist_env`` is the line between ordinary Deep Agents work and
         Pi preview work.  A Pi sandbox retains Docker's workspace and egress
         containment but receives no generic application environment or private
-        agent mount.
+        agent mount. ``before_start`` records a Git recovery fence immediately
+        before Docker create; earlier policy/setup failures create no new fence.
+        A preceding Git generation's retained fence is cleared only after verification.
+        Read-only Git verification omits persistent scratch/private mounts, so
+        configured filters cannot mutate the checked worktree through an alias.
         """
-        # Per-turn lifecycle: never reuse a container across turns.  The web
-        # layer tears each container down at the end of its turn
-        # (manage/web/threads.py), so a registry entry surviving to here means
-        # a prior turn's teardown didn't run (the worker died mid-turn).  Reap
+        # Never reuse container generations. The web layer tears each down at
+        # its phase boundary (manage/web/threads.py), so a registry entry
+        # surviving to here means teardown did not run (the worker died). Reap
         # that stale container before creating a fresh one — the registry is
         # keyed by work_dir, so creating without reaping would overwrite the
         # reference and orphan it (the 3h backstop TTL would eventually catch
@@ -391,7 +395,7 @@ class SandboxManager:
             # uid can write it even if the web process's own uid differs from work_dir's
             # owner (best-effort chown: a no-op when they already match, the common case).
             tmp_dir = os.path.join(os.path.dirname(work_dir), "tmp")
-            if not os.path.isdir(tmp_dir):
+            if not readonly_workspace and not os.path.isdir(tmp_dir):
                 os.makedirs(tmp_dir, exist_ok=True)
                 try:
                     os.chown(tmp_dir, st.st_uid, st.st_gid)
@@ -399,8 +403,10 @@ class SandboxManager:
                     pass  # not permitted (web non-root, uids differ) — mount still
                           # works when web uid == work_dir owner (the deployment case)
 
-            volumes = {work_dir: {"bind": "/workspace", "mode": "rw"},
-                       tmp_dir: {"bind": "/tmp", "mode": "rw"}}
+            volumes = {work_dir: {"bind": "/workspace",
+                                  "mode": "ro" if readonly_workspace else "rw"}}
+            if not readonly_workspace:
+                volumes[tmp_dir] = {"bind": "/tmp", "mode": "rw"}
             if agent_dir is not None:
                 os.makedirs(agent_dir, exist_ok=True)
                 try:
@@ -412,6 +418,8 @@ class SandboxManager:
                     "mode": "rw",
                 }
 
+            if before_start is not None:
+                before_start()
             container = client.containers.run(
                 SANDBOX_IMAGE,
                 detach=True,
@@ -438,16 +446,25 @@ class SandboxManager:
 
     @classmethod
     def get_sandbox_backend(cls, work_dir: str, tz: str | None = None,
-                            agent_dir: str | None = None):
+                            agent_dir: str | None = None, before_start=None):
         """Return the ordinary Docker sandbox, including its established app env."""
         return cls._get_sandbox_backend(
-            work_dir, tz, agent_dir, include_assist_env=True, include_egress_approvals=True)
+            work_dir, tz, agent_dir, include_assist_env=True, include_egress_approvals=True,
+            before_start=before_start)
 
     @classmethod
-    def get_pi_sandbox_backend(cls, work_dir: str, tz: str | None = None):
+    def get_pi_sandbox_backend(cls, work_dir: str, tz: str | None = None, before_start=None):
         """Return Pi's workspace-only Docker sandbox, without app secrets or `/agent`."""
         return cls._get_sandbox_backend(
-            work_dir, tz, None, include_assist_env=False, include_egress_approvals=False)
+            work_dir, tz, None, include_assist_env=False, include_egress_approvals=False,
+            before_start=before_start)
+
+    @classmethod
+    def get_git_verification_backend(cls, work_dir: str, tz: str | None = None, before_start=None):
+        """Credential-free read-only worktree, with ephemeral scratch and no `/agent`."""
+        return cls._get_sandbox_backend(
+            work_dir, tz, None, include_assist_env=False, include_egress_approvals=False,
+            before_start=before_start, readonly_workspace=True)
 
     # work_dir -> egress-network IP for the client-attribution map (thread-
     # scoped egress grants; docs/2026-07-21-egress-approval-hitl.org).
@@ -494,6 +511,26 @@ class SandboxManager:
     def current_container(cls, work_dir: str):
         """Return the registered container generation, if any."""
         return cls._containers.get(work_dir)
+
+    @classmethod
+    def cleanup_verified(cls, work_dir: str, expected_container) -> None:
+        """Confirm this generation exited before allowing host Git object reads.
+
+        Failed teardown retains the registry entry. The Git owner also persists
+        a quarantine so a process restart cannot silently permit another writer.
+        """
+        from docker.errors import NotFound
+        if expected_container is None or cls._containers.get(work_dir) is not expected_container:
+            raise RuntimeError("Git sandbox generation is unavailable")
+        try:
+            expected_container.kill()
+            expected_container.wait(timeout=10)
+        except NotFound:
+            pass  # Auto-removal is also proof that this exact generation exited.
+        if cls._containers.get(work_dir) is not expected_container:
+            raise RuntimeError("Git sandbox generation changed during teardown")
+        cls._containers.pop(work_dir)
+        cls._forget_egress_client(work_dir)
 
     @classmethod
     def cleanup(cls, work_dir: str, expected_container=_ANY_CONTAINER) -> None:

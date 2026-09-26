@@ -49,6 +49,37 @@ Run the Web UI
 #+begin_src shell
 python -m manage.web
 #+end_src
+** Thread Git sync
+New Git-backed web threads bind a configured repository and a non-main thread
+branch outside the agent workspace. Before a fresh Deep or Pi turn, clean
+phone-pushed commits are incorporated by fast-forward. Successful changed turns
+attempt a commit inside the restricted sandbox and publication of only that thread
+branch. No-file-change turns also attempt publication. Main is never automatically pushed.
+
+The phone uses normal Git with its own credentials, not a web Git-object proxy.
+Its repository-key mapping must point to the approved remote; server-local
+repositories need their approved WireGuard/SSH endpoint. A busy phone diff can
+show the latest published commits with a may-change warning, without waiting.
+
+Dirty worktrees, divergent or rewritten history, missing legacy source bindings,
+and uncertain publication or sandbox teardown hold for explicit reconciliation.
+Local commit or verified teardown failure reports a turn error with the saved
+answer retained. Remote-only publication failure remains best-effort and does
+not discard a finalized local answer; pending Git error/fences remain.
+After restart, a saved reply alone is not Git finalization proof. Completed
+visible Git-bound Deep/Pi recovery reports an explicit reconciliation error, preserves the
+answer/work/fences, and does not replay the model or reconstruct the commit.
+Saved answers and work are preserved; =workspace.sync_error= explains pending
+Git sync. Legacy threads require an operator-verified binding. Git snapshots
+are capped at 128 MiB and 10,000 scanned object entries, with bounded subprocesses;
+oversized repositories fail explicitly rather than exporting partial state.
+Authorization separately caps the metadata-only scan of workspace, scratch and
+private-agent roots at 10,000 total entries to prove independent storage.
+
+This per-turn path does not repair the existing user-gated main merge/rebranch
+or older host-Git rendering paths. See
+=docs/2026-09-26-direct-thread-git-sync.org= for the boundary and recovery notes.
+
 ** Developing
 Install the package in editable mode so Emacs/Elpy can discover the modules:
 

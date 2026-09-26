@@ -26,6 +26,7 @@ from starlette.concurrency import run_in_threadpool
 import anyio
 
 from assist.domain_manager import DomainManager
+from assist.git_sync import source_label
 from assist.env import load_dev_env
 from assist.sandbox_manager import SandboxManager
 from assist.schedule.store import ScheduleStore
@@ -224,7 +225,7 @@ MERGE_LOCK = threading.Lock()
 
 def _domain_label(url: str) -> str:
     """'user@host:/path/to/life.git' -> 'life'"""
-    return url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+    return source_label(url)
 
 
 def _domain_selector_html() -> str:
@@ -280,7 +281,7 @@ def _get_domain_manager(tid: str, domain: str | None = None) -> DomainManager | 
 
 
 def _get_sandbox_backend(tid: str, tz: str | None = None, *,
-                         include_agent: bool = True):
+                         include_agent: bool = True, before_start=None):
     """Get sandbox backend for a thread, or None if Docker is unavailable.
 
     ``tz`` is the per-turn context-rider timezone, so this turn's sandbox ``date``
@@ -289,20 +290,15 @@ def _get_sandbox_backend(tid: str, tz: str | None = None, *,
     ``include_agent`` mounts the visible thread's private main-agent directory.
     Hidden child runs pass ``False`` and receive self-contained task briefs instead.
 
-    Runs off the event loop (from ``_process_message``'s background task), so the
-    turn-start origin pre-fetch is safe here: the host refreshes ``origin/main`` in the
-    clone (it has git + origin access) so the agent can rebase onto a current local
-    ``origin/main`` — the agent cannot fetch from inside the sandbox itself."""
+    Git reconciliation is owned by the queued writer, not sandbox construction;
+    resumed slices must not fast-forward their in-flight worktree. ``before_start``
+    records the Git flight fence immediately before the possibly ambiguous create.
+    """
     work_dir = MANAGER.thread_default_working_dir(tid)
-    dm = _get_domain_manager(tid)
-    if dm is not None:
-        try:
-            dm.fetch_origin()
-        except Exception as e:
-            logging.getLogger(__name__).warning("origin pre-fetch failed for %s: %s", tid, e)
     return SandboxManager.get_sandbox_backend(
         work_dir, tz=tz,
-        agent_dir=(MANAGER.thread_agent_dir(tid) if include_agent else None))
+        agent_dir=(MANAGER.thread_agent_dir(tid) if include_agent else None),
+        **({"before_start": before_start} if before_start is not None else {}))
 
 
 def _has_unmerged_changes(tid: str) -> bool:
