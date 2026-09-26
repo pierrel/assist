@@ -269,7 +269,8 @@ class SandboxManager:
     @classmethod
     def _get_sandbox_backend(cls, work_dir: str, tz: str | None,
                              agent_dir: str | None, include_assist_env: bool,
-                             include_egress_approvals: bool, before_start=None):
+                             include_egress_approvals: bool, before_start=None,
+                             readonly_workspace=False):
         """Create one per-turn sandbox from a named authority profile.
 
         ``include_assist_env`` is the line between ordinary Deep Agents work and
@@ -277,6 +278,8 @@ class SandboxManager:
         containment but receives no generic application environment or private
         agent mount. ``before_start`` records a Git recovery fence immediately
         before Docker create; earlier policy/setup failures cannot strand it.
+        Read-only Git verification omits persistent scratch/private mounts, so
+        configured filters cannot mutate the checked worktree through an alias.
         """
         # Per-turn lifecycle: never reuse a container across turns.  The web
         # layer tears each container down at the end of its turn
@@ -392,7 +395,7 @@ class SandboxManager:
             # uid can write it even if the web process's own uid differs from work_dir's
             # owner (best-effort chown: a no-op when they already match, the common case).
             tmp_dir = os.path.join(os.path.dirname(work_dir), "tmp")
-            if not os.path.isdir(tmp_dir):
+            if not readonly_workspace and not os.path.isdir(tmp_dir):
                 os.makedirs(tmp_dir, exist_ok=True)
                 try:
                     os.chown(tmp_dir, st.st_uid, st.st_gid)
@@ -400,8 +403,10 @@ class SandboxManager:
                     pass  # not permitted (web non-root, uids differ) — mount still
                           # works when web uid == work_dir owner (the deployment case)
 
-            volumes = {work_dir: {"bind": "/workspace", "mode": "rw"},
-                       tmp_dir: {"bind": "/tmp", "mode": "rw"}}
+            volumes = {work_dir: {"bind": "/workspace",
+                                  "mode": "ro" if readonly_workspace else "rw"}}
+            if not readonly_workspace:
+                volumes[tmp_dir] = {"bind": "/tmp", "mode": "rw"}
             if agent_dir is not None:
                 os.makedirs(agent_dir, exist_ok=True)
                 try:
@@ -453,6 +458,13 @@ class SandboxManager:
         return cls._get_sandbox_backend(
             work_dir, tz, None, include_assist_env=False, include_egress_approvals=False,
             before_start=before_start)
+
+    @classmethod
+    def get_git_verification_backend(cls, work_dir: str, tz: str | None = None, before_start=None):
+        """Credential-free read-only worktree, with ephemeral scratch and no `/agent`."""
+        return cls._get_sandbox_backend(
+            work_dir, tz, None, include_assist_env=False, include_egress_approvals=False,
+            before_start=before_start, readonly_workspace=True)
 
     # work_dir -> egress-network IP for the client-attribution map (thread-
     # scoped egress grants; docs/2026-07-21-egress-approval-hitl.org).

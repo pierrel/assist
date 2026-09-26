@@ -43,7 +43,8 @@ from assist.domain_manager import (
     OriginAdvancedError,
 )
 from assist.git_sync import (GitSyncError, authorize_branch, bind as bind_git,
-                             ownership as git_ownership, read_state as read_git_binding)
+                             ownership as git_ownership, read_state as read_git_binding,
+                             require_clean as git_check_clean)
 from contextlib import ExitStack
 from langgraph.errors import GraphRecursionError
 import anyio
@@ -1665,21 +1666,22 @@ def _initialize_thread(
             _set_status(tid, "cloning", pending_message=pending, domain=domain,
                         pending_run_id=run_id,
                         started_at=_get_status(tid).get("started_at"))
-            try:
-                _reset_unexecuted_workspace(tid)
-                dm = DomainManager(
-                    MANAGER.thread_default_working_dir(tid),
-                    domain,
-                    branch_suffix=tid[-4:],
-                    clone_timeout_s=INITIALIZATION_CLONE_TIMEOUT_S,
-                )
-                # Refresh cache: a previous render may have cached a no-remote DM.
-                DOMAIN_MANAGERS[tid] = dm
-                authorize_branch(MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid))
-            except Exception as e:
-                logging.error("Clone failed for thread %s: %s", tid, e, exc_info=True)
-                _finish_initialization_failure(tid, run_id, pending, domain, rider)
-                return
+            if binding["branch"] is None:
+                try:
+                    _reset_unexecuted_workspace(tid)
+                    dm = DomainManager(
+                        MANAGER.thread_default_working_dir(tid),
+                        domain,
+                        branch_suffix=tid[-4:],
+                        clone_timeout_s=INITIALIZATION_CLONE_TIMEOUT_S,
+                    )
+                    # Refresh cache: a previous render may have cached a no-remote DM.
+                    DOMAIN_MANAGERS[tid] = dm
+                    authorize_branch(MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid))
+                except Exception as e:
+                    logging.error("Clone failed for thread %s: %s", tid, e, exc_info=True)
+                    _finish_initialization_failure(tid, run_id, pending, domain, rider)
+                    return
         # A DELETE may have committed while this initializer was queued or
         # cloning.  The clone is bounded setup already owned by this worker;
         # it is never interrupted, but the cancelled Run is never executed.
@@ -2746,6 +2748,18 @@ def _git_admit(owner):
         raise reason from error
 
 
+def _git_verify(owner, timezone) -> None:
+    """After writer exit, prove clean Git state on a kernel-read-only workspace."""
+    backend = SandboxManager.get_git_verification_backend(
+        owner.worktree, tz=timezone, before_start=owner.sandbox_started)
+    if backend is None:
+        raise GitSyncError("Git clean verification requires the restricted sandbox")
+    try:
+        git_check_clean(backend)
+    finally:
+        _git_reap(owner, backend.container)
+
+
 def _git_prepare(owner, work_id: str, timezone: str | None) -> None:
     """Reconcile Git before model admission using the credential-free profile."""
     try:
@@ -2757,9 +2771,11 @@ def _git_prepare(owner, work_id: str, timezone: str | None) -> None:
             owner.prepare(backend, work_id)
         finally:
             _git_cleanup(owner, backend.container)
+        _git_verify(owner, timezone)
         _, revision = owner.admit()
         if revision != owner.state["preflights"][work_id]["base"]:
             raise GitSyncError("Git checkout changed during preflight teardown; reconcile before the turn")
+        owner.sandbox_stopped()
     except Exception as error:
         reason = error if isinstance(error, GitSyncError) else GitSyncError(
             "Git preflight failed; preserve the workspace and reconcile before retrying")
@@ -2789,6 +2805,7 @@ def _git_finish(owner, message: str, timezone: str | None, *, on_committed=None)
             owner.commit(backend, message)
         finally:
             _git_reap(owner, backend.container)
+        _git_verify(owner, timezone)
         owner.publish(on_committed=verified_local_commit)
     except Exception as error:
         owner.failed(error if isinstance(error, GitSyncError) else GitSyncError(

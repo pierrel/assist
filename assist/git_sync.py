@@ -207,10 +207,42 @@ def authorize_branch(thread_dir: str, worktree: str) -> None:
     state = read_state(thread_dir)
     if state is None:
         raise GitSyncError("Git source binding is unavailable")
+    _independent_roots((worktree, os.path.join(os.path.dirname(worktree), "tmp"),
+                        os.path.join(thread_dir, "agent")))
     with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
         branch, revision = _Store(path).snapshot(worktree)
     state.update(branch=branch, local_revision=revision, preflights={})
     _write_state(thread_dir, state)
+
+
+def _independent_roots(roots) -> None:
+    """Bounded no-follow inode proof for all writable mounts before legacy admission."""
+    count = 0
+    deadline = time.monotonic() + GIT_TIMEOUT
+
+    def visit(directory, depth=0):
+        nonlocal count
+        if depth > 64:
+            raise GitSyncError("Independent storage verification exceeds its bound")
+        for entry in os.scandir(directory):
+            count += 1
+            if count > MAX_OBJECT_FILES or time.monotonic() > deadline:
+                raise GitSyncError("Independent storage verification exceeds its bound")
+            info = os.stat(entry.name, dir_fd=directory, follow_symlinks=False)
+            if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+                raise GitSyncError("Thread files share hardlinks; migrate all writable mounts to independent storage")
+            if stat.S_ISDIR(info.st_mode):
+                with _directory(entry.name, parent=directory) as child:
+                    visit(child, depth + 1)
+
+    try:
+        for root in roots:
+            if not os.path.lexists(root):
+                continue
+            with _directory(root) as directory:
+                visit(directory)
+    except OSError as error:
+        raise GitSyncError("Independent thread storage could not be verified") from error
 
 
 @contextmanager
@@ -354,10 +386,11 @@ def _sandbox_git(sandbox, command: str) -> None:
         raise GitSyncError("Git worktree needs reconciliation in the restricted sandbox")
 
 
-def _require_clean(sandbox) -> None:
+def require_clean(sandbox) -> None:
     # Inspect the full index in-container. The backend truncates large stdout,
     # so only exit status crosses that boundary, never a path listing.
-    probe = '''import subprocess, sys
+    probe = '''import os, subprocess, sys
+os.environ["GIT_OPTIONAL_LOCKS"] = "0"
 args = sys.argv[1:]
 with subprocess.Popen(args + ["ls-files", "-v", "-z"], stdout=subprocess.PIPE,
                       stderr=subprocess.DEVNULL) as process:
@@ -494,7 +527,7 @@ class GitSync:
             floor = self.state["published"].get(branch)
             if floor and (remote is None or not store.ancestor(floor, remote)):
                 raise GitSyncError("Remote thread branch was deleted or rewritten; reconcile explicitly")
-            _require_clean(sandbox)
+            require_clean(sandbox)
             if remote and local != remote and not (store.ancestor(local, remote) or store.ancestor(remote, local)):
                 raise GitSyncError("Local and remote thread branches diverged; reconcile explicitly")
             bundle = os.path.join(path, "incoming.bundle")
@@ -520,7 +553,7 @@ class GitSync:
             expected_local = remote if remote and store.ancestor(local, remote) else local
             if self._branch() != (branch, expected_local):
                 raise GitSyncError("Git preflight did not leave the expected clean thread checkout")
-            _require_clean(sandbox)
+            require_clean(sandbox)
             self.state["preflights"][work_id] = {"branch": branch,
                                                 "expected": remote, "base": self._branch()[1]}
             self.state["error"] = None
@@ -540,7 +573,7 @@ class GitSync:
                      + _WORKTREE_GIT + " -c commit.gpgSign=false commit -m "
                      + shlex.quote(message[:4096] or "assistant update")
                      + "; else exit \"$code\"; fi; }")
-        _require_clean(sandbox)
+        require_clean(sandbox)
 
     def publish(self, *, on_committed=None) -> None:
         """Publish exact FF branch only; callers have already verified sandbox teardown."""

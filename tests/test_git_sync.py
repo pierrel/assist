@@ -390,6 +390,7 @@ def web_turn(repos, monkeypatch, model):
         threads.SandboxManager._containers.pop(worktree)
 
     monkeypatch.setattr(threads.SandboxManager, "get_pi_sandbox_backend", backend)
+    monkeypatch.setattr(threads.SandboxManager, "get_git_verification_backend", backend)
     monkeypatch.setattr(threads, "_get_sandbox_backend", backend)
     monkeypatch.setattr(threads.SandboxManager, "cleanup_verified", cleanup)
     return threads, events, outcomes
@@ -399,8 +400,8 @@ def test_deep_turn_noop_publishes_before_releasing_workspace(repos, monkeypatch)
     threads, events, outcomes = web_turn(repos, monkeypatch, lambda: "saved answer")
     threads._process_message("state", "probe")
     assert outcomes[-1][1:4] == ("ready", None, "saved answer")
-    assert [event[0] for event in events] == ["start", "exit"] * 3
-    assert len({event[1] for event in events}) == 3
+    assert [event[0] for event in events] == ["start", "exit"] * 5
+    assert len({event[1] for event in events}) == 5
     assert git(repos[0], "rev-parse", "thread/test") == git(repos[1], "rev-parse", "HEAD")
     assert not sync.read_state(str(repos[3]))["sandbox_in_flight"]
 
@@ -445,7 +446,7 @@ def test_failed_model_teardown_preserves_answer_and_quarantines(repos, monkeypat
     original = threads.SandboxManager.cleanup_verified
 
     def fail_model_cleanup(worktree, generation):
-        if len(events) == 3:
+        if len(events) == 5:
             raise RuntimeError("test daemon failure")
         return original(worktree, generation)
 
@@ -453,7 +454,7 @@ def test_failed_model_teardown_preserves_answer_and_quarantines(repos, monkeypat
     threads._process_message("state", "probe")
     assert outcomes[-1][1:4] == ("ready", None, "saved answer")
     assert sync.read_state(str(repos[3]))["quarantine"]
-    assert len(events) == 3  # No Git-only generation or host publication after failed exit.
+    assert len(events) == 5  # No Git-only generation or host publication after failed exit.
     assert git(repos[0], "for-each-ref", "--format=%(refname)") == "refs/heads/main"
     # Test double has no actual container; remove only its private registry entry.
     threads.SandboxManager._containers.pop(str(repos[1]), None)
@@ -482,7 +483,7 @@ def test_pi_turn_uses_same_preflight_commit_and_publication(repos, monkeypatch):
     threads._execute_pi_run(run, user_priority=False)
     assert threads._runs().get("state", run.id).status == "success"
     assert git(repos[0], "show", "thread/test:pi") == "Pi committed change"
-    assert [event[0] for event in events] == ["start", "exit"] * 3
+    assert [event[0] for event in events] == ["start", "exit"] * 5
     saved = threads._PI_CONVERSATIONS.completed_reply(str(repos[3]), run.id)
     assert saved.text == "saved Pi answer"
 
@@ -615,7 +616,7 @@ def test_pi_preflight_fault_terminalizes_and_exposes_reason(repos, monkeypatch, 
     if fault == "missing-git":
         (repos[1] / ".git").rename(repos[1] / "preserved-git")
     elif fault == "lost-sandbox":
-        monkeypatch.setattr(sync, "_require_clean", lambda _backend: (
+        monkeypatch.setattr(sync, "require_clean", lambda _backend: (
             _ for _ in ()).throw(SandboxContainerLostError("lost sandbox")))
     else:
         (repos[1] / "dirty").write_text("preserve\n")
@@ -652,7 +653,7 @@ def test_hidden_child_commits_before_parent_wake_preflight(repos, monkeypatch, t
     assert threads._runs().get("sub-child", run.id).status == "success"
     assert wakes == ["child output\n"]
     assert git(repos[0], "show", "thread/test:child-file") == "child output"
-    assert [event[0] for event in events] == ["start", "exit"] * 3
+    assert [event[0] for event in events] == ["start", "exit"] * 5
 
 
 @pytest.mark.parametrize("failure", ["before-create", "during-create"])
@@ -749,7 +750,7 @@ def test_child_git_failure_preserves_result_without_success_wake(repos, monkeypa
         original = threads.SandboxManager.cleanup_verified
 
         def cleanup(worktree, generation):
-            if len(events) == 3:
+            if len(events) == 5:
                 raise RuntimeError("daemon failure")
             original(worktree, generation)
 
@@ -970,3 +971,112 @@ def test_standard_git_repack_bitmap_does_not_block_snapshot(repos):
     owner, _ = turn(repos)
     owner.publish()
     assert git(repos[0], "rev-parse", "thread/test") == git(repos[1], "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("alias", ["keep", "untracked", "scratch", "private"])
+def test_legacy_relocated_source_hardlink_cannot_hide_from_authorization(repos, tmp_path, alias):
+    remote, _, _, binding = repos
+    git(remote, "repack", "-ad")
+    legacy = tmp_path / "legacy-clone"
+    subprocess.run(["git", "clone", str(remote), str(legacy)], check=True, capture_output=True)
+    git(legacy, "checkout", "-b", "legacy")
+    pack = next((legacy / ".git" / "objects" / "pack").glob("*.pack"))
+    original = pack.read_bytes()
+    if alias == "keep":
+        target = pack.with_suffix(".keep")
+    elif alias == "untracked":
+        target = legacy / "untracked-source-inode"
+    else:
+        directory = tmp_path / "tmp" if alias == "scratch" else binding / "agent"
+        directory.mkdir(exist_ok=True)
+        target = directory / "source-inode"
+    pack.rename(target)  # Old sandbox can move its source-linked inode within a mount.
+    pack.write_bytes(original)
+    for path in (legacy / ".git" / "objects" / "pack").iterdir():
+        if path == target:
+            continue
+        content = path.read_bytes()
+        path.unlink()
+        path.write_bytes(content)
+    with sync.tempfile.TemporaryDirectory() as directory:
+        sync._Store(directory).snapshot(str(legacy))  # Object-only validation misses the alias.
+    with pytest.raises(sync.GitSyncError, match="hardlinks"):
+        sync.authorize_branch(str(binding), str(legacy))
+    assert sync.read_state(str(binding))["branch"] == "thread/test"
+    assert target.stat().st_nlink > 1 and target.read_bytes() == original
+
+
+def test_git_verification_profile_mounts_only_readonly_workspace(repos, monkeypatch):
+    from unittest.mock import MagicMock
+    from assist.sandbox_manager import SandboxManager
+    client = MagicMock()
+    container = client.containers.run.return_value
+    container.id = "verify-container"
+    monkeypatch.setattr(SandboxManager, "_containers", {})
+    monkeypatch.setattr(SandboxManager, "_get_docker_client", lambda: client)
+    monkeypatch.setattr(SandboxManager, "_ensure_egress_proxy_running", lambda _client: None)
+    starts = []
+    SandboxManager.get_git_verification_backend(str(repos[1]), before_start=lambda: starts.append(True))
+    call = client.containers.run.call_args.kwargs
+    assert starts == [True]
+    assert call["volumes"] == {str(repos[1]): {"bind": "/workspace", "mode": "ro"}}
+    assert not any(key.startswith("ASSIST_") for key in call["environment"])
+    assert call["user"] != "0:0"
+
+
+def test_recovered_initializer_preserves_authorized_workspace_and_ancestry(repos, monkeypatch):
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: "unused")
+    owner, _ = turn(repos)
+    before = sync.read_state(str(repos[3]))
+    (repos[1] / "tracked").write_text("preserve dirty work\n")
+    run = threads._create_run("state", "first visible message")
+    executed = []
+    monkeypatch.setattr(threads, "_execute_run", lambda *args: executed.append(args))
+    monkeypatch.setattr(threads, "_settle_cancelled_initializer", lambda *_: False)
+    monkeypatch.setattr(threads._INITIALIZATION_SCHEDULER, "complete", lambda *_: None)
+    monkeypatch.setattr(threads, "_reset_unexecuted_workspace", lambda *_: (
+        _ for _ in ()).throw(AssertionError("Must not discard authorized workspace")))
+    monkeypatch.setattr(threads, "DomainManager", lambda *_args, **_kw: (
+        _ for _ in ()).throw(AssertionError("Must not rebuild authorized clone")))
+    threads._initialize_thread("state", run.id, str(repos[0]))
+    assert executed == [(run.id, "state")]
+    assert sync.read_state(str(repos[3])) == before
+    assert (repos[1] / "tracked").read_text() == "preserve dirty work\n"
+
+
+@pytest.mark.parametrize("phase", ["preflight", "commit"])
+def test_late_writer_after_clean_probe_cannot_reach_child_success(repos, monkeypatch, tmp_path, phase):
+    calls = []
+
+    def model():
+        calls.append(True)
+        (repos[1] / "child").write_text("child\n")
+        return "saved child result"
+
+    threads, events, _ = web_turn(repos, monkeypatch, model)
+    child_dir = tmp_path / "sub-child"
+    child_dir.mkdir()
+    monkeypatch.setattr(threads.MANAGER, "thread_dir",
+                        lambda tid: str(child_dir if tid == "sub-child" else repos[3]))
+    monkeypatch.setattr(threads, "_child_waits_for_egress", lambda _run: False)
+    outcomes = []
+    monkeypatch.setattr(threads, "_complete_child_handoff", lambda run: outcomes.append(run))
+    original = threads.SandboxManager.cleanup_verified
+
+    def late_write(worktree, generation):
+        # Deterministic cut: the mutable generation's clean check has returned,
+        # while its background writer is not yet reaped. No sleep race fixture.
+        if len(events) == (1 if phase == "preflight" else 7):
+            (repos[1] / "tracked").write_text("late writer dirt\n")
+        original(worktree, generation)
+
+    monkeypatch.setattr(threads.SandboxManager, "cleanup_verified", late_write)
+    run = threads._create_run("sub-child", "probe", mode="child", parent_thread_id="state",
+                              parent_run_id="parent", dispatch_key="late-writer-child",
+                              assistant_id="delegate-agent")
+    threads._execute_child_run(run)
+    assert outcomes[-1].status == "error"
+    assert outcomes[-1].result == ("saved child result" if phase == "commit" else None)
+    assert calls == ([True] if phase == "commit" else [])
+    assert (repos[1] / "tracked").read_text() == "late writer dirt\n"
+    assert not sync.read_commit_receipt(str(child_dir), run.work_id)
