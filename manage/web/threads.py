@@ -42,6 +42,9 @@ from assist.domain_manager import (
     MergeConflictError,
     OriginAdvancedError,
 )
+from assist.git_sync import (GitSyncError, authorize_branch, bind as bind_git,
+                             ownership as git_ownership)
+from contextlib import ExitStack
 from langgraph.errors import GraphRecursionError
 import anyio
 import anyio.to_thread
@@ -1669,6 +1672,7 @@ def _initialize_thread(
                 )
                 # Refresh cache: a previous render may have cached a no-remote DM.
                 DOMAIN_MANAGERS[tid] = dm
+                authorize_branch(MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid))
             except Exception as e:
                 logging.error("Clone failed for thread %s: %s", tid, e, exc_info=True)
                 _finish_initialization_failure(tid, run_id, pending, domain, rider)
@@ -2164,6 +2168,8 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
     sandbox = None
     sandbox_generation = None
     duplicate = False
+    git_scope = ExitStack()
+    git_owner = None
     try:
         with THREAD_QUEUE.acquire(
                 run.thread_id, accumulated_active_ms=run.active_ms):
@@ -2179,10 +2185,16 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                 if not duplicate:
                     parent_working_dir = MANAGER.thread_default_working_dir(
                         run.parent_thread_id)
+                    git_owner = git_scope.enter_context(git_ownership(
+                        MANAGER.thread_dir(run.parent_thread_id), parent_working_dir))
+                    if git_owner:
+                        git_owner.sandbox_started()
                     try:
                         sandbox = _get_sandbox_backend(
                             run.parent_thread_id, include_agent=False)
                         sandbox_generation = sandbox.container if sandbox else None
+                        if git_owner and sandbox is None:
+                            raise GitSyncError("Git sync requires the restricted sandbox")
                     except Exception:
                         sandbox_generation = SandboxManager.current_container(
                             parent_working_dir)
@@ -2246,10 +2258,14 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
     finally:
         if parent_working_dir is not None:
             try:
-                SandboxManager.cleanup(parent_working_dir, sandbox_generation)
+                if git_owner and sandbox_generation is not None:
+                    _git_cleanup(git_owner, sandbox_generation)
+                else:
+                    SandboxManager.cleanup(parent_working_dir, sandbox_generation)
             except Exception:
                 logging.error(
                     "child run %s sandbox cleanup failed", run.id, exc_info=True)
+        git_scope.close()
 
     THREAD_QUEUE.pop_hold(run.thread_id)
     if duplicate:
@@ -2507,7 +2523,8 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
             _dispatch_pending_after(run.thread_id, run.id)
         return
     try:
-        with THREAD_QUEUE.acquire(tid, user_priority=user_priority):
+        with THREAD_QUEUE.acquire(tid, user_priority=user_priority), git_ownership(
+                MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid)) as git_owner:
             # The selector's earlier check only permits reservation. This
             # authority-bearing recheck prevents a queued Pi Run from starting
             # after the operator disables the preview.
@@ -2527,6 +2544,8 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
                 run = _runs().claim(tid, run.id)
             _set_status(tid, "starting_sandbox", pending_message=run.text, started_at=_now_ms())
             thread_dir = MANAGER.thread_dir(tid)
+            if git_owner:
+                _git_prepare(git_owner, run.work_id, (run.rider or {}).get("tz"))
             _PI_CONVERSATIONS.append(thread_dir, run.id, "user", run.text)
             context = _PI_CONVERSATIONS.context(
                 thread_dir, max_messages=PI_HISTORY_LIMIT, exclude_run_id=run.id)
@@ -2540,6 +2559,8 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
                     result.evicted_skills, result.history_summary)
 
             _set_status(tid, "processing", pending_message=run.text, started_at=_now_ms())
+            if git_owner:
+                git_owner.sandbox_started()
             result = _PI_RUNTIME.run(
                 work_dir=MANAGER.thread_default_working_dir(tid), timezone=(run.rider or {}).get("tz"),
                 prompt=run.text, history=history, system_prompt=_pi_system_prompt(),
@@ -2548,15 +2569,21 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
                 compaction_candidate=context.compaction_candidate,
                 skill_run_id=run.id, commit=complete_pi_run,
                 turn_id=tid, admitted=lambda: PI_PREVIEW.admits("pi"),
-                should_yield=_pi_should_yield, trace_dir=thread_dir, trace_run_id=run.id)
+                should_yield=_pi_should_yield, trace_dir=thread_dir, trace_run_id=run.id,
+                sandbox_cleanup=(lambda generation: _git_cleanup(git_owner, generation))
+                if git_owner else None)
+            if git_owner:
+                _git_finish(git_owner, result.reply, (run.rider or {}).get("tz"))
             with _RUN_ADMISSION_LOCK:
                 _runs().transition(tid, run.id, "success", result=result.reply)
             _set_status(tid, "ready")
             MANAGER.touch(tid)
-    except (PiConversationError, PiRuntimeError, ThreadHoldExpired, QueueWaitTimeout) as error:
+    except (PiConversationError, PiRuntimeError, GitSyncError, ThreadHoldExpired, QueueWaitTimeout) as error:
         logging.error("Pi run %s failed", run.id, exc_info=True)
         with _RUN_ADMISSION_LOCK:
             current = _runs().get(tid, run.id)
+            if current.status == "pending" and isinstance(error, GitSyncError):
+                current = _runs().claim(tid, run.id)
             if current.status == "running":
                 _runs().transition(tid, run.id, "error", error=str(error))
         _set_status(tid, "error", error=str(error), pending_message=run.text)
@@ -2655,6 +2682,49 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
         origin=run.origin, work_id=run.work_id,
         location=_location_from_fields(run.location))
     _RESUME_SCHEDULER.submit(successor.id, tid, user_priority=user_priority)
+
+
+def _git_cleanup(owner, generation) -> None:
+    """Persist a recovery fence if this exact sandbox cannot be proved exited."""
+    try:
+        SandboxManager.cleanup_verified(owner.worktree, generation)
+        owner.sandbox_stopped()
+    except Exception as error:
+        owner.quarantine()
+        owner.failed(GitSyncError("Git sandbox teardown needs operator verification"))
+        raise GitSyncError("Git sandbox teardown needs operator verification") from error
+
+
+def _git_prepare(owner, work_id: str, timezone: str | None) -> None:
+    """Reconcile Git before model admission using the credential-free profile."""
+    owner.sandbox_started()
+    backend = SandboxManager.get_pi_sandbox_backend(owner.worktree, tz=timezone)
+    if backend is None:
+        raise GitSyncError("Git sync requires the restricted sandbox")
+    try:
+        owner.prepare(backend, work_id)
+    finally:
+        _git_cleanup(owner, backend.container)
+
+
+def _git_finish(owner, message: str, timezone: str | None) -> None:
+    """Best-effort bounded publication; never discard a saved successful answer."""
+    try:
+        if owner.state.get("quarantine") or owner.state.get("sandbox_in_flight"):
+            raise GitSyncError("Git sandbox teardown needs operator verification")
+        owner.sandbox_started()
+        backend = SandboxManager.get_pi_sandbox_backend(owner.worktree, tz=timezone)
+        if backend is None:
+            raise GitSyncError("Git sync requires the restricted sandbox")
+        try:
+            owner.commit(backend, message)
+        finally:
+            _git_cleanup(owner, backend.container)
+        owner.publish()
+    except Exception as error:
+        owner.failed(error if isinstance(error, GitSyncError) else GitSyncError(
+            "Branch publication is pending; work and answer are preserved"))
+        logging.warning("Thread branch publication pending", exc_info=True)
 
 
 def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
@@ -2781,7 +2851,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 user_priority=(queue_user_priority
                                or (_run is not None and _run.origin is None
                                    and _run.mode == "turn"
-                                   and _run.text is not None))):
+                                   and _run.text is not None))), git_ownership(
+                MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid)) as git_owner:
             # A queued run remains pending until it actually owns THREAD_QUEUE. This
             # is what makes it visible to the active turn's interjection reader. Two
             # dispatchers for one run serialize here; only the first can claim it.
@@ -2839,6 +2910,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 except InvalidRunTransition:
                     return
             _set_status(tid, "starting_sandbox", **pending_kwargs)
+            if git_owner and not resume and resume_decision is None:
+                _git_prepare(git_owner, _run.work_id if _run else tid,
+                             rider.tz if rider else None)
             sandbox = None
             sandbox_generation = None
             try:
@@ -2846,9 +2920,13 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # creation registers a container and then raises — cleanup
                 # keys on work_dir, not on the `sandbox` handle.
                 try:
+                    if git_owner:
+                        git_owner.sandbox_started()
                     sandbox = _get_sandbox_backend(
                         tid, tz=rider.tz if rider else None)
                     sandbox_generation = sandbox.container if sandbox else None
+                    if git_owner and sandbox is None:
+                        raise GitSyncError("Git sync requires the restricted sandbox")
                 except Exception:
                     sandbox_generation = SandboxManager.current_container(
                         MANAGER.thread_default_working_dir(tid))
@@ -2958,7 +3036,16 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # cleanup() SIGKILLs (the response is already committed to the
                 # checkpoint here, and the sandbox has nothing to flush).
                 _work_dir = MANAGER.thread_default_working_dir(tid)
-                SandboxManager.cleanup(_work_dir, sandbox_generation)
+                if git_owner and sandbox_generation is not None:
+                    try:
+                        _git_cleanup(git_owner, sandbox_generation)
+                    except GitSyncError:
+                        # The durable answer remains available; later writes are quarantined.
+                        logging.error("Git model sandbox teardown failed", exc_info=True)
+                else:
+                    SandboxManager.cleanup(_work_dir, sandbox_generation)
+            if git_owner and not chat.pending_reply() and not _pending_email(chat):
+                _git_finish(git_owner, resp or "assistant update", rider.tz if rider else None)
         MANAGER.touch(tid)
 
         # Generate description if there is none
@@ -2968,11 +3055,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         except Exception as e:
             logging.warning("Description generation failed for %s: %s", tid, e)
 
-        # After message, sync changes if any
-        dm = _get_domain_manager(tid)
-        if dm and dm.changes():
-            last_assistant = resp if resp else "assistant update"
-            dm.sync(last_assistant)
+        # Git finalization ran inside workspace ownership, including no-file-change turns.
         # Record this turn's wall-clock elapsed (submit → completion) keyed by turn ordinal,
         # for the completed-reply badge. Off-loop. Runs at BOTH success exits below (ready
         # and awaiting_approval), keyed by the turn ordinal — so a HITL turn records
@@ -3099,6 +3182,21 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                    + (_REJOURNAL_NOTE if _rejournaled else "")),
             **pending_kwargs,
         )
+    except GitSyncError as error:
+        # Ownership/binding can fail before the normal claim point. Complete this
+        # exact accepted ticket rather than leave a permanently pending Run.
+        other_running = False
+        if _run is not None:
+            with _RUN_ADMISSION_LOCK:
+                current = _runs().get(tid, _run.id)
+                if current.status == "pending":
+                    current = _runs().claim(tid, current.id)
+                if current.status == "running":
+                    _runs().transition(tid, current.id, "error", error=str(error))
+                other_running = any(candidate.id != _run.id and candidate.status == "running"
+                                    for candidate in _runs().list(tid))
+        if not other_running:
+            _set_status(tid, "error", error=str(error), **pending_kwargs)
     except _SupersedeCapReached:
         # Controlled unwind from the supersede-cap terminal exit: the queue is now
         # released and the container reaped, and _terminal is already the terminal
@@ -3234,15 +3332,18 @@ def _require_new_thread_engine(engine: str) -> str:
 @app.post("/threads")
 async def create_thread(domain: str | None = Form(None), engine: str = Form("deepagents")):
     selected_engine = await run_in_threadpool(_require_new_thread_engine, engine)
+    selected = _selected_git_source(domain)
     tid = await run_in_threadpool(MANAGER.reserve_visible, selected_engine)
-    selected = domain or (DOMAINS[0] if DOMAINS else None)
     if selected:
+        await run_in_threadpool(bind_git, MANAGER.thread_dir(tid), selected)
         await run_in_threadpool(
             DomainManager,
             MANAGER.thread_default_working_dir(tid),
             selected,
             branch_suffix=tid[-4:]
         )
+        await run_in_threadpool(authorize_branch, MANAGER.thread_dir(tid),
+                               MANAGER.thread_default_working_dir(tid))
     elif selected_engine == "pi":
         await run_in_threadpool(_create_empty_pi_workspace, tid)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
@@ -3267,6 +3368,14 @@ async def create_thread_with_message(
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
+def _selected_git_source(domain: str | None) -> str | None:
+    """Only configured source choices authorize host Git credentials."""
+    selected = domain or (DOMAINS[0] if DOMAINS else None)
+    if selected is not None and selected not in DOMAINS:
+        raise HTTPException(status_code=400, detail="Choose a configured Git repository")
+    return selected
+
+
 def create_thread_with_message_core(
     text: str, domain: str | None, rider: ContextRider | None = None, engine: str = "deepagents",
     location: LocationSnapshot | None = None, *, thread_id: str | None = None,
@@ -3282,8 +3391,10 @@ def create_thread_with_message_core(
                for existing in MANAGER.list()) >= MAX_INITIALIZING_THREADS:
             raise HTTPException(status_code=429, detail="Thread setup is busy")
         selected_engine = _require_new_thread_engine(engine)
+        selected = _selected_git_source(domain)
         tid = MANAGER.reserve_visible(selected_engine, thread_id)
-        selected = domain or (DOMAINS[0] if DOMAINS else None)
+        if selected:
+            bind_git(MANAGER.thread_dir(tid), selected)
         if selected_engine == "pi" and selected is None:
             _create_empty_pi_workspace(tid)
         if selected_engine == "pi":
@@ -5256,7 +5367,8 @@ def merge_thread(tid: str):
     if not dm or not dm.repo:
         raise HTTPException(status_code=400, detail="No git repository configured for this thread")
 
-    with MERGE_LOCK:
+    with MERGE_LOCK, git_ownership(
+            MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid)):
         try:
             dm.merge_and_push()
             _clear_conflict(tid)

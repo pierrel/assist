@@ -408,7 +408,8 @@ class PiRuntimeManager:
             max_turns: int = _MAX_TURNS, turn_id: str | None = None,
             admitted: Callable[[], bool] | None = None,
             should_yield: Callable[[], bool] | None = None,
-            trace_dir: str | None = None, trace_run_id: str | None = None) -> PiRuntimeResult:
+            trace_dir: str | None = None, trace_run_id: str | None = None,
+            sandbox_cleanup: Callable[[object], None] | None = None) -> PiRuntimeResult:
         """Run one fresh Pi worker and tear down every authority it used."""
         if (not isinstance(prompt, str) or not isinstance(system_prompt, str)
                 or not system_prompt.strip() or not isinstance(max_turns, int)
@@ -588,8 +589,9 @@ class PiRuntimeManager:
                     teardown_errors.append(error)
             if worker_reaped:
                 if sandbox is not None:
-                    self._attempt(teardown_errors, lambda: self._sandbox_manager.cleanup(
-                        work_dir, expected_container=sandbox.container))
+                    self._attempt(teardown_errors, lambda: sandbox_cleanup(sandbox.container)
+                                  if sandbox_cleanup is not None else self._sandbox_manager.cleanup(
+                                      work_dir, expected_container=sandbox.container))
                 if broker is not None:
                     self._attempt(teardown_errors, broker.close)
                 if relay is not None:

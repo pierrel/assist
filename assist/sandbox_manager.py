@@ -496,6 +496,26 @@ class SandboxManager:
         return cls._containers.get(work_dir)
 
     @classmethod
+    def cleanup_verified(cls, work_dir: str, expected_container) -> None:
+        """Confirm this generation exited before allowing host Git object reads.
+
+        Failed teardown retains the registry entry. The Git owner also persists
+        a quarantine so a process restart cannot silently permit another writer.
+        """
+        from docker.errors import NotFound
+        if expected_container is None or cls._containers.get(work_dir) is not expected_container:
+            raise RuntimeError("Git sandbox generation is unavailable")
+        try:
+            expected_container.kill()
+            expected_container.wait(timeout=10)
+        except NotFound:
+            pass  # Auto-removal is also proof that this exact generation exited.
+        if cls._containers.get(work_dir) is not expected_container:
+            raise RuntimeError("Git sandbox generation changed during teardown")
+        cls._containers.pop(work_dir)
+        cls._forget_egress_client(work_dir)
+
+    @classmethod
     def cleanup(cls, work_dir: str, expected_container=_ANY_CONTAINER) -> None:
         """Tear down the container for a work_dir. Removal is automatic (--rm).
 

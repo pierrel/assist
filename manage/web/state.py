@@ -289,17 +289,10 @@ def _get_sandbox_backend(tid: str, tz: str | None = None, *,
     ``include_agent`` mounts the visible thread's private main-agent directory.
     Hidden child runs pass ``False`` and receive self-contained task briefs instead.
 
-    Runs off the event loop (from ``_process_message``'s background task), so the
-    turn-start origin pre-fetch is safe here: the host refreshes ``origin/main`` in the
-    clone (it has git + origin access) so the agent can rebase onto a current local
-    ``origin/main`` — the agent cannot fetch from inside the sandbox itself."""
+    Git reconciliation is owned by the visible turn, not sandbox construction:
+    hidden and resumed runs must not fast-forward a shared in-flight worktree.
+    """
     work_dir = MANAGER.thread_default_working_dir(tid)
-    dm = _get_domain_manager(tid)
-    if dm is not None:
-        try:
-            dm.fetch_origin()
-        except Exception as e:
-            logging.getLogger(__name__).warning("origin pre-fetch failed for %s: %s", tid, e)
     return SandboxManager.get_sandbox_backend(
         work_dir, tz=tz,
         agent_dir=(MANAGER.thread_agent_dir(tid) if include_agent else None))

@@ -130,14 +130,14 @@ def ensure_thread_branch(repo_dir: str, suffix: str | None = None) -> str:
 
 def clone_repo(repo_url: str, dest_dir: str, branch_suffix: str | None = None,
                timeout_s: float | None = None) -> None:
-    """Always clone the repository into dest_dir.
+    """Clone with independent object files, including server-local repositories.
 
     ``branch_suffix`` is forwarded to :func:`create_timestamped_branch`
     so the per-thread branch carries an unambiguous identifier.
     """
     parent = os.path.dirname(dest_dir)
     os.makedirs(parent, exist_ok=True)
-    subprocess.run(['git', 'clone', '--branch', 'main', repo_url, dest_dir], check=True,
+    subprocess.run(['git', 'clone', '--no-hardlinks', '--branch', 'main', repo_url, dest_dir], check=True,
                    timeout=timeout_s)
     create_timestamped_branch(dest_dir, suffix=branch_suffix)
 
