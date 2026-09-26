@@ -1241,3 +1241,6 @@ def test_local_commit_failure_cancels_new_continuation_and_rejournals_interjecti
     assert len(fresh) == 1 and fresh[0].id != created["interjection"].id
     assert queued == [(fresh[0].id, "state")]
     assert "state" not in threads._TURN_INTERJECTION
+    saved = threads._runs().get("state", run.id)
+    assert "follow-up this turn had scheduled was cancelled" in saved.error
+    assert "mid-turn message will be retried" in saved.error

@@ -3278,9 +3278,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             **pending_kwargs,
         )
     except GitSyncError as error:
+        message = str(error)
         if _terminal is not None:
-            _cancel_this_turns_continuations(tid, _pre_turn_conts)
-            _rejournal_claimed_interjections(tid, rider)
+            if _cancel_this_turns_continuations(tid, _pre_turn_conts):
+                message += " A follow-up this turn had scheduled was cancelled."
+            if _rejournal_claimed_interjections(tid, rider):
+                message += _REJOURNAL_NOTE
         # Ownership/binding can fail before the normal claim point. Complete this
         # exact accepted ticket rather than leave a permanently pending Run.
         other_running = False
@@ -3290,12 +3293,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 if current.status == "pending":
                     current = _runs().claim(tid, current.id)
                 if current.status == "running":
-                    _runs().transition(tid, current.id, "error", error=str(error),
+                    _runs().transition(tid, current.id, "error", error=message,
                                        **({"result": _terminal[1]} if _terminal is not None else {}))
                 other_running = any(candidate.id != _run.id and candidate.status == "running"
                                     for candidate in _runs().list(tid))
         if not other_running:
-            _set_status(tid, "error", error=str(error), **pending_kwargs)
+            _set_status(tid, "error", error=message, **pending_kwargs)
     except _SupersedeCapReached:
         # Controlled unwind from the supersede-cap terminal exit: the queue is now
         # released and the container reaped, and _terminal is already the terminal
