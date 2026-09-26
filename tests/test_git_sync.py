@@ -1213,3 +1213,31 @@ def test_remote_only_child_failure_keeps_local_success_and_retry_fences(repos, m
         later.commit(backend, "no further change")
         later.publish()
         assert git(repos[0], "show", "thread/test:child") == "saved child work"
+
+
+def test_local_commit_failure_cancels_new_continuation_and_rejournals_interjection(repos, monkeypatch):
+    created = {}
+
+    def model():
+        created["continuation"] = threads._create_run("state", "new promise", origin="continuation")
+        injected = threads._create_run("state", "interjected user message")
+        created["interjection"] = injected
+        threads._consume_interjections("state", {injected.id})
+        return "saved answer"
+
+    threads, _, outcomes = web_turn(repos, monkeypatch, model)
+    retained = threads._create_run("state", "earlier promise", origin="continuation")
+    queued = []
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit", lambda *args: queued.append(args))
+    monkeypatch.setattr(sync.GitSync, "commit", lambda *_args: (
+        _ for _ in ()).throw(sync.GitSyncError("restricted commit failed")))
+    run = threads._create_run("state", "probe")
+    threads._process_message("state", "probe", _run=run)
+    assert outcomes[-1][1:4] == ("error", None, "saved answer")
+    assert threads._runs().get("state", created["continuation"].id).status == "cancelled"
+    assert threads._runs().get("state", retained.id).status == "pending"
+    fresh = [item for item in threads._runs().list("state")
+             if item.text == "interjected user message" and item.status == "pending"]
+    assert len(fresh) == 1 and fresh[0].id != created["interjection"].id
+    assert queued == [(fresh[0].id, "state")]
+    assert "state" not in threads._TURN_INTERJECTION

@@ -2891,10 +2891,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # handlers below can reference it even when the failure precedes the
     # snapshot (e.g. a queue-wait timeout).
     _pre_turn_conts: set = set()
-    # Turn-completion observer seam (D1/§7.1): set at the two SUCCESS terminal
-    # exits below (reply captured); a fall-through error exit leaves it None
-    # (reported as "error" at the post-block fire). The pause path and every
-    # early-return `return` exit the function before the fire, correctly.
+    # Turn-completion observer seam (D1/§7.1): capture a reply at success exits
+    # and post-model Git finalization errors. Other error exits leave it None
+    # (reported as "error" at the post-block fire). Pauses and early returns
+    # exit the function before that fire.
     _terminal: tuple[str, str | None] | None = None
 
     def on_queue_wait(stage: str) -> None:
@@ -3278,6 +3278,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             **pending_kwargs,
         )
     except GitSyncError as error:
+        if _terminal is not None:
+            _cancel_this_turns_continuations(tid, _pre_turn_conts)
+            _rejournal_claimed_interjections(tid, rider)
         # Ownership/binding can fail before the normal claim point. Complete this
         # exact accepted ticket rather than leave a permanently pending Run.
         other_running = False
@@ -3338,7 +3341,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # durable AND the queue is released. Terminal exits reach here: ready/awaiting set
     # _terminal; the supersede-cap awaiting_approval unwinds here via _SupersedeCapReached
     # (so its observer also fires post-release, never under the queue lock); the error
-    # branches fall through with _terminal None (→ "error"). The pause path and the
+    # branches normally fall through with _terminal None (→ "error"); a post-model
+    # Git finalization error retains its saved reply in ("error", resp). The pause path and the
     # deleted-thread/duplicate-dispatch skips `return` before this line, so a paused/
     # skipped turn correctly fires nothing. No observer registered in v1 ⇒ a no-op.
     if _terminal is None:
