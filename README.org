@@ -66,6 +66,9 @@ and uncertain publication or sandbox teardown hold for explicit reconciliation.
 Local commit or verified teardown failure reports a turn error with the saved
 answer retained. Remote-only publication failure remains best-effort and does
 not discard a finalized local answer; pending Git error/fences remain.
+After restart, a saved reply alone is not Git finalization proof. Completed
+Git-bound recovery reports an explicit reconciliation error, preserves the
+answer/work/fences, and does not replay the model or reconstruct the commit.
 Saved answers and work are preserved; =workspace.sync_error= explains pending
 Git sync. Legacy threads require an operator-verified binding. Git snapshots
 are capped at 128 MiB and 10,000 scanned object entries, with bounded subprocesses;

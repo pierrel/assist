@@ -1244,3 +1244,28 @@ def test_local_commit_failure_cancels_new_continuation_and_rejournals_interjecti
     saved = threads._runs().get("state", run.id)
     assert "follow-up this turn had scheduled was cancelled" in saved.error
     assert "mid-turn message will be retried" in saved.error
+
+
+@pytest.mark.parametrize("engine", ["deep", "pi"])
+def test_completed_git_recovery_is_error_without_replaying_saved_answer(repos, monkeypatch, engine):
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: pytest.fail("replayed model"))
+    owner, _ = turn(repos)
+    owner.sandbox_started()
+    (repos[1] / "crash-work").write_text("preserve crash edits\n")
+    before = sync.read_state(str(repos[3]))
+    run = threads._create_run("state", "probe")
+    threads._runs().claim("state", run.id)
+    run = threads._runs().transition("state", run.id, "running", result="saved answer")
+    monkeypatch.setattr(threads, "_recovery_decision", lambda *_: "finalize")
+    monkeypatch.setattr(threads, "_is_pi_thread", lambda _: engine == "pi")
+    if engine == "pi":
+        monkeypatch.setattr(threads, "_PI_CONVERSATIONS", SimpleNamespace(
+            completed_reply=lambda *_: SimpleNamespace(text="saved answer")))
+        threads._execute_pi_run(run, user_priority=False)
+    else:
+        threads._recover_run(run)
+    saved = threads._runs().get("state", run.id)
+    assert saved.status == "error" and saved.result == "saved answer"
+    assert "Git" in saved.error and "reconcile" in saved.error.lower()
+    assert sync.read_state(str(repos[3])) == before
+    assert (repos[1] / "crash-work").read_text() == "preserve crash edits\n"

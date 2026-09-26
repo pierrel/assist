@@ -674,6 +674,19 @@ def test_recover_finalizes_completed_turn(wired, monkeypatch):
     assert _get_status(tid)["stage"] == "ready"
 
 
+def test_legacy_git_completed_projection_is_not_ready_after_restart(wired, monkeypatch):
+    tid, root = wired
+    from assist.git_sync import bind, read_state
+    bind(str(root / tid), "https://example.invalid/repo.git")
+    before = read_state(str(root / tid))
+    monkeypatch.setattr(threads, "_recovery_decision", lambda *_: "finalize")
+    _set_status(tid, "processing", pending_message="saved checkpoint answer")
+    threads.queue_recovery_runs()
+    assert _get_status(tid)["stage"] == "error"
+    assert "unverified" in _get_status(tid)["error"]
+    assert read_state(str(root / tid)) == before
+
+
 def test_recover_unrecoverable_errors_with_message_surfaced(wired, monkeypatch):
     tid, _ = wired
     calls = []

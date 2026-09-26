@@ -2512,6 +2512,19 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
         pass  # thread deletion removes its run store while a dispatcher unwinds.
 
 
+def _git_recovery_error(tid: str) -> str | None:
+    """A saved reply alone cannot authenticate a Git-backed turn's finalization."""
+    try:
+        git_bound = read_git_binding(MANAGER.thread_dir(tid)) is not None or os.path.lexists(
+            os.path.join(MANAGER.thread_default_working_dir(tid), ".git"))
+    except (GitSyncError, OSError):
+        git_bound = True
+    if git_bound:
+        return ("Git finalization after restart is unverified; saved answer and files are preserved. "
+                "Reconcile Git before continuing.")
+    return None
+
+
 def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
     """Execute one manual visible Pi turn without constructing a Deep graph."""
     tid = run.thread_id
@@ -2540,11 +2553,14 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
                 _dispatch_pending_after(tid, run.id)
                 return
             if completed is not None:
+                git_error = _git_recovery_error(tid)
                 with _RUN_ADMISSION_LOCK:
                     current = _runs().get(run.thread_id, run.id)
                     if current.status in {"running", "interrupted"}:
-                        _runs().transition(run.thread_id, run.id, "success", result=completed.text)
-                _set_status(run.thread_id, "ready")
+                        _runs().transition(run.thread_id, run.id, "error" if git_error else "success",
+                                           result=completed.text, **({"error": git_error} if git_error else {}))
+                _set_status(run.thread_id, "error" if git_error else "ready",
+                            **({"error": git_error} if git_error else {}))
                 MANAGER.touch(run.thread_id)
                 _dispatch_pending_after(run.thread_id, run.id)
                 return
@@ -2701,8 +2717,11 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
     decision = _recovery_decision(tid, pending_text or "")
     logging.info("recovery: run %s on %s -> %s", run.id, tid, decision)
     if decision == "finalize":
-        _runs().transition(tid, run.id, "success")
-        _set_status(tid, "ready")
+        git_error = _git_recovery_error(tid)
+        _runs().transition(tid, run.id, "error" if git_error else "success",
+                           **({"error": git_error} if git_error else {}))
+        _set_status(tid, "error" if git_error else "ready",
+                    **({"error": git_error} if git_error else {}))
         _dispatch_pending_after(tid)
         return
     if decision == "error":
@@ -4362,7 +4381,9 @@ def queue_recovery_runs() -> None:
             pending = status.get("pending_message") or ""
             decision = _recovery_decision(tid, pending)
             if decision == "finalize":
-                _set_status(tid, "ready")
+                git_error = _git_recovery_error(tid)
+                _set_status(tid, "error" if git_error else "ready",
+                            **({"error": git_error} if git_error else {}))
             elif decision == "error":
                 _set_status(
                     tid, "error",

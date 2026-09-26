@@ -925,6 +925,9 @@ Git state holds for explicit reconciliation while preserving work and saved answ
 Local commit or verified teardown failure reports a turn error with the saved
 answer retained. Remote-only publication failure remains best-effort and does
 not discard a finalized local answer; the pending Git error/fences remain.
+After restart, a saved reply alone is not Git finalization proof. Completed
+Git-bound recovery reports an explicit reconciliation error, preserves the
+answer/work/fences, and does not replay the model or reconstruct the commit.
 Legacy threads need an operator-verified binding and independent object storage.
 The phone uses normal Git credentials, not an Assist-web Git proxy; pending sync
 is reported through bounded `workspace.sync_error` metadata.
