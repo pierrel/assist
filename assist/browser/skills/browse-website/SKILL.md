@@ -11,15 +11,13 @@ or controls, use this turn's browser tools yourself. Do not delegate browser
 navigation to a child agent. The browser is stateful only within this Run and
 has a short lifetime; reopen a page after a later turn or an approval pause.
 
-`browser_open(url)` renders one HTTP(S) page. On success it returns the page ID,
-actual URL, snapshot ID, readable accessibility snapshot, link/control targets,
-popup page IDs, download IDs, and network errors. For another visit, pass an
-observed live page ID as `reuse_page_id` to navigate that page in place; its old snapshot and
+`browser_open(url)` renders one HTTP(S) page and returns a page ID, URL,
+snapshot ID, readable accessibility snapshot, link/control targets, popup page
+IDs, download IDs, and network errors. A failed navigation can return the
+attempted URL, an empty snapshot, and a closed page ID. For another visit, pass
+an observed live page ID as `reuse_page_id` to navigate that page in place; its old snapshot and
 targets become invalid. `browser_close(page_id)` releases a finished page or
 popup. The limit is five concurrently live pages, not five total visits.
-If HTTP navigation fails, the result may have an empty snapshot, the attempted
-URL, and a closed page ID; use `browser_probe` for the attempted host or open
-another page.
 
 Only existing allowlisted or approved hosts are reachable. If a host is denied,
 use the existing egress approval
@@ -36,8 +34,6 @@ works if only one link has it; duplicate links need the reference. To enter
 ordinary nonsecret text, use `browser_act(..., "fill", {"ref": "...", "text":
 "..."})`. Re-observe after a stale-target error. `browser_wait(page_id, role,
 name)` waits briefly for one named control. Popups return their own page ID.
-A new blank popup has an empty snapshot; reuse its page ID to open an HTTP(S)
-URL.
 
 For a failed network request, `browser_probe(host, port)` reports the proxy's
 reason only for a host the browser already tried. Do not treat a failed asset

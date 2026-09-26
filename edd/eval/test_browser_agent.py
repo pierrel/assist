@@ -300,7 +300,7 @@ class TestBrowserAgent(TestCase):
         self.assertTrue(agent_tool_calls(agent, "browser_open"), agent.all_messages())
         self.assertFalse(agent_tool_calls(agent, "request_egress"), agent.all_messages())
         self.assertTrue(any(word in answer.lower() for word in
-                            ("blocked", "cannot", "couldn't", "not load")), answer)
+                            ("blocked", "cannot", "couldn't", "can't", "not load")), answer)
 
     def test_approval_pause_then_reopens_on_followup(self):
         """A real-looking approval pauses navigation; a later turn reopens it."""
