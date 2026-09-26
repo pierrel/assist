@@ -32,6 +32,7 @@ from assist.schedule.store import ScheduleStore
 from assist.schedule.tools import schedule_tools
 from assist.events.store import SubscriptionStore
 from assist.events.tools import subscription_tools
+from assist.events.quiet import quiet_tools
 from assist.events.reply import reply_tools, REPLY_INTERRUPT_ON
 from assist.events.email import email_tools, EMAIL_INTERRUPT_ON
 from assist.events.notify import notify_tools
@@ -197,8 +198,15 @@ _egress_tools = (egress_tools(EGRESS_STORE, EGRESS_BASE_HOSTS,
                               thread_dir=MANAGER.thread_dir)
                  if EGRESS_STORE else [])
 
+
+def _request_quiet(tid: str, run_id: str) -> bool:
+    from manage.web.threads import _runs
+    return _runs().request_quiet(tid, run_id)
+
+
 set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE)
               + notify_tools(lambda tid: _mark_urgent(tid))
+              + quiet_tools(_request_quiet)
               + _geo_tools + email_tools() + [get_location]
               + frequency_tools(FREQUENCY_STORE))
 set_execution_egress_tools(_egress_tools)
@@ -456,14 +464,11 @@ def _get_status(tid: str) -> dict:
         return {"stage": "ready"}
 
 
-def _set_status(tid: str, stage: str, **kwargs) -> None:
+def _set_status(tid: str, stage: str, *, mark_unseen: bool = True, **kwargs) -> None:
     _atomic_write(_status_path(tid), json.dumps({"stage": stage, **kwargs}))
-    # Single choke point for the "unseen AI response" badge: `ready` and
-    # `awaiting_approval` are set ONLY at _process_message's three response-success
-    # exits (incl. the supersede early-return), and nowhere else — so marking here
-    # catches every response/draft the user should see, and can't miss an exit.
-    # Errors don't mark (the "error" badge, above "new" in precedence, covers them).
-    if stage in ("ready", "awaiting_approval"):
+    # A quiet ready result skips only its own new marker. Existing unread
+    # attention remains until the page is opened. Approvals always mark new.
+    if stage == "awaiting_approval" or (stage == "ready" and mark_unseen):
         _mark_unseen_response(tid)
 
 
@@ -510,8 +515,9 @@ def _append_timing(tid: str, ordinal: int, seconds: float) -> None:
 
 
 # --- "unseen AI response" badge state -------------------------------------
-# A thread carries an "unseen" AI response from when a turn produces a
-# response/draft until the user OPENS that thread's page.  Two representations of
+# A completed turn normally marks its response/draft unseen until the user
+# OPENS that thread's page. A quiet ready result skips adding this marker but
+# leaves any earlier marker intact. Two representations of
 # the one bit, kept in sync (see docs/2026-07-03-unread-badge.org):
 #   - a marker file per thread (durable — survives restart),
 #   - the _UNSEEN set (the badge READ PATH — render_index tests membership per row,

@@ -217,6 +217,36 @@ def test_process_message_kills_container_at_turn_end_on_success(client, monkeypa
     assert calls[0].endswith("thread-e2e"), f"teardown targeted the wrong work_dir: {calls}"
 
 
+def test_quiet_run_choice_suppresses_the_completed_turn_new_badge(client, monkeypatch):
+    """The worker uses the configured Run ID to project a quiet ready result."""
+    from manage.web import state
+
+    class _Chat:
+        def message(self, _text):
+            return "All clear"
+
+        def pending_reply(self):
+            return None
+
+    chat = _Chat()
+    _stub_happy_path(monkeypatch, chat)
+    original_get = web.MANAGER.get
+
+    def get_and_request_quiet(tid, **kwargs):
+        config = kwargs.get("configurable") or {}
+        if config.get("web_run_id"):
+            assert threads._runs().request_quiet(tid, config["web_run_id"])
+        return original_get(tid, **kwargs)
+
+    monkeypatch.setattr(web.MANAGER, "get", get_and_request_quiet)
+    state._UNSEEN.discard("thread-e2e")
+    response = client.post("/thread/thread-e2e/message", data={"text": "Check status"},
+                           follow_redirects=False)
+    assert response.status_code == 303
+    assert _wait_for_terminal_status("thread-e2e")["stage"] == "ready"
+    assert not state._has_unseen_response("thread-e2e")
+
+
 def test_durable_worker_publishes_reserved_phone_deltas_then_finishes_journal(client, monkeypatch):
     """The real Run worker, not a route helper, owns live journal publication."""
     from manage.web.run_stream import RunStreamJournal
