@@ -236,14 +236,18 @@ def test_failed_endpoint_scan_keeps_existing_grant_for_recovery(tmp_path):
     assert read_client(directory, ip).generation == "generation"
 
 
-def test_empty_recovery_queue_still_reaps_browser_attribution(monkeypatch):
+def test_empty_recovery_queue_still_reconciles_browser_attribution(monkeypatch):
     import queue
 
     from manage.web import threads
 
     called = []
-    monkeypatch.setattr(threads.BrowserManager, "reap_orphans",
-                        lambda root: called.append(root))
+
+    def reconcile(root):
+        called.append(root)
+        return True
+
+    monkeypatch.setattr(threads.BrowserManager, "reconcile_startup", reconcile)
     monkeypatch.setattr(threads.SandboxManager, "reap_orphans",
                         lambda _root: (_ for _ in ()).throw(
                             AssertionError("empty queue should skip sandbox recovery")))
