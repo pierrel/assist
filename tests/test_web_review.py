@@ -336,6 +336,8 @@ class TestPostReviewRoute:
         """
         tdir = tmp_path / "thread-1"
         tdir.mkdir()
+        from assist.browser.authority import mark_new_thread
+        mark_new_thread(str(tmp_path), "thread-1")
         monkeypatch.setattr(web.MANAGER, "root_dir", str(tmp_path))
         monkeypatch.setattr(web.MANAGER, "thread_dir", lambda tid: str(tmp_path / tid))
         return TestClient(web.app)

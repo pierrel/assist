@@ -22,7 +22,7 @@ import threading
 import time
 import urllib.parse
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import markdown
 import requests
@@ -48,7 +48,7 @@ import anyio.to_thread
 from langchain_core.messages import HumanMessage
 
 from assist.backlog import PendingMessage
-from assist.run_service import InvalidRunTransition, Run, RunNotFound
+from assist.run_service import InvalidRunTransition, Run, RunNotFound, browser_reset_owed
 from assist.async_subagents import AsyncTaskContext, async_task_context
 from assist.egress.store import EgressWaiter, resolution_prompt
 from assist.egress.tools import (EGRESS_ORIGIN_THREAD_ID,
@@ -67,6 +67,9 @@ from assist.events.email import email_identity, valid_email_content
 from assist.schedule.scheduler import Scheduler
 from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
+from assist.browser.manager import BrowserManager, BrowserSession, BrowserUserRequest, browser_tools
+from assist.browser import authority as browser_authority
+from assist.egress.client_map import browser_records, configured_directory
 from assist.thread import Thread
 from assist.safe_markdown import render_markdown
 from assist.visible_conversation import (
@@ -969,20 +972,42 @@ def render_thread(
     # sent again while the first is on screen hides its queued bubble until
     # the first is claimed — cosmetic, self-resolving.)
     _journal_entries = []
+    _visible_runs = []
     if history_before is None:
-        _journal_entries = [PendingMessage(
-            thread_id=run.thread_id, text=run.text or "", sender=run.sender,
-            rider=run.rider, enqueued_at=run.created_at, origin=run.origin, id=run.id)
-            for run in _runs().peek(tid)
-            if run.status == "pending" and run.text]
+        _visible_runs = _runs().peek(tid)
+        _journal_entries = [run for run in _visible_runs
+                            if run.status in {"pending", "revocation_pending"}
+                            and run.text]
     for r in ([r for r in _journal_entries
                if r.origin is None and r.text not in seen_interjections]
               if history_before is None else []):
+        held = r.status == "revocation_pending"
+        badge = "queued · browser safety reset" if held else "queued"
+        detail = ""
+        if held:
+            detail = ("<div class=\"content\" style=\"font-size:.8rem;\">"
+                      "Not yet delivered. "
+                      + html.escape(r.error or "Closing the previous internal browser")
+                      + ("; retry after " + html.escape(r.revocation_retry_at)
+                         if r.revocation_retry_at else "") + "</div>")
         rendered.insert(0, (
             '<div class="msg user" style="opacity:.8;"><div class="role">user'
             '<span style="margin-left:.5rem; color:#9ca3af; font-size:.75rem;'
-            'font-weight:normal;">queued</span></div><div class="content">'
-            f'{html.escape(r.text).replace(chr(10), "<br/>")}</div></div>'))
+            f'font-weight:normal;">{badge}</span></div><div class="content">'
+            f'{html.escape(r.text).replace(chr(10), "<br/>")}</div>{detail}</div>'))
+    notices = [run for run in _visible_runs if run.browser_reset_notice]
+    if notices:
+        latest = notices[-1]
+        prior = next((run for run in _visible_runs
+                      if run.id == latest.browser_reset_run_id), None)
+        prior_status = prior.status if prior else "unavailable"
+        rendered.insert(0, (
+            '<div class="msg tools"><div class="content">'
+            'Internal browsing stopped; page and form state was lost. '
+            'The earlier task was not canceled by this safety reset '
+            f'(current Run status: {html.escape(prior_status)}). '
+            'A fresh exact-host request is needed unless the new message named that host.'
+            '</div></div>'))
     rendered_body = "\n".join(rendered) or "<p><em>No messages yet.</em></p>"
     cursor_attr = (f' data-history-cursor="{html.escape(history_cursor, quote=True)}"'
                    if history_cursor else "")
@@ -1837,6 +1862,19 @@ def _frame_interjection(rec: "PendingMessage") -> str:
         guide += (" Review your outstanding subagent tasks with list_async_tasks, "
                   "then deliberately keep, update, or cancel them if this message "
                   "changes their relevance.")
+    try:
+        admitted = _runs().get(rec.thread_id, rec.id)
+        if admitted.browser_reset_notice:
+            prior = (_runs().get(rec.thread_id, admitted.browser_reset_run_id)
+                     if admitted.browser_reset_run_id else None)
+            state = prior.status if prior else "unavailable"
+            guide += (" Trusted browser safety reset: internal browsing stopped; "
+                      "page and form state was lost. The earlier task was not "
+                      f"canceled by this reset; its Run status is {state}. "
+                      "A new exact-host user request is needed unless this direct "
+                      "message itself names that host.")
+    except RunNotFound:
+        pass
     return _INTERJECTION_FRAME + rec.text + guide + ")"
 
 
@@ -1877,7 +1915,8 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
         for rec in claimed:
             fresh = _create_run(
                 rec.thread_id, rec.text,
-                rider=_rider_from_fields(rec.rider), sender=rec.sender)
+                rider=_rider_from_fields(rec.rider), sender=rec.sender,
+                user_origin=rec.sender is None)
             # The retried turn keeps the ORIGINAL message's context rider
             # (sent_at/tz/lat/lon from the journal entry — recovery fidelity,
             # like the restart drain); fall back to a fresh rider with the
@@ -1894,12 +1933,20 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
 # the web layer is the only embedder that does (CLI/emacsos/evals keep today's
 # behavior by construction). The journal read is the locked one — the
 # middleware hook runs on the turn's worker thread, never the event loop.
+def _runs_before_browser_reset(runs: list[Run]) -> list[Run]:
+    """Only journal entries before the first owed reset may run or interject."""
+    first_reset = next((index for index, run in enumerate(runs)
+                        if browser_reset_owed(run)), len(runs))
+    return runs[:first_reset]
+
+
 def _pending_run_records(tid: str) -> list[PendingMessage]:
-    """Interjection adapter over pending runs (the middleware needs record shape)."""
+    """Interjection adapter; never expose a follower across a reset debt."""
+    eligible = _runs_before_browser_reset(_runs().list(tid))
     return [PendingMessage(
         thread_id=run.thread_id, text=run.text or "", sender=run.sender,
         rider=run.rider, enqueued_at=run.created_at, origin=run.origin, id=run.id)
-        for run in _runs().list(tid)
+        for run in eligible
         if (run.status == "pending" and run.mode == "turn" and run.text
             and run.assistant_id == "general-agent")]
 
@@ -2089,7 +2136,10 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 parent_run_id=None, dispatch_key=None,
                 cancel_pending=False, max_runs=None,
                 max_pending=None, multitask_strategy="enqueue",
-                delegate_user_urls=(), location: LocationSnapshot | None = None) -> Run:
+                delegate_user_urls=(), location: LocationSnapshot | None = None,
+                user_origin: bool = False, user_event_id: str | None = None,
+                revocation_pending: bool = False,
+                browser_reset_run_id: str | None = None) -> Run:
     """Commit one web turn before placing its id on a dispatch queue."""
     return _runs().create(
         tid, assistant_id, text, run_id=run_id, work_id=work_id, mode=mode,
@@ -2101,7 +2151,10 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
         cancel_pending=cancel_pending, max_runs=max_runs,
         max_pending=max_pending, multitask_strategy=multitask_strategy,
         delegate_user_urls=delegate_user_urls,
-        location=_location_to_fields(location) if location else None)
+        location=_location_to_fields(location) if location else None,
+        user_origin=user_origin, user_event_id=user_event_id,
+        revocation_pending=revocation_pending,
+        browser_reset_run_id=browser_reset_run_id)
 
 
 def _publish_phone_text(tid: str, work_id: str, text: str) -> None:
@@ -2386,6 +2439,12 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
     except RunNotFound:
         logging.info("run %s on %s disappeared before dispatch", run_id, tid)
         return
+    if (run.status == "pending" and not any(
+            item.id == run.id for item in _runs_before_browser_reset(
+                _runs().list(tid)))):
+        # Schedules, SMS and synthetic approval turns may dispatch directly.
+        # Leave the ticket pending; reset completion replays it in order.
+        return
     try:
         if _is_pi_thread(tid):
             _execute_pi_run(run, user_priority=user_priority)
@@ -2573,7 +2632,8 @@ def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
     if (status.get("stage") == "paused"
             and any(run.status == "interrupted" for run in runs)):
         return
-    pending_runs = [run for run in runs
+    eligible = _runs_before_browser_reset(runs)
+    pending_runs = [run for run in eligible
                     if run.status == "pending" and run.id != run_id]
     if not pending_runs:
         return
@@ -2626,6 +2686,7 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
                 tid, None, rider=_rider_from_fields(run.rider), sender=run.sender,
                 resume=True, active_ms=run.active_ms, pending_text=pending_text,
                 origin=run.origin, work_id=run.work_id,
+                user_event_id=run.user_event_id,
                 location=_location_from_fields(run.location))
         _RESUME_SCHEDULER.submit(
             successor.id, tid, user_priority=user_priority)
@@ -2653,8 +2714,34 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
         resume=(decision == "resume"), active_ms=run.active_ms,
         pending_text=pending_text if decision == "resume" else None,
         origin=run.origin, work_id=run.work_id,
+        user_event_id=run.user_event_id,
         location=_location_from_fields(run.location))
     _RESUME_SCHEDULER.submit(successor.id, tid, user_priority=user_priority)
+
+
+def _browser_user_request(run: Run | None, run_history: list[Run]) -> BrowserUserRequest | None:
+    """Resolve this work's recorded direct event ID, never copied task text."""
+    if (run is None or run.origin is not None or run.mode != "turn"
+            or run.sender is not None or run.user_event_id is None):
+        return None
+    source_position = next((index for index, prior in enumerate(run_history)
+                            if prior.id == run.user_event_id), None)
+    run_position = next((index for index, prior in enumerate(run_history)
+                         if prior.id == run.id), None)
+    if (source_position is None or run_position is None
+            or source_position > run_position):
+        return None
+    source = run_history[source_position]
+    if (source is None or source.user_event_id != source.id
+            or source.thread_id != run.thread_id or source.work_id != run.work_id
+            or source.origin is not None or source.sender is not None
+            or source.mode != "turn" or source.text is None):
+        return None
+    if any(prior.user_event_id == prior.id and prior.work_id == run.work_id
+           for prior in run_history[source_position + 1:run_position + 1]):
+        return None
+    return BrowserUserRequest(
+        source.id, source.work_id, source.text, source.admission_sequence)
 
 
 def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
@@ -2714,6 +2801,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         pending_kwargs["rider"] = _rider_to_fields(rider)
     if origin:
         pending_kwargs["origin"] = origin
+    if _run is not None:
+        pending_kwargs["work_id"] = _run.work_id
+        if _run.user_event_id is not None:
+            pending_kwargs["user_event_id"] = _run.user_event_id
     # Turn-start origin for the elapsed badge + live WIP timer: reuse the started_at already
     # in status (a queued/paused/resumed turn keeps the original submit time, so elapsed
     # spans the queue wait + any pause) or stamp now for turns with no upstream setter
@@ -2841,6 +2932,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             _set_status(tid, "starting_sandbox", **pending_kwargs)
             sandbox = None
             sandbox_generation = None
+            browser_session = None
             try:
                 # Inside the try so the `finally` reaps even if sandbox
                 # creation registers a container and then raises — cleanup
@@ -2854,6 +2946,22 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         MANAGER.thread_default_working_dir(tid))
                     raise
                 try:
+                    # Only a direct user-origin event in this active work lineage
+                    # can authorize an internal host. Approval-generated system
+                    # Runs deliberately inherit no such authorization.
+                    user_request = _browser_user_request(
+                        _run, _runs().list(tid) if _run is not None else [])
+                    extra_browser_tools = ()
+                    if (sandbox is not None and _run is not None and not sender
+                            and assistant_id == "general-agent"
+                            and BrowserManager.ready_for_browser(MANAGER.root_dir, tid)):
+                        browser_session = BrowserSession(
+                            tid, _run.id if _run is not None else event_id or "legacy",
+                            MANAGER.thread_default_working_dir(tid), MANAGER.root_dir,
+                            user_request, work_id=_run.work_id if _run else None,
+                            run_service=_runs())
+                        BrowserManager.register(browser_session)
+                        extra_browser_tools = tuple(browser_tools(browser_session))
                     # on_queue_state=None: the outer acquire above already
                     # owns the callback; the inner acquire is the reentrant
                     # no-op fast path (no state callback fires from it).
@@ -2870,6 +2978,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     # A triage turn (sender set) gets the reduced, HITL-gated tool surface.
                     assistant_kwargs = ({"assistant_id": assistant_id}
                                         if assistant_id != "general-agent" else {})
+                    if extra_browser_tools:
+                        assistant_kwargs["browser_tools"] = extra_browser_tools
                     chat = MANAGER.get(tid, sandbox_backend=sandbox,
                                        on_queue_state=None,
                                        configurable=(_cfg or None),
@@ -2958,7 +3068,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # cleanup() SIGKILLs (the response is already committed to the
                 # checkpoint here, and the sandbox has nothing to flush).
                 _work_dir = MANAGER.thread_default_working_dir(tid)
-                SandboxManager.cleanup(_work_dir, sandbox_generation)
+                try:
+                    BrowserManager.cleanup(tid, browser_session)
+                finally:
+                    SandboxManager.cleanup(_work_dir, sandbox_generation)
         MANAGER.touch(tid)
 
         # Generate description if there is none
@@ -3039,6 +3152,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         tid, None, rider=rider, sender=sender, resume=True,
                         active_ms=carry, pending_text=pending_kwargs.get("pending_message"),
                         origin=origin, work_id=_run.work_id,
+                        user_event_id=_run.user_event_id,
                         location=_location_from_fields(_run.location))
                 else:
                     # Compatibility for direct low-level callers during the migration.
@@ -3293,7 +3407,7 @@ def create_thread_with_message_core(
                     started_at=started_at)
         run = _create_run(tid, text, rider=rider, location=location,
                           run_id=run_id, work_id=work_id,
-                          dispatch_key=dispatch_key)
+                          dispatch_key=dispatch_key, user_origin=True)
         # A first Run needs its slow clone before execution.  Persist that relation so
         # startup recovery replays initialization rather than running in a missing worktree.
         _set_status(tid, "initializing", pending_message=text, domain=selected or "",
@@ -3443,8 +3557,9 @@ def _mark_pending(tid: str, text: str, busy: bool,
     input — which is wrong for a thread that's just received a follow-up
     message.
 
-    No-op when ``busy`` — the caller's single busy sample (status stage OR
-    holder==tid), which also drives durable Run admission — so a second message
+    No-op when ``busy`` — the caller's admission sample includes status stage,
+    queue holder, an older web Run, held browser reset, or active browser
+    session — so a second message
     to a mid-turn thread doesn't clobber the in-flight turn's status; that
     follow-up is already durable in RUN_SERVICE. One shared sample
     keeps the two decisions consistent (independent samples could straddle a
@@ -3453,12 +3568,10 @@ def _mark_pending(tid: str, text: str, busy: bool,
     Called off the asyncio event loop together with durable run creation.
     """
     if busy:
-        # The caller's single busy sample (status stage OR holder==tid) decided
-        # this message is a pending follower — write nothing: the running
-        # turn owns status.json, and a write here would be clobbered by its
-        # writes while its Run already holds this message durably. One
-        # sample drives both Run admission and this skip, so they cannot
-        # disagree (two samples could straddle a turn's acquire).
+        # The caller's one busy sample covers an active turn or a browser
+        # safety hold. The Run already holds this message durably; status.json
+        # remains with the active turn or reset worker. Reusing that sample
+        # keeps journal admission and this skip consistent.
         return
     holder_tid = THREAD_QUEUE.peek_holder()
     stage = "queued" if (holder_tid is not None and holder_tid != tid) else "processing"
@@ -3470,6 +3583,181 @@ def _mark_pending(tid: str, text: str, busy: bool,
 
 
 _RUN_ADMISSION_LOCK = threading.Lock()
+_BROWSER_RETRY_LOCK = threading.Lock()
+_BROWSER_RESET_QUEUE: queue.Queue[str] = queue.Queue()
+_BROWSER_QUEUED: set[str] = set()
+_BROWSER_REQUEUE: set[str] = set()
+_BROWSER_WORKERS_STARTED = False
+_BROWSER_RETRY_DUE: dict[str, float] = {}
+_BROWSER_RETRY_TIMER: threading.Timer | None = None
+_BROWSER_NOTIFY_PENDING: set[str] = set()
+
+
+def _queue_browser_revocation(tid: str) -> None:
+    """Coalesce durable held work into a fixed, fair two-worker reset pool."""
+    global _BROWSER_WORKERS_STARTED
+    with _BROWSER_RETRY_LOCK:
+        if tid in _BROWSER_QUEUED:
+            _BROWSER_REQUEUE.add(tid)
+            return
+        _BROWSER_QUEUED.add(tid)
+        _BROWSER_RESET_QUEUE.put_nowait(tid)
+        if not _BROWSER_WORKERS_STARTED:
+            _BROWSER_WORKERS_STARTED = True
+            for index in range(2):
+                threading.Thread(target=_browser_reset_worker,
+                                 name=f"browser-reset-{index}", daemon=True).start()
+
+
+def _browser_reset_worker() -> None:
+    while True:
+        tid = _BROWSER_RESET_QUEUE.get()
+        try:
+            _drain_held_browser_events(tid)
+        except Exception:
+            logging.warning("browser reset worker failed for %s", tid, exc_info=True)
+            _schedule_browser_revocation_retry(tid)
+        finally:
+            with _BROWSER_RETRY_LOCK:
+                _BROWSER_QUEUED.discard(tid)
+                dirty = tid in _BROWSER_REQUEUE
+                _BROWSER_REQUEUE.discard(tid)
+            if dirty:
+                _queue_browser_revocation(tid)
+            _BROWSER_RESET_QUEUE.task_done()
+
+
+def _arm_browser_retry_locked() -> None:
+    global _BROWSER_RETRY_TIMER
+    if _BROWSER_RETRY_TIMER is not None:
+        _BROWSER_RETRY_TIMER.cancel()
+        _BROWSER_RETRY_TIMER = None
+    if _BROWSER_RETRY_DUE:
+        delay = max(0, min(_BROWSER_RETRY_DUE.values()) - time.monotonic())
+        _BROWSER_RETRY_TIMER = threading.Timer(delay, _browser_retry_due)
+        _BROWSER_RETRY_TIMER.daemon = True
+        _BROWSER_RETRY_TIMER.start()
+
+
+def _browser_retry_due() -> None:
+    now = time.monotonic()
+    with _BROWSER_RETRY_LOCK:
+        due = [tid for tid, when in _BROWSER_RETRY_DUE.items() if when <= now]
+        for tid in due:
+            del _BROWSER_RETRY_DUE[tid]
+        _arm_browser_retry_locked()
+    for tid in due:
+        _queue_browser_revocation(tid)
+
+
+def _schedule_browser_revocation_retry(tid: str) -> None:
+    """One shared timer wakes durable held work after a bounded delay."""
+    with _BROWSER_RETRY_LOCK:
+        _BROWSER_RETRY_DUE[tid] = time.monotonic() + 10
+        _arm_browser_retry_locked()
+
+
+def _drain_held_browser_events(tid: str) -> bool:
+    """Complete one exact reset, then promote an uncancelled held event."""
+    gate = BrowserManager.thread_gate(tid)
+    if not gate.acquire(timeout=20):
+        failure = "Browser safety reset is waiting for an in-flight browser command"
+    else:
+        failure = None
+        try:
+            # A prior reset can have committed A while its scheduler notification
+            # failed. Retry A before attempting held B, whose reset may fail too.
+            with _BROWSER_RETRY_LOCK:
+                notify_pending = tid in _BROWSER_NOTIFY_PENDING
+            if notify_pending:
+                _RESUME_SCHEDULER.promote(tid)
+                THREAD_QUEUE.promote(tid)
+                _dispatch_pending_after(tid)
+                with _BROWSER_RETRY_LOCK:
+                    _BROWSER_NOTIFY_PENDING.discard(tid)
+            held = sorted((run for run in _runs().list(tid)
+                           if browser_reset_owed(run)),
+                          key=lambda run: run.admission_sequence)
+            if not held:
+                # A prior attempt may have durably promoted the last held Run
+                # before its volatile scheduler notification failed. The
+                # marker above already retried that path when present.
+                if not notify_pending:
+                    _dispatch_pending_after(tid)
+                return True
+            run = held[0]
+            session = BrowserManager.current_session(tid)
+            try:
+                with browser_authority.fence(MANAGER.root_dir, tid) as state:
+                    owner = (run.browser_reset_run_id
+                             or (state.lease or {}).get("owner_run_id")
+                             or (session.run_id if session is not None else None))
+                    covered = state.covered
+                if session is not None and session.run_id == owner:
+                    reset = session.revoke_internal()
+                else:
+                    reset = False
+                if not covered:
+                    BrowserManager.reap_orphans(MANAGER.root_dir)
+                reset = (BrowserManager.confirm_owner_stopped(
+                    MANAGER.root_dir, tid, owner) or reset)
+                with browser_authority.fence(MANAGER.root_dir, tid) as state:
+                    if not state.covered or state.lease is not None:
+                        raise RuntimeError("browser lease reconciliation is incomplete")
+                    with _RUN_ADMISSION_LOCK:
+                        current = _runs().get(tid, run.id)
+                        cancelling = (current.status == "cancelled"
+                                      and current.browser_cancel_reset
+                                      and current.cancel_cleanup == "pending")
+                        if current.status != "revocation_pending" and not cancelling:
+                            _queue_browser_revocation(tid)
+                            return True
+                        if not cancelling:
+                            latest = max((item.admission_sequence
+                                          for item in _runs().list(tid)
+                                          if item.user_event_id == item.id), default=0)
+                            if (session is not None and not session.closed
+                                    and latest == current.admission_sequence):
+                                session.rebind_user_request(BrowserUserRequest(
+                                    current.id, current.work_id,
+                                    current.text or "", current.admission_sequence))
+                            _runs().transition(
+                                tid, run.id, "pending", browser_reset_notice=reset)
+                            with _BROWSER_RETRY_LOCK:
+                                _BROWSER_NOTIFY_PENDING.add(tid)
+                if cancelling:
+                    from manage.web import phone_api
+                    with _BROWSER_RETRY_LOCK:
+                        _BROWSER_NOTIFY_PENDING.add(tid)
+                    phone_api._finish_browser_cancel_cleanup(tid, run.id)
+                    with _BROWSER_RETRY_LOCK:
+                        _BROWSER_NOTIFY_PENDING.discard(tid)
+                else:
+                    _RESUME_SCHEDULER.promote(tid)
+                    THREAD_QUEUE.promote(tid)
+                    _dispatch_pending_after(tid)
+                    with _BROWSER_RETRY_LOCK:
+                        _BROWSER_NOTIFY_PENDING.discard(tid)
+                if any(browser_reset_owed(item) for item in _runs().list(tid)):
+                    _queue_browser_revocation(tid)
+                return True
+            except Exception as error:
+                failure = f"Browser safety reset is unconfirmed ({type(error).__name__})"
+        except Exception as error:
+            failure = f"Browser safety reset could not read held Runs ({type(error).__name__})"
+        finally:
+            gate.release()
+    if failure:
+        retry_at = (datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()
+        try:
+            for run in _runs().list(tid):
+                if run.status == "revocation_pending":
+                    _runs().transition(tid, run.id, "revocation_pending",
+                                       error=failure, revocation_retry_at=retry_at)
+        finally:
+            _schedule_browser_revocation_retry(tid)
+        return False
+    return True
 
 
 class _EmailApprovalPending(Exception):
@@ -3481,14 +3769,31 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
                                dispatch_key: str | None = None,
                                max_pending: int | None = None,
                                run_id: str | None = None,
-                               work_id: str | None = None) -> tuple[Run, bool]:
-    """Admit one message while ``_RUN_ADMISSION_LOCK`` is held."""
+                               work_id: str | None = None,
+                               browser_state=None,
+                               browser_map_record: bool = False) -> tuple[Run, bool]:
+    """Admit one message under the short browser fence and Run lock."""
     if _get_status(tid).get("pending_email_token"):
         raise _EmailApprovalPending
     prior_stage = _get_status(tid).get("stage")
     busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
+    previous = _runs().list(tid)
+    held = sorted((item for item in previous if browser_reset_owed(item)),
+                  key=lambda item: item.admission_sequence)
+    older_web = [item for item in previous
+                 if (item.assistant_id == "general-agent" and item.mode == "turn"
+                     and item.status in {"pending", "running"})]
+    session = BrowserManager.current_session(tid)
+    browser_active = session is not None
+    lease = browser_state.lease if browser_state is not None else None
+    browser_hold = (browser_state is None or not browser_state.covered
+                    or lease is not None or browser_map_record
+                    or browser_active or bool(held) or bool(older_web))
+    busy = busy or browser_active or bool(older_web) or bool(held)
+    pi_thread = False
     try:
-        if _is_pi_thread(tid):
+        pi_thread = _is_pi_thread(tid)
+        if pi_thread:
             _ensure_pi_description(tid, text)
     except ThreadEngineError:
         # Dispatch will make the existing invalid-engine error durable; title
@@ -3497,7 +3802,20 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
     run = _create_run(tid, text, rider=rider, location=location,
                       run_id=run_id, work_id=work_id,
                       dispatch_key=dispatch_key,
-                      max_pending=max_pending)
+                      max_pending=max_pending, user_origin=True,
+                      revocation_pending=browser_hold and not pi_thread,
+                      browser_reset_run_id=(
+                          lease["owner_run_id"] if lease is not None else
+                          session.run_id if session is not None else
+                          held[0].browser_reset_run_id if held else
+                          older_web[0].id if older_web else None))
+    if run.status == "revocation_pending":
+        if busy:
+            # Preserve ordinary user priority for an already reserved paused
+            # predecessor; the held successor itself is not dispatched yet.
+            _RESUME_SCHEDULER.promote(tid)
+            THREAD_QUEUE.promote(tid)
+        return run, True
     if busy:
         # Cover both wait points. The paused head may still be queued on
         # the scheduler, or it may already be parked inside the affinity
@@ -3515,9 +3833,24 @@ def _accept_message_run(tid: str, text: str, rider=None,
                         run_id: str | None = None,
                         work_id: str | None = None) -> tuple[Run, bool]:
     """Persist one web submission and return whether earlier work owns the thread."""
-    with _RUN_ADMISSION_LOCK:
-        return _accept_message_run_locked(tid, text, rider, location, dispatch_key,
-                                          max_pending, run_id, work_id)
+    with browser_authority.fence(MANAGER.root_dir, tid) as browser_state:
+        map_record = False
+        try:
+            map_dir = configured_directory()
+            if map_dir is not None:
+                map_record = bool(browser_records(map_dir, tid))
+        except (OSError, RuntimeError, ValueError):
+            # Browser registration is disabled by an unsafe map; a durable
+            # lease still holds its owner, while a clean marked thread keeps
+            # ordinary base-only chat available.
+            pass
+        with _RUN_ADMISSION_LOCK:
+            run, busy = _accept_message_run_locked(
+                tid, text, rider, location, dispatch_key, max_pending,
+                run_id, work_id, browser_state, map_record)
+    if run.status == "revocation_pending":
+        _queue_browser_revocation(tid)
+    return run, busy
 
 
 def _record_browser_location(rider: ContextRider | None) -> LocationSnapshot | None:
@@ -3917,8 +4250,10 @@ _PROVISIONER = (
 
 
 def _recovery_prep(q: "queue.Queue") -> None:
-    """One-time worker-thread prep before draining recovery jobs (no-op cost when
-    none are queued). (a) Reap THIS deployment's orphaned sandbox containers (by
+    """One-time worker-thread prep before draining recovery jobs. Browser
+    orphan/map reconciliation runs even when the queue is empty; only shell
+    cleanup and model-wait depend on pending jobs. Reap THIS deployment's
+    orphaned sandbox containers (by
     label + /workspace-mount scope — see ``reap_orphans``): a killed web process
     reaps nothing, and a ``docker exec``'d tool command keeps mutating the
     host-bind-mounted /workspace for up to the 3h TTL — a resumed turn's fresh
@@ -3926,6 +4261,15 @@ def _recovery_prep(q: "queue.Queue") -> None:
     (bounded) for the model endpoint: on a cold boot llamacpp loads for minutes
     after assist-web is up, and erroring every recovered thread against a
     still-loading model would defeat recovery."""
+    try:
+        if not BrowserManager.reconcile_startup(MANAGER.root_dir):
+            BrowserManager.schedule_reconciliation(MANAGER.root_dir)
+            raise RuntimeError("browser orphan reconciliation is incomplete")
+    except Exception:
+        logging.warning("browser startup reconciliation remains incomplete", exc_info=True)
+    for tid in {run.thread_id for run in _runs().scan_all()
+                if browser_reset_owed(run)}:
+        _queue_browser_revocation(tid)
     if q.empty():
         return
     SandboxManager.reap_orphans(MANAGER.root_dir)
@@ -4099,7 +4443,8 @@ def queue_recovery_runs() -> None:
     # start replay recreates the same task ID.
     for child_tid in os.listdir(MANAGER.root_dir):
         if child_tid.startswith(".subagent-"):
-            MANAGER.hard_delete(child_tid)
+            # Unpublished staging has no accepted Run or browser authority.
+            shutil.rmtree(MANAGER.thread_dir(child_tid))
             continue
         marker = os.path.join(MANAGER.thread_dir(child_tid), ".subagent")
         if os.path.isfile(marker) and not _runs().list(child_tid):
@@ -4163,25 +4508,48 @@ def queue_recovery_runs() -> None:
                     resume=(decision == "resume"),
                     active_ms=float(status.get("accumulated_active_ms") or 0.0),
                     pending_text=pending if decision == "resume" else None,
-                    origin=status.get("origin") or None)
+                    origin=status.get("origin") or None,
+                    work_id=status.get("work_id") or None,
+                    user_event_id=status.get("user_event_id") or None)
                 _RESUME_SCHEDULER.submit(recovered.id, tid)
                 continue
         _dispatch_pending_after(tid)
 
 
 class _PriorityRunQueue:
-    """Blocking two-tier FIFO with promotable dormant reservations."""
+    """Blocking two-tier FIFO; one queued wake per Run, but requeue after get."""
 
     def __init__(self) -> None:
         self._cond = threading.Condition()
         self._user = deque()
         self._background = deque()
         self._reserved: dict[object, dict] = {}
+        self._queued: set[tuple[str, str]] = set()
+
+    @staticmethod
+    def _key(item: dict) -> tuple[str, str]:
+        return item["tid"], item["run_id"]
+
+    def _promote_queued(self, key: tuple[str, str]) -> None:
+        """Upgrade one exact queued Run without creating a second wake."""
+        for queued in self._background:
+            if self._key(queued) == key:
+                self._background.remove(queued)
+                queued["user_priority"] = True
+                self._user.append(queued)
+                self._cond.notify()
+                return
 
     def put(self, item: dict) -> None:
         with self._cond:
+            key = self._key(item)
+            if key in self._queued:
+                if item.get("user_priority"):
+                    self._promote_queued(key)
+                return
             target = self._user if item.get("user_priority") else self._background
             target.append(item)
+            self._queued.add(key)
             self._cond.notify()
 
     def reserve(self, item: dict) -> object:
@@ -4197,21 +4565,31 @@ class _PriorityRunQueue:
             item = self._reserved.pop(ticket, None)
             if item is None:
                 return
+            key = self._key(item)
+            if key in self._queued:
+                if item.get("user_priority"):
+                    self._promote_queued(key)
+                return
             target = self._user if item.get("user_priority") else self._background
             target.append(item)
+            self._queued.add(key)
             self._cond.notify()
 
     def get(self) -> dict:
         with self._cond:
             while not self._user and not self._background:
                 self._cond.wait()
-            return (self._user if self._user else self._background).popleft()
+            item = (self._user if self._user else self._background).popleft()
+            self._queued.discard(self._key(item))
+            return item
 
     def get_nowait(self) -> dict:
         with self._cond:
             if not self._user and not self._background:
                 raise queue.Empty
-            return (self._user if self._user else self._background).popleft()
+            item = (self._user if self._user else self._background).popleft()
+            self._queued.discard(self._key(item))
+            return item
 
     def empty(self) -> bool:
         with self._cond:
@@ -5091,15 +5469,25 @@ def show_file_view(tid: str, path: str, lines: str = "", pages: str = ""):
 @app.post("/thread/{tid}/delete")
 async def delete_thread(tid: str):
     _existing_thread_dir(tid)
-    # Off-loop: hard_delete does rmtree + sqlite deletes, and _evict_egress
-    # takes the egress store lock — none of it belongs on the event loop.
+    # Off-loop: browser teardown, hard_delete's rmtree/SQLite work, and
+    # _evict_egress's store lock do not belong on the event loop.
     await run_in_threadpool(_delete_thread_and_children, tid)
     return RedirectResponse(url="/", status_code=303)
 
 
 def _delete_thread_and_children(tid: str) -> None:
-    """Delete a visible thread and each non-running hidden task directory."""
+    """Stop its browser before deleting a thread and non-running children."""
     _PI_RUNTIME.retire(tid)
+    # A deleted Run journal cannot authorize or recover an internal sidecar.
+    # Wait for Docker outside the Run admission lock, but keep the browser
+    # gate through deletion so another session cannot register in between.
+    with BrowserManager.bounded_thread_gate(tid):
+        BrowserManager.cleanup(tid)
+        _delete_thread_after_browser_stop(tid)
+
+
+def _delete_thread_after_browser_stop(tid: str) -> None:
+    """Erase a thread while its browser gate prevents a replacement sidecar."""
     with _RUN_ADMISSION_LOCK:
         child_ids = {
             child.thread_id for child in _runs().scan_children()

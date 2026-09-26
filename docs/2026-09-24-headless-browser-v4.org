@@ -1,0 +1,163 @@
+#+title: Headless browser design v4 — network and state boundary corrections
+#+date: <2026-09-24>
+#+status: design candidate; no product code
+
+* Decision and scope
+
+Keep the visible main agent as decision maker and a lazy, per-Run headless
+Chromium sidecar as its bounded stateful resource. It is not a host-network
+browser, a delegated subagent, a code-execution endpoint, or a new egress
+grant. The sidecar uses Playwright 1.58 and the existing exact-host egress
+proxy; the permanent allowlist and human approval contract do not expand.
+The option comparison, primary-source research, ordinary user flow, resource
+limits, artifact transfer and evaluation cadence in the directly superseded
+v3 design remain in force except where this document replaces them below.
+
+* Non-bypassable network boundary
+
+The browser joins only its dedicated Docker bridge, with =internal=True= and
+=gateway_mode_ipv4=isolated=; IPv6 is disabled or an equivalently isolated,
+tested IPv6 mode is configured. Docker's =internal= flag alone does not remove
+the host bridge address. The manager reads Docker's actual network inspect
+values at creation and reuse, including internal flag, gateway mode, IPv4/IPv6
+subnets, gateway and proxy attachment. Unsupported options, any host gateway,
+an unexpected v6 route, overlapping networks, missing proxy, or policy drift
+fail closed before exposing a browser. It never retries with plain internal
+bridge, host networking or a bypass list. Runtime tests from the browser
+container attempt direct TCP and UDP to the host bridge and internal
+allowlisted services and require failure; a proxied allowed public request
+must still succeed. The only path to those services is the proxy, subject to
+the browser policy below.
+
+The proxy identifies ingress using the currently inspected, explicitly
+configured ordinary-sandbox and browser network identities and CIDRs. It
+admits no unknown source CIDR, stale network fingerprint or overlapping
+classification; such traffic receives no base-list or thread-grant fallback.
+Network recreation updates proxy configuration and client attribution as one
+fail-closed transition before a new sidecar runs. A browser source must never
+be classified as ordinary shell traffic. Test CIDR drift, network recreation,
+unknown source and overlap as negative cases. The browser network exposes only
+the same egress proxy; the proxy is the non-bypassable policy point for every
+CONNECT and plain-HTTP target, including redirect, popup, form POST, fetch
+and worker WebSocket destinations. Playwright routing is defense in depth.
+
+Browser public mode denies operator internal base hosts and literal or
+resolved private/link-local/loopback endpoints. The proxy vets the selected
+dial address and connects to that same address, avoiding a second DNS lookup.
+The explicit internal mode admits only one exact internal host already on the
+base allowlist, and denies all public/other hosts regardless of thread grants.
+Mode is immutable per sidecar. The host derives the internal-mode host solely
+from an immutable real user-origin event or a recorded explicit user
+confirmation of that exact host, never from page text, model-supplied mode or
+task metadata, a popup, a tool result, or a synthetic/system/approval follow-up
+message. In particular, an egress approval follow-up that copied a
+model-supplied =main_task= is not a new user authorization. A public page
+instructing the agent to visit an internal address cannot switch mode. To
+follow a public link from an internal visit, close that sidecar and
+open a new public-mode sidecar/context under the same Run deadline; the
+internal page's cookies, DOM and form state are discarded. No public document
+and internal document share a browser context. Policy denials expose bounded
+host:port/reason diagnostics, not URL path, query or userinfo, and cannot be
+mistaken for =host_not_approved= when deciding =request_egress=.
+
+* Shared attribution and lifecycle
+
+Both =SandboxManager= and =BrowserManager= use one authoritative client-map
+writer and an interprocess file lock for the entire read/validate/modify/
+atomic-replace sequence. A Python =threading.Lock= alone is insufficient:
+different web workers can otherwise lose updates or resurrect an IP-to-thread
+grant after Docker reuses an address. Each record binds IP, thread ID,
+container generation, kind, browser mode and exact internal host. Admission
+registers the actual generation successfully before *any* network-capable
+command is handed out; failed registration destroys the new container.
+Removal compares generation under the same interprocess lock; a delayed
+cleanup or orphan reaper cannot delete a successor's record. The proxy uses
+only validated current-schema records and rejects malformed or legacy values.
+Two-process forced interleavings, recycled-IP registration failure and delayed
+compare-delete are mandatory tests, for both ordinary and browser containers.
+
+The browser-enabled client-map projection is independent of optional
+approved-host grants: configure one safe, always-mounted, read-only proxy map
+path whenever browser capability is enabled. If the path cannot be validated,
+created, locked or atomically published, browser admission fails closed and
+the ordinary shell keeps its preexisting base-only operation when approvals
+are disabled. Do not require optional approvals merely to run a base-allowed
+browser, and do not allow a missing map to make browser traffic base-allowed.
+
+The sidecar's PID 1 enforces the 240-second deadline from the first browser
+open, keyed to the Run; re-creation cannot extend it. Host Docker exec/wait
+has a monotonic, cancelable 20-second transport deadline outside the registry
+lock. Web startup/shutdown reaps only labeled, verified orphan generations and
+prunes absent generations' map records using compare-delete. Every ordinary
+Run exit, including error, cancellation, deletion and approval suspension,
+tears down its sidecar. No separate host watchdog is required: PID 1 TTL,
+bounded host calls and startup/shutdown reconciliation cover crash recovery.
+
+* Observable interaction and approval
+
+=browser_open(url)= accepts only parsed HTTP(S) URLs with hostname and no
+userinfo. It returns bounded rendered body ARIA snapshot, current page URL,
+opaque IDs of every page, relevant links, and failed-request/response
+diagnostics even when the DOM loaded. =browser_observe(page_id)= explicitly
+revisits a still-open opener or popup without navigation; unknown, closed or
+stale IDs fail. =browser_act(page_id, action, target)= requires the page ID
+from a current observation. Semantic role/name alone is not enough when two
+controls match: the observation supplies an opaque target reference scoped to
+that snapshot and page, or an observed exact href for a link. The helper
+rejects ambiguous role/name matches or stale target references rather than
+clicking the first match. It supports only typed click and nonsecret fill;
+=browser_wait(page_id, role, name)= is a typed bounded wait for delayed
+semantic state. A popup waits for DOMContentLoaded before its first snapshot.
+Actions return fresh page IDs, actual active URLs and rendered observations.
+No arbitrary JS/Python/shell or exposed CDP listener is accepted.
+
+An essential blocked redirect or XHR can justify an exact-host approval only
+when the proxy's reason is =host_not_approved=; a browser-internal-policy deny
+cannot. =request_egress= ends the current Run and destroys the browser.
+Approval creates a new Run and a new browser; the agent reopens the recorded
+URL and repeats only safe idempotent discovery. It truthfully reports lost
+nonrepeatable click, filled form or authentication state and asks the user to
+redo or confirm it as needed. Consequential actions still require explicit
+user confirmation. Password, OTP, payment and file-upload controls remain
+unsupported in v1. Download staging and all browser profile/origin storage
+remain on bounded tmpfs; completed files transfer with a pre-write size cap,
+basename-only no-clobber atomic placement under fixed data-only
+=/workspace/downloads/=. Neither page text nor filename can place AGENTS.md
+in a memory/instruction path. Plain-HTTP proxy logs redact path/query.
+
+* Planned implementation and verification delta
+
+In addition to v3's planned =dockerfiles/Dockerfile.browser=, browser seccomp
+profile, =assist/browser/=, =assist/thread_manager.py=, =assist/agent.py=,
+=manage/web/threads.py=, browser/explore skills, README, Makefile and tests,
+the v4 boundary changes =assist/sandbox_manager.py=,
+=assist/egress/client_map.py= and =dockerfiles/egress-proxy.py=. The first
+creates and verifies isolated network mode and attaches the proxy; the shared
+client-map module owns interprocess serialization and generation-aware
+compare-delete; the proxy validates network identity/CIDR, browser mode and
+vetted dial address on every destination. These are planned interfaces, not
+product edits. No allowlist file or approval tool changes are planned.
+
+Acceptance tests must exercise the real sidecar, Docker network and proxy,
+not only mocked Playwright routes: isolated bridge TCP/UDP and IPv6 negative
+probes; public 302 to internal base host and worker WebSocket denial; trusted
+user internal visit restricted to one host; injected page instruction failing
+to select internal mode even after an egress-approval follow-up with
+model-supplied task text; proxy CIDR drift and unknown-source denial; two
+manager processes racing the map; approvals-disabled browser admission and
+ordinary shell base-only regression; ambiguous duplicate-label link handling;
+opener observation after popup; typed delayed-content wait; cross-call JS
+state; download/profile/cache exhaustion; and approval after fill/click with
+new-Run recovery or honest lost-state report. Natural user prompts, matched
+baseline/candidate repetitions and adjacent regression coverage remain as in
+v3. Reviewers should check actual Docker Engine 29 network inspect behavior,
+Playwright 1.58 API, teardown and proxy logs before calling the boundary met.
+
+* Historical supersessions
+
+This document directly supersedes =docs/2026-09-24-headless-browser.org= v3's
+runtime network, attribution, interaction and lifecycle sections where they
+described =internal=True= without isolated gateway verification, in-process
+map locking, CIDR fallback, implicit opener observation, ambiguous link
+targets or a redundant host watchdog. Its unaffected design decisions and
+primary-source evidence remain historical context. The v3 file is unchanged.

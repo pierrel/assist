@@ -562,13 +562,31 @@ class TestDockerSandboxBackendPathPrefixing(TestCase):
 class TestSandboxManager(TestCase):
     """Test SandboxManager Docker lifecycle with mocked Docker client."""
 
+    @staticmethod
+    def _attached_proxy(container, client):
+        container.status = "running"
+        container.attrs = {"Mounts": [], "NetworkSettings": {"Networks": {
+            "assist-egress-network": {"NetworkID": "ordinary-net"}}}}
+        client.api._version = "1.43"
+        client.api.create_container.return_value = {"Id": container.id}
+        client.containers.get.return_value = container
+
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         # Clear class-level state between tests
         SandboxManager._docker_client = None
         SandboxManager._containers.clear()
+        # These lifecycle mocks have no Docker network attributes; live
+        # routing validation is covered by the real browser Docker tests.
+        self.network_identity = patch(
+            'assist.sandbox_manager._network_identity',
+            side_effect=lambda _network, *, isolated:
+                ('browser-net', '172.31.0.0/16') if isolated
+                else ('ordinary-net', '172.30.0.0/16'))
+        self.network_identity.start()
 
     def tearDown(self):
+        self.network_identity.stop()
         SandboxManager._docker_client = None
         SandboxManager._containers.clear()
         if os.path.exists(self.temp_dir):
@@ -586,14 +604,14 @@ class TestSandboxManager(TestCase):
         # Doubles as the egress-proxy container too — _wait_for_egress_proxy_ready
         # polls .logs() looking for "listening on" before returning.
         mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        self._attached_proxy(mock_container, mock_client)
         mock_client.containers.run.return_value = mock_container
 
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
             sandbox = SandboxManager.get_sandbox_backend(test_path)
 
         self.assertIsNotNone(sandbox)
-        # Two containers.run calls: the egress proxy (idempotent setup)
-        # and the sandbox itself.  Find the sandbox call specifically.
+        # The proxy uses create/start; the shell uses containers.run.
         sandbox_calls = [
             c for c in mock_client.containers.run.call_args_list
             if c.args and c.args[0] == "assist-sandbox"
@@ -613,6 +631,7 @@ class TestSandboxManager(TestCase):
         mock_container = MagicMock()
         mock_container.id = "test123456ab"
         mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        self._attached_proxy(mock_container, mock_client)
         mock_client.containers.run.return_value = mock_container
 
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
@@ -634,6 +653,7 @@ class TestSandboxManager(TestCase):
         mock_client = MagicMock()
         mock_container = MagicMock(id="test123456ab", status="running")
         mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        self._attached_proxy(mock_container, mock_client)
         mock_client.containers.run.return_value = mock_container
 
         with patch.dict(os.environ, {
@@ -662,13 +682,15 @@ class TestSandboxManager(TestCase):
         mock_client = MagicMock()
         mock_container = MagicMock(id="test123456ab", status="running")
         mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        self._attached_proxy(mock_container, mock_client)
         mock_client.containers.run.return_value = mock_container
 
         with patch.dict(os.environ, {"ASSIST_MODEL_URL": "http://model.example.test"}):
             with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
                 with patch.object(SandboxManager, '_record_egress_client') as enroll:
                     SandboxManager.get_pi_sandbox_backend(test_path)
-        enroll.assert_not_called()
+        enroll.assert_called_once_with(
+            mock_client, mock_container, test_path, kind="pi")
 
         sandbox_call = next(c for c in mock_client.containers.run.call_args_list
                             if c.args and c.args[0] == "assist-sandbox")
@@ -692,6 +714,7 @@ class TestSandboxManager(TestCase):
         mock_container.id = "test123456ab"
         mock_container.status = "running"
         mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        self._attached_proxy(mock_container, mock_client)
         mock_client.containers.run.return_value = mock_container
 
         host_st = os.stat(test_path)
@@ -771,6 +794,7 @@ class TestSandboxManager(TestCase):
         fresh.id = "fresh1234567"
         fresh.status = "running"
         fresh.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        self._attached_proxy(fresh, mock_client)
         mock_client.containers.run.return_value = fresh
 
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
@@ -797,7 +821,7 @@ class TestSandboxManager(TestCase):
         mock_client = MagicMock()
         # Has to be a DockerException subclass now that the catch is
         # narrowed; a bare Exception would propagate (correctly).
-        mock_client.containers.run.side_effect = DockerException("Docker not running")
+        mock_client.api.create_container.side_effect = DockerException("Docker not running")
 
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
             sandbox = SandboxManager.get_sandbox_backend(test_path)

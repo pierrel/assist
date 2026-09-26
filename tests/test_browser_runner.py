@@ -1,0 +1,434 @@
+"""Observed browser targets remain bound to their live DOM semantics."""
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from assist.browser import runner
+from assist.browser.runner import BrowserInputError, BrowserWorker, http_url
+
+
+class _Page:
+    url = "https://example.com/"
+
+    def __init__(self, closed=False):
+        self.closed = closed
+
+    def is_closed(self):
+        return self.closed
+
+    def on(self, *_args):
+        pass
+
+    def goto(self, url, **_kwargs):
+        self.url = url
+
+    def close(self):
+        self.closed = True
+
+
+class _Link:
+    def __init__(self, href, name="Manual", tag="a", kind=None):
+        self.href = href
+        self.name = name
+        self.tag = tag
+        self.kind = kind
+        self.clicked = False
+        self.filled = False
+
+    def is_visible(self):
+        return True
+
+    def get_attribute(self, name):
+        return {"href": self.href, "aria-label": self.name,
+                "type": self.kind}.get(name)
+
+    def evaluate(self, _expression):
+        return self.tag
+
+    def inner_text(self):
+        return self.name
+
+    def click(self, **_kwargs):
+        self.clicked = True
+
+    def fill(self, *_args, **_kwargs):
+        self.filled = True
+
+
+def _observed(worker, element):
+    worker.pages["page"] = _Page()
+    worker.snapshots["page"] = "snapshot"
+    worker.targets["page"] = {"observed": (
+        element, *worker._target_state(element, _Page.url))}
+
+
+def test_sidecar_pid1_is_inert_until_registered_command(monkeypatch):
+    monkeypatch.setattr(runner, "sync_playwright", lambda: (_ for _ in ()).throw(
+        AssertionError("Chromium must not start before an attributed command")))
+    worker = BrowserWorker()
+    assert worker.browser is None and worker.context is None
+    assert worker.pages == {}
+
+
+@pytest.mark.parametrize("selector", [
+    {"ref": "observed"},
+    {"href": "https://example.com/original"},
+    {"role": "link", "name": "Manual"},
+])
+def test_changed_observed_link_fails_for_every_target_selector(selector):
+    worker = BrowserWorker()
+    link = _Link("/changed")
+    _observed(worker, link)
+    worker.targets["page"]["observed"] = (
+        link, "link", "Manual", "https://example.com/original", "/original",
+        worker.targets["page"]["observed"][-1])
+
+    with pytest.raises(BrowserInputError, match="observed link changed"):
+        worker.act("page", "snapshot", "click", selector)
+    assert not link.clicked
+
+
+def test_changed_button_name_cannot_be_clicked():
+    worker = BrowserWorker()
+    button = _Link(None, "Show report", tag="button")
+    _observed(worker, button)
+    button.name = "Delete account"
+    with pytest.raises(BrowserInputError, match="target changed"):
+        worker.act("page", "snapshot", "click", {"ref": "observed"})
+    assert not button.clicked
+
+
+def test_changed_field_attributes_cannot_be_filled():
+    worker = BrowserWorker()
+    field = _Link(None, "Search", tag="input", kind="text")
+    _observed(worker, field)
+    field.kind = "password"
+    with pytest.raises(BrowserInputError, match="field changed"):
+        worker.act("page", "snapshot", "fill",
+                   {"ref": "observed", "text": "secret"})
+    assert not field.filled
+
+
+def test_absent_href_cannot_be_added_to_observed_link():
+    worker = BrowserWorker()
+    link = _Link(None)
+    _observed(worker, link)
+    link.href = "/delete"
+    with pytest.raises(BrowserInputError, match="link changed"):
+        worker.act("page", "snapshot", "click", {"ref": "observed"})
+    assert not link.clicked
+
+
+@pytest.mark.parametrize("url", ["http://@example.com/", "http://example.com:0/"])
+def test_invalid_userinfo_and_port_zero(url):
+    with pytest.raises(BrowserInputError):
+        http_url(url)
+
+
+@pytest.mark.parametrize("url", ["data:text/html,secret", "file:///etc/passwd",
+                                     "javascript:alert(1)"])
+def test_non_http_observation_closes_page_before_content_is_read(url):
+    worker = BrowserWorker()
+    page = _Page()
+    page.url = url
+    worker.pages["page"] = page
+    with pytest.raises(BrowserInputError, match="non-HTTP page"):
+        worker.observe("page")
+    assert page.closed
+    assert worker.pages == {}
+
+
+def test_non_http_observed_link_is_not_clicked():
+    worker = BrowserWorker()
+    link = _Link("data:text/html,secret")
+    _observed(worker, link)
+    with pytest.raises(BrowserInputError, match="only HTTP"):
+        worker.act("page", "snapshot", "click", {"ref": "observed"})
+    assert not link.clicked
+
+
+def test_non_http_popup_is_closed_at_registration():
+    worker = BrowserWorker()
+    popup = _Page()
+    popup.url = "file:///etc/passwd"
+    with pytest.raises(BrowserInputError, match="non-HTTP page"):
+        worker._register_page(popup)
+    assert popup.closed
+    assert worker.pages == {}
+
+
+def test_page_driven_non_http_navigation_closes_observed_page():
+    class EventPage(_Page):
+        main_frame = object()
+
+        def on(self, event, callback):
+            if event == "framenavigated":
+                self.navigation = callback
+
+    worker = BrowserWorker()
+    page = EventPage()
+    page_id = worker._register_page(page)
+    page.url = "data:text/html,secret"
+    page.navigation(page.main_frame)
+    assert page.closed
+    assert page_id not in worker.pages
+    assert worker.errors[-1]["reason"] == "non_http_navigation"
+
+
+def test_page_returning_to_about_blank_is_closed_after_web_navigation():
+    class EventPage(_Page):
+        main_frame = object()
+
+        def on(self, event, callback):
+            if event == "framenavigated":
+                self.navigation = callback
+
+    worker = BrowserWorker()
+    page = EventPage()
+    page.url = "about:blank"
+    worker._register_page(page)
+    page.url = "https://example.com/"
+    page.navigation(page.main_frame)
+    page.url = "about:blank"
+    page.navigation(page.main_frame)
+    assert page.closed
+    assert worker.pages == {}
+
+
+def test_initial_about_blank_popup_is_reusable_without_exposing_its_content():
+    class Popup(_Page):
+        def locator(self, _selector):
+            raise AssertionError("blank popup content must not be read")
+
+    worker = BrowserWorker()
+    popup = Popup()
+    popup.url = "about:blank"
+    page_id = worker._register_page(popup)
+    result = worker.observe(page_id)
+    assert result["page_id"] == page_id
+    assert result["url"] == "about:blank"
+    assert result["snapshot"] == ""
+    assert result["targets"] == []
+    assert not popup.closed
+
+
+def test_navigation_during_snapshot_cannot_return_non_http_content():
+    class Body:
+        def aria_snapshot(self, **_kwargs):
+            page.url = "about:blank"
+            return "secret"
+
+    class Page(_Page):
+        def wait_for_load_state(self, **_kwargs):
+            pass
+
+        def locator(self, selector):
+            return Body() if selector == "body" else SimpleNamespace(count=lambda: 0)
+
+    worker = BrowserWorker()
+    page = Page()
+    worker.pages["page"] = page
+    with pytest.raises(BrowserInputError, match="non-HTTP page"):
+        worker.observe("page")
+    assert page.closed
+
+
+def test_denied_http_navigation_keeps_probe_evidence_without_observing_error_page(
+        monkeypatch):
+    worker = BrowserWorker()
+    page = _Page()
+    page.url = "about:blank"
+    def denied(_url, **_kwargs):
+        raise RuntimeError("proxy denied")
+    page.goto = denied
+    worker.context = SimpleNamespace(new_page=lambda: page)
+    result = worker.open("http://unlisted.example/")
+    assert result["snapshot"] == ""
+    assert result["observation_errors"] == ["navigation_failed"]
+    assert page.closed
+    assert "unlisted.example:80" in worker.failed_hosts
+
+
+def test_http_403_response_is_probeable_with_fragmented_proxy_headers(monkeypatch):
+    worker = BrowserWorker()
+    worker._response(SimpleNamespace(
+        status=403, url="http://denied.example/",
+        request=SimpleNamespace(resource_type="document")))
+    assert "denied.example:80" in worker.failed_hosts
+
+    class _Socket:
+        parts = [b"HTTP/1.1 403 Forbidden\r\nX-Assist-Egress-",
+                 b"Result: host_not_approved\r\nContent-Length: 0\r\n\r\n"]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def settimeout(self, *_args):
+            pass
+
+        def sendall(self, *_args):
+            pass
+
+        def recv(self, _size):
+            return self.parts.pop(0)
+
+    monkeypatch.setattr(runner.socket, "create_connection", lambda *_args, **_kwargs: _Socket())
+    assert worker.probe("denied.example", 80) == {
+        "host": "denied.example", "port": 80,
+        "status": "403", "reason": "host_not_approved"}
+
+
+def test_observation_budget_preserves_targets():
+    class _Body:
+        def aria_snapshot(self, **_kwargs):
+            return "S" * 16000
+
+    class _Indexed:
+        def __init__(self, index):
+            self.index = index
+
+        def element_handle(self):
+            return _Link("/" + str(self.index) + "x" * 3000,
+                         name="\0" * 120)
+
+    class _Locator:
+        def count(self):
+            return 60
+
+        def nth(self, index):
+            return _Indexed(index)
+
+    class _RichPage(_Page):
+        def wait_for_load_state(self, **_kwargs):
+            pass
+
+        def locator(self, selector):
+            return _Body() if selector == "body" else _Locator()
+
+    worker = BrowserWorker()
+    worker.pages["page"] = _RichPage()
+    for _ in range(12):
+        worker._error("e" * 255, "document", "request_failed")
+    observed = worker.observe("page")
+    assert observed["targets"]
+    assert observed["truncated"] is True
+    assert len(json.dumps({"result": observed}).encode()) < runner.MAX_RESULT
+    assert len(worker.targets["page"]) == len(observed["targets"])
+
+
+def test_closed_pages_do_not_consume_concurrent_page_quota():
+    worker = BrowserWorker()
+    for index in range(5):
+        worker.pages[str(index)] = _Page(closed=True)
+    fresh = _Page()
+    assert worker._register_page(fresh)
+    assert len(worker.pages) == 1
+
+
+def test_six_sequential_visits_reuse_one_page_and_invalidate_old_refs(monkeypatch):
+    worker = BrowserWorker()
+    worker.context = SimpleNamespace(new_page=lambda: _Page())
+    monkeypatch.setattr(worker, "_observe", lambda page_id: {
+        "page_id": page_id, "url": worker.pages[page_id].url})
+    first = worker.open("https://one.example/")
+    page_id = first["page_id"]
+    worker.snapshots[page_id] = "old"
+    worker.targets[page_id] = {"old": object()}
+    for index in range(2, 7):
+        result = worker.open(f"https://{index}.example/", reuse_page_id=page_id)
+        assert result == {"page_id": page_id, "url": f"https://{index}.example/"}
+    assert len(worker.pages) == 1
+    assert page_id not in worker.snapshots
+    assert page_id not in worker.targets
+
+
+def test_five_page_limit_is_concurrent_and_close_releases_popup_slot(monkeypatch):
+    worker = BrowserWorker()
+    worker.context = SimpleNamespace(new_page=lambda: _Page())
+    monkeypatch.setattr(worker, "_observe", lambda page_id: {"page_id": page_id})
+    page_ids = [worker.open(f"https://{index}.example/")["page_id"]
+                for index in range(5)]
+    with pytest.raises(BrowserInputError, match="page limit"):
+        worker.open("https://six.example/")
+    closed = worker.close(page_ids[-1])
+    assert closed["closed_page_id"] == page_ids[-1]
+    assert page_ids[-1] not in worker.pages
+    assert len(closed["pages"]) == 4
+    replacement = worker.open("https://six.example/")["page_id"]
+    assert replacement not in page_ids
+    with pytest.raises(BrowserInputError, match="unknown or closed"):
+        worker.open("https://seven.example/", reuse_page_id=page_ids[-1])
+
+
+def test_close_bounds_site_controlled_page_urls():
+    worker = BrowserWorker()
+    for index in range(5):
+        page = _Page()
+        page.url = "https://example.com/" + str(index) + "x" * 100_000
+        worker.pages[str(index)] = page
+    result = worker.close("4")
+    assert len(result["pages"]) == 4
+    assert all(len(item["url"]) <= 256 for item in result["pages"])
+    assert len(json.dumps({"result": result}).encode()) < runner.MAX_RESULT
+
+
+def test_partial_playwright_launch_is_closed(monkeypatch):
+    closed = []
+
+    class _Chromium:
+        def launch(self, **_kwargs):
+            raise RuntimeError("launch failed")
+
+    class _Driver:
+        chromium = _Chromium()
+
+        def stop(self):
+            closed.append("driver")
+
+    monkeypatch.setattr(runner, "sync_playwright",
+                        lambda: SimpleNamespace(start=lambda: _Driver()))
+    worker = BrowserWorker()
+    with pytest.raises(RuntimeError, match="launch failed"):
+        worker._start()
+    assert closed == ["driver"]
+    assert worker.playwright is worker.browser is worker.context is None
+
+
+def test_failed_context_cleanup_reaches_driver_even_if_browser_close_raises(
+        monkeypatch):
+    closed = []
+
+    class _Browser:
+        def new_context(self, **_kwargs):
+            raise RuntimeError("context failed")
+
+        def close(self):
+            closed.append("browser")
+            raise RuntimeError("close failed")
+
+    class _Driver:
+        chromium = SimpleNamespace(launch=lambda **_kwargs: _Browser())
+
+        def stop(self):
+            closed.append("driver")
+
+    monkeypatch.setattr(runner, "sync_playwright",
+                        lambda: SimpleNamespace(start=lambda: _Driver()))
+    worker = BrowserWorker()
+    with pytest.raises(RuntimeError, match="context failed"):
+        worker._start()
+    assert closed == ["browser", "driver"]
+    assert worker.playwright is worker.browser is worker.context is None
+
+
+def test_ninth_download_is_cancelled_and_reported():
+    worker = BrowserWorker()
+    worker.downloads = {str(index): object() for index in range(8)}
+    cancelled = []
+    worker._register_download(SimpleNamespace(cancel=lambda: cancelled.append(True)))
+    assert cancelled == [True]
+    assert worker.errors[-1]["reason"] == "download_limit"

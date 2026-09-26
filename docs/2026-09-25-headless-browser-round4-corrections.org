@@ -1,0 +1,28 @@
+State: In progress
+
+* Problem
+PR #267 round 4 found two remaining boundaries on commit =281b432e=: a
+browser or shell client-map record could be published after the matching proxy
+or network generation was retired by an uncertain Docker mutation, and a site
+could move a page to a non-HTTP(S) URL through a click or popup. The proxy and
+network snapshot was unretired at review time; the source paths were still
+reachable.
+
+* Solution
+Under the existing proxy setup lock, check the exact proxy and network IDs in
+the host retirement ledger immediately before either client-map publication.
+The setup path already uses that lock for retirement, so publication cannot
+cross a mediated retirement after the check.
+
+Reject observed non-HTTP(S) link clicks before clicking. Close a page on a
+non-HTTP(S) main-frame navigation, and validate its URL before returning any
+page content. Initial =about:blank= is allowed only before the page first
+reaches HTTP(S); a later move back to it closes the page. Keep failed HTTP
+navigation probeable by returning an empty
+failed-navigation result when Chromium shows a non-HTTP error page.
+
+* Verification
+Focused fake-Docker and worker tests cover both retired generation kinds for
+each publisher, a changed link, a site-driven navigation, popup registration,
+and a failed HTTP navigation. Real container and Chromium checks remain for the
+protected deployment handoff.

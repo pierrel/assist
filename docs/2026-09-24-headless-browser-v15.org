@@ -1,0 +1,63 @@
+#+title: Headless browser design v15 — exact running-endpoint attribution
+#+date: <2026-09-24>
+#+status: design successor; no product code
+
+* Decision
+
+Keep v13's map snapshot → Docker scan outside locks → exact-record
+compare-delete algorithm. Replace v14's all-object retention: an
+inspectable but stopped browser container no longer owns its bridge IP,
+so retaining its internal-mode IP attribution could grant a later
+container on a recycled address the wrong thread/mode.
+
+* Running endpoint reconciliation
+
+The successful bounded Docker scan enumerates *running* browser
+endpoints as exact =(container generation, browser-network IP)= pairs,
+not just object IDs. Under the final short map lock, delete a snapshot
+IP→record only when the current record still exactly equals that snapshot
+and its =(generation, IP)= pair is absent from the successful running-
+endpoint set. A stopped object, a running object detached from the
+browser network, or a generation that moved to a different IP loses its
+old attribution. A later restart of the same Docker ID does not inherit
+the removed grant: fresh exact-generation/IP registration is required
+before any browser command. A failed, partial, malformed or timed-out
+scan deletes nothing and leaves recovery-dependent user events held.
+Docker enumeration and per-container inspection stay outside every
+map, short publication and user-admission lock.
+
+There remains an interval if A stops *after* the scan but before Docker
+allocates its old IP to B. Do not claim probabilistic safety or that an
+arbitrary privileged host =docker exec= into B would be denied in that
+interval. The product admission invariant is stricter: a new shell or
+browser container is never returned to the agent, handed an untrusted
+page, or given a tool command until its own exact IP+generation record
+has been published under the short fence. Its pre-registration PID 1
+is trusted and performs no proxy request. B's publication overwrites
+any stale A record for that IP before untrusted code can run; failed
+publication destroys B without exposing it. The proxy still rejects
+unknown/malformed source attribution, and the separate browser-mode
+network policy remains unchanged.
+
+* Verification delta
+
+Stop A while its Docker object remains inspectable; reconcile, then
+allocate A's old IP to B. Before B is registered, a raw proxy CONNECT
+from that IP must be denied; after exact B registration, the proxy must
+apply only B's thread/mode. Restarting A under the same ID after its
+record was removed must not revive its old grant. Force A to stop
+between scan and B creation: B must not be exposed to an agent/page or
+issue a product-path proxy request before B's record replaces A's.
+Verify the pre-registration PID 1 makes no network request. A failed
+scan removes nothing; a new record inserted or IP reused after the
+snapshot survives exact-record compare-delete. Keep v13's stalled-scan
+admission liveness test.
+
+* Historical supersessions
+
+This document directly supersedes
+=docs/2026-09-24-headless-browser-v14.org='s all-object absence condition
+and its stopped-object verification. V14's observation that a Docker
+ID may restart is retained, but restart now requires new attribution;
+v13's lock-free scan and exact-record protection still apply. Earlier
+dated designs remain unchanged.

@@ -16,11 +16,13 @@ from unittest.mock import patch, MagicMock
 
 from assist import retention
 from assist.thread_manager import ThreadManager
+from assist.browser.authority import mark_new_thread
 
 
 def _make_thread_dir(root: str, tid: str, mtime: float) -> str:
     tdir = os.path.join(root, tid)
     os.makedirs(os.path.join(tdir, "domain"), exist_ok=True)
+    mark_new_thread(root, tid)
     os.utime(tdir, (mtime, mtime))
     return tdir
 

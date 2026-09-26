@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build-time smoke for the sandbox egress allowlist.  Wired into
 # `make sandbox-smoke` and `make deploy-sandbox-build`.  Fails the
-# build if:
+# build on a normal invocation if:
 #
 #   - A non-allowlisted hostname returns any 2xx/3xx (allowlist leak)
 #   - A direct-IP CONNECT succeeds (DNS bypass)
@@ -22,27 +22,31 @@
 #   - Approvals written AFTER proxy start are honored (the directory
 #     mount's inode-pin check)
 #
-# Both images must already be built: `assist-sandbox` and
-# `assist-egress-proxy`.  This harness creates a temporary internal
-# network, brings the proxy up on it, runs probes inside a sandbox
-# container attached to it, then tears everything down.
+# A normal invocation needs both `assist-sandbox` and
+# `assist-egress-proxy`; --proxy-startup-only needs just the proxy image.
+# This harness creates a temporary internal network, brings the proxy up
+# on it, runs probes inside a sandbox container, then tears everything down. The
+# --proxy-startup-only mode tests that exact network/proxy startup without
+# the external-host probes.
 
 NETWORK="assist-egress-smoke-$$"
 PROXY="assist-egress-proxy-smoke-$$"
 HOST_DIR=$(mktemp -d)
 APPROVALS_DIR=$(mktemp -d)
+CLIENT_MAP_DIR=$(mktemp -d)
 SANDBOX2="assist-egress-smoke-sb-$$"
 
 # Same runner-uid-vs-container-uid gap as $HOST_DIR below: `mktemp -d`
 # defaults to 0700, so the proxy container's non-root `proxy` user
 # (uid 1000, Dockerfile.egress-proxy) can't even traverse into
-# /approvals on a host where the runner's uid differs (GitHub's
+# /approvals or /client-map on a host where the runner's uid differs (GitHub's
 # ubuntu-latest = 1001) — every _read_small_json() call fails closed
 # with PermissionError, so approval grants silently never match. The
 # files created inside get their mode from the process umask (already
 # world-readable), so only the directory's own x-for-other bit is
 # missing.
 chmod 0755 "$APPROVALS_DIR"
+chmod 0755 "$CLIENT_MAP_DIR"
 
 # Mount the real requirements.txt + pyproject.toml + assist source so
 # the positive case probes EXACTLY what dev-agent's eval install does
@@ -77,7 +81,7 @@ chmod -R a+rX "$HOST_DIR"
 cleanup() {
     docker rm -f "$PROXY" "$SANDBOX2" >/dev/null 2>&1
     docker network rm "$NETWORK" >/dev/null 2>&1
-    rm -rf "$HOST_DIR" "$APPROVALS_DIR"
+    rm -rf "$HOST_DIR" "$APPROVALS_DIR" "$CLIENT_MAP_DIR"
 }
 trap cleanup EXIT
 
@@ -85,6 +89,12 @@ echo "→ Creating internal network $NETWORK"
 docker network create --internal --driver bridge "$NETWORK" >/dev/null || {
     echo "FAIL: could not create test network"; exit 1
 }
+SANDBOX_CIDR=$(docker network inspect -f '{{(index .IPAM.Config 0).Subnet}}' "$NETWORK") || {
+    echo "FAIL: could not inspect test network subnet"; exit 1
+}
+if [ -z "$SANDBOX_CIDR" ] || [ "$SANDBOX_CIDR" = '<no value>' ]; then
+    echo "FAIL: test network has no subnet"; exit 1
+fi
 
 echo "→ Starting proxy with PyPI-only allowlist (host.docker.internal omitted)"
 # Deliberately narrow allowlist: pypi.org + files.pythonhosted.org +
@@ -96,7 +106,9 @@ docker run -d \
     --network bridge \
     --add-host=host.docker.internal:host-gateway \
     -e EGRESS_ALLOWLIST="pypi.org,files.pythonhosted.org,pip.pypa.io" \
+    -e EGRESS_SANDBOX_CIDR="$SANDBOX_CIDR" \
     -v "$APPROVALS_DIR":/approvals:ro \
+    -v "$CLIENT_MAP_DIR":/client-map:ro \
     assist-egress-proxy >/dev/null || {
     echo "FAIL: proxy container did not start"; exit 1
 }
@@ -114,6 +126,22 @@ docker logs "$PROXY" 2>&1 | grep -q "listening on" || {
     docker logs "$PROXY" 2>&1
     exit 1
 }
+
+# CI's startup-only case covers this exact deploy topology without depending on
+# external package hosts.  The full smoke below retains all egress assertions.
+if [ "${1:-}" = "--proxy-startup-only" ]; then
+    docker rm -f "$PROXY" >/dev/null || {
+        echo "FAIL: could not remove startup-test proxy"; exit 1
+    }
+    docker network rm "$NETWORK" >/dev/null || {
+        echo "FAIL: could not remove startup-test network"; exit 1
+    }
+    rm -r "$HOST_DIR" "$APPROVALS_DIR" "$CLIENT_MAP_DIR" || {
+        echo "FAIL: could not remove startup-test directories"; exit 1
+    }
+    trap - EXIT
+    exit 0
+fi
 
 PROXY_URL="http://${PROXY}:8888"
 
@@ -241,11 +269,13 @@ docker run -d --name "$SANDBOX2" --network "$NETWORK" \
     assist-sandbox sleep 300 >/dev/null || { echo "FAIL: sandbox2 start"; exit 1; }
 SB_IP=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$NETWORK\").IPAddress}}" "$SANDBOX2")
 [ -n "$SB_IP" ] || { echo "FAIL: no sandbox2 IP"; exit 1; }
+SB_ID=$(docker inspect -f '{{.Id}}' "$SANDBOX2")
+[ -n "$SB_ID" ] || { echo "FAIL: no sandbox2 generation"; exit 1; }
 
 EXP_OK=$(date -u -d "+1 hour" +%Y-%m-%dT%H:%M:%S+00:00)
 EXP_OLD=$(date -u -d "-1 hour" +%Y-%m-%dT%H:%M:%S+00:00)
-cat > "$APPROVALS_DIR/client-map.json" <<EOF
-{"$SB_IP": "t-smoke"}
+cat > "$CLIENT_MAP_DIR/client-map.json" <<EOF
+{"$SB_IP": {"thread_id": "t-smoke", "generation": "$SB_ID", "kind": "sandbox"}}
 EOF
 cat > "$APPROVALS_DIR/approved-hosts.json" <<EOF
 {"t-smoke:example.com:443": {"host": "example.com", "port": 443, "origin_tid": "t-smoke", "expires_at": "$EXP_OK"},

@@ -16,6 +16,7 @@ Covered here:
 from __future__ import annotations
 
 import itertools
+import os
 import re
 import shutil
 import tempfile
@@ -80,19 +81,24 @@ class TestNoReuse(_SandboxStateBase):
             f"created-{next(ids)}")
         st = MagicMock()
         st.st_uid, st.st_gid = 1000, 1000
+        real_stat = os.stat
         return [
             patch.object(SandboxManager, "_get_docker_client", return_value=client),
             patch.object(SandboxManager, "_ensure_egress_proxy_running"),
-            patch("assist.sandbox_manager.os.stat", return_value=st),
+            patch("assist.sandbox_manager.os.stat", side_effect=lambda path: (
+                st if str(path) == "/ws/t" else real_stat(path))),
             patch("assist.sandbox.DockerSandboxBackend", lambda *a, **k: MagicMock()),
             # the persistent-/tmp dir is created for real; the work_dir here is a
             # fake path, so stub the mkdir like os.stat above.
             patch("assist.sandbox_manager.os.makedirs"),
+            # Attribution is covered separately; this lifecycle test uses a
+            # fake proxy without inspectable Docker mount attributes.
+            patch.object(SandboxManager, "_record_egress_client"),
         ]
 
     def test_second_call_reaps_stale_and_creates_fresh(self):
         p = self._patches()
-        with p[0], p[1], p[2], p[3], p[4]:
+        with p[0], p[1], p[2], p[3], p[4], p[5]:
             SandboxManager.get_sandbox_backend("/ws/t")
             first = SandboxManager._containers["/ws/t"]
             # Second turn for the SAME thread: must NOT reuse `first`.

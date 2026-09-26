@@ -13,6 +13,7 @@ from manage import web
 from manage.web import threads
 from manage.web.state import MESSAGE_BACKLOG, _get_status, _set_status
 from assist.backlog import PendingMessage
+from assist.run_service import InvalidRunTransition
 from assist.middleware import interjection as ij
 from assist.middleware.interjection import InterjectionMiddleware
 
@@ -95,6 +96,46 @@ def test_sender_scoping_matrix(wired, monkeypatch):
     # mismatched triage turn: nothing
     assert _hook(monkeypatch, tid, sender="+15559999999").before_model(
         {"messages": []}, None) is None
+
+
+def test_sms_interjection_waits_behind_held_browser_reset(wired, monkeypatch):
+    tid, root = wired
+    sender = "+15550001111"
+    owner = _journal(tid, "Original triage", sender=sender)
+    threads._runs().claim(tid, owner.id)
+    monkeypatch.setattr(threads, "_queue_browser_revocation", lambda _tid: None)
+    monkeypatch.setattr(threads, "_schedule_browser_revocation_retry",
+                        lambda _tid: None)
+    held, _ = threads._accept_message_run(tid, "Read another page")
+    assert held.status == "revocation_pending"
+    sms = _journal(tid, "SMS follow-up", sender=sender)
+    hook = _hook(monkeypatch, tid, sender=sender)
+    assert hook.before_model({"messages": []}, None) is None
+    with pytest.raises(InvalidRunTransition, match="browser safety reset"):
+        threads._runs().transition(tid, sms.id, "success", consumed_by=owner.id)
+
+    from assist.browser import manager as browser
+    monkeypatch.setattr(browser.BrowserManager, "reap_orphans",
+                        lambda _root: (_ for _ in ()).throw(
+                            browser.BrowserUnavailable("Docker scan stalled")))
+    assert threads._drain_held_browser_events(tid) is False
+    assert hook.before_model({"messages": []}, None) is None
+    assert threads._runs().get(tid, sms.id).status == "pending"
+
+    def reconciled(root_dir):
+        with threads.browser_authority.fence(root_dir, tid) as state:
+            state.mark_covered()
+
+    monkeypatch.setattr(browser.BrowserManager, "reap_orphans", reconciled)
+    monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped",
+                        lambda *_args: False)
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda _tid: None)
+    assert threads._drain_held_browser_events(tid) is True
+    out = hook.before_model({"messages": []}, None)
+    assert [message.additional_kwargs["interjection_ids"] for message in out["messages"]] == [
+        [sms.id]]
+    threads._consume_interjections(tid, {sms.id})
+    assert threads._runs().get(tid, sms.id).status == "success"
 
 
 def test_next_boundary_claims_checkpointed_ids(wired, monkeypatch):

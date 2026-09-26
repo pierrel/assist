@@ -1,0 +1,84 @@
+#+title: Headless browser design v9 — held-event command fence
+#+date: <2026-09-24>
+#+status: design successor; no product code
+
+* Decision
+
+Keep v8's durable =revocation_pending= direct-owner Run, ordered promotion,
+per-Run browser session, isolated proxy network and exact-host approval
+boundary. This revision closes the interval between journaling a held event
+and the revocation worker acquiring the browser gate, and makes Docker
+startup safe for shared locks when its transport stalls.
+
+* Fence at durable journal commit
+
+The journal commit of a newer direct owner event is the logical
+browser-command revocation point. Every internal =BrowserSession.command=
+admission, under its per-thread gate and before sending anything to the
+sidecar, reads the durable latest direct-owner admission sequence, including
+=revocation_pending= Runs. A sequence newer than the immutable event bound
+to the session's current internal authority rejects the command as stale
+and triggers or awaits exact-generation revocation. A cached session field
+alone is not proof. A command whose sequence check completed before the
+journal commit was already admitted and remains subject to v8's bounded
+in-flight teardown order; a command reaching that gate after commit cannot
+start new old-generation agent-directed traffic. Rebinding requires ordered
+promotion and confirmed teardown, then a newer immutable direct event or
+fresh confirmation naming the exact already-allowlisted internal host.
+
+This command fence does not falsely claim that autonomous JavaScript on an
+already-live page stops at journal commit. Confirmed sidecar teardown is
+still required before the held event becomes eligible for model delivery;
+only that teardown ends established tunnels and background page traffic.
+If it stalls, the message remains visibly held and undelivered. The older
+task is not cancelled by the safety reset.
+
+* Bounded shared-lock startup
+
+Every Docker startup/proxy setup/network inspect/container create operation
+that runs while the shared =_egress_lock= or per-thread gate is held must use
+a genuinely cancellable monotonic-bounded transport, such as a killable
+child process or CLI invocation. Lock acquisition itself is bounded, and
+timeout releases the lock. A timer around a Python SDK thread is not a
+cancellation mechanism: that thread could retain =_egress_lock=
+indefinitely, mutate proxy state or create a container later. Never leave
+such an uncontrolled thread behind a successful timeout return.
+
+The daemon might finish an already-submitted operation after its client
+process is killed. Before the next command admission, re-inspect the actual
+proxy network/config fingerprint and sidecar labels/generation, reject any
+drift, and reap only verified orphans. A late-created sidecar has no valid
+client-map registration and is proxy-denied until current-generation
+attribution succeeds. A failed or timed-out stop keeps the user event
+=revocation_pending= with a visible retry reason; it does not reset the
+original 240-second Run deadline or silently let another sandbox start
+under an unverified proxy state.
+
+* Truthful notice and verification
+
+After confirmed revocation, the trusted in-thread notice says internal
+browsing stopped and page/form state was lost. It says the earlier task
+"was not canceled by this safety reset" and reports its actual current
+status if available, rather than asserting it remains pending after a
+delayed teardown. It explains when fresh exact-host user confirmation is
+needed. Failed teardown still shows the new message queued and undelivered
+with reason and retry time, not as seen or answered by the running agent.
+
+Test journal commit of a held event, pause its revocation worker before
+gate acquisition, then call the old internal browser tool: it must reject
+without reaching the sidecar. Test the opposite ordering and rebind only
+after promotion/confirmed stop. Hang proxy setup while =_egress_lock= is
+held: timeout must release the lock, preserve the visible held message and
+allow a subsequent independent ordinary sandbox start after actual proxy
+state is reverified. Hang =containers.run= likewise; verify no late
+generation gains network permission. Keep v8's recovery, two-interjection
+ordering, page-state, network and user-visible checks.
+
+* Historical supersessions
+
+This document directly supersedes
+=docs/2026-09-24-headless-browser-v8.org='s durable held-message and
+session/startup sections where a post-journal/pre-worker browser command or
+uncontrolled timed-out SDK thread could continue, and its visible-outcome
+section's unconditional claim that the older task remains pending. Its
+other decisions remain in force; earlier dated designs stay unchanged.

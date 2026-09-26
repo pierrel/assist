@@ -21,6 +21,7 @@ from manage import web
 from manage.web import threads
 from manage.web.state import _get_status
 from assist.location import LocationSnapshot
+from assist.browser.authority import mark_new_thread
 from assist.thread_queue import ThreadPauseRequested
 
 
@@ -50,6 +51,7 @@ class _PausingChat:
 def wired(tmp_path, monkeypatch):
     tid = "t-pause"
     (tmp_path / tid).mkdir()
+    mark_new_thread(str(tmp_path), tid)
     calls = []
     chat = _PausingChat(tid, calls)
 
@@ -219,6 +221,40 @@ def test_resume_scheduler_reservation_is_invisible_until_committed_once():
         q.get_nowait()
 
 
+def test_resume_scheduler_dedupes_only_queued_run_ids():
+    q = threads._PriorityRunQueue()
+    item = {"kind": "run", "run_id": "same", "tid": "thread"}
+    q.put(item)
+    q.put(dict(item))
+    reserved = q.reserve(dict(item))
+    q.commit(reserved)
+    assert q.get_nowait()["run_id"] == "same"
+    with pytest.raises(threads.queue.Empty):
+        q.get_nowait()
+    # Once the scheduler has taken the item, a paused turn can legitimately
+    # queue its next wake before this invocation has fully unwound.
+    q.put(dict(item))
+    assert q.get_nowait()["run_id"] == "same"
+    with pytest.raises(threads.queue.Empty):
+        q.get_nowait()
+
+
+@pytest.mark.parametrize("via_reservation", [False, True])
+def test_duplicate_run_wake_upgrades_existing_background_ticket(via_reservation):
+    q = threads._PriorityRunQueue()
+    q.put({"kind": "run", "run_id": "sms", "tid": "thread"})
+    q.put({"kind": "run", "run_id": "unrelated", "tid": "other"})
+    upgraded = {"kind": "run", "run_id": "sms", "tid": "thread",
+                "user_priority": True}
+    if via_reservation:
+        q.commit(q.reserve(upgraded))
+    else:
+        q.put(upgraded)
+    assert [q.get_nowait()["run_id"] for _ in range(2)] == ["sms", "unrelated"]
+    with pytest.raises(threads.queue.Empty):
+        q.get_nowait()
+
+
 def test_resume_scheduler_promotes_reservations_on_both_sides_of_commit():
     q = threads._PriorityRunQueue()
     q.put({"run_id": "user-first", "tid": "user", "user_priority": True})
@@ -263,7 +299,9 @@ def test_pause_reservation_keeps_a_concurrent_user_promotion(wired, monkeypatch)
     queued = threads._RESUME_SCHEDULER._q.get_nowait()
     assert queued["run_id"] == successor.id
     assert queued["user_priority"] is True
-    assert threads._runs().get(tid, follower.id).status == "pending"
+    # The user submission remains held until exact browser reconciliation,
+    # even though it has already promoted the paused predecessor's ticket.
+    assert threads._runs().get(tid, follower.id).status == "revocation_pending"
     assert calls == [("message", "hello")]
 
 

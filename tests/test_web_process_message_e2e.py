@@ -53,6 +53,8 @@ def client(tmp_path, monkeypatch):
     """
     tdir = tmp_path / "thread-e2e"
     tdir.mkdir()
+    from assist.browser.authority import mark_new_thread
+    mark_new_thread(str(tmp_path), "thread-e2e")
     monkeypatch.setattr(web.MANAGER, "root_dir", str(tmp_path))
     monkeypatch.setattr(
         web.MANAGER, "thread_dir", lambda tid: str(tmp_path / tid)
@@ -267,6 +269,28 @@ def test_process_message_kills_container_even_when_turn_errors(client, monkeypat
     assert _wait_for_terminal_status("thread-e2e").get("stage") == "error"
 
     assert len(calls) == 1, f"erroring turn must still tear down its container, got {calls}"
+
+
+def test_browser_cleanup_failure_still_reaps_shell_container(client, monkeypatch):
+    class _Chat:
+        def message(self, text):
+            return "ok"
+
+        def pending_reply(self):
+            return None
+
+    _stub_happy_path(monkeypatch, _Chat())
+    calls = _spy_cleanup(monkeypatch)
+    monkeypatch.setattr(
+        threads.BrowserManager, "cleanup",
+        classmethod(lambda cls, tid, expected=None: (_ for _ in ()).throw(
+            threads.BrowserUnavailable("browser stop unconfirmed"))))
+
+    response = client.post("/thread/thread-e2e/message", data={"text": "hi"},
+                           follow_redirects=False)
+    assert response.status_code == 303
+    assert _wait_for_terminal_status("thread-e2e").get("stage") == "error"
+    assert len(calls) == 1
 
 
 def test_recursion_limit_sets_error_status(client, monkeypatch):

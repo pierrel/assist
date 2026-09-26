@@ -24,7 +24,7 @@ from assist.egress import tools as egress_tools_mod
 from assist.egress.tools import (EGRESS_ORIGIN_THREAD_ID, EGRESS_WAITER_RUN_ID,
                                  EGRESS_WAITER_THREAD_ID, egress_tools,
                                  _parse_host_port)
-from assist.egress.client_map import record_client, forget_client
+from assist.egress.client_map import ClientRecord, record_client, forget_client, read_client
 
 
 def _store(tmp_path):
@@ -299,11 +299,14 @@ def test_child_request_interrupts_then_resumes_from_stored_resolution(
 
 def test_client_map_roundtrip(tmp_path):
     d = str(tmp_path)
-    record_client(d, "172.20.0.5", "t1")
-    record_client(d, "172.20.0.5", "t2")   # IP reuse: newest wins
-    path = tmp_path / APPROVALS_SUBDIR / "client-map.json"
-    assert json.loads(path.read_text()) == {"172.20.0.5": "t2"}
-    forget_client(d, "172.20.0.5")
+    record_client(d, "172.20.0.5", ClientRecord("t1", "old", "sandbox"))
+    record_client(d, "172.20.0.5", ClientRecord("t2", "new", "sandbox"))
+    path = tmp_path / "client-map.json"
+    assert json.loads(path.read_text()) == {
+        "172.20.0.5": {"thread_id": "t2", "generation": "new", "kind": "sandbox"}}
+    forget_client(d, "172.20.0.5", "old")
+    assert "172.20.0.5" in json.loads(path.read_text())
+    forget_client(d, "172.20.0.5", "new")
     assert json.loads(path.read_text()) == {}
 
 
@@ -313,6 +316,9 @@ def test_client_map_roundtrip(tmp_path):
 def proxy_mod(tmp_path, monkeypatch):
     monkeypatch.setenv("EGRESS_ALLOWLIST", "pypi.org,host.docker.internal")
     monkeypatch.setenv("APPROVALS_DIR", str(tmp_path))
+    monkeypatch.setenv("CLIENT_MAP_DIR", str(tmp_path))
+    monkeypatch.setenv("EGRESS_SANDBOX_CIDR", "172.20.0.0/16")
+    monkeypatch.setenv("EGRESS_BROWSER_CIDR", "172.21.0.0/16")
     monkeypatch.setenv("EGRESS_THROTTLE_BODY", "request stopped locally\n")
     spec = importlib.util.spec_from_file_location(
         "egress_proxy_under_test",
@@ -330,19 +336,30 @@ def _write_approval(tmp_path, host="api.example.com", port=443, tid="t1",
     (tmp_path / "approved-hosts.json").write_text(json.dumps(
         {f"{tid}:{host}:{port}": {"host": host, "port": port,
                                   "origin_tid": tid, "expires_at": exp}}))
-    (tmp_path / "client-map.json").write_text(json.dumps({"172.20.0.9": tid}))
+    (tmp_path / "client-map.json").write_text(json.dumps({
+        "172.20.0.9": ClientRecord(tid, "generation", "sandbox").to_dict()}))
 
 
 def test_proxy_approved_target_matrix(proxy_mod, tmp_path):
     _write_approval(tmp_path)
     ok = proxy_mod.approved_target
-    assert ok("api.example.com", 443, "172.20.0.9")
-    assert not ok("api.example.com", 22, "172.20.0.9")       # port-scoped
-    assert not ok("api.example.com", 443, "172.20.0.99")     # unknown client IP
-    assert not ok("evil.example.com", 443, "172.20.0.9")
+    assert ok("api.example.com", 443, "t1")
+    assert not ok("api.example.com", 22, "t1")       # port-scoped
+    assert not ok("api.example.com", 443, None)
+    assert not ok("evil.example.com", 443, "t1")
     # wrong thread: same host approved for another tid
-    (tmp_path / "client-map.json").write_text(json.dumps({"172.20.0.9": "t2"}))
-    assert not ok("api.example.com", 443, "172.20.0.9")
+    assert not ok("api.example.com", 443, "t2")
+
+
+def test_pi_recycled_ip_never_inherits_old_shell_approval(proxy_mod, tmp_path,
+                                                          monkeypatch):
+    _write_approval(tmp_path)
+    monkeypatch.setattr(proxy_mod, "vet_resolved", lambda *_args, **_kwargs: "93.184.216.34")
+    ip = "172.20.0.9"
+    assert proxy_mod.target_policy("api.example.com", 443, ip) == (
+        "93.184.216.34", None)
+    record_client(str(tmp_path), ip, ClientRecord("t1", "pi-generation", "pi"))
+    assert proxy_mod.target_policy("api.example.com", 443, ip)[1] == "host_not_approved"
 
 
 def test_proxy_duration_fail_closed(proxy_mod, tmp_path):
@@ -358,15 +375,15 @@ def test_proxy_duration_fail_closed(proxy_mod, tmp_path):
 
 def test_proxy_files_fail_closed(proxy_mod, tmp_path):
     ok = proxy_mod.approved_target
-    assert not ok("api.example.com", 443, "172.20.0.9")     # no files at all
+    assert not ok("api.example.com", 443, "t1")     # no files at all
     (tmp_path / "approved-hosts.json").write_text("{corrupt")
     (tmp_path / "client-map.json").write_text("[1,2]")      # wrong shape
-    assert not ok("api.example.com", 443, "172.20.0.9")
+    assert not ok("api.example.com", 443, "t1")
     big = json.dumps({"k" + str(i): {} for i in range(9000)})
     (tmp_path / "approved-hosts.json").write_text(big)      # oversized
     _write_approval(tmp_path)  # rewrites both files validly
     (tmp_path / "approved-hosts.json").write_text(big)
-    assert not ok("api.example.com", 443, "172.20.0.9")
+    assert not ok("api.example.com", 443, "t1")
 
 
 def test_proxy_vet_resolved(proxy_mod, monkeypatch):
@@ -390,6 +407,65 @@ def test_base_allowlist_unaffected_by_approvals(proxy_mod, tmp_path):
     # corrupt approvals in place: base host membership is a plain set check
     (tmp_path / "approved-hosts.json").write_text("{corrupt")
     assert "pypi.org" in proxy_mod.ALLOWLIST
+
+
+def test_proxy_browser_source_and_mode_policy(proxy_mod, tmp_path, monkeypatch):
+    def resolve(host, port, *, global_only=True):
+        addresses = {"pypi.org": "93.184.216.34",
+                     "host.docker.internal": "172.17.0.1"}
+        address = addresses.get(host)
+        return address if address and (address == "93.184.216.34") == global_only else None
+
+    monkeypatch.setattr(proxy_mod, "vet_resolved", resolve)
+    ip = "172.21.0.8"
+    assert proxy_mod.target_policy("pypi.org", 443, ip)[1] == "browser_attribution_missing"
+    record_client(str(tmp_path), ip, ClientRecord("t1", "g1", "browser", "public"))
+    assert proxy_mod.target_policy("pypi.org", 443, ip) == ("93.184.216.34", None)
+    assert proxy_mod.target_policy("host.docker.internal", 80, ip)[1] == "browser_internal_policy"
+    assert proxy_mod.target_policy("pypi.org", 443, "172.22.0.8")[1] == "unknown_proxy_source"
+
+    record_client(str(tmp_path), ip, ClientRecord(
+        "t1", "g2", "browser", "internal", "host.docker.internal", 80))
+    assert proxy_mod.target_policy("host.docker.internal", 80, ip) == ("172.17.0.1", None)
+    assert proxy_mod.target_policy("host.docker.internal", 8000, ip)[1] == "browser_internal_policy"
+    assert proxy_mod.target_policy("pypi.org", 443, ip)[1] == "browser_internal_policy"
+
+    # A new network CIDR never reclassifies an old browser address as shell.
+    import ipaddress
+    monkeypatch.setattr(proxy_mod, "BROWSER_CIDR", ipaddress.ip_network("172.23.0.0/16"))
+    assert proxy_mod.target_policy("pypi.org", 443, ip)[1] == "unknown_proxy_source"
+
+
+def test_proxy_rejects_legacy_and_kind_mismatched_records(proxy_mod, tmp_path):
+    ip = "172.21.0.8"
+    path = tmp_path / "client-map.json"
+    path.write_text(json.dumps({ip: "t1"}))
+    assert proxy_mod.target_policy("pypi.org", 443, ip)[1] == "browser_attribution_missing"
+    record = ClientRecord("t1", "g1", "sandbox").to_dict()
+    path.write_text(json.dumps({ip: record}))
+    assert proxy_mod.target_policy("pypi.org", 443, ip)[1] == "browser_attribution_missing"
+    # A pre-port internal record must lose access after policy upgrade.
+    legacy_internal = {"thread_id": "t1", "generation": "old", "kind": "browser",
+                       "browser_mode": "internal", "internal_host": "host.docker.internal"}
+    path.write_text(json.dumps({ip: legacy_internal}))
+    assert proxy_mod.target_policy("host.docker.internal", 80, ip)[1] == "browser_attribution_missing"
+
+
+def test_recycled_browser_ip_cannot_use_previous_thread_grant(
+        proxy_mod, tmp_path, monkeypatch):
+    ip = "172.21.0.8"
+    host = "api.example.com"
+    monkeypatch.setattr(proxy_mod, "vet_resolved",
+                        lambda *_args, **_kwargs: "93.184.216.34")
+    _write_approval(tmp_path, host=host, tid="old-thread")
+    record_client(str(tmp_path), ip, ClientRecord(
+        "old-thread", "old-generation", "browser", "public"))
+    assert proxy_mod.target_policy(host, 443, ip) == ("93.184.216.34", None)
+    record_client(str(tmp_path), ip, ClientRecord(
+        "new-thread", "new-generation", "browser", "public"))
+    forget_client(str(tmp_path), ip, "old-generation")
+    assert proxy_mod.target_policy(host, 443, ip)[1] == "host_not_approved"
+    assert read_client(str(tmp_path), ip).generation == "new-generation"
 
 
 # --- proxy host throttle ------------------------------------------------------

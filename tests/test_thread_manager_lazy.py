@@ -22,6 +22,7 @@ from unittest import TestCase
 from unittest.mock import patch, MagicMock
 
 from assist.thread_engine import ThreadEngine, ThreadEngineError, read_thread_engine
+from assist.browser.authority import fence
 from assist.thread_manager import ThreadManager
 
 
@@ -36,6 +37,21 @@ class TestThreadManagerLazy(TestCase):
                     ThreadEngine("pi", "manual-web"),
                     read_thread_engine(manager.thread_dir(tid)),
                 )
+                with fence(tmp, tid) as browser_state:
+                    self.assertTrue(browser_state.covered)
+                    self.assertIsNone(browser_state.lease)
+            finally:
+                manager.close()
+
+    def test_visible_thread_is_not_published_if_birth_marker_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ThreadManager(root_dir=tmp)
+            try:
+                with patch("assist.browser.authority.mark_new_thread",
+                           side_effect=RuntimeError("marker write failed")):
+                    with self.assertRaisesRegex(RuntimeError, "marker write failed"):
+                        manager.reserve_visible("pi", thread_id="pi-thread")
+                self.assertFalse(os.path.exists(manager.thread_dir("pi-thread")))
             finally:
                 manager.close()
 

@@ -43,6 +43,17 @@ where reliability is harder than with frontier APIs.
   to the host when Docker is unavailable; fail-closed cross-surface isolation is
   planned rather than shipped.
 
+- **Website browser.** Ordinary web main-agent turns can render and interact
+  with JavaScript pages using a short-lived Chromium sidecar. It is isolated
+  from the shell container and can reach only the existing egress proxy.
+  Public visits use the same exact-host list and approvals; private/local
+  visits require a fresh user request naming an operator-allowlisted host
+  and exact port. A bare host permits only HTTP 80 or HTTPS 443; a
+  nondefault port must be explicit, such as `http://host.docker.internal:5050`.
+  Browser pages cannot approve access. Browser tools do not return non-HTTP(S)
+  page content. An empty new popup can be reused for an HTTP(S) visit.
+  Deleting a thread stops its browser sidecar before removing the thread state.
+
 - **Specialized agents and skills out of the box.**
   - **Research agent** rigorous fact-checking and critiquing with
     internet search (`search_internet`) and URL fetch (`read_url`).
@@ -848,13 +859,15 @@ assist/
 │   │   ├── dev/SKILL.md     # TDD workflow + code-task routing
 │   │   ├── org-format/SKILL.md
 │   │   └── …
+│   ├── browser/             # Typed Chromium sidecar, runner, and browser skill
 │   ├── main_skills/         # Supervisor-only skills for the async main
 │   │   └── complex-request/SKILL.md
 │   └── templates/           # Jinja prompt templates
 │       ├── deepagents/      # Per-agent system prompts
 │       └── reference/       # Inline references (legacy; being moved into skills)
 ├── dockerfiles/             # Docker images
-│   └── Dockerfile.sandbox   # Sandbox container (Arch-based, with git/python/emacs)
+│   ├── Dockerfile.sandbox   # Sandbox container (Arch-based, with git/python/emacs)
+│   └── Dockerfile.browser   # Bounded headless Chromium sidecar
 ├── edd/                     # Agent evaluations (LLM-driven, network-bound)
 │   ├── eval/                # Evaluation test suite — anything that calls the real model
 │   └── history/             # Test results history (JUnit XML)
@@ -918,10 +931,20 @@ When enabled, each thread creates a git branch and can merge changes back to mai
 
 On the web path, the agent executes shell commands inside a Docker container rather than on the host. Each turn gets a fresh container with the domain repository bind-mounted at `/workspace`, also exposed as `/user`; persistent thread scratch at `/tmp`; and, for visible main-agent turns, private state at `/agent`. The current sandbox also inherits the configured `ASSIST_*` environment, so it is not yet a credential-free boundary. The CLI path remains host-backed.
 
-The sandbox image is built automatically by `make web` (and `make deploy`). To build it manually:
+The sandbox and browser images are built automatically by `make web` (and `make deploy`). To build them manually:
 ```bash
-make sandbox-build
+make sandbox-build browser-build
 ```
+
+Browser use also needs a proxy-only client-map directory outside the thread
+workspaces. Set `ASSIST_EGRESS_CLIENT_MAP_DIR` to an absolute directory owned
+by the web user and not group/world writable. If safe egress approvals are
+already configured, their proxy-mounted directory supplies the map by default.
+The browser tool is unavailable when neither directory is configured.
+Shared proxy/network retirement uses a separate host-only ledger outside the
+thread workspaces (`ASSIST_EGRESS_RUNTIME_DIR`, or a private sibling directory
+by default). It must remain writable even when browser attribution is disabled;
+if it cannot be read safely, new egress setup fails closed.
 
 If Docker is unavailable, the agent falls back to running without a sandbox.
 

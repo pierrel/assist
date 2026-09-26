@@ -1,14 +1,16 @@
 ---
 name: explore-website
-description: "Explore ONE specific website to find and download a file — a manual, PDF, spec sheet, dataset, image, export. Navigate with read_url, download with curl. EXAMPLES — 'download the user manual PDF from the fellow website'; 'get the CSV linked on this vendor dashboard page'; 'save the spec sheet from acme.com/products/x'. This is NOT general web research (that's the research agent, which searches). MUST load before fetching pages or files from a specific website with read_url or curl."
+description: "Explore ONE specific website to find and download a file — a manual, PDF, spec sheet, dataset, image, export. For static links navigate with read_url and download with curl; JavaScript controls use browse-website and browser_save_download. EXAMPLES — 'download the user manual PDF from the fellow website'; 'get the CSV linked on this vendor dashboard page'; 'save the spec sheet from acme.com/products/x'. This is NOT general web research (that's the research agent, which searches). MUST load before fetching pages or files from a specific website with read_url or curl."
 allowed-tools: read_url
 ---
 
-# Explore a website — read to navigate, curl to download
+# Explore a website — static links or rendered controls
 
 You have a specific website (or a page URL) and need to find and download one
-or more files from it. The rule is simple: **`read_url` finds; `curl`
-downloads.** Never swap them.
+or more files from it. For a static page, **`read_url` finds; `curl`
+downloads.** Do not swap those roles. If JavaScript hides the links or a
+button starts the download, load `browse-website`, use its browser controls,
+and save the returned download ID with `browser_save_download` instead.
 
 ## The failure this skill exists to prevent — read this first
 
@@ -35,9 +37,11 @@ page:" list of real URLs (absolute). That link list is how you navigate.
 3. `read_url` that page. Repeat until a surfaced link **is** your file — it
    ends in `.pdf` / `.csv` / `.zip` / `.xlsx` etc., or sits under a downloads
    / files / CDN-files path.
-4. **Budget: 2–4 `read_url` hops.** read_url is host-side and safe. But if a
-   few hops don't surface the file, **stop** — tell the user you couldn't find
-   it and name the pages you checked. Do not keep hopping.
+4. **Budget: 2–4 `read_url` hops.** If those static hops do not expose the
+   file because JavaScript or an interactive control hides it, load
+   `browse-website` and use the browser path. Otherwise stop the static
+   traversal, name the pages checked, and report that the file was not found.
+   Do not keep repeating `read_url` hops.
 
 ## Download the file — with `curl`
 
@@ -96,6 +100,6 @@ Three reads, one download, zero asset crawling.
 Some sites build their links or download buttons with JavaScript, so
 `read_url` (which runs no JS) and `curl` won't see the file. If `read_url`
 shows the page but none of its surfaced links lead to the file and you're
-confident it exists, **say so** — that page needs a headless browser, which
-isn't available yet. Don't curl-crawl trying to work around it; tell the user
-it needs browser rendering.
+confident it exists, load `browse-website` and use the browser tools if they
+are available in this web turn. Otherwise say that browser rendering is
+needed. Do not chase raw JavaScript assets with `curl`.

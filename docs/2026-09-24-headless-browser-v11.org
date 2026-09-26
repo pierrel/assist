@@ -1,0 +1,138 @@
+#+title: Headless browser design v11 — admission, recovery and visit bounds
+#+date: <2026-09-24>
+#+status: design successor; no product code
+
+* Decision
+
+Keep the v10 proxy, exact-host approval, retired shared-generation, bounded
+sidecar and main-agent contracts. This revision closes three observed
+browser/admission races, gives revocation work its own worker, fixes the
+first-open deadline, and makes the five-page limit a concurrency bound
+rather than a visit limit. No egress host or approval scope expands.
+
+* Direct-user admission without a session-sample race
+
+Browser registration, =browser_open= and ordinary direct-user admission
+cannot be ordered by an unlocked =current_session= sample. A direct owner
+message is journaled as durable =revocation_pending= whenever browser
+safety startup reconciliation is incomplete, an earlier held direct event
+exists, or an older general-agent web Run is active/queued. This conservative
+hold applies even if the process-local BrowserSession is absent or has no
+container yet. In the apparently idle fast path, acquire the bounded
+per-thread browser/admission gate *before* a short global persistence lock;
+recheck startup readiness, older nonterminal Runs, earlier held events and
+the current session under that gate, then commit ordinary =pending= only if
+all remain clear. On gate timeout or any uncertainty, durably hold instead.
+No path may hold the global admission lock while waiting for that gate or
+Docker. Browser registration/open uses the same gate and a durable latest-
+direct-event fence before client-map publication; a pre-event startup
+result cannot gain internal proxy attribution after a newer held event.
+
+Hold any newer B while an earlier A is =revocation_pending=, regardless of
+whether A's original session still exists. Drain held events in durable
+admission-sequence order. A delayed cleanup or promotion for A cannot
+rebind older authority after B is held. A no-browser overlap may promote
+quickly, but never by bypassing the order or assuming a missing session is
+proof of safety.
+
+* Recovery, late creation and worker availability
+
+Persist the old browser owner Run ID with the held event at its journal
+commit, plus any already-issued startup token and exact generation.
+The owner Run label identifies sidecars even when no session existed at
+the sample; a startup begun later must pass the durable sequence fence.
+Null =revocation_generation= means *unresolved*, not “nothing to stop.”
+The revocation worker, under the per-thread gate, must successfully read
+the client map and enumerate sidecars by this deployment's root and old
+owner Run/launch labels. It revokes attribution and confirms teardown of
+every previously grant-capable matching generation before promotion.
+Any map read, Docker scan or kill uncertainty keeps the event held, visibly
+undelivered with a retry reason. A late startup result in a live old Run
+must compare the durable direct-event sequence before publishing attribution
+and kill itself on a newer held event. After a host crash, its dead parent
+cannot publish the map entry; a sidecar the daemon creates after a successful
+scan is therefore proxy-denied and exits at its fixed PID 1 deadline.
+Promotion requires confirmed removal of old *grant-capable* generations
+and this no-late-attribution fence, not an impossible proof that no inert
+container can ever appear after one scan.
+
+Browser safety readiness starts false on web-process startup. Before *any*
+ordinary direct admission, including one after the previous Run became
+terminal just before a crash, recovery must complete a successful orphan
+and client-map reconciliation for the thread/deployment. Lifespan yielding
+while an asynchronous scan runs is not readiness. If scanning or cleanup
+fails, new direct messages are durably held; they cannot become ordinary
+=pending= merely because the new process has an empty session registry.
+Browser tool admission is likewise unavailable until reconciliation.
+
+The four-token user admission worker only journals/returns the visible held
+message and schedules one per-thread bounded revocation job; it does not
+synchronously wait on Docker teardown. Completion promotes in order and
+signals normal dispatch. A one-shot retry/backstop and startup recovery
+resume held work after timeout or crash, without a sleep-loop or silently
+dropping the user's message. In the no-browser case the job takes the short
+safe path. A failed reset remains queued and undelivered with its reason.
+
+* One deadline and bounded page reuse
+
+Record one absolute =CLOCK_BOOTTIME= deadline when the first
+=browser_open= is admitted: exactly 240 seconds from that instant. Host
+commands, every replacement sidecar and sidecar PID 1 compare against that
+same absolute deadline. Verify the host/container monotonic clock identity
+at image/runtime smoke or fail closed; do not pass a relative TTL computed
+before =containers.run= and restart it when the daemon creates the sidecar
+later. A delayed creation after the deadline exits immediately. Rebinding
+or a new sidecar within the same Run never extends the budget.
+
+=browser_open(url, reuse_page_id=None)= still opens a new page by default,
+with at most five *concurrently live* pages. When the agent supplies a
+currently observed live page ID, it navigates that exact page instead of
+opening another; it invalidates the old snapshot/target references and
+returns the actual active URL and fresh observation. Unknown, closed or
+stale IDs fail. No automatic tab retargeting and no arbitrary visit/hop
+cap are introduced, so sequential visits can reuse one page. A separate
+close-page tool is unnecessary for this acceptance path.
+
+* Trusted internal-host request language
+
+An immutable direct user event can authorize an exact already-allowlisted
+internal host when it unambiguously asks for an outcome at that host, not
+only when it starts with an imperative verb. Narrow supported forms include
+“What is the status at http://host.docker.internal:5050?” and “Find the
+report on host.docker.internal.” Match a parsed exact host and a clear
+visit/outcome relation; a mere host mention, quoted page text, negation or
+model-composed task is not consent. If intent is ambiguous, explain the
+exact host and ask for fresh user confirmation rather than demanding magic
+wording or silently choosing internal mode. An approval-generated synthetic
+Run still inherits no internal authorization.
+
+* Verification delta
+
+Force session registration/open between admission's first sample and
+journal commit; the message must be held or ordinary admission must occur
+before any old internal browser can register. Force A held, process-local
+session lost, then B arrives: both remain ordered and B cannot dispatch
+first. Start a new web process while orphan reconciliation is paused or
+fails, then submit a direct message; it remains visibly held. Crash after
+held commit but before generation persistence, with failed scan and failed
+kill; neither case promotes. Retry succeeds only after old grant-capable
+generations are gone. Create a late sidecar after the scan and verify no
+client-map entry, denied CONNECT and deadline-driven exit. Stall revocation
+while submitting on another thread: the admission worker remains free.
+Test the fixed deadline across delayed Docker creation and a mode rebind;
+six sequential sites succeed by explicit reuse while six concurrent pages
+do not. Test natural exact-host requests, quoted/negated host mentions and
+the confirmation fallback. Keep v10's proxy-retirement and v9's held-event
+command-fence tests.
+
+* Historical supersessions
+
+This document directly supersedes
+=docs/2026-09-24-headless-browser-v8.org='s held-message promotion and
+session/deadline sections where a missing process-local session or null
+generation could imply safe promotion and where host and sidecar deadlines
+could start at different instants. It also supersedes
+=docs/2026-09-24-headless-browser-v9.org='s command-admission paragraph
+only to require a durable sequence check again before late startup grants
+proxy attribution. Their other decisions, and v10's shared-generation
+retirement rule, remain in force. Earlier dated records are unchanged.

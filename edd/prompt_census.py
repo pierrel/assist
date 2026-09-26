@@ -1710,6 +1710,7 @@ _TOOL_ORIGINS = {
 
 _DECLARED_TEMPLATE_RENDER_HASHES = {
     "assist/templates/deepagents/assist_core.md.j2": {
+        "c2bf45bb658da376155de7bcd91a6f36dea61a6dd73999721513cd4b62c91527",
         "18d57020fae23ba1cc93aed0b0cca265a89891e66708619f9f28adfefb257adb",
         "d0bf608e2e7b8c0b5bad52e2dd87fe17b91f357d06bb449742406f08230eb32d",
         "cbc483e291b07adf34e6be71a409f486bee4de7a6f520f0c15994ede69dbf30c",
@@ -2125,7 +2126,7 @@ _TOOL_RESULT_METADATA = {
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "aa148c9f2cd1a1d933047a5d6ab0451777832eb1af259f92891624b938da489f"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "fec3352037cb982f2a274e88f489fd08fd52d03b6fc4a489f8c21a6c670aaba2"
+    "84e19a9d59967c5fbd4858228ee2f829ebc3a1444f0ee8de0ad1852b4ed635a8"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
@@ -2782,7 +2783,8 @@ def _assert_source_links(artifact: dict[str, Any]) -> None:
                     or source["rendered_sha256"] not in \
                     _DECLARED_TEMPLATE_RENDER_HASHES[source["locator"]]:
                 raise AssertionError(
-                    f"template source hash drifted: {source['locator']}")
+                    f"template source hash drifted: {source['locator']} "
+                    f"(rendered {source['rendered_sha256']})")
         if source["kind"] == "synthetic-fixture" \
                 and (source["scenario"] not in EXPECTED_CALL_COUNTS
                      or source["value_sha256"] != _sha(source["value"])

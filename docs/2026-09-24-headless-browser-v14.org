@@ -1,0 +1,45 @@
+#+title: Headless browser design v14 — container absence for map pruning
+#+date: <2026-09-24>
+#+status: design successor; no product code
+
+* Exact lifecycle condition
+
+Keep v13's snapshot → Docker scan outside locks → exact-record
+compare-delete algorithm. Its deletion condition is absence of the
+immutable generation from a *successful all-object browser-container
+enumeration* (=docker ps --all --no-trunc= with the browser label), not
+absence from the running-only list. A stopped Docker object could be
+restarted under the same ID, so “not running” alone does not prove that
+its client-map record is permanently stale. A generation already in the
+snapshot necessarily existed before the scan; after Docker confirms that
+exact object is absent, it cannot later restart under the same ID. A
+newly created generation has a different ID and is protected by v13's
+exact-record compare-delete.
+
+Current sidecars are requested with Docker =AutoRemove=true= and no
+restart policy. Verify those actual inspect values at runtime/image smoke;
+they are useful cleanup bounds but are not substituted for the all-object
+absence test. A stopped object that still exists remains in the map until
+exact removal is confirmed. An incomplete, malformed, timed-out or failed
+all-object scan removes nothing and reports retryable reconciliation
+failure. This does not change the proxy policy, allowlist or approval
+boundary.
+
+* Verification delta
+
+Stop a labeled sidecar while leaving its object inspectable: pruning must
+retain its exact map record, including if a test fixture makes it
+restartable. Remove that object, then a successful all-object scan may
+prune the stale exact record. Check actual sidecar =AutoRemove= and
+=RestartPolicy= settings; exercise the transient stopped-but-not-yet-
+removed window, failed enumeration and concurrent recycled-IP insertion.
+The v13 Docker scan remains outside map and admission locks.
+
+* Historical supersessions
+
+This document directly supersedes only
+=docs/2026-09-24-headless-browser-v13.org='s assertion in
+“Snapshot, scan, compare-delete” that absence from a live-generation
+scan alone means a Docker ID cannot become live later, and its affected
+verification condition. The rest of v13 and earlier dated designs
+remain unchanged.

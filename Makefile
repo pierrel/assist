@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-pi-runtime-build deploy-service deploy-install deploy-speech-models restart status logs setup-sudo help sandbox-build egress-proxy-build pi-runtime-build pi-preview-enable pi-preview-disable pi-preview-status sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-pi-runtime-build deploy-service deploy-install deploy-speech-models restart status logs setup-sudo help sandbox-build browser-build browser-smoke browser-docker-test egress-proxy-build pi-runtime-build pi-preview-enable pi-preview-disable pi-preview-status sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
 
 eval:
 	$(call with-dev-env,./scripts/run-evals.sh)
@@ -37,7 +37,7 @@ eval:
 test:
 	$(call with-dev-env,.venv/bin/pytest --junit-xml=tests/history/results-$$(date +%Y%m%d-%H%M).xml tests)
 
-web: sandbox-build pi-runtime-build
+web: sandbox-build browser-smoke pi-runtime-build
 	$(call with-dev-env,.venv/bin/python -m manage.web)
 
 smoke:
@@ -52,9 +52,17 @@ pull-eval-history:
 sandbox-build: egress-proxy-build
 	docker build -t assist-sandbox -f dockerfiles/Dockerfile.sandbox .
 
-# Egress allowlist proxy.  Tiny image (python:3-alpine + ~150 LOC of
-# stdlib).  Used by SandboxManager._ensure_egress_proxy_running to
-# gate every byte leaving the sandbox.  See
+browser-build:
+	docker build -t assist-browser -f dockerfiles/Dockerfile.browser .
+
+browser-smoke: browser-build
+	bash dockerfiles/test-browser-runtime.sh
+
+browser-docker-test: egress-proxy-build browser-smoke
+	ASSIST_BROWSER_DOCKER_TEST=1 .venv/bin/pytest -q tests/test_browser_docker.py
+
+# Egress allowlist proxy. Tiny stdlib Python image, shared by shell and
+# browser containers. SandboxManager starts it for exact-host policy. See
 # dockerfiles/egress-proxy.py and docs/2026-05-08-sandbox-network-allowlist.org.
 egress-proxy-build:
 	docker build -t assist-egress-proxy -f dockerfiles/Dockerfile.egress-proxy .
@@ -71,7 +79,7 @@ pi-preview-disable:
 pi-preview-status:
 	$(call with-dev-env,$(PYTHON) scripts/pi-preview.py status)
 
-# Build-time smoke.  Three layers, fail-on-first-regression:
+# Build-time smoke. Shell and browser-runtime checks, fail-on-first-regression:
 #   - test-sandbox-shim.sh: 18 push-bypass variants + privilege-drop checks
 #   - test-sandbox-egress.sh: positive (pip install via proxy) +
 #     negative (off-allowlist host, direct-IP, raw TCP) probes
@@ -80,10 +88,11 @@ pi-preview-status:
 #     the same call path the agent's tool hits.  Requires Docker;
 #     fails loudly if missing (no skip — too important).
 #
-# `deploy-sandbox-build` only runs the two shell harnesses on the
-# remote (no venv there); use `make sandbox-smoke` locally / in CI
-# for the full three-layer coverage.
-sandbox-smoke: sandbox-build
+# `deploy-sandbox-build` runs the Chromium runtime and two shell harnesses on
+# the remote (no venv there); use `make sandbox-smoke` locally / in CI
+# for shell egress integration too. The full browser
+# Docker/proxy regression is separate: `make browser-docker-test`.
+sandbox-smoke: sandbox-build browser-smoke
 	bash dockerfiles/test-sandbox-shim.sh
 	bash dockerfiles/test-sandbox-egress.sh
 	.venv/bin/pytest tests/test_sandbox_egress_integration.py -v
@@ -119,6 +128,10 @@ deploy-sandbox-build:
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-egress-proxy -f dockerfiles/Dockerfile.egress-proxy .'
 	@echo "→ Building sandbox image on $(DEPLOY_HOST)..."
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-sandbox -f dockerfiles/Dockerfile.sandbox .'
+	@echo "→ Building browser image on $(DEPLOY_HOST)..."
+	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-browser -f dockerfiles/Dockerfile.browser .'
+	@echo "→ Running bounded Chromium sandbox smoke on $(DEPLOY_HOST)..."
+	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && bash dockerfiles/test-browser-runtime.sh'
 	@echo "→ Running sandbox-smoke on $(DEPLOY_HOST) (push-refusal regression gate)..."
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && bash dockerfiles/test-sandbox-shim.sh'
 	@echo "→ Running egress-smoke on $(DEPLOY_HOST) (allowlist regression gate)..."
@@ -142,7 +155,11 @@ deploy-migrate-workspaces:
 	@ssh $(DEPLOY_HOST) 'sudo chown -R $$USER:$$USER $(ASSIST_THREADS_DIR)'
 	@echo "✓ Workspace ownership migrated"
 
-export DEPLOY_PATH SERVICE_NAME ASSIST_THREADS_DIR ASSIST_PORT ASSIST_MODEL_URL ASSIST_DOMAINS ASSIST_SEARCH_URL TAVILY_API_KEY ASSIST_ROUTING_URL ASSIST_GEOCODER_URL TRAVEL_INFRA_DIR ASSIST_EGRESS_APPROVALS_DIR ASSIST_SSL_CERT ASSIST_SSL_KEY ASSIST_SMS_SECRET ASSIST_SMS_OUTBOUND_URL URGENT_SMS_RECIPIENT URGENT_SMS_THREAD_URL_BASE ASSIST_VOICE_SECRET ASSIST_VOICE_PIN ASSIST_VOICE_CALLERS ASSIST_VOICE_CALL_LOG_DIR ASSIST_VOICE_PIPER_MODEL ASSIST_VOICE_WHISPER_MODEL EMAIL_RESEND_API_KEY_FILE EMAIL_FROM_ADDRESS EMAIL_FROM_NAME EMAIL_ALWAYS_CC ASSIST_THREAD_QUANTUM_S
+export DEPLOY_PATH SERVICE_NAME ASSIST_THREADS_DIR ASSIST_PORT ASSIST_MODEL_URL ASSIST_DOMAINS ASSIST_SEARCH_URL TAVILY_API_KEY ASSIST_ROUTING_URL ASSIST_GEOCODER_URL TRAVEL_INFRA_DIR ASSIST_EGRESS_APPROVALS_DIR ASSIST_EGRESS_CLIENT_MAP_DIR ASSIST_SSL_CERT ASSIST_SSL_KEY ASSIST_SMS_SECRET ASSIST_SMS_OUTBOUND_URL URGENT_SMS_RECIPIENT URGENT_SMS_THREAD_URL_BASE ASSIST_VOICE_SECRET ASSIST_VOICE_PIN ASSIST_VOICE_CALLERS ASSIST_VOICE_CALL_LOG_DIR ASSIST_VOICE_PIPER_MODEL ASSIST_VOICE_WHISPER_MODEL EMAIL_RESEND_API_KEY_FILE EMAIL_FROM_ADDRESS EMAIL_FROM_NAME EMAIL_ALWAYS_CC ASSIST_THREAD_QUANTUM_S
+
+ifneq ($(origin ASSIST_EGRESS_RUNTIME_DIR),undefined)
+export ASSIST_EGRESS_RUNTIME_DIR
+endif
 
 deploy-service:
 	@echo "→ Installing systemd service..."
@@ -243,6 +260,9 @@ help:
 	@echo "  make eval           - Run evals"
 	@echo "  make smoke          - Run smoke test against running server"
 	@echo "  make sandbox-build  - Build Docker sandbox image"
+	@echo "  make browser-build  - Build headless browser image"
+	@echo "  make browser-smoke  - Build and launch sandboxed Chromium once"
+	@echo "  make browser-docker-test - Build current images and run real browser/proxy tests"
 	@echo "  make sandbox-shell  - Run interactive sandbox shell"
 	@echo "  make pull-eval-history - Pull eval results from deploy server"
 	@echo ""

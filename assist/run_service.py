@@ -1,7 +1,8 @@
 """Durable Agent Protocol-shaped runs.
 
-A persisted ``pending`` run is the acceptance commit.  Dispatch queues and web
-status are projections which may be rebuilt from this store after a restart.
+A persisted ``pending`` run is the dispatch acceptance commit. A direct owner
+event may first be ``revocation_pending`` while browser safety reset completes.
+Dispatch queues and web status are projections of this store.
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import os
 import shutil
 import stat
 import threading
+import time
 import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -21,7 +23,7 @@ from assist.record_store import PerThreadJsonStore, RecordNotFound
 
 
 RunStatus = Literal[
-    "pending", "running", "success", "error", "timeout", "interrupted",
+    "revocation_pending", "pending", "running", "success", "error", "timeout", "interrupted",
     "cancelled", "awaiting_approval",
 ]
 RunMode = Literal["turn", "child"]
@@ -31,7 +33,7 @@ ObservationToken = tuple[int, int, int, int, int]
 RUNS_FILE = "runs.json"
 # ``interrupted`` is terminal for that protocol invocation. Logical work continues in
 # a new run sharing work_id; recovery still reconciles interrupted parents explicitly.
-NONTERMINAL_STATUSES = frozenset({"pending", "running"})
+NONTERMINAL_STATUSES = frozenset({"revocation_pending", "pending", "running"})
 AWAITING_APPROVAL_STATUSES = frozenset({"awaiting_approval"})
 TERMINAL_STATUSES = frozenset(
     {"success", "error", "timeout", "interrupted", "cancelled"})
@@ -95,6 +97,20 @@ class Run:
     # A cancellation receipt belongs to the immutable accepted handle, not a
     # successor slice.  Its absence keeps historical records unchanged.
     cancel_cleanup: CancelCleanup | None = None
+    # Only a directly admitted human turn mints its own immutable Run ID here.
+    # A same-work successor may carry that ID; synthetic follow-ups do not.
+    user_event_id: str | None = None
+    # Direct-owner events have a durable per-thread ordering sequence. Historical
+    # Runs without this field retain zero and cannot outrank a new event.
+    admission_sequence: int = 0
+    revocation_retry_at: str | None = None
+    browser_reset_notice: bool = False
+    browser_reset_run_id: str | None = None
+    # A cancelled held phone Run still owes exact browser teardown before
+    # cancellation cleanup may dispatch a follower.
+    browser_cancel_reset: bool = False
+    browser_boot_id: str | None = None
+    browser_deadline_ns: int | None = None
 
     _MAX_OPAQUE_ID_CHARS = 256
 
@@ -139,6 +155,22 @@ class Run:
             value.pop("location")
         if self.cancel_cleanup is None:
             value.pop("cancel_cleanup")
+        if self.user_event_id is None:
+            value.pop("user_event_id")
+        if self.admission_sequence == 0:
+            value.pop("admission_sequence")
+        if self.revocation_retry_at is None:
+            value.pop("revocation_retry_at")
+        if not self.browser_reset_notice:
+            value.pop("browser_reset_notice")
+        if self.browser_reset_run_id is None:
+            value.pop("browser_reset_run_id")
+        if not self.browser_cancel_reset:
+            value.pop("browser_cancel_reset")
+        if self.browser_boot_id is None:
+            value.pop("browser_boot_id")
+        if self.browser_deadline_ns is None:
+            value.pop("browser_deadline_ns")
         return value
 
     @staticmethod
@@ -164,6 +196,24 @@ class Run:
         resume = value.get("resume", False)
         if not isinstance(resume, bool):
             raise ValueError("invalid resume flag")
+        sequence = value.get("admission_sequence", 0)
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+            raise ValueError("invalid admission sequence")
+        browser_reset_notice = value.get("browser_reset_notice", False)
+        if not isinstance(browser_reset_notice, bool):
+            raise ValueError("invalid browser reset notice")
+        browser_cancel_reset = value.get("browser_cancel_reset", False)
+        if not isinstance(browser_cancel_reset, bool):
+            raise ValueError("invalid browser cancellation reset")
+        deadline_ns = value.get("browser_deadline_ns")
+        if (deadline_ns is not None and
+                (isinstance(deadline_ns, bool) or not isinstance(deadline_ns, int)
+                 or deadline_ns <= 0)):
+            raise ValueError("invalid browser deadline")
+        boot_id = Run._optional_opaque_id(value.get("browser_boot_id"),
+                                          "browser boot id")
+        if (boot_id is None) != (deadline_ns is None):
+            raise ValueError("incomplete browser deadline")
         return Run(
             thread_id=Run._required_opaque_id(value["thread_id"], "thread id"),
             assistant_id=Run._required_opaque_id(value["assistant_id"], "assistant id"),
@@ -195,10 +245,29 @@ class Run:
             delegate_user_urls=tuple(delegate_user_urls),
             location=Run._optional_mapping(value.get("location"), "location"),
             cancel_cleanup=cancel_cleanup,
+            user_event_id=Run._optional_opaque_id(
+                value.get("user_event_id"), "user event id"),
+            admission_sequence=sequence,
+            revocation_retry_at=Run._optional_text(
+                value.get("revocation_retry_at"), "revocation retry at"),
+            browser_reset_notice=browser_reset_notice,
+            browser_reset_run_id=Run._optional_opaque_id(
+                value.get("browser_reset_run_id"), "browser reset run id"),
+            browser_cancel_reset=browser_cancel_reset,
+            browser_boot_id=boot_id,
+            browser_deadline_ns=deadline_ns,
         )
 
 
+def browser_reset_owed(run: Run) -> bool:
+    """Whether this journal entry still fences later same-thread work."""
+    return (run.status == "revocation_pending" or
+            (run.status == "cancelled" and run.browser_cancel_reset
+             and run.cancel_cleanup == "pending"))
+
+
 _TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
+    "revocation_pending": frozenset({"pending", "cancelled", "error"}),
     # ``pending -> success`` is the interjection handoff: the accepted follower is
     # checkpointed into the active run, then terminalized with ``consumed_by`` so a
     # restart can never dispatch it as a second answer.
@@ -353,8 +422,12 @@ class RunService(PerThreadJsonStore[Run]):
         multitask_strategy: str = "enqueue",
         delegate_user_urls: tuple[str, ...] = (),
         location: dict | None = None,
+        user_origin: bool = False,
+        user_event_id: str | None = None,
+        revocation_pending: bool = False,
+        browser_reset_run_id: str | None = None,
     ) -> Run:
-        """Persist and return a pending run, the work-acceptance commit."""
+        """Persist a direct held event or a dispatchable pending Run."""
         if not assistant_id:
             raise ValueError("assistant_id is required")
         if active_ms < 0:
@@ -368,10 +441,18 @@ class RunService(PerThreadJsonStore[Run]):
         if mode == "turn" and (parent_thread_id or parent_run_id):
             raise ValueError("a turn run cannot have parent fields")
         rid = run_id or uuid.uuid4().hex
+        if user_origin:
+            if (user_event_id is not None or mode != "turn" or origin is not None
+                    or sender is not None or text is None or resume):
+                raise ValueError("only a fresh direct user turn can create user provenance")
+            user_event_id = rid
+        if revocation_pending and not user_origin:
+            raise ValueError("only a direct owner event can await browser revocation")
         now = _now()
         run = Run(
             thread_id=thread_id, assistant_id=assistant_id, text=text, id=rid,
-            work_id=work_id or rid, status="pending", mode=mode,
+            work_id=work_id or rid,
+            status="revocation_pending" if revocation_pending else "pending", mode=mode,
             parent_thread_id=parent_thread_id, parent_run_id=parent_run_id,
             dispatch_key=dispatch_key, sender=sender,
             rider=dict(rider) if rider else None, origin=origin, resume=resume,
@@ -383,6 +464,8 @@ class RunService(PerThreadJsonStore[Run]):
             created_at=now, updated_at=now,
             delegate_user_urls=tuple(delegate_user_urls),
             location=dict(location) if location else None,
+            user_event_id=user_event_id,
+            browser_reset_run_id=browser_reset_run_id,
         )
         with self._lock:
             if mode == "child":
@@ -410,12 +493,13 @@ class RunService(PerThreadJsonStore[Run]):
                     raise InvalidRunTransition(
                         "running or interrupted work cannot be replaced")
                 runs = [replace(candidate, status="cancelled", updated_at=now)
-                        if candidate.status == "pending" else candidate
+                        if candidate.status in {"pending", "revocation_pending"} else candidate
                         for candidate in runs]
             if max_runs is not None and len(runs) >= max_runs:
                 raise InvalidRunTransition("run history limit reached")
             if (max_pending is not None
-                    and sum(candidate.status == "pending" for candidate in runs)
+                    and sum(candidate.status in {"pending", "revocation_pending"}
+                            for candidate in runs)
                     >= max_pending):
                 raise InvalidRunTransition("pending run limit reached")
             if any(existing.id == rid for existing in runs):
@@ -424,6 +508,9 @@ class RunService(PerThreadJsonStore[Run]):
                 os.makedirs(directory, exist_ok=True)
                 with open(marker, "a"):
                     pass
+            if user_origin:
+                run = replace(run, admission_sequence=max(
+                    (candidate.admission_sequence for candidate in runs), default=0) + 1)
             runs.append(run)
             try:
                 self._write(thread_id, runs)
@@ -436,6 +523,29 @@ class RunService(PerThreadJsonStore[Run]):
     def get(self, thread_id: str, run_id: str) -> Run:
         with self._lock:
             return self._find(self._read(thread_id), run_id)
+
+    def bind_browser_deadline(self, thread_id: str, run_id: str) -> tuple[str, int]:
+        """Persist one boot-relative first-open deadline for the logical work."""
+        with self._lock:
+            runs = self._read(thread_id)
+            current = self._find(runs, run_id)
+            existing = [run for run in runs if run.work_id == current.work_id
+                        and run.browser_deadline_ns is not None]
+            if existing:
+                boot_id = existing[0].browser_boot_id
+                deadline_ns = min(run.browser_deadline_ns for run in existing)
+                if any(run.browser_boot_id != boot_id for run in existing):
+                    raise RuntimeError("browser work crossed a host reboot")
+            else:
+                with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as stream:
+                    boot_id = stream.read().strip()
+                deadline_ns = time.clock_gettime_ns(time.CLOCK_BOOTTIME) + 240_000_000_000
+            if current.browser_deadline_ns is None:
+                runs[runs.index(current)] = replace(
+                    current, browser_boot_id=boot_id,
+                    browser_deadline_ns=deadline_ns, updated_at=_now())
+                self._write(thread_id, runs)
+            return boot_id, deadline_ns
 
     def list(self, thread_id: str) -> list[Run]:
         return self.for_thread(thread_id)
@@ -469,6 +579,9 @@ class RunService(PerThreadJsonStore[Run]):
         error: str | None = None,
         rider: dict | None = None,
         result: str | None = None,
+        revocation_retry_at: str | None = None,
+        browser_reset_notice: bool = False,
+        browser_reset_run_id: str | None = None,
     ) -> Run:
         """Move a run to ``status``; repeating the same transition is a no-op."""
         if active_ms is not None and active_ms < 0:
@@ -486,6 +599,12 @@ class RunService(PerThreadJsonStore[Run]):
                     error=current.error if error is None else error,
                     rider=current.rider if rider is None else dict(rider),
                     result=current.result if result is None else result,
+                    revocation_retry_at=(current.revocation_retry_at
+                                         if revocation_retry_at is None else revocation_retry_at),
+                    browser_reset_notice=current.browser_reset_notice or browser_reset_notice,
+                    browser_reset_run_id=(current.browser_reset_run_id
+                                          if browser_reset_run_id is None
+                                          else browser_reset_run_id),
                 )
                 if changed == current:
                     return current
@@ -496,6 +615,11 @@ class RunService(PerThreadJsonStore[Run]):
             if status not in _TRANSITIONS[current.status]:
                 raise InvalidRunTransition(
                     f"cannot transition run {run_id} from {current.status} to {status}")
+            if (status == "running" or
+                    (status == "success" and current.status == "pending")) and any(
+                    browser_reset_owed(prior) for prior in runs[:runs.index(current)]):
+                raise InvalidRunTransition(
+                    f"cannot advance run {run_id} before browser safety reset")
             changed = replace(
                 current,
                 status=status,
@@ -504,6 +628,11 @@ class RunService(PerThreadJsonStore[Run]):
                 error=error,
                 rider=current.rider if rider is None else dict(rider),
                 result=current.result if result is None else result,
+                revocation_retry_at=revocation_retry_at,
+                browser_reset_notice=current.browser_reset_notice or browser_reset_notice,
+                browser_reset_run_id=(current.browser_reset_run_id
+                                      if browser_reset_run_id is None
+                                      else browser_reset_run_id),
                 updated_at=_now(),
             )
             runs[runs.index(current)] = changed
@@ -532,7 +661,7 @@ class RunService(PerThreadJsonStore[Run]):
             return changed
 
     def cancel_logical(self, thread_id: str, accepted_id: str) -> list[Run]:
-        """Atomically cancel a pending logical slice and receipt its cleanup.
+        """Atomically cancel a pending or held logical slice and receipt cleanup.
 
         The accepted handle owns the receipt so a retry can distinguish its
         incomplete cleanup from an unrelated terminal cancellation.  The
@@ -543,9 +672,10 @@ class RunService(PerThreadJsonStore[Run]):
             accepted = self._find(runs, accepted_id)
             work = [run for run in runs if run.work_id == accepted.work_id]
             selected = work[-1]
-            if selected.status != "pending":
+            if selected.status not in {"pending", "revocation_pending"}:
                 raise InvalidRunTransition(
                     f"cannot cancel non-pending logical run {selected.id}: {selected.status}")
+            held = selected.status == "revocation_pending"
             now = _now()
             updated = []
             for run in runs:
@@ -555,6 +685,9 @@ class RunService(PerThreadJsonStore[Run]):
                     changes.update(status="cancelled", updated_at=now)
                 if run.id == accepted_id:
                     changes["cancel_cleanup"] = "pending"
+                    if held:
+                        changes["browser_cancel_reset"] = True
+                        changes["browser_reset_run_id"] = selected.browser_reset_run_id
                     changes.setdefault("updated_at", now)
                 updated.append(replace(run, **changes) if changes else run)
             self._write(thread_id, updated)
@@ -587,8 +720,9 @@ class RunService(PerThreadJsonStore[Run]):
             failed = []
             updated_runs = []
             for run in runs:
-                should_fail = run.id == run_id or run.status == "pending"
-                if should_fail and run.status in {"pending", "running"}:
+                should_fail = run.id == run_id or run.status in {
+                    "pending", "revocation_pending"}
+                if should_fail and run.status in {"pending", "revocation_pending", "running"}:
                     run = replace(run, status="error", error=error, updated_at=now)
                     changed = True
                 if should_fail and run.status == "error":
