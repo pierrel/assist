@@ -271,7 +271,7 @@ class SandboxManager:
                              agent_dir: str | None, include_assist_env: bool,
                              include_egress_approvals: bool, before_start=None,
                              readonly_workspace=False):
-        """Create one per-turn sandbox from a named authority profile.
+        """Create a sandbox generation from a named authority profile.
 
         ``include_assist_env`` is the line between ordinary Deep Agents work and
         Pi preview work.  A Pi sandbox retains Docker's workspace and egress
@@ -281,10 +281,9 @@ class SandboxManager:
         Read-only Git verification omits persistent scratch/private mounts, so
         configured filters cannot mutate the checked worktree through an alias.
         """
-        # Per-turn lifecycle: never reuse a container across turns.  The web
-        # layer tears each container down at the end of its turn
-        # (manage/web/threads.py), so a registry entry surviving to here means
-        # a prior turn's teardown didn't run (the worker died mid-turn).  Reap
+        # Never reuse container generations. The web layer tears each down at
+        # its phase boundary (manage/web/threads.py), so a registry entry
+        # surviving to here means teardown did not run (the worker died). Reap
         # that stale container before creating a fresh one — the registry is
         # keyed by work_dir, so creating without reaping would overwrite the
         # reference and orphan it (the 3h backstop TTL would eventually catch

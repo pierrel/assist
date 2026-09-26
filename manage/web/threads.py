@@ -2732,7 +2732,7 @@ def _git_reap(owner, generation) -> None:
 
 
 def _git_cleanup(owner, generation) -> None:
-    """Prove model/preflight generation exit and clear its flight fence."""
+    """Prove model generation exit and clear its flight fence."""
     _git_reap(owner, generation)
     owner.sandbox_stopped()
 
@@ -2770,7 +2770,7 @@ def _git_prepare(owner, work_id: str, timezone: str | None) -> None:
         try:
             owner.prepare(backend, work_id)
         finally:
-            _git_cleanup(owner, backend.container)
+            _git_reap(owner, backend.container)
         _git_verify(owner, timezone)
         _, revision = owner.admit()
         if revision != owner.state["preflights"][work_id]["base"]:
@@ -3117,7 +3117,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     else:
                         resp = chat.message(text)
             finally:
-                # One container per turn: kill it as soon as this turn's agent
+                # Reap the model generation as soon as this turn's agent
                 # run finishes — success, error, or the early return above —
                 # while we still hold the queue, so the next turn always starts
                 # in a fresh sandbox and no container outlives its turn.  This,

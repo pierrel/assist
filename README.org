@@ -67,6 +67,8 @@ Saved answers and work are preserved; =workspace.sync_error= explains pending
 Git sync. Legacy threads require an operator-verified binding. Git snapshots
 are capped at 128 MiB and 10,000 scanned object entries, with bounded subprocesses;
 oversized repositories fail explicitly rather than exporting partial state.
+Authorization separately caps the metadata-only scan of workspace, scratch and
+private-agent roots at 10,000 total entries to prove independent storage.
 
 This per-turn path does not repair the existing user-gated main merge/rebranch
 or older host-Git rendering paths. See

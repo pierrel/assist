@@ -1044,6 +1044,20 @@ def test_recovered_initializer_preserves_authorized_workspace_and_ancestry(repos
     assert (repos[1] / "tracked").read_text() == "preserve dirty work\n"
 
 
+def test_preflight_crash_after_writer_exit_keeps_resume_fenced(repos, monkeypatch):
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: "must not run")
+    owner = sync.GitSync(str(repos[3]), str(repos[1]))
+    monkeypatch.setattr(threads, "_git_verify", lambda *_: (
+        _ for _ in ()).throw(SystemExit("before readonly verification")))
+    with pytest.raises(SystemExit, match="readonly verification"):
+        threads._git_prepare(owner, "crashed-preflight", None)
+    state = sync.read_state(str(repos[3]))
+    assert "crashed-preflight" in state["preflights"]
+    assert state["sandbox_in_flight"]
+    with pytest.raises(sync.GitSyncError, match="verification"):
+        sync.GitSync(str(repos[3]), str(repos[1]))
+
+
 @pytest.mark.parametrize("phase", ["preflight", "commit"])
 def test_late_writer_after_clean_probe_cannot_reach_child_success(repos, monkeypatch, tmp_path, phase):
     calls = []
