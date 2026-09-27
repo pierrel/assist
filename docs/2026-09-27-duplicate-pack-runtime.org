@@ -43,9 +43,9 @@ fixed or disproved by this compatibility correction. Root alone deploys and
 performs any actual user-facing proof; saved failed Runs are not replayed.
 
 * Historical supersessions
-This directly supersedes the README snapshot-limit assumption reflected by the
-Pack snapshots section of =2026-09-27-thread-git-compatibility.org=:
-raw duplicate-pack bytes may exceed the final authenticated-object limit. The
-bounded staging/private compaction construction replaces raw-layout-dependent
-rejection while retaining the original per-file/final limits. Enrollment and
-main-merge scope conclusions in that record are unchanged.
+No prior dated document is invalidated: the earlier compatibility addendum's
+Pack snapshots section concerns metadata omission and fsck, which remain unchanged.
+The former README.org snapshot paragraph at revision =c2eee517= described only a
+128 MiB cap. Current README wording distinguishes bounded raw staging from the
+unchanged per-file/final authenticated-object limit. Enrollment and main-merge
+scope conclusions in the earlier dated record are unchanged.

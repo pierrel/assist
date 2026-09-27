@@ -164,6 +164,27 @@ def test_prepare_imports_only_novel_main_history_once(repos):
     assert git(thread, "rev-parse", "refs/remotes/origin/main") == git(remote, "rev-parse", "main")
 
 
+@pytest.mark.parametrize("large", [False, True])
+def test_optional_main_hint_does_not_reject_valid_packed_refs(repos, large):
+    _, thread, _, _ = repos
+    if large:
+        revision = git(thread, "rev-parse", "HEAD")
+        packed = "# pack-refs with: sorted\n" + "".join(
+            f"{revision} refs/tags/tag{number:05d}\n" for number in range(10000))
+        (thread / ".git" / "packed-refs").write_text(packed)
+        assert len(packed) > 512 * 1024
+        assert sync._known_main(str(thread)) is None
+    else:
+        git(thread, "tag", "café")
+        git(thread, "pack-refs", "--all")
+        (thread / "tracked").write_text("loose branch after packed refs\n")
+        git(thread, "add", ".")
+        git(thread, "commit", "-m", "loose branch")
+        assert sync._known_main(str(thread)) == git(thread, "rev-parse", "origin/main")
+    with sync.tempfile.TemporaryDirectory() as directory:
+        assert sync._Store(directory).snapshot(str(thread)) == sync.identity(str(thread))
+
+
 def test_first_noop_publishes_only_thread_branch(repos):
     remote, thread, _, binding = repos
     main = git(remote, "rev-parse", "main")

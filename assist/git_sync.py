@@ -75,20 +75,20 @@ def _branch(value: str) -> str:
 
 def _known_main(worktree: str) -> str | None:
     """Read only a fixed tracking hint; its objects must be verified separately."""
-    with _directory(worktree) as root, _directory(".git", parent=root) as git:
-        try:
-            with _directory("refs", parent=git) as refs, \
-                    _directory("remotes", parent=refs) as remotes, \
-                    _directory("origin", parent=remotes) as origin:
-                revision = _read_at(origin, "main", 128).decode("ascii").strip()
-        except FileNotFoundError:
+    try:
+        with _directory(worktree) as root, _directory(".git", parent=root) as git:
             try:
-                packed = _read_at(git, "packed-refs", 512 * 1024).decode("ascii")
+                with _directory("refs", parent=git) as refs, \
+                        _directory("remotes", parent=refs) as remotes, \
+                        _directory("origin", parent=remotes) as origin:
+                    revision = _read_at(origin, "main", 128).strip()
             except FileNotFoundError:
-                return None
-            revision = next((line.split(" ", 1)[0] for line in packed.splitlines()
-                             if line.endswith(" refs/remotes/origin/main")), "")
-    return revision if _OID.fullmatch(revision) else None
+                packed = _read_at(git, "packed-refs", 512 * 1024)
+                revision = next((line.split(b" ", 1)[0] for line in packed.splitlines()
+                                 if line.endswith(b" refs/remotes/origin/main")), b"")
+    except (OSError, GitSyncError):
+        return None  # An unavailable optional hint cannot authorize or block a snapshot.
+    return revision.decode("ascii") if re.fullmatch(rb"[0-9a-f]{40}", revision) else None
 
 
 def identity(worktree: str) -> tuple[str, str]:
