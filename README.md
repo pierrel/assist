@@ -922,6 +922,9 @@ changes attempt a commit inside the restricted sandbox and the server attempts p
 of only that thread branch. No-file-change turns also attempt publication; main
 and tags are not automatically pushed. Dirty, divergent, rewritten, or unavailable
 Git state holds for explicit reconciliation while preserving work and saved answers.
+If a hidden child yields its fair-scheduling slot, a new parent message waits
+until the child's sandbox teardown and Git workspace lock release. After safe
+teardown, it runs normally instead of failing on a transient lock.
 Local commit or verified teardown failure reports a turn error with the saved
 answer retained. Remote-only publication failure remains best-effort and does
 not discard a finalized local answer; the pending Git error/fences remain.

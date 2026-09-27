@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
+import threading
 import zlib
 from types import SimpleNamespace
 
@@ -1105,6 +1106,103 @@ def test_hidden_child_commits_before_parent_wake_preflight(repos, monkeypatch, t
     assert wakes == ["child output\n"]
     assert git(repos[0], "show", "thread/test:child-file") == "child output"
     assert [event[0] for event in events] == ["start", "exit"] * 5
+
+
+def test_child_fair_yield_releases_git_before_parent_queue_admission(repos, monkeypatch, tmp_path):
+    from assist.thread_queue import ThreadAffinityQueue, ThreadPauseRequested
+
+    child_started = threading.Event()
+    parent_queued = threading.Event()
+    cleanup_blocked = threading.Event()
+    release_cleanup = threading.Event()
+    pausing = threading.Event()
+    model_calls = []
+
+    def model():
+        model_calls.append(threading.current_thread().name)
+        if threading.current_thread().name == "child":
+            child_started.set()
+            assert parent_queued.wait(10)
+            pausing.set()
+            raise ThreadPauseRequested
+        return "parent answer"
+
+    threads, _, outcomes = web_turn(repos, monkeypatch, model)
+    child_dir = tmp_path / "sub-child"
+    child_dir.mkdir()
+    monkeypatch.setattr(threads.MANAGER, "thread_dir",
+                        lambda tid: str(child_dir if tid == "sub-child" else repos[3]))
+    queue = ThreadAffinityQueue(wait_timeout_s=20, quantum_s=100)
+    monkeypatch.setattr(threads, "THREAD_QUEUE", queue)
+    monkeypatch.setattr(threads, "_is_pi_thread", lambda _tid: False)
+    resumes = []
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit", lambda *args: resumes.append(args))
+    set_status = threads._set_status
+
+    def record_status(tid, stage, **fields):
+        set_status(tid, stage, **fields)
+        if tid == "state" and stage == "queued":
+            parent_queued.set()
+
+    monkeypatch.setattr(threads, "_set_status", record_status)
+    cleanup = threads.SandboxManager.cleanup_verified
+
+    def hold_cleanup(worktree, generation):
+        if threading.current_thread().name == "child" and pausing.is_set():
+            cleanup_blocked.set()
+            assert release_cleanup.wait(20)
+        cleanup(worktree, generation)
+
+    monkeypatch.setattr(threads.SandboxManager, "cleanup_verified", hold_cleanup)
+    child_run = threads._create_run("sub-child", "child prompt", mode="child",
+                                    parent_thread_id="state", parent_run_id="parent",
+                                    dispatch_key="fair-child", assistant_id="delegate-agent")
+    parent_run = threads._create_run("state", "parent message")
+    errors = []
+
+    def run_child():
+        try:
+            threads._execute_child_run(child_run)
+        except BaseException as error:
+            errors.append(error)
+
+    def run_parent():
+        try:
+            threads._execute_run(parent_run.id, "state")
+        except BaseException as error:
+            errors.append(error)
+
+    child = threading.Thread(target=run_child, name="child")
+    parent = threading.Thread(target=run_parent, name="parent")
+    try:
+        child.start()
+        assert child_started.wait(10)
+        parent.start()
+        assert parent_queued.wait(10)
+        assert cleanup_blocked.wait(10)
+        assert queue.current_handle().thread_id == "sub-child"
+        assert threads._runs().get("state", parent_run.id).status == "pending"
+        with pytest.raises(sync.GitSyncError, match="still owns"):
+            with sync.ownership(str(repos[3]), str(repos[1])):
+                pass
+    finally:
+        release_cleanup.set()
+        child.join(timeout=30)
+        if parent.ident is not None:
+            parent.join(timeout=30)
+
+    assert not child.is_alive() and not parent.is_alive() and not errors
+    assert threads._runs().get("state", parent_run.id).status == "success"
+    assert outcomes[-1][1:4] == ("ready", None, "parent answer")
+    assert model_calls == ["child", "parent"]
+    child_runs = threads._runs().list("sub-child")
+    assert len(child_runs) == 2
+    assert child_runs[0].status == "interrupted" and child_runs[0].active_ms > 0
+    assert child_runs[1].status == "pending" and child_runs[1].work_id == child_run.work_id
+    assert resumes == [(child_runs[1].id, "sub-child")]
+    assert queue.current_handle() is None and queue.waiter_count() == 0
+    with sync.ownership(str(repos[3]), str(repos[1])):
+        pass
 
 
 @pytest.mark.parametrize("failure", ["before-create", "during-create"])

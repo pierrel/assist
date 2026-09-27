@@ -2175,9 +2175,23 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
     duplicate = False
     git_scope = ExitStack()
     git_owner = None
+
+    def cleanup_child_sandbox() -> None:
+        if parent_working_dir is not None:
+            try:
+                if git_owner and sandbox_generation is not None:
+                    _git_cleanup(git_owner, sandbox_generation)
+                else:
+                    SandboxManager.cleanup(parent_working_dir, sandbox_generation)
+            except Exception:
+                logging.error(
+                    "child run %s sandbox cleanup failed", run.id, exc_info=True)
+
     try:
-        with THREAD_QUEUE.acquire(
-                run.thread_id, accumulated_active_ms=run.active_ms):
+        with ExitStack() as child_scope:
+            child_scope.enter_context(THREAD_QUEUE.acquire(
+                run.thread_id, accumulated_active_ms=run.active_ms))
+            child_scope.callback(git_scope.close)
             with _RUN_ADMISSION_LOCK:
                 run = _runs().get(run.thread_id, run.id)
                 if run.status == "pending" and run.multitask_strategy == "cancel":
@@ -2193,6 +2207,7 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                     git_owner = git_scope.enter_context(git_ownership(
                         MANAGER.thread_dir(run.parent_thread_id), parent_working_dir))
                     if git_owner:
+                        child_scope.callback(cleanup_child_sandbox)
                         git_owner.select_work(run.work_id)
                     if git_owner and not (resume or run.resume or run.resume_decision is not None):
                         _git_prepare(git_owner, run.work_id, None)
@@ -2276,17 +2291,8 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
         else:
             run = current
     finally:
-        if parent_working_dir is not None:
-            try:
-                if git_owner and sandbox_generation is not None:
-                    _git_cleanup(git_owner, sandbox_generation)
-                else:
-                    SandboxManager.cleanup(parent_working_dir, sandbox_generation)
-            except Exception:
-                logging.error(
-                    "child run %s sandbox cleanup failed", run.id, exc_info=True)
-        git_scope.close()
-
+        if git_owner is None:
+            cleanup_child_sandbox()
     THREAD_QUEUE.pop_hold(run.thread_id)
     if duplicate:
         return

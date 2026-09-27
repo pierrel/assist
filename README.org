@@ -55,6 +55,9 @@ branch outside the agent workspace. Before a fresh Deep or Pi turn, clean
 phone-pushed commits are incorporated by fast-forward. Successful changed turns
 attempt a commit inside the restricted sandbox and publication of only that thread
 branch. No-file-change turns also attempt publication. Main is never automatically pushed.
+If a hidden child yields its fair-scheduling slot, a new parent message waits
+until the child's sandbox teardown and Git workspace lock release. After safe
+teardown, it runs normally instead of failing on a transient lock.
 
 The phone uses normal Git with its own credentials, not a web Git-object proxy.
 Its repository-key mapping must point to the approved remote; server-local
