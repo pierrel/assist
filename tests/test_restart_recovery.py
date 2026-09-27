@@ -15,6 +15,7 @@ import json
 import os
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -557,6 +558,117 @@ def test_thread_deletion_closes_phone_journals(wired, monkeypatch):
     threads._delete_thread_and_children(tid)
 
     assert journal.is_gone(tid, run.work_id)
+
+
+@pytest.mark.parametrize("target", ["parent", "child"])
+def test_browser_stop_does_not_hold_global_admission(wired, monkeypatch, target):
+    """A deletion waiting on browser proof cannot block other Runs."""
+    tid, root = wired
+    child = "hidden-child"
+    from assist.browser.authority import mark_new_thread
+    from assist.browser.manager import BrowserManager
+    if target == "child":
+        (root / child).mkdir()
+        (root / child / ".subagent").write_text(
+            json.dumps({"parent_thread_id": tid}))
+        mark_new_thread(str(root), child)
+    entered, release = threading.Event(), threading.Event()
+
+    def confirm(_root, thread_id, _owner):
+        if thread_id == (child if target == "child" else tid):
+            entered.set()
+            assert release.wait(3)
+        return False
+
+    monkeypatch.setattr(BrowserManager, "confirm_owner_stopped", confirm)
+    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+    monkeypatch.setattr(threads, "_evict_caches", lambda _tid: None)
+    monkeypatch.setattr(threads, "_evict_egress", lambda _tid: None)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        deleting = pool.submit(threads._delete_thread_and_children, tid)
+        try:
+            assert entered.wait(3)
+            assert threads._RUN_ADMISSION_LOCK.acquire(timeout=0.2)
+            threads._RUN_ADMISSION_LOCK.release()
+        finally:
+            release.set()
+        deleting.result(timeout=3)
+    assert not (root / tid).exists()
+    if target == "child":
+        assert not (root / child).exists()
+
+
+@pytest.mark.parametrize("target", ["parent", "child"])
+def test_unconfirmed_web_browser_stop_retains_thread_state(
+        wired, monkeypatch, target):
+    tid, root = wired
+    child = "hidden-child"
+    if target == "child":
+        (root / child).mkdir()
+        (root / child / ".subagent").write_text(
+            json.dumps({"parent_thread_id": tid}))
+        from assist.browser.authority import mark_new_thread
+        mark_new_thread(str(root), child)
+    from assist.browser.manager import BrowserManager
+    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+    monkeypatch.setattr(BrowserManager, "confirm_owner_stopped",
+                        lambda *_args: (_ for _ in ()).throw(RuntimeError("stop unconfirmed")))
+
+    with pytest.raises(RuntimeError, match="stop unconfirmed"):
+        threads._delete_thread_and_children(tid)
+
+    assert (root / tid).is_dir()
+    if target == "child":
+        assert (root / child).is_dir()
+
+
+def test_new_child_during_browser_proof_prevents_parent_deletion(wired, monkeypatch):
+    tid, root = wired
+    child = "late-hidden-child"
+    from assist.browser.authority import mark_new_thread
+    from assist.browser.manager import BrowserManager
+
+    def confirm(_root, thread_id, _owner):
+        if thread_id == tid:
+            (root / child).mkdir()
+            (root / child / ".subagent").write_text(
+                json.dumps({"parent_thread_id": tid}))
+            mark_new_thread(str(root), child)
+        return False
+
+    monkeypatch.setattr(BrowserManager, "confirm_owner_stopped", confirm)
+    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+
+    with pytest.raises(RuntimeError, match="children changed"):
+        threads._delete_thread_and_children(tid)
+
+    assert (root / tid).is_dir()
+    assert (root / child).is_dir()
+
+
+def test_recreated_child_id_during_browser_proof_prevents_parent_deletion(
+        wired, monkeypatch):
+    tid, root = wired
+    child = "reused-hidden-child"
+    metadata = {"parent_thread_id": tid}
+    threads.MANAGER.reserve(child, hidden=metadata)
+    from assist.browser.manager import BrowserManager
+
+    def confirm(_root, thread_id, _owner):
+        if thread_id == tid:
+            with threads._RUN_ADMISSION_LOCK:
+                threads.MANAGER.reserve(child, hidden=metadata)
+        return False
+
+    monkeypatch.setattr(BrowserManager, "confirm_owner_stopped", confirm)
+    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+
+    with pytest.raises(RuntimeError, match="children changed"):
+        threads._delete_thread_and_children(tid)
+
+    assert (root / tid).is_dir()
+    assert (root / child).is_dir()
 
 
 def test_invalid_engine_execution_retires_phone_journal(wired, monkeypatch):

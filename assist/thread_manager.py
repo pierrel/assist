@@ -239,7 +239,9 @@ class ThreadManager:
         "Approach" section for why each step happens before the next.
         Briefly:
 
-        Browser teardown is proved by ``hard_delete`` before these steps.
+        The caller proves browser teardown while holding its thread gate
+        before these steps. ``hard_delete`` does both for direct callers;
+        web deletion proves the stop outside its global Run admission lock.
 
         1. ``SandboxManager.cleanup`` first so any in-flight agent run
            hits the existing ``SandboxContainerLostError`` path
@@ -404,26 +406,8 @@ class ThreadManager:
                 interrupt_on=interrupt_on))
 
     def remove(self, thread_id: str) -> None:
-        from assist.browser.manager import BrowserManager
-        BrowserManager.cleanup(thread_id)
-        tdir = self.thread_dir(thread_id)
-        if os.path.isdir(tdir):
-            # Best-effort delete
-            for root, dirs, files in os.walk(tdir, topdown=False):
-                for f in files:
-                    try:
-                        os.remove(os.path.join(root, f))
-                    except Exception:
-                        pass
-                for d in dirs:
-                    try:
-                        os.rmdir(os.path.join(root, d))
-                    except Exception:
-                        pass
-            try:
-                os.rmdir(tdir)
-            except Exception:
-                pass
+        """Remove a thread only after the common durable browser stop proof."""
+        self.hard_delete(thread_id)
 
     def new(self, working_dir: str|None = None, sandbox_backend=None,
             on_queue_state: Callable[[str], None] | None = None) -> Thread:

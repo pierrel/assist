@@ -1,8 +1,10 @@
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from types import SimpleNamespace
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from manage.web import threads
@@ -710,6 +712,132 @@ def test_retention_never_prunes_result_before_completion_wake_is_consumed(
         "dispatch_key": "after-consume",
     })
     assert not os.path.exists(threads.MANAGER.thread_dir(child.thread_id))
+
+
+def test_retained_task_browser_proof_does_not_hold_global_admission(
+        monkeypatch, tmp_path):
+    _, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run("sub-stable", "context-agent", "inspect", metadata=metadata)
+    threads._runs().claim(child.thread_id, child.id)
+    child = threads._runs().transition(child.thread_id, child.id, "success")
+    wake = threads._complete_child_handoff(child)
+    threads._runs().claim("parent", wake.id)
+    threads._runs().transition("parent", wake.id, "success")
+    monkeypatch.setattr(SERVICE, "MAX_RETAINED_TASKS_PER_PARENT", 1)
+    from assist.browser.manager import BrowserManager
+    entered, release = threading.Event(), threading.Event()
+
+    def confirm(_root, thread_id, _owner):
+        assert thread_id == child.thread_id
+        entered.set()
+        assert release.wait(3)
+        return False
+
+    monkeypatch.setattr(BrowserManager, "confirm_owner_stopped", confirm)
+    next_metadata = {**metadata, "dispatch_key": "next"}
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        creating = pool.submit(SERVICE.create_thread, "sub-next", next_metadata)
+        try:
+            assert entered.wait(3)
+            assert threads._RUN_ADMISSION_LOCK.acquire(timeout=0.2)
+            threads._RUN_ADMISSION_LOCK.release()
+        finally:
+            release.set()
+        assert creating.result(timeout=3)["thread_id"] == "sub-next"
+    assert not os.path.exists(threads.MANAGER.thread_dir(child.thread_id))
+
+
+def test_unconfirmed_retained_task_stop_preserves_child(monkeypatch, tmp_path):
+    _, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run("sub-stable", "context-agent", "inspect", metadata=metadata)
+    threads._runs().claim(child.thread_id, child.id)
+    child = threads._runs().transition(child.thread_id, child.id, "cancelled")
+    monkeypatch.setattr(SERVICE, "MAX_RETAINED_TASKS_PER_PARENT", 1)
+    from assist.browser.manager import BrowserManager
+    monkeypatch.setattr(BrowserManager, "confirm_owner_stopped",
+                        lambda *_args: (_ for _ in ()).throw(RuntimeError("stop unconfirmed")))
+
+    with pytest.raises(RuntimeError, match="stop unconfirmed"):
+        SERVICE.create_thread("sub-next", {**metadata, "dispatch_key": "next"})
+
+    assert os.path.isdir(threads.MANAGER.thread_dir(child.thread_id))
+    assert not os.path.exists(threads.MANAGER.thread_dir("sub-next"))
+
+
+def test_retained_task_that_gets_new_run_during_proof_is_not_pruned(
+        monkeypatch, tmp_path):
+    _, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run("sub-stable", "context-agent", "inspect", metadata=metadata)
+    threads._runs().claim(child.thread_id, child.id)
+    child = threads._runs().transition(child.thread_id, child.id, "success")
+    wake = threads._complete_child_handoff(child)
+    threads._runs().claim("parent", wake.id)
+    threads._runs().transition("parent", wake.id, "success")
+    monkeypatch.setattr(SERVICE, "MAX_RETAINED_TASKS_PER_PARENT", 1)
+    from assist.browser.manager import BrowserManager
+
+    def confirm(_root, thread_id, _owner):
+        assert thread_id == child.thread_id
+        SERVICE.create_run(
+            child.thread_id, "context-agent", "updated",
+            metadata={**metadata, "dispatch_key": "update"})
+        return False
+
+    monkeypatch.setattr(BrowserManager, "confirm_owner_stopped", confirm)
+    SERVICE.create_thread("sub-next", {**metadata, "dispatch_key": "next"})
+
+    assert os.path.isdir(threads.MANAGER.thread_dir(child.thread_id))
+    assert len(threads._runs().list(child.thread_id)) == 2
+
+
+def test_parent_deleted_during_retained_task_proof_blocks_new_child(
+        monkeypatch, tmp_path):
+    _, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run("sub-stable", "context-agent", "inspect", metadata=metadata)
+    threads._runs().claim(child.thread_id, child.id)
+    threads._runs().transition(child.thread_id, child.id, "cancelled")
+    monkeypatch.setattr(SERVICE, "MAX_RETAINED_TASKS_PER_PARENT", 1)
+    monkeypatch.setattr(threads.SandboxManager, "cleanup", lambda *_args: None)
+    from assist.browser.manager import BrowserManager
+
+    def confirm(_root, thread_id, _owner):
+        if thread_id == child.thread_id:
+            threads.MANAGER.hard_delete("parent")
+        return False
+
+    monkeypatch.setattr(BrowserManager, "confirm_owner_stopped", confirm)
+
+    with pytest.raises(FileNotFoundError):
+        SERVICE.create_thread("sub-next", {**metadata, "dispatch_key": "next"})
+
+    assert not os.path.exists(threads.MANAGER.thread_dir("sub-next"))
+
+
+def test_parent_replaced_during_retained_task_proof_blocks_old_child(
+        monkeypatch, tmp_path):
+    _, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run("sub-stable", "context-agent", "inspect", metadata=metadata)
+    threads._runs().claim(child.thread_id, child.id)
+    threads._runs().transition(child.thread_id, child.id, "cancelled")
+    monkeypatch.setattr(SERVICE, "MAX_RETAINED_TASKS_PER_PARENT", 1)
+    monkeypatch.setattr(threads.SandboxManager, "cleanup", lambda *_args: None)
+    from assist.browser.manager import BrowserManager
+
+    def confirm(_root, thread_id, _owner):
+        if thread_id == child.thread_id:
+            threads.MANAGER.hard_delete("parent")
+            threads.MANAGER.reserve("parent")
+            threads._create_run("parent", "replacement")
+        return False
+
+    monkeypatch.setattr(BrowserManager, "confirm_owner_stopped", confirm)
+
+    with pytest.raises(HTTPException, match="Parent Run changed") as error:
+        SERVICE.create_thread("sub-next", {**metadata, "dispatch_key": "next"})
+
+    assert error.value.status_code == 409
+    assert os.path.isdir(threads.MANAGER.thread_dir("parent"))
+    assert not os.path.exists(threads.MANAGER.thread_dir("sub-next"))
 
 
 def test_task_description_survives_fair_resume_generation(monkeypatch, tmp_path):

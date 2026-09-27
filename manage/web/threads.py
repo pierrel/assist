@@ -5469,7 +5469,7 @@ def show_file_view(tid: str, path: str, lines: str = "", pages: str = ""):
 @app.post("/thread/{tid}/delete")
 async def delete_thread(tid: str):
     _existing_thread_dir(tid)
-    # Off-loop: browser teardown, hard_delete's rmtree/SQLite work, and
+    # Off-loop: browser teardown, _hard_delete_after_browser_stop's SQLite/rmtree, and
     # _evict_egress's store lock do not belong on the event loop.
     await run_in_threadpool(_delete_thread_and_children, tid)
     return RedirectResponse(url="/", status_code=303)
@@ -5486,29 +5486,55 @@ def _delete_thread_and_children(tid: str) -> None:
         _delete_thread_after_browser_stop(tid)
 
 
+def _deletion_child_ids(tid: str) -> set[str]:
+    """Find durable children, including reservations without an accepted Run."""
+    child_ids = {
+        child.thread_id for child in _runs().scan_children()
+        if child.mode == "child" and child.parent_thread_id == tid
+    }
+    for child_tid in os.listdir(MANAGER.root_dir):
+        marker = os.path.join(MANAGER.thread_dir(child_tid), ".subagent")
+        try:
+            with open(marker) as stream:
+                metadata = json.load(stream)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            continue
+        if metadata.get("parent_thread_id") == tid:
+            child_ids.add(child_tid)
+    return child_ids
+
+
 def _delete_thread_after_browser_stop(tid: str) -> None:
-    """Erase a thread while its browser gate prevents a replacement sidecar."""
+    """Prove browser stops outside Run admission; delete under its lock."""
     with _RUN_ADMISSION_LOCK:
-        child_ids = {
-            child.thread_id for child in _runs().scan_children()
-            if child.mode == "child" and child.parent_thread_id == tid
-        }
-        for child_tid in os.listdir(MANAGER.root_dir):
-            marker = os.path.join(MANAGER.thread_dir(child_tid), ".subagent")
-            try:
-                with open(marker) as stream:
-                    metadata = json.load(stream)
-            except (FileNotFoundError, json.JSONDecodeError, OSError):
-                continue
-            if metadata.get("parent_thread_id") == tid:
-                child_ids.add(child_tid)
-        for child_tid in child_ids:
-            child_runs = _runs().list(child_tid)
-            if any(child.status == "running" for child in child_runs):
-                continue
-            MANAGER.hard_delete(child_tid)
-            RUN_STREAMS.mark_thread_gone(child_tid)
-        MANAGER.hard_delete(tid, on_delete=[_evict_caches, _evict_egress])
+        child_ids = _deletion_child_ids(tid)
+    deleted_children = set()
+    for child_tid in sorted(child_ids):
+        with BrowserManager.bounded_thread_gate(child_tid):
+            with _RUN_ADMISSION_LOCK:
+                child_runs = _runs().list(child_tid)
+                if any(child.status == "running" for child in child_runs):
+                    continue
+            if os.path.isdir(MANAGER.thread_dir(child_tid)):
+                BrowserManager.cleanup(child_tid)
+                BrowserManager.confirm_owner_stopped(
+                    MANAGER.root_dir, child_tid, None)
+            with _RUN_ADMISSION_LOCK:
+                child_runs = _runs().list(child_tid)
+                if any(child.status == "running" for child in child_runs):
+                    continue
+                MANAGER._hard_delete_after_browser_stop(child_tid)
+                RUN_STREAMS.mark_thread_gone(child_tid)
+                deleted_children.add(child_tid)
+    if os.path.isdir(MANAGER.thread_dir(tid)):
+        BrowserManager.confirm_owner_stopped(MANAGER.root_dir, tid, None)
+    with _RUN_ADMISSION_LOCK:
+        if (_deletion_child_ids(tid) - child_ids
+                or any(os.path.isdir(MANAGER.thread_dir(child_tid))
+                       for child_tid in deleted_children)):
+            raise RuntimeError("thread children changed during deletion")
+        MANAGER._hard_delete_after_browser_stop(
+            tid, on_delete=[_evict_caches, _evict_egress])
         RUN_STREAMS.mark_thread_gone(tid)
 
 

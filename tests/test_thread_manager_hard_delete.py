@@ -161,6 +161,21 @@ class TestHardDeleteBrowserStop(TestCase):
             finally:
                 mgr.close()
 
+    def test_legacy_remove_requires_the_same_durable_stop_proof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = ThreadManager(root_dir=tmp)
+            try:
+                tid = "20260504000011-browser"
+                tdir = _seed_thread(mgr, tid)
+                with patch("assist.browser.manager.BrowserManager.confirm_owner_stopped",
+                           side_effect=RuntimeError("browser stop unconfirmed")):
+                    with self.assertRaisesRegex(RuntimeError, "stop unconfirmed"):
+                        mgr.remove(tid)
+                self.assertTrue(os.path.isdir(tdir))
+                self.assertEqual(_count_rows(mgr, "checkpoints", tid), 1)
+            finally:
+                mgr.close()
+
 
 class TestThreadReservationBrowserAuthority(TestCase):
     def test_failed_authority_write_does_not_publish_generic_thread(self):

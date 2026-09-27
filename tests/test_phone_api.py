@@ -7,6 +7,7 @@ import os
 import sqlite3
 import tarfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from types import SimpleNamespace
 
@@ -281,6 +282,68 @@ def test_phone_thread_creation_is_bounded(tmp_path, monkeypatch):
         phone_api._create_and_submit(phone_api._CreateThread(message="start"), "a" * 16)
 
     assert error.value.status_code == 429
+
+
+def test_stale_phone_draft_browser_proof_does_not_hold_global_admission(
+        tmp_path, monkeypatch):
+    """A stale deterministic draft can wait for teardown without freezing Runs."""
+    from assist.browser.authority import mark_new_thread
+    from assist.browser.manager import BrowserManager
+
+    tid = "phone-stale-draft"
+    (tmp_path / tid).mkdir()
+    mark_new_thread(str(tmp_path), tid)
+    monkeypatch.setattr(state.MANAGER, "root_dir", str(tmp_path))
+    monkeypatch.setattr(state.MANAGER, "thread_dir", lambda _tid: str(tmp_path / _tid))
+    monkeypatch.setattr(phone_api, "_phone_thread_id", lambda _key: tid)
+    monkeypatch.setattr(phone_api, "_find_dispatch", lambda *_args: None)
+    monkeypatch.setattr(phone_api, "_phone_thread_limit_reached", lambda: False)
+    monkeypatch.setattr(phone_api, "_phone_initialization_limit_reached", lambda: False)
+    run = SimpleNamespace(id="new-run")
+    monkeypatch.setattr(phone_api.threads, "_runs", lambda: SimpleNamespace(
+        list=lambda _tid: [], get=lambda *_args: run))
+    monkeypatch.setattr(phone_api.threads, "create_thread_with_message_core",
+                        lambda *_args, **_kwargs: (tid, run.id, None))
+    monkeypatch.setattr(phone_api.threads.SandboxManager, "cleanup", lambda *_args: None)
+    entered, release = threading.Event(), threading.Event()
+
+    def confirm(*_args):
+        entered.set()
+        assert release.wait(3)
+        return False
+
+    monkeypatch.setattr(BrowserManager, "confirm_owner_stopped", confirm)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        creating = pool.submit(phone_api._create_and_submit,
+                               phone_api._CreateThread(message="start"), "a" * 16)
+        try:
+            assert entered.wait(3)
+            assert phone_api.threads._RUN_ADMISSION_LOCK.acquire(timeout=0.2)
+            phone_api.threads._RUN_ADMISSION_LOCK.release()
+        finally:
+            release.set()
+        assert creating.result(timeout=3)[0] == tid
+
+
+def test_unconfirmed_stale_phone_draft_retains_directory(tmp_path, monkeypatch):
+    from assist.browser.authority import mark_new_thread
+    from assist.browser.manager import BrowserManager
+
+    tid = "phone-stale-draft"
+    (tmp_path / tid).mkdir()
+    mark_new_thread(str(tmp_path), tid)
+    monkeypatch.setattr(state.MANAGER, "root_dir", str(tmp_path))
+    monkeypatch.setattr(state.MANAGER, "thread_dir", lambda _tid: str(tmp_path / _tid))
+    monkeypatch.setattr(phone_api, "_phone_thread_id", lambda _key: tid)
+    monkeypatch.setattr(phone_api, "_find_dispatch", lambda *_args: None)
+    monkeypatch.setattr(phone_api.threads, "_runs", lambda: SimpleNamespace(list=lambda _tid: []))
+    monkeypatch.setattr(BrowserManager, "confirm_owner_stopped",
+                        lambda *_args: (_ for _ in ()).throw(RuntimeError("stop unconfirmed")))
+
+    with pytest.raises(RuntimeError, match="stop unconfirmed"):
+        phone_api._create_and_submit(phone_api._CreateThread(message="start"), "a" * 16)
+
+    assert (tmp_path / tid).is_dir()
 
 
 def test_phone_thread_creation_allows_only_one_waiting_initialization(tmp_path, monkeypatch):

@@ -738,36 +738,47 @@ def _create_and_submit(body: _CreateThread, key: str, *, run_id: str | None = No
         raise HTTPException(status_code=422, detail="Unknown repository")
     tid = _phone_thread_id(key)
     dispatch_key = _phone_dispatch_key(key)
-    with threads._RUN_ADMISSION_LOCK:
-        if os.path.isdir(state.MANAGER.thread_dir(tid)):
-            replay = _find_dispatch(tid, dispatch_key)
-            if replay is None:
-                if threads._runs().list(tid):
-                    raise HTTPException(status_code=409, detail="Phone draft conflicts with an existing thread")
-                state.MANAGER.hard_delete(tid)
-            else:
-                expected_domain = domain or (state.DOMAINS[0] if state.DOMAINS else None)
-                try:
-                    existing_engine = read_thread_engine(_thread_dir(tid)).name
-                except ThreadEngineError as error:
-                    raise HTTPException(status_code=409, detail="Thread harness is unavailable") from error
-                if (replay.text != body.message or existing_engine != body.harness
-                        or state._get_status(tid).get("domain", "") != (expected_domain or "")):
-                    raise HTTPException(status_code=409, detail="Idempotency-Key conflicts with prior message")
-                return tid, replay, None, True
-        if _phone_thread_limit_reached():
-            raise HTTPException(status_code=429, detail="Phone thread limit reached")
-        if _phone_initialization_limit_reached():
-            raise HTTPException(status_code=429, detail="Phone initialization is busy")
-        try:
-            tid, run_id, selected = threads.create_thread_with_message_core(
-                body.message, domain, engine=body.harness, thread_id=tid,
-                dispatch_key=dispatch_key, run_id=run_id,
-                work_id=work_id)
-            run = threads._runs().get(tid, run_id)
-        except (ValueError, ThreadEngineError) as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-        return tid, run, selected, False
+    with threads.BrowserManager.bounded_thread_gate(tid):
+        with threads._RUN_ADMISSION_LOCK:
+            stale = (os.path.isdir(state.MANAGER.thread_dir(tid))
+                     and _find_dispatch(tid, dispatch_key) is None
+                     and not threads._runs().list(tid))
+        if stale:
+            threads.BrowserManager.cleanup(tid)
+            threads.BrowserManager.confirm_owner_stopped(
+                state.MANAGER.root_dir, tid, None)
+        with threads._RUN_ADMISSION_LOCK:
+            if os.path.isdir(state.MANAGER.thread_dir(tid)):
+                replay = _find_dispatch(tid, dispatch_key)
+                if replay is None:
+                    if threads._runs().list(tid):
+                        raise HTTPException(status_code=409, detail="Phone draft conflicts with an existing thread")
+                    if not stale:
+                        raise HTTPException(status_code=503, detail="Phone draft changed during cleanup")
+                    state.MANAGER._hard_delete_after_browser_stop(tid)
+                else:
+                    expected_domain = domain or (state.DOMAINS[0] if state.DOMAINS else None)
+                    try:
+                        existing_engine = read_thread_engine(_thread_dir(tid)).name
+                    except ThreadEngineError as error:
+                        raise HTTPException(status_code=409, detail="Thread harness is unavailable") from error
+                    if (replay.text != body.message or existing_engine != body.harness
+                            or state._get_status(tid).get("domain", "") != (expected_domain or "")):
+                        raise HTTPException(status_code=409, detail="Idempotency-Key conflicts with prior message")
+                    return tid, replay, None, True
+            if _phone_thread_limit_reached():
+                raise HTTPException(status_code=429, detail="Phone thread limit reached")
+            if _phone_initialization_limit_reached():
+                raise HTTPException(status_code=429, detail="Phone initialization is busy")
+            try:
+                tid, run_id, selected = threads.create_thread_with_message_core(
+                    body.message, domain, engine=body.harness, thread_id=tid,
+                    dispatch_key=dispatch_key, run_id=run_id,
+                    work_id=work_id)
+                run = threads._runs().get(tid, run_id)
+            except (ValueError, ThreadEngineError) as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
+            return tid, run, selected, False
 
 
 def _logical_status(tid: str, run_id: str) -> dict[str, Any]:
