@@ -1,0 +1,80 @@
+#+title: Stopped-writer recovery for old web Git threads
+#+date: 2026-09-27
+
+* Scope and observed failure
+An old bound web thread retained =sandbox_in_flight= after a bounded private
+snapshot failure. Ordinary =GitSync= construction correctly refused a new
+writer, but no supported operator recovery entrypoint existed. Another old
+thread lacked a source binding and needs the existing =enroll_legacy= path.
+Container absence and terminal Run status alone cannot authorize either action.
+This correction is web-only; no phone, credentials, main-merge algorithm,
+prompt replay or automatic source discovery is added. Root owns production
+source selection, generation exclusion, enrollment, recovery and deployment.
+
+* Explicit recovery contract
+=assist.git_sync.recover_stopped= accepts the operator-selected trusted source,
+approved exact =(branch, OID)= and SHA256 of the bounded raw sidecar. It does not
+construct =GitSync= through a bypass or execute host Git against mutable
+workspace configuration. Under the same nonblocking workspace flock, it calls
+root's =verify_stopped= adapter before reading objects. This adapter must raise
+unless old and current writer generations have exited and web/scheduler/legacy
+writer admission remains excluded for the entire operation. Global process exit
+and complete mount-alias writer inspection are needed for legacy generations
+whose identifiers did not survive. An empty container list alone is insufficient.
+
+The source must match the approved binding. The independent writable-root scan
+and bounded authenticated private snapshot are unchanged. The branch/OID must
+match approval and bound branch. Local revision, published floor and retained
+preflight bases/non-null expected tips must remain ancestors of local HEAD;
+one bounded =merge-base --independent= authenticates their ancestry together.
+A null expected tip permits recovery before first publication. Fixed source
+main/thread refs are fetched privately: a previously observed missing branch,
+rewritten published floor or unrelated local/remote history holds explicitly.
+Any unresolved publication intent holds, rather than guessing its outcome.
+
+Root's =verify_clean= adapter must use the credential-free kernel-read-only
+Git verification generation, run =require_clean=, and prove its exact teardown
+before returning. Both adapters raise on failure and return only =None= on
+success, never assertion flags. =verify_stopped= runs again after the verifier
+exits. State digest and branch/OID are rechecked before one atomic sidecar write.
+Only =sandbox_in_flight=, =quarantine= and =error= are cleared; source, branch,
+local/publication floors, suspended preflights, Runs and answers are retained.
+
+An exception before replacement does not change the binding or workspace. An
+I/O error after replacement requires exact reread, not blind retry. Dirty files,
+index flags, untracked work, history divergence or unavailable proofs remain
+held; no reset, commit, rebase, push or model replay is attempted. Ordinary new
+web requests and scheduled dispatches still pass normal clean/FF preflight.
+Operator recovery is not proof that a previous failed request succeeded.
+
+* Legacy enrollment and inventory
+Unbound threads continue to use =enroll_legacy= after root verifies stopped
+writers, independently selects the trusted configured repository and approves
+each current branch/OID. Mutable origin text is only an inventory hint. Root
+corroborates authenticated branch tips/ancestry against trusted source refs;
+unknown sources remain held. Enrollment preserves dirty bytes/index/history,
+but does not bypass clean model admission. Existing bound/fenced threads cannot
+be enrolled to erase their state. No wildcard enrollment or prompt replay is
+part of this implementation.
+
+* Verification and exclusions
+Disposable real-Git tests reproduce the missing recovery API and exercise
+fresh-request availability, first publication, real flock contention, failed
+stopped/clean/teardown proofs, Boolean assertion rejection, stale state/source/
+identity, post-verifier drift, forged objects, local/preflight ancestry,
+remote deletion/rewrite/divergence, and preserved dirty files/index/history.
+The local backend is a disposable test adapter, not live Docker containment
+proof. Root's actual process/generation and read-only sandbox checks are separate
+operational evidence. No model-facing changes or model/GPU/live Docker evals
+are required or claimed. Existing private-store bounds remain unchanged.
+
+Pre-existing repeated authorization helper, persisted-source corruption and
+host-mutable main merge/rendering debt remain outside this correction. This
+operator entrypoint is not exposed as a web route or agent tool and does not
+certify the whole merge path.
+
+* Historical supersessions
+This supersedes only the absence of retained bound-fence recovery in
+=docs/2026-09-27-thread-git-compatibility.org=, Operator enrollment. That
+document's enrollment restriction still holds; the new entrypoint is distinct
+and does not weaken it. Pack behavior and prior merge debt are unchanged.

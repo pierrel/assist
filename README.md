@@ -936,6 +936,12 @@ files, index or history, does not infer `origin`, and preserves dirty files for
 explicit reconciliation. A failed setup Run stays failed; send a new message
 after the preserved clone is enrolled and clean. Snapshots omit standard
 multi-pack-index and cruft `.mtimes` metadata, while verifying the imported objects.
+For a bound thread with a retained teardown fence, `assist.git_sync.recover_stopped`
+is an operator-only path. It requires exact source/state/branch approval, stopped
+writers, authenticated history/floors and read-only clean verification with exact
+verifier teardown. It clears only the teardown fence/error, preserving work,
+saved answers and suspended preflights. Dirty, divergent or unknown publication
+state remains held; recovery never replays a failed prompt or commits files.
 Snapshots enforce a 128 MiB per-file and authenticated-object limit. Raw staging
 is separately capped at 256 MiB so duplicate packs can be authenticated and
 compacted in the disposable private store without changing the thread repository

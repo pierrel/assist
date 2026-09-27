@@ -586,6 +586,180 @@ def test_crash_before_sandbox_teardown_blocks_new_writer(repos):
     sync.GitSync(str(repos[3]), str(repos[1]))
 
 
+def recovery(repos, *, verify_stopped=lambda: None, verify_clean=None, **changes):
+    """Disposable operator adapters; production proves process exit and readonly teardown."""
+    remote, thread, _, binding = repos
+    arguments = dict(source=str(remote), expected=sync.identity(str(thread)),
+                     expected_state=hashlib.sha256((binding / "git-sync.json").read_bytes()).hexdigest(),
+                     verify_stopped=verify_stopped,
+                     verify_clean=verify_clean or (lambda: sync.require_clean(LocalBackend(thread))))
+    arguments.update(changes)
+    return sync.recover_stopped(str(binding), str(thread), **arguments)
+
+
+def test_operator_recovery_restores_fresh_web_preflight_without_replaying_work(repos):
+    owner, backend = turn(repos)
+    owner.commit(backend, "first publication")
+    owner.publish()
+    owner.prepare(backend, "old-failed-work")
+    owner.sandbox_started()
+    before = sync.read_state(str(repos[3]))
+    expected = sync.identity(str(repos[1]))
+    preserved = {file: file.read_bytes() for file in (repos[1] / "tracked", repos[1] / ".git" / "index",
+                                                    repos[1] / ".git" / "config", repos[1] / ".git" / "HEAD")}
+    with pytest.raises(sync.GitSyncError, match="operator"):
+        sync.GitSync(str(repos[3]), str(repos[1]))
+    proofs = []
+    recovery(repos, verify_stopped=lambda: proofs.append("stopped"))
+    assert proofs == ["stopped", "stopped"]
+    after = sync.read_state(str(repos[3]))
+    assert after == dict(before, sandbox_in_flight=False, quarantine=False, error=None)
+    assert sync.identity(str(repos[1])) == expected
+    assert preserved == {file: file.read_bytes() for file in preserved}
+    resumed = sync.GitSync(str(repos[3]), str(repos[1]))
+    resumed.prepare(backend, "new-web-request")
+    assert "old-failed-work" in resumed.state["preflights"]
+    resumed.commit(backend, "new scheduled prompt")
+    resumed.publish()
+    assert "old-failed-work" in resumed.state["preflights"]
+
+
+@pytest.mark.parametrize("failure", ["stopped", "clean", "teardown", "state", "identity", "source", "intent", "lock"])
+def test_operator_recovery_holds_atomically_on_failed_proofs(repos, failure):
+    owner, backend = turn(repos)
+    owner.sandbox_started()
+    if failure == "intent":
+        owner.state["intent"] = {"branch": owner.state["branch"], "expected": None,
+                                 "desired": owner.state["local_revision"]}
+        sync._write_state(owner.thread_dir, owner.state)
+    if failure == "clean":
+        (repos[1] / "tracked").write_text("preserved dirty user work\n")
+        (repos[1] / "untracked").write_text("preserved untracked\n")
+    before = (repos[3] / "git-sync.json").read_bytes()
+    files = {file: file.read_bytes() for file in repos[1].rglob("*") if file.is_file()}
+    arguments = {}
+    calls = []
+
+    def verify_stopped():
+        calls.append("stop")
+        if failure == "stopped":
+            raise sync.GitSyncError("An old writer generation is not verified stopped")
+
+    def verify_clean():
+        calls.append("clean")
+        sync.require_clean(backend)
+        if failure == "teardown":
+            raise sync.GitSyncError("Read-only verification teardown is unconfirmed")
+
+    if failure == "state":
+        arguments["expected_state"] = "0" * 64
+    elif failure == "identity":
+        arguments["expected"] = (owner.state["branch"], "a" * 40)
+    elif failure == "source":
+        arguments["source"] = str(repos[0]) + "-different"
+    with pytest.raises(sync.GitSyncError):
+        if failure == "lock":
+            with sync._workspace_lock(str(repos[3])):
+                recovery(repos, **arguments)
+        else:
+            recovery(repos, verify_stopped=verify_stopped, verify_clean=verify_clean, **arguments)
+    assert (repos[3] / "git-sync.json").read_bytes() == before
+    assert files == {file: file.read_bytes() for file in files}
+    if failure in {"stopped", "state", "identity", "source", "intent"}:
+        assert "clean" not in calls
+
+
+@pytest.mark.parametrize("failure", ["local-rewrite", "preflight-rewrite", "remote-delete", "remote-rewrite", "diverged"])
+def test_operator_recovery_requires_authenticated_history_and_remote_floors(repos, failure):
+    owner, backend = turn(repos)
+    owner.commit(backend, "publish initial branch")
+    owner.publish()
+    owner.prepare(backend, "old-work")
+    owner.sandbox_started()
+    remote, thread, phone, binding = repos
+    if failure in {"local-rewrite", "preflight-rewrite"}:
+        bad = "a" * 40
+        if failure == "local-rewrite":
+            owner.state["local_revision"] = bad
+        else:
+            owner.state["preflights"]["old-work"]["base"] = bad
+        sync._write_state(str(binding), owner.state)
+    elif failure == "remote-delete":
+        git(remote, "update-ref", "-d", "refs/heads/thread/test")
+    else:
+        git(phone, "checkout", "--orphan", "replacement")
+        git(phone, "rm", "-rf", ".")
+        (phone / "other").write_text("other history\n")
+        git(phone, "add", ".")
+        git(phone, "commit", "-m", "unrelated")
+        git(phone, "push", "--force", "origin", "HEAD:refs/heads/thread/test")
+        if failure == "diverged":
+            # No published floor still must not admit unrelated local/remote history.
+            owner.state["published"] = {}
+            owner.state.update(published_branch=None, published_revision=None)
+            sync._write_state(str(binding), owner.state)
+    before = (binding / "git-sync.json").read_bytes()
+    expected = sync.identity(str(thread))
+    with pytest.raises(sync.GitSyncError):
+        recovery(repos)
+    assert (binding / "git-sync.json").read_bytes() == before
+    assert sync.identity(str(thread)) == expected
+
+
+def test_operator_recovery_allows_unpublished_stopped_thread(repos):
+    owner, backend = turn(repos)
+    assert owner.state["preflights"]["work-1"]["expected"] is None
+    owner.sandbox_started()
+    recovery(repos)
+    resumed = sync.GitSync(str(repos[3]), str(repos[1]))
+    resumed.prepare(backend, "new-work")
+    resumed.commit(backend, "first successful turn")
+    resumed.publish()
+    assert git(repos[0], "rev-parse", "refs/heads/thread/test") == sync.identity(str(repos[1]))[1]
+
+
+@pytest.mark.parametrize("proof", ["stopped", "clean"])
+@pytest.mark.parametrize("value", [False, True])
+def test_operator_recovery_does_not_accept_boolean_assertions(repos, proof, value):
+    owner, _ = turn(repos)
+    owner.sandbox_started()
+    before = (repos[3] / "git-sync.json").read_bytes()
+    with pytest.raises(sync.GitSyncError, match="proof|verification"):
+        recovery(repos, **{"verify_" + proof: lambda: value})
+    assert (repos[3] / "git-sync.json").read_bytes() == before
+
+
+def test_operator_recovery_rechecks_binding_after_verifier(repos):
+    owner, _ = turn(repos)
+    owner.sandbox_started()
+    original = (repos[3] / "git-sync.json").read_bytes()
+
+    def changed_during_verification():
+        state = sync.read_state(str(repos[3]))
+        state["error"] = "operator proof drift"
+        sync._write_state(str(repos[3]), state)
+
+    with pytest.raises(sync.GitSyncError, match="state or branch changed"):
+        recovery(repos, verify_clean=changed_during_verification)
+    state = sync.read_state(str(repos[3]))
+    assert state["sandbox_in_flight"] and state["error"] == "operator proof drift"
+    assert (repos[3] / "git-sync.json").read_bytes() != original
+
+
+def test_operator_recovery_authenticates_objects_before_clean_callback(repos):
+    owner, _ = turn(repos)
+    owner.sandbox_started()
+    directory = repos[1] / ".git" / "objects" / "aa"
+    directory.mkdir(exist_ok=True)
+    (directory / ("a" * 38)).write_bytes(zlib.compress(b"blob 5\0other"))
+    before = (repos[3] / "git-sync.json").read_bytes()
+    calls = []
+    with pytest.raises(sync.GitSyncError):
+        recovery(repos, verify_clean=lambda: calls.append("clean"))
+    assert not calls
+    assert (repos[3] / "git-sync.json").read_bytes() == before
+
+
 def test_local_domain_clone_does_not_share_mutable_objects(repos, tmp_path):
     from assist.domain_manager import clone_repo
     target = tmp_path / "isolated"

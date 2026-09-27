@@ -258,6 +258,63 @@ def enroll_legacy(thread_dir: str, worktree: str, source: str,
         _write_state(thread_dir, state)
 
 
+def recover_stopped(thread_dir: str, worktree: str, *, source: str,
+                    expected: tuple[str, str], expected_state: str,
+                    verify_stopped, verify_clean) -> None:
+    """Operator-only fence recovery, never a constructor or model-admission bypass.
+
+    Root selects the trusted source and approves the exact branch/OID and raw
+    sidecar SHA256. Its adapters raise on failure, returning None only after
+    operation-long exclusion of all old/current writers, or kernel-read-only
+    clean verification and exact verifier teardown respectively. Container
+    absence alone is not writer-exit proof. No prompt/result is replayed.
+    """
+    _initial_binding(source)
+    with _workspace_lock(thread_dir):
+        if verify_stopped() is not None:
+            raise GitSyncError("Stopped writer proof is unavailable")
+        with _directory(thread_dir) as directory:
+            if hashlib.sha256(_read_at(directory, _BINDING)).hexdigest() != expected_state:
+                raise GitSyncError("Approved Git recovery state changed")
+        state = read_state(thread_dir)
+        if state is None or state["source"] != source:
+            raise GitSyncError("Verified Git recovery source changed")
+        if not (state.get("sandbox_in_flight") or state.get("quarantine")):
+            raise GitSyncError("Git thread has no retained teardown fence")
+        if state.get("intent"):
+            raise GitSyncError("Previous publication outcome is unknown; reconcile explicitly")
+        _independent_roots((worktree, os.path.join(os.path.dirname(worktree), "tmp"),
+                            os.path.join(thread_dir, "agent")))
+        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
+            store = _Store(path)
+            branch, local = store.snapshot(worktree)
+            if (branch, local) != expected or branch != state.get("branch"):
+                raise GitSyncError("Approved Git recovery branch identity changed")
+            floors = {local, state.get("local_revision"), state["published"].get(branch)}
+            for pending in state["preflights"].values():
+                floors.update((pending["base"], pending["expected"]))
+            floors.discard(None)
+            if store.git("merge-base", "--independent", *sorted(floors)) != local:
+                raise GitSyncError("Retained local Git history changed; reconcile explicitly")
+            remote = store.fetch(source, branch)
+            published = state["published"].get(branch)
+            observed = published or any(pending["expected"] for pending in state["preflights"].values())
+            if ((observed and remote is None)
+                    or (published and not store.ancestor(published, remote))):
+                raise GitSyncError("Remote thread branch was deleted or rewritten; reconcile explicitly")
+            if remote and not (store.ancestor(local, remote) or store.ancestor(remote, local)):
+                raise GitSyncError("Local and remote thread branches diverged; reconcile explicitly")
+        if verify_clean() is not None or verify_stopped() is not None:
+            raise GitSyncError("Git recovery verification is unavailable")
+        with _directory(thread_dir) as directory:
+            unchanged = hashlib.sha256(_read_at(directory, _BINDING)).hexdigest() == expected_state
+        if not unchanged or identity(worktree) != expected:
+            raise GitSyncError("Approved Git recovery state or branch changed")
+        # Retain publication/local floors, all suspended preflights and Run answers.
+        state.update(sandbox_in_flight=False, quarantine=False, error=None)
+        _write_state(thread_dir, state)
+
+
 def authorize_branch(thread_dir: str, worktree: str) -> None:
     """Authorize an independent clone without rebinding an existing thread branch."""
     state = read_state(thread_dir)

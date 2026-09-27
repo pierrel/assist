@@ -76,7 +76,13 @@ branch/commit pair after stopping legacy writers. Enrollment preserves files,
 index, history and dirty work; it does not infer =origin= or bypass clean
 admission. Failed setup Runs remain failed; send a new message after enrollment
 and reconciliation. Snapshots omit standard multi-pack-index and cruft =.mtimes=
-metadata, while verifying imported objects. Git snapshots retain a 128 MiB
+metadata, while verifying imported objects. For bound threads with retained
+teardown fences, =assist.git_sync.recover_stopped= is operator-only: exact
+source/state/branch approval, stopped writers, authenticated history/floors and
+read-only clean verification with exact verifier teardown are required. It clears
+only the teardown fence/error, preserving work, saved answers and suspended
+preflights. Dirty, divergent or unknown publication state remains held; no failed
+prompt replay or commit is performed. Git snapshots retain a 128 MiB
 per-file and authenticated-object cap, with at most 256 MiB of raw staging for
 duplicate packs. Oversized staging is rejected; authenticated duplicate packs
 are compacted only in the private disposable store, retaining unreachable
