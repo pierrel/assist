@@ -76,9 +76,14 @@ branch/commit pair after stopping legacy writers. Enrollment preserves files,
 index, history and dirty work; it does not infer =origin= or bypass clean
 admission. Failed setup Runs remain failed; send a new message after enrollment
 and reconciliation. Snapshots omit standard multi-pack-index and cruft =.mtimes=
-metadata, while verifying imported objects. Git snapshots
-are capped at 128 MiB and 10,000 scanned object entries, with bounded subprocesses;
-oversized repositories fail explicitly rather than exporting partial state.
+metadata, while verifying imported objects. Git snapshots retain a 128 MiB
+per-file and authenticated-object cap, with at most 256 MiB of raw staging for
+duplicate packs. Oversized staging is rejected; authenticated duplicate packs
+are compacted only in the private disposable store, retaining unreachable
+objects. The final 128 MiB and 10,000 scanned-entry bounds remain enforced.
+Incoming bundles exclude verified existing history; no new objects means no
+bundle import. Oversized repositories fail explicitly rather than exporting
+partial state. See =docs/2026-09-27-duplicate-pack-runtime.org=.
 Authorization separately caps the metadata-only scan of workspace, scratch and
 private-agent roots at 10,000 total entries to prove independent storage.
 

@@ -73,6 +73,24 @@ def _branch(value: str) -> str:
     return value
 
 
+def _known_main(worktree: str) -> str | None:
+    """Read only a fixed tracking hint; its objects must be verified separately."""
+    with _directory(worktree) as root, _directory(".git", parent=root) as git:
+        try:
+            with _directory("refs", parent=git) as refs, \
+                    _directory("remotes", parent=refs) as remotes, \
+                    _directory("origin", parent=remotes) as origin:
+                revision = _read_at(origin, "main", 128).decode("ascii").strip()
+        except FileNotFoundError:
+            try:
+                packed = _read_at(git, "packed-refs", 512 * 1024).decode("ascii")
+            except FileNotFoundError:
+                return None
+            revision = next((line.split(" ", 1)[0] for line in packed.splitlines()
+                             if line.endswith(" refs/remotes/origin/main")), "")
+    return revision if _OID.fullmatch(revision) else None
+
+
 def identity(worktree: str) -> tuple[str, str]:
     """Read a stable loose/packed SHA-1 branch identity without invoking Git."""
     with _directory(worktree) as root, _directory(".git", parent=root) as git:
@@ -381,10 +399,10 @@ class _Store:
                             continue  # Inert pack indexes, pins and cruft ages are never imported.
                         if not _OBJECT.fullmatch(name):
                             raise GitSyncError("Unsupported Git object entry")
-                        data = _read_at(entries, name, MAX_BYTES - copied, independent=True)
+                        # Staging may contain duplicate packs; each file stays bounded.
+                        data = _read_at(entries, name, min(MAX_BYTES, 2 * MAX_BYTES - copied),
+                                        independent=True)
                         copied += len(data)
-                        if copied > MAX_BYTES:
-                            raise GitSyncError("Git object snapshot is too large")
                         (target / name).write_bytes(data)
         if identity(worktree) != before:
             raise GitSyncError("Git branch changed during snapshot")
@@ -394,6 +412,24 @@ class _Store:
         # copied objects' hashes before a force-with-lease can rely on their graph.
         self.git("fsck", "--strict", "--no-reflogs", "--no-dangling", revision)
         self.git("update-ref", "refs/heads/" + branch, revision)
+        if copied > MAX_BYTES:
+            # Authenticate before private-only deduplication; retain unreachable objects.
+            self.git("repack", "-a", "-d", "--keep-unreachable", "--threads=1")
+            total = entries = 0
+            deadline = time.monotonic() + GIT_TIMEOUT
+            for file in Path(self.path, "objects").rglob("*"):
+                entries += 1
+                if entries > MAX_OBJECT_FILES or time.monotonic() > deadline:
+                    raise GitSyncError("Git object snapshot exceeds its bound")
+                if file.is_file():
+                    total += file.stat().st_size
+                    if total > MAX_BYTES:
+                        raise GitSyncError("Git object snapshot is too large")
+            self.git("fsck", "--strict", "--no-reflogs", "--no-dangling", revision)
+        main = _known_main(worktree)
+        if main and self.git("rev-parse", "--verify", "--quiet", main + "^{commit}",
+                             allowed=(0, 1, 128)) == main:
+            self.git("update-ref", "refs/assist/snapshot-main", main)
         return before
 
     def fetch(self, source: str, branch: str) -> str | None:
@@ -578,25 +614,32 @@ class GitSync:
             require_clean(sandbox)
             if remote and local != remote and not (store.ancestor(local, remote) or store.ancestor(remote, local)):
                 raise GitSyncError("Local and remote thread branches diverged; reconcile explicitly")
-            bundle = os.path.join(path, "incoming.bundle")
-            store.git("bundle", "create", bundle, "refs/remotes/origin/main",
-                      *( ["refs/remotes/origin/thread"] if remote else []))
-            data = Path(bundle).read_bytes()
-            if len(data) > MAX_BYTES:
-                raise GitSyncError("Incoming Git bundle is too large")
-            transfer = "/tmp/assist-git-" + os.path.basename(path) + ".bundle"
-            response = sandbox.upload_files([(transfer, data)])[0]
-            if response.error:
-                raise GitSyncError("Could not import remote Git objects")
+            heads = ["refs/remotes/origin/main", *(["refs/remotes/origin/thread"] if remote else [])]
+            known = [local]
+            main_hint = store.git("rev-parse", "--verify", "--quiet", "refs/assist/snapshot-main",
+                                 allowed=(0, 1, 128))
+            if main_hint:
+                known.append(main_hint)
+            commands = []
+            if int(store.git("rev-list", "--count", *heads, "--not", *known)):
+                bundle = os.path.join(path, "incoming.bundle")
+                store.git("bundle", "create", bundle, *heads, "--not", *known)
+                data = Path(bundle).read_bytes()
+                if len(data) > MAX_BYTES:
+                    raise GitSyncError("Incoming Git bundle is too large")
+                transfer = "/tmp/assist-git-" + os.path.basename(path) + ".bundle"
+                response = sandbox.upload_files([(transfer, data)])[0]
+                if response.error:
+                    raise GitSyncError("Could not import remote Git objects")
+                commands.extend([_WORKTREE_GIT + " bundle unbundle " + shlex.quote(transfer),
+                                 "rm -- " + shlex.quote(transfer)])
             main = store.git("rev-parse", "refs/remotes/origin/main")
-            commands = [_WORKTREE_GIT + " bundle unbundle " + shlex.quote(transfer),
-                        _WORKTREE_GIT + " update-ref refs/remotes/origin/main " + main]
+            commands.append(_WORKTREE_GIT + " update-ref refs/remotes/origin/main " + main)
             if remote:
                 commands.append(_WORKTREE_GIT + " update-ref "
                                 + shlex.quote("refs/remotes/origin/" + branch) + " " + remote)
                 if local != remote and store.ancestor(local, remote):
                     commands.append(_WORKTREE_GIT + " merge --ff-only --no-overwrite-ignore --no-autostash " + remote)
-            commands.append("rm -- " + shlex.quote(transfer))
             _sandbox_git(sandbox, " && ".join(commands))
             expected_local = remote if remote and store.ancestor(local, remote) else local
             if self._branch() != (branch, expected_local):

@@ -936,6 +936,13 @@ files, index or history, does not infer `origin`, and preserves dirty files for
 explicit reconciliation. A failed setup Run stays failed; send a new message
 after the preserved clone is enrolled and clean. Snapshots omit standard
 multi-pack-index and cruft `.mtimes` metadata, while verifying the imported objects.
+Snapshots enforce a 128 MiB per-file and authenticated-object limit. Raw staging
+is separately capped at 256 MiB so duplicate packs can be authenticated and
+compacted in the disposable private store without changing the thread repository
+or expiring unreachable objects. The final snapshot still must fit 128 MiB;
+genuinely oversized repositories remain unavailable. Incoming bundles exclude
+verified existing history and skip import when no objects are new. See
+`docs/2026-09-27-duplicate-pack-runtime.org` for the observed runtime correction.
 The phone uses normal Git credentials, not an Assist-web Git proxy; pending sync
 is reported through bounded `workspace.sync_error` metadata.
 

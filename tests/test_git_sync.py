@@ -1,4 +1,5 @@
 """Real two-clone Git probes; the local backend is a disposable test double only."""
+import hashlib
 import os
 from pathlib import Path
 import shlex
@@ -64,6 +65,103 @@ def turn(repos):
     backend = LocalBackend(thread)
     owner.prepare(backend, "work-1")
     return owner, backend
+
+
+def test_duplicate_pack_snapshot_compacts_privately_without_losing_unreachable(repos, monkeypatch, tmp_path):
+    _, thread, _, _ = repos
+    (thread / "payload").write_bytes(hashlib.shake_256(b"duplicate-pack").digest(16384))
+    git(thread, "add", "payload")
+    git(thread, "commit", "-m", "payload")
+    git(thread, "repack", "-ad")
+    unreachable = subprocess.check_output(
+        ["git", "-C", str(thread), "hash-object", "-w", "--stdin"], input=b"retained unreachable\n").decode().strip()
+    (thread / "tracked").write_text("next\n")
+    git(thread, "add", "tracked")
+    git(thread, "commit", "-m", "next")
+    bundle = tmp_path / "incoming.bundle"
+    git(thread, "bundle", "create", str(bundle), "HEAD")
+    git(thread, "-c", "transfer.unpackLimit=0", "bundle", "unbundle", str(bundle))
+    objects = thread / ".git" / "objects"
+    before = {str(file.relative_to(objects)): file.read_bytes()
+              for file in objects.rglob("*") if file.is_file()}
+    monkeypatch.setattr(sync, "MAX_BYTES", 24576)
+    assert sum(len(data) for data in before.values()) > sync.MAX_BYTES
+    with sync.tempfile.TemporaryDirectory() as directory:
+        store = sync._Store(directory)
+        assert store.snapshot(str(thread)) == sync.identity(str(thread))
+        assert store.git("cat-file", "-p", unreachable) == "retained unreachable"
+        assert sum(file.stat().st_size for file in Path(directory, "objects").rglob("*")
+                   if file.is_file()) <= sync.MAX_BYTES
+    assert {str(file.relative_to(objects)): file.read_bytes()
+            for file in objects.rglob("*") if file.is_file()} == before
+
+
+def test_normalized_unique_snapshot_still_rejects_over_limit(repos, monkeypatch):
+    _, thread, _, _ = repos
+    for number in range(2):
+        (thread / f"payload{number}").write_bytes(hashlib.shake_256(str(number).encode()).digest(16384))
+    git(thread, "add", ".")
+    git(thread, "commit", "-m", "unique payloads")
+    before = sync.identity(str(thread))
+    monkeypatch.setattr(sync, "MAX_BYTES", 24576)
+    with sync.tempfile.TemporaryDirectory() as directory, pytest.raises(sync.GitSyncError):
+        sync._Store(directory).snapshot(str(thread))
+    assert sync.identity(str(thread)) == before
+
+
+def test_snapshot_raw_staging_stays_bounded_before_verification(repos, monkeypatch):
+    _, thread, _, _ = repos
+    for number in range(4):
+        subprocess.check_output(["git", "-C", str(thread), "hash-object", "-w", "--stdin"],
+                                input=hashlib.shake_256(str(number).encode()).digest(16384))
+    before = sync.identity(str(thread))
+    monkeypatch.setattr(sync, "MAX_BYTES", 24576)
+    calls = []
+    original = sync._Store.git
+
+    def record(store, *arguments, **kwargs):
+        calls.append(arguments[0])
+        return original(store, *arguments, **kwargs)
+
+    monkeypatch.setattr(sync._Store, "git", record)
+    with sync.tempfile.TemporaryDirectory() as directory, pytest.raises(sync.GitSyncError):
+        sync._Store(directory).snapshot(str(thread))
+    assert "fsck" not in calls
+    assert sync.identity(str(thread)) == before
+
+
+def test_prepare_imports_only_novel_main_history_once(repos):
+    remote, thread, phone, binding = repos
+
+    class CountingBackend(LocalBackend):
+        def __init__(self, path):
+            super().__init__(path)
+            self.imports = 0
+
+        def upload_files(self, files):
+            self.imports += 1
+            return super().upload_files(files)
+
+    backend = CountingBackend(thread)
+    owner = sync.GitSync(str(binding), str(thread))
+    owner.prepare(backend, "first")
+    assert backend.imports == 0
+    owner.commit(backend, "no changes")
+    owner.publish()
+    git(phone, "checkout", "main")
+    (phone / "tracked").write_text("remote main advance\n")
+    git(phone, "add", ".")
+    git(phone, "commit", "-m", "main advance")
+    git(phone, "push", "origin", "main")
+    owner.prepare(backend, "second")
+    assert backend.imports == 1
+    owner.commit(backend, "no changes")
+    owner.publish()
+    head = git(thread, "rev-parse", "HEAD")
+    owner.prepare(backend, "third")
+    assert backend.imports == 1
+    assert git(thread, "rev-parse", "HEAD") == head
+    assert git(thread, "rev-parse", "refs/remotes/origin/main") == git(remote, "rev-parse", "main")
 
 
 def test_first_noop_publishes_only_thread_branch(repos):
