@@ -183,8 +183,7 @@ def _write_state(thread_dir: str, value: dict, filename: str = _BINDING) -> None
             os.unlink(name)
 
 
-def bind(thread_dir: str, source: str) -> None:
-    """Bind an explicitly selected source before the first agent can edit it."""
+def _initial_binding(source: str) -> dict:
     if (not source or len(source) > 2048 or source.startswith("-") or "::" in source
             or "\n" in source or "\0" in source):
         raise GitSyncError("Unsupported Git source")
@@ -194,15 +193,51 @@ def bind(thread_dir: str, source: str) -> None:
     if (parsed.password or parsed.query or parsed.fragment
             or (parsed.scheme in {"http", "https"} and parsed.username)):
         raise GitSyncError("Use Git credentials rather than secrets in the source URL")
+    return {"version": 1, "source": source, "published": {},
+            "published_branch": None, "published_revision": None,
+            "branch": None, "local_revision": None,
+            "intent": None, "preflights": {}, "error": None}
+
+
+def bind(thread_dir: str, source: str) -> None:
+    """Bind an explicitly selected source before the first agent can edit it."""
+    initial = _initial_binding(source)
     current = read_state(thread_dir)
     if current is not None:
         if current["source"] != source:
             raise GitSyncError("Git source binding changed")
         return
-    _write_state(thread_dir, {"version": 1, "source": source, "published": {},
-                              "published_branch": None, "published_revision": None,
-                              "branch": None, "local_revision": None,
-                              "intent": None, "preflights": {}, "error": None})
+    _write_state(thread_dir, initial)
+
+
+def enroll_legacy(thread_dir: str, worktree: str, source: str,
+                  expected: tuple[str, str]) -> None:
+    """Operator-only enrollment; source and branch/OID must be independently verified.
+
+    Creates a complete binding for an unbound or never-authorized clone without
+    changing its files, index, branch or history. Root must first stop any legacy
+    sandbox writers, which predate the shared fence. Dirty files remain dirty;
+    ordinary model admission still requires a clean worktree.
+    """
+    initial = _initial_binding(source)
+    with _workspace_lock(thread_dir):
+        current = read_state(thread_dir)
+        if current is not None:
+            if current["source"] != source:
+                raise GitSyncError("Git source binding changed")
+            if any(current.get(field) for field in (
+                    "branch", "local_revision", "published", "published_branch",
+                    "published_revision", "intent", "preflights", "quarantine", "sandbox_in_flight")):
+                raise GitSyncError("Git source binding is already authorized or needs reconciliation")
+        _independent_roots((worktree, os.path.join(os.path.dirname(worktree), "tmp"),
+                            os.path.join(thread_dir, "agent")))
+        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
+            branch, revision = _Store(path).snapshot(worktree)
+        if (branch, revision) != expected:
+            raise GitSyncError("Legacy Git branch identity changed; verify before enrollment")
+        state = current if current is not None else initial
+        state.update(branch=branch, local_revision=revision, error=None)
+        _write_state(thread_dir, state)
 
 
 def authorize_branch(thread_dir: str, worktree: str) -> None:
@@ -259,6 +294,13 @@ def ownership(thread_dir: str, worktree: str):
             raise GitSyncError("Existing Git repository needs an operator-verified source binding")
         yield None
         return
+    with _workspace_lock(thread_dir):
+        yield GitSync(thread_dir, worktree)
+
+
+@contextmanager
+def _workspace_lock(thread_dir: str):
+    """Share the same nonblocking fence with explicit legacy enrollment."""
     try:
         with _directory(thread_dir) as directory:
             fd = os.open("git-sync.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
@@ -274,7 +316,7 @@ def ownership(thread_dir: str, worktree: str):
             raise GitSyncError("A previous turn still owns this Git workspace") from error
         except OSError as error:
             raise GitSyncError("Git workspace ownership is unavailable") from error
-        yield GitSync(thread_dir, worktree)
+        yield
     finally:
         os.close(fd)
 
@@ -334,8 +376,9 @@ class _Store:
                         count += 1
                         if count > MAX_OBJECT_FILES or time.monotonic() > deadline:
                             raise GitSyncError("Git object snapshot exceeds its bound")
-                        if directory == "pack" and re.fullmatch(r"pack-[0-9a-f]{40}\.(?:bitmap|keep)", name):
-                            continue  # Inert local repack accelerators/pins are never imported.
+                        if directory == "pack" and (name == "multi-pack-index" or re.fullmatch(
+                                r"pack-[0-9a-f]{40}\.(?:bitmap|keep|mtimes)", name)):
+                            continue  # Inert pack indexes, pins and cruft ages are never imported.
                         if not _OBJECT.fullmatch(name):
                             raise GitSyncError("Unsupported Git object entry")
                         data = _read_at(entries, name, MAX_BYTES - copied, independent=True)

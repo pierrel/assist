@@ -89,6 +89,139 @@ def test_changed_and_staged_only_turn(repos):
     assert git(remote, "rev-parse", "main") != git(remote, "rev-parse", "thread/test")
 
 
+def test_snapshot_omits_standard_midx_and_cruft_metadata(repos):
+    _, thread, _, binding = repos
+    subprocess.run(["git", "-C", str(thread), "hash-object", "-w", "--stdin"],
+                   input="unreachable fixture\n", text=True, check=True,
+                   stdout=subprocess.DEVNULL)
+    git(thread, "repack", "--cruft", "-d")
+    git(thread, "multi-pack-index", "write")
+    packs = thread / ".git" / "objects" / "pack"
+    assert (packs / "multi-pack-index").is_file()
+    assert list(packs.glob("pack-*.mtimes"))
+    before = sync.identity(str(thread))
+    with sync.tempfile.TemporaryDirectory() as path:
+        store = sync._Store(path)
+        assert store.snapshot(str(thread)) == before
+        imported = Path(path) / "objects" / "pack"
+        assert not (imported / "multi-pack-index").exists()
+        assert not list(imported.glob("*.mtimes"))
+        store.git("cat-file", "-e", before[1] + "^{commit}")
+    sync.authorize_branch(str(binding), str(thread))
+    assert sync.read_state(str(binding))["local_revision"] == before[1]
+
+
+@pytest.mark.parametrize("name", ["multi-pack-index", "pack-" + "a" * 40 + ".mtimes"])
+def test_ignored_pack_metadata_is_not_followed(repos, name):
+    _, thread, _, _ = repos
+    pack = thread / ".git" / "objects" / "pack"
+    (pack / name).symlink_to(thread / ".git" / "config")
+    with sync.tempfile.TemporaryDirectory() as path:
+        assert sync._Store(path).snapshot(str(thread)) == sync.identity(str(thread))
+        assert not (Path(path) / "objects" / "pack" / name).exists()
+
+
+@pytest.mark.parametrize("name", ["multi-pack-index.extra", "pack-" + "a" * 40 + ".mtimes.extra"])
+def test_only_exact_standard_pack_metadata_is_ignored(repos, name):
+    _, thread, _, _ = repos
+    (thread / ".git" / "objects" / "pack" / name).write_bytes(b"unsupported")
+    with sync.tempfile.TemporaryDirectory() as path:
+        with pytest.raises(sync.GitSyncError, match="Unsupported Git object entry"):
+            sync._Store(path).snapshot(str(thread))
+
+
+def test_legacy_enrollment_preserves_dirty_work_and_ignores_workspace_config(repos):
+    remote, thread, _, binding = repos
+    expected = sync.identity(str(thread))
+    (binding / "git-sync.json").unlink()
+    (thread / "tracked").write_text("staged\n")
+    git(thread, "add", "tracked")
+    (thread / "tracked").write_text("unstaged\n")
+    (thread / "untracked").write_text("user files\n")
+    git(thread, "remote", "set-url", "origin", "evil::remote")
+    marker = thread.parent / "host-hook-ran"
+    git(thread, "config", "core.fsmonitor", "!touch " + str(marker))
+    tracked = [thread / "tracked", thread / "untracked", thread / ".git" / "index",
+               thread / ".git" / "HEAD", thread / ".git" / "config"]
+    before = {path: path.read_bytes() for path in tracked}
+    sync.enroll_legacy(str(binding), str(thread), str(remote), expected)
+    state = sync.read_state(str(binding))
+    assert state["source"] == str(remote)
+    assert (state["branch"], state["local_revision"]) == expected
+    assert state["published"] == {} and state["preflights"] == {}
+    assert before == {path: path.read_bytes() for path in tracked}
+    assert sync.identity(str(thread)) == expected
+    assert not marker.exists()
+
+
+def test_enrolled_legacy_clean_turn_publishes_to_selected_source(repos, tmp_path):
+    remote, thread, _, binding = repos
+    expected = sync.identity(str(thread))
+    (binding / "git-sync.json").unlink()
+    wrong_remote = tmp_path / "wrong-remote"
+    subprocess.run(["git", "init", "--bare", str(wrong_remote)], check=True,
+                   capture_output=True)
+    git(thread, "remote", "set-url", "origin", str(wrong_remote))
+    sync.enroll_legacy(str(binding), str(thread), str(remote), expected)
+    owner, backend = turn(repos)
+    (thread / "new").write_text("next legacy turn\n")
+    owner.commit(backend, "legacy message")
+    owner.publish()
+    assert git(remote, "show", "thread/test:new") == "next legacy turn"
+    assert git(wrong_remote, "for-each-ref") == ""
+
+
+def test_legacy_enrollment_mismatch_is_atomic_and_incomplete_clone_can_enroll(repos):
+    remote, thread, _, binding = repos
+    expected = sync.identity(str(thread))
+    sidecar = binding / "git-sync.json"
+    sidecar.unlink()
+    with pytest.raises(sync.GitSyncError, match="identity"):
+        sync.enroll_legacy(str(binding), str(thread), str(remote), (expected[0], "a" * 40))
+    assert not sidecar.exists()
+    sync.bind(str(binding), str(remote))
+    before = sidecar.read_bytes()
+    with pytest.raises(sync.GitSyncError, match="identity"):
+        sync.enroll_legacy(str(binding), str(thread), str(remote), (expected[0], "a" * 40))
+    assert sidecar.read_bytes() == before
+    sync.enroll_legacy(str(binding), str(thread), str(remote), expected)
+    assert (sync.read_state(str(binding))["branch"],
+            sync.read_state(str(binding))["local_revision"]) == expected
+
+
+def test_legacy_enrollment_rejects_existing_binding_and_contended_lock(repos):
+    remote, thread, _, binding = repos
+    sidecar = binding / "git-sync.json"
+    before = sidecar.read_bytes()
+    expected = sync.identity(str(thread))
+    with pytest.raises(sync.GitSyncError, match="already authorized"):
+        sync.enroll_legacy(str(binding), str(thread), str(remote), expected)
+    assert sidecar.read_bytes() == before
+    sidecar.unlink()
+    with sync._workspace_lock(str(binding)):
+        with pytest.raises(sync.GitSyncError, match="owns"):
+            sync.enroll_legacy(str(binding), str(thread), str(remote), expected)
+    assert not sidecar.exists()
+
+
+def test_legacy_enrollment_rejects_shared_inode_before_binding(repos):
+    remote, thread, _, binding = repos
+    (binding / "git-sync.json").unlink()
+    os.link(thread / "tracked", thread / "shared")
+    with pytest.raises(sync.GitSyncError, match="hardlinks"):
+        sync.enroll_legacy(str(binding), str(thread), str(remote), sync.identity(str(thread)))
+    assert not (binding / "git-sync.json").exists()
+
+
+@pytest.mark.parametrize("source", ["evil::remote", "https://secret@example.test/repo", "-bad"])
+def test_legacy_enrollment_rejects_unsafe_source_without_writing(repos, source):
+    _, thread, _, binding = repos
+    (binding / "git-sync.json").unlink()
+    with pytest.raises(sync.GitSyncError):
+        sync.enroll_legacy(str(binding), str(thread), source, sync.identity(str(thread)))
+    assert not (binding / "git-sync.json").exists()
+
+
 def test_phone_commit_fast_forwarded_before_next_turn(repos):
     remote, thread, phone, _ = repos
     owner, backend = turn(repos)
@@ -404,6 +537,28 @@ def test_deep_turn_noop_publishes_before_releasing_workspace(repos, monkeypatch)
     assert len({event[1] for event in events}) == 5
     assert git(repos[0], "rev-parse", "thread/test") == git(repos[1], "rev-parse", "HEAD")
     assert not sync.read_state(str(repos[3]))["sandbox_in_flight"]
+
+
+def test_enrollment_allows_legacy_message_without_host_workspace_git(repos, monkeypatch):
+    calls = []
+
+    def model():
+        calls.append(True)
+        (repos[1] / "new-message").write_text("legacy reply work\n")
+        return "legacy reply"
+
+    threads, _, outcomes = web_turn(repos, monkeypatch, model)
+    (repos[3] / "git-sync.json").unlink()
+    threads._process_message("state", "before enrollment")
+    assert threads._get_status("state")["stage"] == "error"
+    assert calls == []
+    sync.enroll_legacy(str(repos[3]), str(repos[1]), str(repos[0]),
+                       sync.identity(str(repos[1])))
+    threads._process_message("state", "after enrollment")
+    assert threads._get_status("state")["stage"] == "ready"
+    assert outcomes[-1][1:4] == ("ready", None, "legacy reply")
+    assert calls == [True]
+    assert git(repos[0], "show", "thread/test:new-message") == "legacy reply work"
 
 
 def test_deep_turn_incorporates_phone_commit_before_model(repos, monkeypatch):

@@ -929,6 +929,13 @@ After restart, a saved reply alone is not Git finalization proof. Completed
 visible Git-bound Deep/Pi recovery reports an explicit reconciliation error, preserves the
 answer/work/fences, and does not replay the model or reconstruct the commit.
 Legacy threads need an operator-verified binding and independent object storage.
+An operator can enroll an unbound or never-authorized clone with
+`assist.git_sync.enroll_legacy`, supplying a verified configured source and exact
+branch/commit pair after stopping its legacy writers. Enrollment does not change
+files, index or history, does not infer `origin`, and preserves dirty files for
+explicit reconciliation. A failed setup Run stays failed; send a new message
+after the preserved clone is enrolled and clean. Snapshots omit standard
+multi-pack-index and cruft `.mtimes` metadata, while verifying the imported objects.
 The phone uses normal Git credentials, not an Assist-web Git proxy; pending sync
 is reported through bounded `workspace.sync_error` metadata.
 

@@ -1,0 +1,65 @@
+#+title: Verified legacy enrollment and standard pack metadata compatibility
+#+date: 2026-09-27
+
+* Scope
+Pierre authorized two compatibility outcomes: explicit configured-source
+enrollment for reported legacy Git threads, and the observed new-clone rejection
+of standard multi-pack-index and cruft =pack-<sha>.mtimes= metadata. No new
+transport, credential, automatic source discovery or mass migration is added.
+The original direct-Git, FF-only publication and sandbox isolation contracts
+remain unchanged. Root owns live enrollment, composition and deployment.
+
+* Operator enrollment
+=assist.git_sync.enroll_legacy(thread_dir, worktree, source, expected)= accepts
+an operator-verified configured source and expected =(branch, commit)= pair.
+It does not read mutable origin to choose a source. Root must first stop and
+verify the exit of legacy sandbox writers, which predate the shared fence.
+
+The helper takes the same nonblocking workspace flock as ordinary Git writers.
+It permits only a missing binding or a same-source never-authorized clone.
+Authorized branches, retained publication/preflight/intent and flight/quarantine
+state are rejected, not reset or migrated. Existing source validation,
+independent inode checks across workspace/scratch/private-agent roots, and a
+private object snapshot/fsck all precede the exact expected identity comparison
+and one atomic complete sidecar write. Validation failure leaves the old
+binding and worktree unchanged; an I/O failure after replacement needs an exact
+binding reread before an operator decides what succeeded.
+
+Enrollment does not change files, index, refs or history, and does not execute
+workspace Git configuration on the host. Dirty files remain dirty: ordinary
+model admission still requires explicit preserving reconciliation. Completing
+the preserved clone's authorization does not replay a failed setup Run. After
+reconciliation, send a new message on that thread.
+
+* Pack snapshots
+The object scanner now omits exactly =multi-pack-index= and
+=pack-<40 lowercase hex>.mtimes= alongside existing inert bitmap/keep metadata.
+These files are not read or copied into the private store; source symlinks under
+those ignored names are not followed. Every directory entry is still counted
+and checked against the scan deadline before skipping it. Imported pack/index/
+reverse-index and loose objects still require independent no-follow bounded
+reads and private =git fsck --strict= verification. Unknown pack names remain
+explicit errors, and alternates/config/hooks are never imported.
+
+* Verification and remaining operational choices
+Disposable real-Git fixtures reproduce the old MIDX/cruft rejection and verify
+object import without those metadata files. Enrollment fixtures cover exact
+identity failure, contended ownership, shared inodes, invalid source, complete
+same-source failed-clone authorization, preservation of staged/unstaged/
+untracked work and hostile mutable config, and a normal clean legacy Deep turn
+publishing to the selected source rather than its mutable origin.
+
+The reported live threads require root's independently verified configured
+source choice and guarded enrollment. The existing user-gated main merge/rebranch
+algorithm still executes host Git with workspace configuration; this scoped
+enrollment/metadata change does not repair or certify that separate path.
+Likewise enrollment is not permission to bypass clean preflight for dirty work.
+Any different merge or dirty-admission policy must be explicitly resolved by
+root before claiming the whole compatibility outcome complete.
+
+* Historical supersessions
+This directly supersedes only the operator recovery note and assumed accepted
+pack-metadata names in =docs/2026-09-26-direct-thread-git-sync.org=. Explicit
+atomic enrollment now supports missing or never-authorized bindings, and the
+two observed inert metadata forms no longer block snapshots. The earlier
+document's mainmerge security debt and all other trust/ancestry rules remain.
