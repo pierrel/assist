@@ -96,7 +96,8 @@ private-agent roots at 10,000 total entries to prove independent storage.
 This per-turn path does not repair the existing user-gated main merge/rebranch
 or older host-Git rendering paths. See
 =docs/2026-09-26-direct-thread-git-sync.org= for the original boundary and
-=docs/2026-09-27-thread-git-compatibility.org= for current enrollment/recovery notes.
+=docs/2026-09-27-thread-git-compatibility.org= for enrollment and
+=docs/2026-09-27-web-git-operator-recovery.org= for stopped-writer recovery.
 
 ** Developing
 Install the package in editable mode so Emacs/Elpy can discover the modules:

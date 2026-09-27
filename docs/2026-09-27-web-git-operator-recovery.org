@@ -74,7 +74,7 @@ operator entrypoint is not exposed as a web route or agent tool and does not
 certify the whole merge path.
 
 * Historical supersessions
-This supersedes only the absence of retained bound-fence recovery in
-=docs/2026-09-27-thread-git-compatibility.org=, Operator enrollment. That
-document's enrollment restriction still holds; the new entrypoint is distinct
-and does not weaken it. Pack behavior and prior merge debt are unchanged.
+No earlier dated claim is invalidated. The new entrypoint is distinct from
+=docs/2026-09-27-thread-git-compatibility.org=, Operator enrollment: its
+restriction against enrolling fenced bindings still holds. Pack behavior and
+prior merge debt are unchanged.
