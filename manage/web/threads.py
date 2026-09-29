@@ -43,8 +43,7 @@ from assist.domain_manager import (
     OriginAdvancedError,
 )
 from assist.git_sync import (GitSyncError, authorize_branch, bind as bind_git,
-                             ownership as git_ownership, read_state as read_git_binding,
-                             require_clean as git_check_clean)
+                             read_state as read_git_binding)
 from contextlib import ExitStack
 from langgraph.errors import GraphRecursionError
 import anyio
@@ -96,6 +95,7 @@ from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
 from edd.live_capture import CaptureStorageFull
 
 from manage.web.app import app
+from manage.web.git_lifecycle import GitLifecycle, recovery_error as git_recovery_error
 from manage.web.run_stream import PHONE_DELTA_CHUNK_BYTES, RUN_STREAMS
 from manage.web.diff import _DIFF_CSS, _render_inline_diffs
 from assist.geo.model import STATE_FAILED, STATE_IMPORTING
@@ -2174,13 +2174,13 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
     sandbox_generation = None
     duplicate = False
     git_scope = ExitStack()
-    git_owner = None
+    git_lifecycle = None
 
     def cleanup_child_sandbox() -> None:
         if parent_working_dir is not None:
             try:
-                if git_owner and sandbox_generation is not None:
-                    _git_cleanup(git_owner, sandbox_generation)
+                if git_lifecycle is not None:
+                    git_lifecycle.cleanup_model(sandbox_generation)
                 else:
                     SandboxManager.cleanup(parent_working_dir, sandbox_generation)
             except Exception:
@@ -2204,22 +2204,22 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                 if not duplicate:
                     parent_working_dir = MANAGER.thread_default_working_dir(
                         run.parent_thread_id)
-                    git_owner = git_scope.enter_context(git_ownership(
-                        MANAGER.thread_dir(run.parent_thread_id), parent_working_dir))
-                    if git_owner:
+                    git_lifecycle = git_scope.enter_context(GitLifecycle.acquire(
+                        MANAGER.thread_dir(run.parent_thread_id), parent_working_dir,
+                        run.work_id))
+                    if git_lifecycle.bound:
                         child_scope.callback(cleanup_child_sandbox)
-                        git_owner.select_work(run.work_id)
-                    if git_owner and not (resume or run.resume or run.resume_decision is not None):
-                        _git_prepare(git_owner, run.work_id, None)
-                    elif git_owner:
-                        _git_admit(git_owner)
+                    if not (resume or run.resume or run.resume_decision is not None):
+                        git_lifecycle.prepare(None)
+                    else:
+                        git_lifecycle.resume()
                     try:
                         sandbox = _get_sandbox_backend(
                             run.parent_thread_id, include_agent=False,
-                            **({"before_start": git_owner.sandbox_started} if git_owner else {}))
+                            **({"before_start": git_lifecycle.model_starting}
+                               if git_lifecycle.bound else {}))
                         sandbox_generation = sandbox.container if sandbox else None
-                        if git_owner and sandbox is None:
-                            raise GitSyncError("Git sync requires the restricted sandbox")
+                        git_lifecycle.require_sandbox(sandbox)
                     except Exception:
                         sandbox_generation = SandboxManager.current_container(
                             parent_working_dir)
@@ -2237,17 +2237,16 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                         run = _runs().transition(
                             run.thread_id, run.id,
                             "awaiting_approval" if waits_for_egress
-                            else "running" if git_owner else "success", result=result)
-                    if git_owner and not waits_for_egress:
-                        _git_cleanup(git_owner, sandbox_generation)
+                            else "running" if git_lifecycle.bound else "success", result=result)
+                    if git_lifecycle.bound and not waits_for_egress:
+                        git_lifecycle.cleanup_model(sandbox_generation)
                         sandbox_generation = None
-                        if not _git_finish(git_owner, str(result or "assistant task update"), None,
-                                           on_committed=lambda: git_owner.receipt(
-                                               MANAGER.thread_dir(run.thread_id))):
-                            raise GitSyncError("Child Git commit is pending; saved result and files are preserved")
+                        git_lifecycle.finish_child(
+                            str(result or "assistant task update"),
+                            MANAGER.thread_dir(run.thread_id))
                         with _RUN_ADMISSION_LOCK:
                             run = _runs().transition(run.thread_id, run.id, "success")
-                        git_owner.forget_work()
+                        git_lifecycle.child_terminal()
                     if waits_for_egress and run.parent_thread_id is not None:
                         _resume_egress_waiters(run.parent_thread_id)
     except ThreadPauseRequested:
@@ -2291,7 +2290,7 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
         else:
             run = current
     finally:
-        if git_owner is None:
+        if git_lifecycle is None or not git_lifecycle.bound:
             cleanup_child_sandbox()
     THREAD_QUEUE.pop_hold(run.thread_id)
     if duplicate:
@@ -2352,18 +2351,14 @@ def _recover_child_run(run: Run) -> None:
         if result is not None:
             with _RUN_ADMISSION_LOCK:
                 _runs().transition(run.thread_id, run.id, "running", result=result)
-            with THREAD_QUEUE.acquire(run.thread_id), git_ownership(
-                    MANAGER.thread_dir(run.parent_thread_id), parent_working_dir) as git_owner:
-                if git_owner:
-                    git_owner.select_work(run.work_id)
-                    if not git_owner.verified_receipt(MANAGER.thread_dir(run.thread_id)) and not _git_finish(
-                            git_owner, str(result), None, on_committed=lambda: git_owner.receipt(
-                                MANAGER.thread_dir(run.thread_id))):
-                        raise GitSyncError("Child Git commit is pending; saved result and files are preserved")
+            with THREAD_QUEUE.acquire(run.thread_id), GitLifecycle.acquire(
+                    MANAGER.thread_dir(run.parent_thread_id), parent_working_dir,
+                    run.work_id) as git_lifecycle:
+                git_lifecycle.recover_child(
+                    str(result), MANAGER.thread_dir(run.thread_id))
                 with _RUN_ADMISSION_LOCK:
                     _runs().transition(run.thread_id, run.id, "success", result=result)
-                if git_owner:
-                    git_owner.forget_work()
+                git_lifecycle.child_terminal()
         else:
             _execute_child_run(run)
             return
@@ -2518,19 +2513,6 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
         pass  # thread deletion removes its run store while a dispatcher unwinds.
 
 
-def _git_recovery_error(tid: str) -> str | None:
-    """A saved reply alone cannot authenticate a Git-backed turn's finalization."""
-    try:
-        git_bound = read_git_binding(MANAGER.thread_dir(tid)) is not None or os.path.lexists(
-            os.path.join(MANAGER.thread_default_working_dir(tid), ".git"))
-    except (GitSyncError, OSError):
-        git_bound = True
-    if git_bound:
-        return ("Git finalization after restart is unverified; saved answer and files are preserved. "
-                "Reconcile Git before continuing.")
-    return None
-
-
 def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
     """Execute one manual visible Pi turn without constructing a Deep graph."""
     tid = run.thread_id
@@ -2559,7 +2541,8 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
                 _dispatch_pending_after(tid, run.id)
                 return
             if completed is not None:
-                git_error = _git_recovery_error(tid)
+                git_error = git_recovery_error(
+                    MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid))
                 with _RUN_ADMISSION_LOCK:
                     current = _runs().get(run.thread_id, run.id)
                     if current.status in {"running", "interrupted"}:
@@ -2578,10 +2561,9 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
             _dispatch_pending_after(run.thread_id, run.id)
         return
     try:
-        with THREAD_QUEUE.acquire(tid, user_priority=user_priority), git_ownership(
-                MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid)) as git_owner:
-            if git_owner:
-                git_owner.select_work(run.work_id)
+        with THREAD_QUEUE.acquire(tid, user_priority=user_priority), GitLifecycle.acquire(
+                MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid),
+                run.work_id) as git_lifecycle:
             # The selector's earlier check only permits reservation. This
             # authority-bearing recheck prevents a queued Pi Run from starting
             # after the operator disables the preview.
@@ -2601,8 +2583,7 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
                 run = _runs().claim(tid, run.id)
             _set_status(tid, "starting_sandbox", pending_message=run.text, started_at=_now_ms())
             thread_dir = MANAGER.thread_dir(tid)
-            if git_owner:
-                _git_prepare(git_owner, run.work_id, (run.rider or {}).get("tz"))
+            git_lifecycle.prepare((run.rider or {}).get("tz"))
             _PI_CONVERSATIONS.append(thread_dir, run.id, "user", run.text)
             context = _PI_CONVERSATIONS.context(
                 thread_dir, max_messages=PI_HISTORY_LIMIT, exclude_run_id=run.id)
@@ -2625,14 +2606,12 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
                 skill_run_id=run.id, commit=complete_pi_run,
                 turn_id=tid, admitted=lambda: PI_PREVIEW.admits("pi"),
                 should_yield=_pi_should_yield, trace_dir=thread_dir, trace_run_id=run.id,
-                sandbox_cleanup=(lambda generation: _git_cleanup(git_owner, generation))
-                if git_owner else None,
-                sandbox_starting=git_owner.sandbox_started if git_owner else None)
-            if git_owner:
+                sandbox_cleanup=git_lifecycle.pi_model_cleanup,
+                sandbox_starting=git_lifecycle.model_starting)
+            if git_lifecycle.bound:
                 with _RUN_ADMISSION_LOCK:
                     _runs().transition(tid, run.id, "running", result=result.reply)
-                if not _git_finish(git_owner, result.reply, (run.rider or {}).get("tz")):
-                    raise GitSyncError("Git commit is pending; saved answer and files are preserved")
+                git_lifecycle.finish_visible(result.reply, (run.rider or {}).get("tz"))
             with _RUN_ADMISSION_LOCK:
                 _runs().transition(tid, run.id, "success", result=result.reply)
             _set_status(tid, "ready")
@@ -2723,7 +2702,8 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
     decision = _recovery_decision(tid, pending_text or "")
     logging.info("recovery: run %s on %s -> %s", run.id, tid, decision)
     if decision == "finalize":
-        git_error = _git_recovery_error(tid)
+        git_error = git_recovery_error(
+            MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid))
         _runs().transition(tid, run.id, "error" if git_error else "success",
                            **({"error": git_error} if git_error else {}))
         _set_status(tid, "error" if git_error else "ready",
@@ -2747,99 +2727,6 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
         origin=run.origin, work_id=run.work_id,
         location=_location_from_fields(run.location))
     _RESUME_SCHEDULER.submit(successor.id, tid, user_priority=user_priority)
-
-
-def _git_reap(owner, generation) -> None:
-    """Prove exact generation exit, retaining the Git flight/finalization fence."""
-    try:
-        SandboxManager.cleanup_verified(owner.worktree, generation)
-    except Exception as error:
-        owner.quarantine()
-        owner.failed(GitSyncError("Git sandbox teardown needs operator verification"))
-        raise GitSyncError("Git sandbox teardown needs operator verification") from error
-
-
-def _git_cleanup(owner, generation) -> None:
-    """Prove model generation exit and clear its flight fence."""
-    _git_reap(owner, generation)
-    owner.sandbox_stopped()
-
-
-def _git_admit(owner):
-    """Fail closed with a bounded persisted reason before a resumed model runs."""
-    try:
-        return owner.admit()
-    except Exception as error:
-        reason = error if isinstance(error, GitSyncError) else GitSyncError(
-            "Git admission failed; preserve the workspace and reconcile before retrying")
-        owner.failed(reason)
-        raise reason from error
-
-
-def _git_verify(owner, timezone) -> None:
-    """After writer exit, prove clean Git state on a kernel-read-only workspace."""
-    backend = SandboxManager.get_git_verification_backend(
-        owner.worktree, tz=timezone, before_start=owner.sandbox_started)
-    if backend is None:
-        raise GitSyncError("Git clean verification requires the restricted sandbox")
-    try:
-        git_check_clean(backend)
-    finally:
-        _git_reap(owner, backend.container)
-
-
-def _git_prepare(owner, work_id: str, timezone: str | None) -> None:
-    """Reconcile Git before model admission using the credential-free profile."""
-    try:
-        backend = SandboxManager.get_pi_sandbox_backend(
-            owner.worktree, tz=timezone, before_start=owner.sandbox_started)
-        if backend is None:
-            raise GitSyncError("Git sync requires the restricted sandbox")
-        try:
-            owner.prepare(backend, work_id)
-        finally:
-            _git_reap(owner, backend.container)
-        _git_verify(owner, timezone)
-        _, revision = owner.admit()
-        if revision != owner.state["preflights"][work_id]["base"]:
-            raise GitSyncError("Git checkout changed during preflight teardown; reconcile before the turn")
-        owner.sandbox_stopped()
-    except Exception as error:
-        reason = error if isinstance(error, GitSyncError) else GitSyncError(
-            "Git preflight failed; preserve the workspace and reconcile before retrying")
-        owner.failed(reason)
-        raise reason from error
-
-
-def _git_finish(owner, message: str, timezone: str | None, *, on_committed=None) -> bool:
-    """Attempt publication, returning whether local commit and teardown completed."""
-    committed = False
-
-    def verified_local_commit():
-        nonlocal committed
-        if on_committed is not None:
-            on_committed()
-        owner.sandbox_stopped()
-        committed = True
-
-    try:
-        if owner.state.get("quarantine") or owner.state.get("sandbox_in_flight"):
-            raise GitSyncError("Git teardown or commit finalization needs operator verification")
-        backend = SandboxManager.get_pi_sandbox_backend(
-            owner.worktree, tz=timezone, before_start=owner.sandbox_started)
-        if backend is None:
-            raise GitSyncError("Git sync requires the restricted sandbox")
-        try:
-            owner.commit(backend, message)
-        finally:
-            _git_reap(owner, backend.container)
-        _git_verify(owner, timezone)
-        owner.publish(on_committed=verified_local_commit)
-    except Exception as error:
-        owner.failed(error if isinstance(error, GitSyncError) else GitSyncError(
-            "Branch publication is pending; work and answer are preserved"))
-        logging.warning("Thread branch publication pending", exc_info=True)
-    return committed
 
 
 def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
@@ -2966,10 +2853,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 user_priority=(queue_user_priority
                                or (_run is not None and _run.origin is None
                                    and _run.mode == "turn"
-                                   and _run.text is not None))), git_ownership(
-                MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid)) as git_owner:
-            if git_owner:
-                git_owner.select_work(_run.work_id if _run else tid)
+                                   and _run.text is not None))), GitLifecycle.acquire(
+                MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid),
+                _run.work_id if _run else tid) as git_lifecycle:
             # A queued run remains pending until it actually owns THREAD_QUEUE. This
             # is what makes it visible to the active turn's interjection reader. Two
             # dispatchers for one run serialize here; only the first can claim it.
@@ -3027,11 +2913,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 except InvalidRunTransition:
                     return
             _set_status(tid, "starting_sandbox", **pending_kwargs)
-            if git_owner and not resume and resume_decision is None:
-                _git_prepare(git_owner, _run.work_id if _run else tid,
-                             rider.tz if rider else None)
-            elif git_owner:
-                _git_admit(git_owner)
+            if not resume and resume_decision is None:
+                git_lifecycle.prepare(rider.tz if rider else None)
+            else:
+                git_lifecycle.resume()
             sandbox = None
             sandbox_generation = None
             try:
@@ -3041,10 +2926,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 try:
                     sandbox = _get_sandbox_backend(
                         tid, tz=rider.tz if rider else None,
-                        **({"before_start": git_owner.sandbox_started} if git_owner else {}))
+                        **({"before_start": git_lifecycle.model_starting}
+                           if git_lifecycle.bound else {}))
                     sandbox_generation = sandbox.container if sandbox else None
-                    if git_owner and sandbox is None:
-                        raise GitSyncError("Git sync requires the restricted sandbox")
+                    git_lifecycle.require_sandbox(sandbox)
                 except Exception:
                     sandbox_generation = SandboxManager.current_container(
                         MANAGER.thread_default_working_dir(tid))
@@ -3153,19 +3038,20 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # impossible: container age <= turn age, capped by the queue.
                 # cleanup() SIGKILLs (the response is already committed to the
                 # checkpoint here, and the sandbox has nothing to flush).
-                _work_dir = MANAGER.thread_default_working_dir(tid)
-                if git_owner and sandbox_generation is not None:
+                if git_lifecycle.bound and sandbox_generation is not None:
                     try:
-                        _git_cleanup(git_owner, sandbox_generation)
+                        git_lifecycle.cleanup_model(sandbox_generation)
                     except GitSyncError:
                         # The durable answer remains available; later writes are quarantined.
                         logging.error("Git model sandbox teardown failed", exc_info=True)
                 else:
-                    SandboxManager.cleanup(_work_dir, sandbox_generation)
-            if git_owner and not chat.pending_reply() and not _pending_email(chat):
-                if not _git_finish(git_owner, resp or "assistant update", rider.tz if rider else None):
+                    git_lifecycle.cleanup_model(sandbox_generation)
+            if git_lifecycle.bound and not chat.pending_reply() and not _pending_email(chat):
+                try:
+                    git_lifecycle.finish_visible(resp or "assistant update", rider.tz if rider else None)
+                except GitSyncError:
                     _terminal = ("error", resp)
-                    raise GitSyncError("Git commit is pending; saved answer and files are preserved")
+                    raise
         MANAGER.touch(tid)
 
         # Generate description if there is none
@@ -4387,7 +4273,8 @@ def queue_recovery_runs() -> None:
             pending = status.get("pending_message") or ""
             decision = _recovery_decision(tid, pending)
             if decision == "finalize":
-                git_error = _git_recovery_error(tid)
+                git_error = git_recovery_error(
+                    MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid))
                 _set_status(tid, "error" if git_error else "ready",
                             **({"error": git_error} if git_error else {}))
             elif decision == "error":
@@ -5499,7 +5386,7 @@ def merge_thread(tid: str):
 
     with MERGE_LOCK, ExitStack() as merge_scope:
         try:
-            merge_scope.enter_context(git_ownership(
+            merge_scope.enter_context(GitLifecycle.acquire(
                 MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid)))
             dm.merge_and_push()
             _clear_conflict(tid)

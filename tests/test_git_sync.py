@@ -68,6 +68,44 @@ def turn(repos):
     return owner, backend
 
 
+def test_web_lifecycle_keeps_non_git_cleanup_and_noop_turn_contract(tmp_path, monkeypatch):
+    from manage.web.git_lifecycle import GitLifecycle
+    from assist.sandbox_manager import SandboxManager
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    cleanup = []
+    monkeypatch.setattr(SandboxManager, "cleanup", lambda *args: cleanup.append(args))
+    with GitLifecycle.acquire(str(tmp_path), str(worktree), "work") as lifecycle:
+        assert not lifecycle.bound
+        assert lifecycle.model_starting is None
+        assert lifecycle.pi_model_cleanup is None
+        lifecycle.prepare(None)
+        lifecycle.resume()
+        lifecycle.require_sandbox(None)
+        lifecycle.cleanup_model("generation")
+        lifecycle.finish_visible("answer", None)
+        lifecycle.finish_child("result", str(tmp_path / "child"))
+        lifecycle.recover_child("result", str(tmp_path / "child"))
+        lifecycle.child_terminal()
+    assert cleanup == [(str(worktree), "generation")]
+
+
+def test_web_lifecycle_shares_turn_and_merge_workspace_fence(repos):
+    from manage.web.git_lifecycle import GitLifecycle
+
+    _, thread, _, binding = repos
+    with GitLifecycle.acquire(str(binding), str(thread), "turn") as lifecycle:
+        assert lifecycle.bound
+        assert lifecycle._owner.work_id == "turn"
+        with pytest.raises(sync.GitSyncError, match="previous turn still owns"):
+            with GitLifecycle.acquire(str(binding), str(thread)):
+                pytest.fail("merge acquired a live turn's workspace")
+    with GitLifecycle.acquire(str(binding), str(thread)) as merge_lifecycle:
+        assert merge_lifecycle.bound
+        assert merge_lifecycle._owner.work_id is None
+
+
 def test_duplicate_pack_snapshot_compacts_privately_without_losing_unreachable(repos, monkeypatch, tmp_path):
     _, thread, _, _ = repos
     (thread / "payload").write_bytes(hashlib.shake_256(b"duplicate-pack").digest(16384))
@@ -1596,12 +1634,14 @@ def test_recovered_initializer_preserves_authorized_workspace_and_ancestry(repos
 
 
 def test_preflight_crash_after_writer_exit_keeps_resume_fenced(repos, monkeypatch):
+    from manage.web import git_lifecycle
+
     threads, _, _ = web_turn(repos, monkeypatch, lambda: "must not run")
     owner = sync.GitSync(str(repos[3]), str(repos[1]))
-    monkeypatch.setattr(threads, "_git_verify", lambda *_: (
+    monkeypatch.setattr(git_lifecycle, "_verify", lambda *_: (
         _ for _ in ()).throw(SystemExit("before readonly verification")))
     with pytest.raises(SystemExit, match="readonly verification"):
-        threads._git_prepare(owner, "crashed-preflight", None)
+        git_lifecycle._prepare(owner, "crashed-preflight", None)
     state = sync.read_state(str(repos[3]))
     assert "crashed-preflight" in state["preflights"]
     assert state["sandbox_in_flight"]
@@ -1735,9 +1775,11 @@ def test_remote_only_child_failure_keeps_local_success_and_retry_fences(repos, m
         return original(store, *args, **kwargs)
 
     with monkeypatch.context() as patch:
+        from manage.web import git_lifecycle
+
         patch.setattr(sync._Store, "git", fail_push)
-        assert threads._git_finish(child, "saved child result", None,
-                                   on_committed=lambda: child.receipt(str(child_dir)))
+        assert git_lifecycle._finish(child, "saved child result", None,
+                                     on_committed=lambda: child.receipt(str(child_dir)))
     assert child.verified_receipt(str(child_dir))
     child.forget_work()
     state = sync.read_state(str(repos[3]))
