@@ -115,7 +115,9 @@ class _SandboxManager:
     backend = _Backend()
 
     @classmethod
-    def get_pi_sandbox_backend(cls, work_dir: str, timezone: str | None) -> _Backend:
+    def get_pi_sandbox_backend(cls, work_dir: str, timezone: str | None, *,
+                               thread_scope: tuple[str, str] | None = None) -> _Backend:
+        cls.last_thread_scope = thread_scope
         cls.events.append("sandbox.start")
         assert timezone == "America/Los_Angeles"
         return cls.backend
@@ -188,7 +190,7 @@ class _ResultSink:
 
 def test_runtime_starts_only_host_authorities_and_reaps_them(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    work_dir = tmp_path / "thread" / "workspace"
+    work_dir = tmp_path / "thread" / "domain"
     work_dir.mkdir(parents=True)
     _SandboxManager.events = []
     monkeypatch.setattr(pi_runtime, "current_model_config", lambda: OpenAIConfig(
@@ -200,9 +202,11 @@ def test_runtime_starts_only_host_authorities_and_reaps_them(
     result = pi_runtime.PiRuntimeManager(_SandboxManager).run(
         work_dir=str(work_dir), timezone="America/Los_Angeles", prompt="hello",
         history=[("user", "earlier")], system_prompt="be useful",
+        thread_scope=(str(tmp_path), "thread"),
     )
 
     assert result == pi_runtime.PiRuntimeResult("done", 1)
+    assert _SandboxManager.last_thread_scope == (str(tmp_path), "thread")
     assert _SandboxManager.events == [
         "sandbox.start", "broker.start", "relay.start", "worker.start", "worker.wait",
         "result.receive", "broker.stop", "relay.stop", "sandbox.cleanup", "broker.close",

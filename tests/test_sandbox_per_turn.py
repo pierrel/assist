@@ -99,10 +99,12 @@ class TestNoReuse(_SandboxStateBase):
             Path(work_dir).mkdir(parents=True)
             p = self._patches(work_dir)
             with p[0], p[1], p[2], p[3], p[4]:
-                SandboxManager.get_sandbox_backend(work_dir)
+                SandboxManager.get_sandbox_backend(
+                    work_dir, thread_scope=(root, "thread"))
                 first = SandboxManager._containers[work_dir]
                 # Second turn for the SAME thread: must NOT reuse `first`.
-                SandboxManager.get_sandbox_backend(work_dir)
+                SandboxManager.get_sandbox_backend(
+                    work_dir, thread_scope=(root, "thread"))
                 second = SandboxManager._containers[work_dir]
 
         self.assertIsNot(second, first, "container was reused across turns")

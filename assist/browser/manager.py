@@ -499,7 +499,7 @@ class BrowserSession:
                 prior_state = storage.load(self.threads_root, self.thread_id)
             except (OSError, ValueError):
                 # A damaged private snapshot loses continuity, not access to
-                # the browser. No snapshot bytes reach the worker or model.
+                # the browser. Valid snapshots go only to the worker, never the model.
                 logger.warning("browser auth state could not be restored")
                 prior_state = None
             if mode == "public" and prior_state is not None:

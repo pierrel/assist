@@ -636,11 +636,60 @@ class TestSandboxManager(TestCase):
         self._attached_proxy(container, client)
         client.containers.run.return_value = container
         with patch.object(SandboxManager, '_get_docker_client', return_value=client):
-            SandboxManager.get_sandbox_backend(test_path, browser_capable=True)
+            SandboxManager.get_sandbox_backend(
+                test_path, browser_capable=True,
+                thread_scope=(self.temp_dir, "browser-turn"))
         options = client.containers.run.call_args.kwargs
         assert options["tmpfs"]["/run/assist-browser"].endswith(
             "uid=10001,gid=10001,mode=0700")
         assert options["security_opt"][0].startswith("seccomp={")
+
+    def test_generic_workspaces_do_not_access_browser_authority(self):
+        from docker.errors import DockerException
+        from assist.browser import authority
+
+        work_dirs = [self.temp_dir, os.path.join(self.temp_dir, "scratch"),
+                     os.path.join(self.temp_dir, "other"),
+                     os.path.join(self.temp_dir, "domain")]
+        for work_dir in work_dirs:
+            os.makedirs(work_dir, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="sandbox-scope-ledger-") as ledger:
+            with patch.dict(os.environ, {"ASSIST_EGRESS_RUNTIME_DIR": ledger}), \
+                 patch.object(authority, "fence", side_effect=AssertionError(
+                     "generic workspace must not access thread authority")) as fence, \
+                 patch.object(SandboxManager, "_get_docker_client",
+                              side_effect=DockerException("no Docker in regression")):
+                for work_dir in work_dirs:
+                    self.assertIsNone(SandboxManager.get_sandbox_backend(work_dir))
+        fence.assert_not_called()
+
+    def test_browser_sandbox_requires_explicit_scope_before_docker(self):
+        with patch.object(SandboxManager, "_get_docker_client") as docker_client:
+            with self.assertRaisesRegex(RuntimeError, "explicit thread authority"):
+                SandboxManager.get_sandbox_backend(self.temp_dir, browser_capable=True)
+        docker_client.assert_not_called()
+
+    def test_cross_thread_workspace_alias_is_rejected_before_authority(self):
+        from assist.browser import authority
+
+        first = os.path.join(self.temp_dir, "first")
+        second = os.path.join(self.temp_dir, "second", "domain")
+        os.makedirs(first)
+        os.makedirs(second)
+        alias = os.path.join(first, "domain")
+        os.symlink(second, alias)
+        with patch.object(authority, "fence") as fence, \
+             patch.object(SandboxManager, "_get_docker_client") as docker_client:
+            for browser_capable in (False, True):
+                with self.assertRaisesRegex(RuntimeError, "does not match thread authority"):
+                    SandboxManager.get_sandbox_backend(
+                        alias, browser_capable=browser_capable,
+                        thread_scope=(self.temp_dir, "first"))
+            with self.assertRaisesRegex(RuntimeError, "does not match thread authority"):
+                SandboxManager.get_pi_sandbox_backend(
+                    alias, thread_scope=(self.temp_dir, "first"))
+        fence.assert_not_called()
+        docker_client.assert_not_called()
 
     def test_browser_lease_requires_stop_proof_before_any_replacement(self):
         from assist.browser import authority
@@ -659,10 +708,17 @@ class TestSandboxManager(TestCase):
         with patch.object(BrowserManager, "confirm_owner_stopped",
                           side_effect=BrowserUnavailable("stop unconfirmed")) as proof:
             with self.assertRaisesRegex(BrowserUnavailable, "stop unconfirmed"):
-                SandboxManager.get_sandbox_backend(test_path, browser_capable=False)
+                SandboxManager.get_sandbox_backend(
+                    test_path, browser_capable=False,
+                    thread_scope=(self.temp_dir, "browser-turn"))
+            with self.assertRaisesRegex(BrowserUnavailable, "stop unconfirmed"):
+                SandboxManager.get_pi_sandbox_backend(
+                    test_path, thread_scope=(self.temp_dir, "browser-turn"))
         stale.kill.assert_not_called()
         self.assertIs(SandboxManager._containers[test_path], stale)
-        proof.assert_called_once_with(self.temp_dir, "browser-turn", None)
+        self.assertEqual(proof.call_count, 2)
+        self.assertEqual(proof.call_args_list[0], proof.call_args_list[1])
+        proof.assert_called_with(self.temp_dir, "browser-turn", None)
 
     @patch('assist.sandbox.DockerSandboxBackend')
     def test_agent_dir_is_created_mounted_and_enables_native_paths(self,

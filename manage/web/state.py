@@ -304,7 +304,7 @@ def _get_sandbox_backend(tid: str, tz: str | None = None, *,
     return SandboxManager.get_sandbox_backend(
         work_dir, tz=tz,
         agent_dir=(MANAGER.thread_agent_dir(tid) if include_agent else None),
-        browser_capable=browser_capable)
+        browser_capable=browser_capable, thread_scope=(MANAGER.root_dir, tid))
 
 
 def _has_unmerged_changes(tid: str) -> bool:

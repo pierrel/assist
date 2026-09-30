@@ -2607,7 +2607,8 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
                 compaction_candidate=context.compaction_candidate,
                 skill_run_id=run.id, commit=complete_pi_run,
                 turn_id=tid, admitted=lambda: PI_PREVIEW.admits("pi"),
-                should_yield=_pi_should_yield, trace_dir=thread_dir, trace_run_id=run.id)
+                should_yield=_pi_should_yield, trace_dir=thread_dir, trace_run_id=run.id,
+                thread_scope=(MANAGER.root_dir, tid))
             with _RUN_ADMISSION_LOCK:
                 _runs().transition(tid, run.id, "success", result=result.reply)
             _set_status(tid, "ready")

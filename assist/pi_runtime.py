@@ -408,7 +408,8 @@ class PiRuntimeManager:
             max_turns: int = _MAX_TURNS, turn_id: str | None = None,
             admitted: Callable[[], bool] | None = None,
             should_yield: Callable[[], bool] | None = None,
-            trace_dir: str | None = None, trace_run_id: str | None = None) -> PiRuntimeResult:
+            trace_dir: str | None = None, trace_run_id: str | None = None,
+            thread_scope: tuple[str, str] | None = None) -> PiRuntimeResult:
         """Run one fresh Pi worker and tear down every authority it used."""
         if (not isinstance(prompt, str) or not isinstance(system_prompt, str)
                 or not system_prompt.strip() or not isinstance(max_turns, int)
@@ -438,7 +439,8 @@ class PiRuntimeManager:
             provider_capability = secrets.token_urlsafe(32)
             result_capability = secrets.token_urlsafe(32)
             result_sink = PiResultSink(control_dir, result_capability)
-            sandbox = self._sandbox_manager.get_pi_sandbox_backend(work_dir, timezone)
+            sandbox = self._sandbox_manager.get_pi_sandbox_backend(
+                work_dir, timezone, thread_scope=thread_scope)
             if sandbox is None:
                 raise PiRuntimeError("Pi workspace sandbox is unavailable")
             if isinstance(sandbox, DockerSandboxBackend):

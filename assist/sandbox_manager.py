@@ -528,13 +528,15 @@ class SandboxManager:
     def _get_sandbox_backend(cls, work_dir: str, tz: str | None,
                              agent_dir: str | None, include_assist_env: bool,
                              include_egress_approvals: bool,
-                             browser_capable: bool = False):
+                             browser_capable: bool = False,
+                             thread_scope: tuple[str, str] | None = None):
         """Create one per-turn sandbox from a named authority profile.
 
         ``include_assist_env`` is the line between ordinary Deep Agents work and
         Pi preview work.  A Pi sandbox retains Docker's workspace and egress
         containment but receives no generic application environment or private
-        agent mount.
+        agent mount. ``thread_scope`` binds managed web/Pi callers to their
+        exact thread workspace; generic callers never infer authority from a path.
         """
         # Per-turn lifecycle: never reuse a container across turns.  The web
         # layer tears each container down at the end of its turn
@@ -547,15 +549,19 @@ class SandboxManager:
         from assist.browser import authority
         from assist.browser.manager import BrowserManager
 
-        thread_dir = os.path.dirname(os.path.realpath(work_dir))
-        threads_root = os.path.dirname(thread_dir)
-        thread_id = os.path.basename(thread_dir)
-        with authority.fence(threads_root, thread_id) as state:
-            browser_stop_owed = state.lease is not None
-        if browser_stop_owed:
-            # System and SMS turns use the same workspace without browser
-            # tools. They still cannot replace an unconfirmed browser sandbox.
-            BrowserManager.confirm_owner_stopped(threads_root, thread_id, None)
+        if browser_capable and thread_scope is None:
+            raise RuntimeError("browser sandbox requires explicit thread authority")
+        if thread_scope is not None:
+            threads_root, thread_id = thread_scope
+            expected = os.path.join(os.path.realpath(threads_root), thread_id, "domain")
+            if os.path.realpath(work_dir) != expected:
+                raise RuntimeError("sandbox workspace does not match thread authority")
+            with authority.fence(threads_root, thread_id) as state:
+                browser_stop_owed = state.lease is not None
+            if browser_stop_owed:
+                # Managed system, SMS and Pi turns also need the browser stop
+                # proof before replacing this thread's sandbox generation.
+                BrowserManager.confirm_owner_stopped(threads_root, thread_id, None)
         if work_dir in cls._containers:
             cls.cleanup(work_dir)
 
@@ -726,17 +732,21 @@ class SandboxManager:
     @classmethod
     def get_sandbox_backend(cls, work_dir: str, tz: str | None = None,
                             agent_dir: str | None = None,
-                            browser_capable: bool = False):
-        """Return the ordinary Docker sandbox, including its established app env."""
+                            browser_capable: bool = False,
+                            thread_scope: tuple[str, str] | None = None):
+        """Return the ordinary sandbox; managed callers bind its thread authority."""
         return cls._get_sandbox_backend(
             work_dir, tz, agent_dir, include_assist_env=True,
-            include_egress_approvals=True, browser_capable=browser_capable)
+            include_egress_approvals=True, browser_capable=browser_capable,
+            thread_scope=thread_scope)
 
     @classmethod
-    def get_pi_sandbox_backend(cls, work_dir: str, tz: str | None = None):
+    def get_pi_sandbox_backend(cls, work_dir: str, tz: str | None = None, *,
+                               thread_scope: tuple[str, str] | None = None):
         """Return Pi's workspace-only Docker sandbox, without app secrets or `/agent`."""
         return cls._get_sandbox_backend(
-            work_dir, tz, None, include_assist_env=False, include_egress_approvals=False)
+            work_dir, tz, None, include_assist_env=False,
+            include_egress_approvals=False, thread_scope=thread_scope)
 
     # work_dir -> (map directory, egress-network IP, container generation)
     # for shell attribution or an explicit Pi no-grant marker.

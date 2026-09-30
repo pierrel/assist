@@ -1,0 +1,54 @@
+#+title: Browser V1 sandbox authority scope correction
+#+date: 2026-09-30
+
+* Confirmed failure
+
+The sandbox factory inferred a browser thread from every workspace's parent.
+A direct temporary workspace under /tmp therefore selected the shared authority
+scope ("/", "tmp"). A no-Docker regression reproduces that access. The prior
+fixture correction supplied an existing directory but did not close this product
+scope defect.
+
+* Correction
+
+Managed callers explicitly bind =thread_scope=(threads_root, thread_id)=.
+The factory verifies that the resolved workspace equals the canonical
+=threads_root/thread_id/domain= before reading authority or contacting Docker.
+A cross-thread workspace symlink fails that check. Browser-capable factories
+require the scope. Generic factories keep supporting arbitrary temporary
+workspaces without reading or creating browser authority, including a directory
+whose name happens to be =domain=.
+
+The ordinary web wrapper supplies the scope for visible, hidden and nonbrowser
+turns. The web Pi caller passes the same tuple through its runtime to the Pi
+sandbox factory. Both managed factory paths retain positive browser stop proof
+before replacing an unconfirmed browser generation. No new browser authority or
+model-visible capability is introduced.
+
+For public browser mode, valid private Playwright snapshots are sent to the
+browser worker for restore; they are withheld from the model. The manager's
+restore comment is corrected to state that boundary.
+
+* Verification boundary
+
+Affected no-Docker checks cover generic callers, cross-thread workspace symlinks,
+managed nonbrowser and Pi stop proof, and web/Pi scope propagation. Independent
+security/lifecycle and dedicated documentation reviews cover the changed host
+interfaces. Model-visible instructions and eval fixtures are unchanged; the
+matched pre-V1 N3 and V1 N3/N5/N10 evidence remains applicable. Docker image,
+launcher, runner, UID fence, seccomp and isolated-test inputs are unchanged;
+root's isolated Chromium/deadline/egress proof applies to those bytes. New host
+scope behavior is proved by the affected checks rather than by claiming the
+old Docker test exercised this new parameter.
+
+Root owns composition, acceptance and deployment. This record does not claim
+that the corrected candidate is live.
+
+* Historical supersessions
+
+This corrects the =Solution= section of
+=2026-09-30-headless-browser-v1-turn-scoped.org=: retaining a browser lease alone
+is insufficient to constrain replacement if a generic workspace is guessed to
+be that thread. Managed factory calls now bind the exact thread explicitly;
+generic calls have no inferred browser authority. The turn lifetime and private
+continuity design otherwise remains as recorded there.

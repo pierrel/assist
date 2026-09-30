@@ -26,3 +26,20 @@ def test_browser_tools_and_skill_route_are_web_main_only(tmp_path):
     assert "/browser-skill/" not in triage.skill_sources
     assert browser_open not in delegate.tools
     assert "/browser-skill/" not in delegate.skill_sources
+
+
+def test_managed_main_and_child_sandboxes_bind_thread_authority(tmp_path, monkeypatch):
+    from manage.web import state
+    from assist.sandbox_manager import SandboxManager
+
+    monkeypatch.setattr(state.MANAGER, "root_dir", str(tmp_path))
+    monkeypatch.setattr(state, "_get_domain_manager", lambda _tid: None)
+    calls = []
+    monkeypatch.setattr(SandboxManager, "get_sandbox_backend",
+                        lambda work_dir, **kwargs: calls.append((work_dir, kwargs)))
+    for include_agent in (True, False):
+        state._get_sandbox_backend("thread", include_agent=include_agent)
+    assert len(calls) == 2
+    for work_dir, kwargs in calls:
+        assert work_dir == str(tmp_path / "thread" / "domain")
+        assert kwargs["thread_scope"] == (str(tmp_path), "thread")
