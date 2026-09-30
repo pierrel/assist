@@ -1,1 +1,1 @@
-"""Isolated browser sidecar and host-side Run controls."""
+"""Turn-scoped browser worker and host-side Run controls."""

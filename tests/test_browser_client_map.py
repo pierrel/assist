@@ -10,7 +10,7 @@ import pytest
 from assist.egress.client_map import (
     ClientRecord, _locked, clear_clients, forget_client, prune_absent_browser_clients,
     record_browser_client,
-    record_client, read_client)
+    record_client, read_client, set_sandbox_browser_mode)
 
 
 def _writer(directory, ip, generation, entered=None, release=None):
@@ -50,6 +50,22 @@ def test_pi_registration_overwrites_recycled_shell_grant(tmp_path):
     record_client(str(tmp_path), ip, ClientRecord("approved", "old", "sandbox"))
     record_client(str(tmp_path), ip, ClientRecord("approved", "pi-generation", "pi"))
     assert read_client(str(tmp_path), ip).kind == "pi"
+
+
+def test_sandbox_browser_mode_preserves_shell_identity_and_pins_turn(tmp_path):
+    directory = str(tmp_path)
+    ip = "172.20.0.2"
+    initial = ClientRecord("thread", "generation", "sandbox")
+    record_client(directory, ip, initial)
+    armed = set_sandbox_browser_mode(directory, ip, initial, "public")
+    assert read_client(directory, ip) == armed
+    with pytest.raises(RuntimeError, match="identity changed"):
+        set_sandbox_browser_mode(directory, ip, initial, "internal",
+                                 "host.docker.internal", 5050)
+    record_client(directory, ip, ClientRecord("other", "new-generation", "sandbox"))
+    with pytest.raises(RuntimeError, match="identity changed"):
+        set_sandbox_browser_mode(directory, ip, initial, "public")
+    assert read_client(directory, ip).generation == "new-generation"
 
 
 def test_late_browser_a_cannot_overwrite_recycled_ip_owner_b(tmp_path):
@@ -146,6 +162,8 @@ def test_internal_record_requires_one_valid_effective_port():
     record = ClientRecord("thread", "generation", "browser", "internal",
                           "host.docker.internal", 5050)
     assert record.to_dict()["internal_port"] == 5050
+    with pytest.raises(ValueError, match="browser policy"):
+        ClientRecord("thread", "generation", "sandbox", "public", "")
 
 
 def test_restart_drops_legacy_portless_internal_record_without_grant(tmp_path):

@@ -51,13 +51,21 @@ class ClientRecord:
                 or not self.generation or len(self.generation) > 128
                 or self.kind not in {"sandbox", "browser", "pi"}):
             raise ValueError("invalid proxy client identity")
-        if self.kind in {"sandbox", "pi"}:
-            if (self.browser_mode is not None or self.internal_host is not None
-                    or self.internal_port is not None):
-                raise ValueError("sandbox has browser policy fields")
-        elif (self.browser_mode not in {"public", "internal"}
-              or (self.browser_mode == "internal") != bool(self.internal_host)
-              or (self.browser_mode == "internal") != (type(self.internal_port) is int)
+        if self.kind == "pi" and any((self.browser_mode, self.internal_host,
+                                      self.internal_port)):
+            raise ValueError("Pi has browser policy fields")
+        if self.kind == "browser" and self.browser_mode is None:
+            raise ValueError("browser policy is missing")
+        if self.browser_mode is None:
+            if self.internal_host is not None or self.internal_port is not None:
+                raise ValueError("invalid browser policy")
+        elif (self.kind == "pi" or self.browser_mode not in {"public", "internal"}
+              or (self.browser_mode == "public"
+                  and (self.internal_host is not None or self.internal_port is not None))
+              or (self.browser_mode == "internal"
+                  and (not isinstance(self.internal_host, str)
+                       or not self.internal_host
+                       or type(self.internal_port) is not int))
               or (self.internal_port is not None
                   and not 1 <= self.internal_port <= 65535)):
             raise ValueError("invalid browser policy")
@@ -152,6 +160,24 @@ def record_client(directory: str, ip: str, record: ClientRecord) -> None:
         _write(path, entries)
 
 
+def set_sandbox_browser_mode(directory: str, ip: str, expected: ClientRecord,
+                             mode: str, host: str | None = None,
+                             port: int | None = None) -> ClientRecord:
+    """Pin browser policy to one exact sandbox generation for its turn."""
+    if expected.kind != "sandbox" or expected.browser_mode is not None:
+        raise ValueError("expected ordinary sandbox identity")
+    record = ClientRecord(expected.thread_id, expected.generation, "sandbox",
+                          mode, host, port)
+    with _locked(directory) as path:
+        entries = _read(path)
+        ip = _validate_ip(ip)
+        if entries.get(ip) != expected.to_dict():
+            raise RuntimeError("sandbox browser identity changed")
+        entries[ip] = record.to_dict()
+        _write(path, entries)
+    return record
+
+
 def record_browser_client(directory: str, ip: str, record: ClientRecord,
                           *, timeout: float = 1) -> None:
     """A late browser launch cannot overwrite another live IP generation."""
@@ -190,7 +216,8 @@ def prune_absent_browser_clients(
     """Compare-delete stale browser IP+generation records after an unlocked scan."""
     with _locked(directory) as path:
         snapshot = {ip: value for ip, value in _read(path).items()
-                    if value["kind"] == "browser"}
+                    if value["kind"] == "browser" or
+                    (value["kind"] == "sandbox" and "browser_mode" in value)}
     # Docker must never run while holding the map lock needed by admission.
     live = running_endpoints()
     if (not isinstance(live, set) or any(
@@ -212,10 +239,19 @@ def prune_absent_browser_clients(
 
 
 def browser_records(directory: str, thread_id: str) -> dict[str, ClientRecord]:
-    """Read exact browser client-map records for one thread."""
+    """Read sidecars and armed turn sandboxes for one thread."""
     with _locked(directory) as path:
         return {ip: ClientRecord(**value) for ip, value in _read(path).items()
-                if value["kind"] == "browser" and value["thread_id"] == thread_id}
+                if value["thread_id"] == thread_id
+                and (value["kind"] == "browser" or
+                     (value["kind"] == "sandbox" and "browser_mode" in value))}
+
+
+def sandbox_browser_records(directory: str) -> dict[str, ClientRecord]:
+    """Find turn sandboxes whose browser proxy endpoint is still armed."""
+    with _locked(directory) as path:
+        return {ip: ClientRecord(**value) for ip, value in _read(path).items()
+                if value["kind"] == "sandbox" and "browser_mode" in value}
 
 
 def read_client(directory: str, ip: str) -> ClientRecord | None:

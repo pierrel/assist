@@ -1,5 +1,6 @@
 """User-origin attribution and affirmative exact-host admission."""
 import json
+from types import SimpleNamespace
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, RLock
@@ -100,7 +101,7 @@ def test_internal_open_rejects_other_port_before_sidecar_start(monkeypatch, tmp_
     assert started == [("internal", "host.docker.internal", 5050)]
 
 
-def test_bare_host_switches_default_ports_with_new_internal_identity(
+def test_bare_host_cannot_switch_port_with_live_browser_in_one_turn(
         monkeypatch, tmp_path):
     monkeypatch.setattr(browser, "_load_egress_allowlist",
                         lambda: ["host.docker.internal"])
@@ -119,8 +120,9 @@ def test_bare_host_switches_default_ports_with_new_internal_identity(
 
     monkeypatch.setattr(session, "_stop", stop)
     monkeypatch.setattr(session, "_start", lambda *args: events.append(args))
-    session._ensure_mode("https://host.docker.internal/")
-    assert events == ["stop-80", ("internal", "host.docker.internal", 443)]
+    with pytest.raises(browser.BrowserUnavailable, match="fixed until the next turn"):
+        session._ensure_mode("https://host.docker.internal/")
+    assert events == []
 
 
 @pytest.mark.parametrize("url", [
@@ -215,7 +217,7 @@ def test_held_event_fences_old_internal_tool_before_worker_runs(tmp_path):
         session.command("observe", page_id="old-page")
 
 
-def test_held_events_promote_in_sequence_and_only_latest_rebinds(monkeypatch, tmp_path):
+def test_held_events_promote_without_cross_work_consent_rebind(monkeypatch, tmp_path):
     (tmp_path / "t").mkdir()
     authority.mark_new_thread(str(tmp_path), "t")
     runs = RunService(str(tmp_path))
@@ -259,7 +261,7 @@ def test_held_events_promote_in_sequence_and_only_latest_rebinds(monkeypatch, tm
     assert [runs.get("t", run.id).status for run in (first, second)] == [
         "pending", "pending"]
     assert runs.get("t", first.id).browser_reset_notice is True
-    assert session.user_request.event_id == second.id
+    assert session.user_request is None
 
 
 def test_failed_reset_keeps_message_held_with_retry(monkeypatch, tmp_path):
@@ -382,7 +384,8 @@ def test_held_event_stays_queued_while_browser_startup_holds_thread_gate(
         def release(self):
             real_gate.release()
 
-    def stalled_start(_request, timeout):
+    def stalled_start(_argv, **kwargs):
+        timeout = kwargs["timeout"]
         assert timeout <= 20
         entered.set()
         assert release.wait(3)
@@ -393,9 +396,15 @@ def test_held_event_stays_queued_while_browser_startup_holds_thread_gate(
     monkeypatch.setattr(browser.BrowserManager, "current_session",
                         lambda _tid: session)
     monkeypatch.setattr(browser, "configured_directory", lambda: str(tmp_path))
+    monkeypatch.setattr(browser.SandboxManager, "current_container",
+                        lambda _work_dir: SimpleNamespace(id="generation"))
+    monkeypatch.setattr(browser.SandboxManager, "_egress_client_ips", {
+        str(tmp_path): (str(tmp_path), "172.20.0.9", "generation")})
+    monkeypatch.setattr(browser, "_kill_container_confirmed", lambda _gen: None)
+    monkeypatch.setattr(browser, "forget_client", lambda *_args: None)
     monkeypatch.setattr(browser, "_load_egress_allowlist",
                         lambda: ["host.docker.internal"])
-    monkeypatch.setattr(browser, "_launch_sidecar_bounded", stalled_start)
+    monkeypatch.setattr(browser, "_bounded_cli", stalled_start)
     monkeypatch.setattr(threads, "_runs", lambda: runs)
     monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
     scheduled = []
@@ -411,7 +420,7 @@ def test_held_event_stays_queued_while_browser_startup_holds_thread_gate(
         assert runs.get("t", held.id).status == "revocation_pending"
         assert scheduled == ["t"]
         release.set()
-        with pytest.raises(browser.BrowserUnavailable, match="startup transport"):
+        with pytest.raises(browser.BrowserUnavailable, match="startup failed"):
             opening.result(timeout=3)
 
 
@@ -452,10 +461,12 @@ def test_thread_deletion_stops_browser_before_erasing_run_journal(
     monkeypatch.setattr(threads.RUN_STREAMS, "mark_thread_gone", lambda _tid: None)
     monkeypatch.setattr(browser.BrowserManager, "cleanup",
                         lambda _tid: calls.append("browser"))
-    monkeypatch.setattr(threads.MANAGER, "hard_delete",
+    monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped",
+                        lambda *_args: calls.append("proof"))
+    monkeypatch.setattr(threads.MANAGER, "_hard_delete_after_browser_stop",
                         lambda _tid, on_delete=None: calls.append("journal"))
     threads._delete_thread_and_children("t")
-    assert calls == ["browser", "journal"]
+    assert calls == ["browser", "proof", "journal"]
     assert runs.get("t", held.id).status == "revocation_pending"
 
 
@@ -466,7 +477,7 @@ def test_failed_browser_stop_prevents_thread_deletion(monkeypatch, tmp_path):
     monkeypatch.setattr(browser.BrowserManager, "cleanup",
                         lambda _tid: (_ for _ in ()).throw(
                             browser.BrowserUnavailable("stop unconfirmed")))
-    monkeypatch.setattr(threads.MANAGER, "hard_delete",
+    monkeypatch.setattr(threads.MANAGER, "_hard_delete_after_browser_stop",
                         lambda *_args, **_kwargs: calls.append("journal"))
     with pytest.raises(browser.BrowserUnavailable, match="stop unconfirmed"):
         threads._delete_thread_and_children("t")
@@ -481,13 +492,15 @@ def test_deletion_gate_rejects_late_browser_registration(monkeypatch, tmp_path):
     monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
     monkeypatch.setattr(threads.RUN_STREAMS, "mark_thread_gone", lambda _tid: None)
     monkeypatch.setattr(browser.BrowserManager, "cleanup", lambda _tid: None)
+    monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped",
+                        lambda *_args: None)
 
     def erase(_tid, on_delete=None):
         entered.set()
         assert release.wait(3)
         (tmp_path / "t").rmdir()
 
-    monkeypatch.setattr(threads.MANAGER, "hard_delete", erase)
+    monkeypatch.setattr(threads.MANAGER, "_hard_delete_after_browser_stop", erase)
     session = browser.BrowserSession(
         "t", "late-run", str(tmp_path), str(tmp_path), None)
     with ThreadPoolExecutor(max_workers=2) as pool:

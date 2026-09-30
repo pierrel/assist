@@ -1,14 +1,18 @@
-"""Host transport remains bounded under repeated Docker/sidecar stalls."""
+"""Host browser transport and exact Docker teardown stay bounded."""
 import fcntl
+import json
 import os
 import sys
 import threading
 import time
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from assist.browser import manager as browser
 from assist.browser import authority
+from assist.browser import storage
 from assist.run_service import RunService
 
 
@@ -83,7 +87,7 @@ def test_auto_removed_sidecar_inspect_is_confirmed_with_lowercase_docker_error(
     assert calls == [["docker", "kill"], ["docker", "inspect"]]
 
 
-def test_uncertain_startup_cannot_accumulate_sidecars_in_one_run(
+def test_uncertain_turn_startup_cannot_repeat_in_one_run(
         monkeypatch, tmp_path):
     (tmp_path / "thread").mkdir()
     authority.mark_new_thread(str(tmp_path), "thread")
@@ -93,18 +97,84 @@ def test_uncertain_startup_cannot_accumulate_sidecars_in_one_run(
         "thread", run.id, str(tmp_path), str(tmp_path), None)
     monkeypatch.setattr(browser, "configured_directory", lambda: str(tmp_path))
     monkeypatch.setattr(browser, "_load_egress_allowlist", lambda: [])
+    monkeypatch.setattr(browser.SandboxManager, "current_container",
+                        lambda _work_dir: SimpleNamespace(id="generation"))
+    monkeypatch.setattr(browser.SandboxManager, "_egress_client_ips", {
+        str(tmp_path): (str(tmp_path), "172.20.0.9", "generation")})
+    monkeypatch.setattr(browser, "_kill_container_confirmed", lambda _gen: None)
+    monkeypatch.setattr(browser, "forget_client", lambda *_args: None)
     launches = []
 
     def timed_out(*_args, **_kwargs):
         launches.append(1)
         raise browser.BrowserUnavailable("browser transport timed out")
 
-    monkeypatch.setattr(browser, "_launch_sidecar_bounded", timed_out)
-    with pytest.raises(browser.BrowserUnavailable, match="timed out"):
+    monkeypatch.setattr(browser, "_bounded_cli", timed_out)
+    with pytest.raises(browser.BrowserUnavailable, match="startup failed"):
         session.command("open", url="https://example.com/")
     with pytest.raises(browser.BrowserUnavailable, match="outcome is unconfirmed"):
         session.command("open", url="https://example.com/")
     assert launches == [1]
+
+
+def test_turn_session_rejects_replaced_sandbox_generation(monkeypatch, tmp_path):
+    session = browser.BrowserSession(
+        "thread", "run", str(tmp_path), str(tmp_path), None,
+        sandbox_generation="original")
+    monkeypatch.setattr(browser.SandboxManager, "current_container",
+                        lambda _work_dir: SimpleNamespace(id="replacement"))
+    monkeypatch.setattr(browser.SandboxManager, "_egress_client_ips", {
+        str(tmp_path): (str(tmp_path), "172.20.0.9", "replacement")})
+    monkeypatch.setattr(browser, "configured_directory", lambda: str(tmp_path))
+    with pytest.raises(browser.BrowserUnavailable, match="identity changed"):
+        session._start("public", None, None)
+
+
+def test_invalid_private_snapshot_loses_continuity_without_blocking_browser(
+        monkeypatch, tmp_path):
+    (tmp_path / "thread").mkdir()
+    authority.mark_new_thread(str(tmp_path), "thread")
+    runs = RunService(str(tmp_path))
+    run = runs.create("thread", "general-agent", "Read a public page",
+                      user_origin=True)
+    session = browser.BrowserSession(
+        "thread", run.id, str(tmp_path), str(tmp_path), None,
+        run_service=runs)
+    session.boot_id, session.deadline_ns = runs.bind_browser_deadline(
+        "thread", run.id)
+    with authority.fence(str(tmp_path), "thread") as state:
+        state.begin(run.id, run.admission_sequence)
+    monkeypatch.setattr(browser.SandboxManager, "current_container",
+                        lambda _work_dir: SimpleNamespace(id="generation"))
+    monkeypatch.setattr(browser.SandboxManager, "_egress_client_ips", {
+        str(tmp_path): (str(tmp_path), "172.20.0.9", "generation")})
+    monkeypatch.setattr(browser, "configured_directory", lambda: str(tmp_path))
+    monkeypatch.setattr(browser, "_bounded_cli", lambda *_args, **_kwargs:
+                        json.dumps({"generation": "generation", "ip": "172.20.0.9",
+                                    "map_dir": str(tmp_path)}).encode())
+    monkeypatch.setattr(storage, "load", lambda *_args: (_ for _ in ()).throw(
+        ValueError("damaged snapshot")))
+    monkeypatch.setattr(browser, "_docker_exec", lambda *_args, **_kwargs:
+                        b'{"result":null}')
+    monkeypatch.setattr(browser, "_kill_container_confirmed", lambda _id: None)
+    monkeypatch.setattr(browser, "forget_client", lambda *_args: None)
+    session._start("public", None, None)
+    assert session.identity.generation == "generation"
+    session.close()
+
+
+def test_failed_stop_keeps_deadline_timer_and_identity(monkeypatch, tmp_path):
+    session = browser.BrowserSession(
+        "thread", "run", str(tmp_path), str(tmp_path), None)
+    session.identity = browser._ContainerIdentity(
+        str(tmp_path), "172.20.0.9", "generation", "public", None)
+    session.expiry_timer = MagicMock()
+    monkeypatch.setattr(browser, "_kill_container_confirmed", lambda _id: (
+        _ for _ in ()).throw(browser.BrowserUnavailable("stop unconfirmed")))
+    with pytest.raises(browser.BrowserUnavailable, match="stop unconfirmed"):
+        session._stop()
+    session.expiry_timer.cancel.assert_not_called()
+    assert session.identity.generation == "generation"
 
 
 def test_failed_command_kills_sidecar_before_releasing_session(monkeypatch, tmp_path):
@@ -175,10 +245,57 @@ def test_command_transport_is_clamped_and_late_result_is_rejected(
     monkeypatch.setattr(session, "_remaining", lambda: next(remaining))
     observed = []
     monkeypatch.setattr(browser, "_docker_exec",
-                        lambda _gen, _cmd, *, timeout: (
+                        lambda _gen, _cmd, *, timeout, in_sandbox: (
                             observed.append(timeout) or b'{"result": {}}'))
     monkeypatch.setattr(browser, "_kill_container_confirmed", lambda gen: None)
     with pytest.raises(browser.BrowserUnavailable, match="deadline expired"):
         session.command("observe", page_id="p1")
     assert observed == [0.4]
     assert session.identity is None
+
+
+def test_missing_thread_directory_still_stops_exact_turn_sandbox(
+        monkeypatch, tmp_path):
+    stopped = []
+    monkeypatch.setattr(browser, "configured_directory", lambda: None)
+    monkeypatch.setattr(browser, "_sandbox_generations",
+                        lambda root, tid: {"sandbox-generation"})
+    monkeypatch.setattr(browser, "_bounded_cli", lambda *_a, **_k: b"")
+    monkeypatch.setattr(browser, "_kill_container_confirmed", stopped.append)
+    monkeypatch.setattr(browser.SandboxManager, "_ensure_egress_proxy_bounded",
+                        lambda: None)
+
+    assert browser.BrowserManager.confirm_owner_stopped(
+        str(tmp_path), "deleted-thread", None) is True
+    assert stopped == ["sandbox-generation"]
+
+
+def test_sandbox_generation_scan_matches_exact_thread_mount(
+        monkeypatch, tmp_path):
+    def docker(argv, **_kwargs):
+        if argv[1] == "ps":
+            return b"target\nother\n"
+        assert argv[1] == "inspect"
+        return (json.dumps([{"Destination": "/workspace",
+                             "Source": str(tmp_path / "target-thread" / "domain")}])
+                + "\n" + json.dumps([{"Destination": "/workspace",
+                                         "Source": str(tmp_path / "other" / "domain")}])
+                + "\n").encode()
+
+    monkeypatch.setattr(browser, "_bounded_cli", docker)
+    assert browser._sandbox_generations(
+        str(tmp_path), "target-thread") == {"target"}
+
+
+def test_turn_browser_transport_uses_private_socket_and_download_dir(monkeypatch):
+    commands = []
+    monkeypatch.setattr(browser, "_bounded_cli",
+                        lambda argv, **_kwargs: commands.append(argv) or b"{}")
+    browser._docker_exec("generation", b"{}", in_sandbox=True)
+    browser._docker_download(
+        "generation", "/run/assist-browser/downloads/report.txt",
+        in_sandbox=True)
+    assert ["-e", "BROWSER_RUNTIME_DIR=/run/assist-browser"] == commands[0][
+        commands[0].index("-e"):commands[0].index("-e") + 2]
+    assert ["-e", "BROWSER_DOWNLOAD_DIR=/run/assist-browser/downloads"] == (
+        commands[1][commands[1].index("-e"):commands[1].index("-e") + 2])

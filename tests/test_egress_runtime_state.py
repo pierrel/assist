@@ -59,7 +59,8 @@ def _client():
             EGRESS_NETWORK: {"NetworkID": ordinary.id},
             **({BROWSER_NETWORK: {"NetworkID": browser.id}}
                if kwargs["environment"]["EGRESS_BROWSER_CIDR"] else {})}}}
-        new.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888"
+        new.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n" + \
+            b"egress-proxy: listening on 0.0.0.0:8889"
         current["proxy"] = new
         return {"Id": new.id}
 

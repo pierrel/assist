@@ -68,7 +68,7 @@ def wired(tmp_path, monkeypatch):
         lambda t, sandbox_backend=None, on_queue_state=None, configurable=None,
         triage=False, continuation=False: chat)
     monkeypatch.setattr("manage.web.threads._get_sandbox_backend",
-                        lambda t, tz=None: None)
+                        lambda t, tz=None, **_kwargs: None)
     monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda t: None)
     monkeypatch.setattr("manage.web.threads.get_cached_description", lambda t: "stub")
     monkeypatch.setattr("manage.web.threads.SandboxManager.cleanup", lambda wd, expected=None: None)

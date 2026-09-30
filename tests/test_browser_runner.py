@@ -1,4 +1,5 @@
 """Observed browser targets remain bound to their live DOM semantics."""
+import io
 import json
 from types import SimpleNamespace
 
@@ -63,12 +64,36 @@ def _observed(worker, element):
         element, *worker._target_state(element, _Page.url))}
 
 
-def test_sidecar_pid1_is_inert_until_registered_command(monkeypatch):
+def test_turn_worker_is_inert_until_registered_command(monkeypatch):
     monkeypatch.setattr(runner, "sync_playwright", lambda: (_ for _ in ()).throw(
         AssertionError("Chromium must not start before an attributed command")))
     worker = BrowserWorker()
     assert worker.browser is None and worker.context is None
     assert worker.pages == {}
+
+
+def test_worker_page_ids_change_with_sandbox_generation(monkeypatch):
+    monkeypatch.setenv("BROWSER_GENERATION", "generation-one")
+    first = BrowserWorker()._register_page(_Page())
+    monkeypatch.setenv("BROWSER_GENERATION", "generation-two")
+    second = BrowserWorker()._register_page(_Page())
+    assert first.startswith("generation-one-")
+    assert second.startswith("generation-two-")
+    assert first != second
+
+
+def test_storage_is_opaque_bounded_and_only_loaded_before_context():
+    worker = BrowserWorker()
+    state = {"cookies": [{"name": "session", "value": "private"}], "origins": []}
+    assert worker.load_storage(state) == {"loaded": True}
+    assert worker.initial_storage == state
+    worker.context = SimpleNamespace(storage_state=lambda **kwargs: state)
+    assert worker.storage_state() == state
+    with pytest.raises(BrowserInputError, match="already active"):
+        worker.load_storage(state)
+    worker.context = None
+    with pytest.raises(BrowserInputError, match="exceeds limit"):
+        worker.load_storage({"cookies": "x" * runner.MAX_STORAGE})
 
 
 @pytest.mark.parametrize("selector", [
@@ -432,3 +457,18 @@ def test_ninth_download_is_cancelled_and_reported():
     worker._register_download(SimpleNamespace(cancel=lambda: cancelled.append(True)))
     assert cancelled == [True]
     assert worker.errors[-1]["reason"] == "download_limit"
+
+
+def test_ready_parses_empty_proc_status_fields(monkeypatch):
+    status = ("Uid:\t10001\t10001\t10001\t10001\n"
+              "Gid:\t10001\t10001\t10001\t10001\n"
+              "VmLck:\t\n"
+              + "".join(f"{name}:\t0000000000000000\n" for name in (
+                  "CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"))
+              + "NoNewPrivs:\t1\nSeccomp:\t2\n")
+    monkeypatch.setattr(runner, "open", lambda *_args, **_kwargs:
+                        io.StringIO(status), raising=False)
+    ready = BrowserWorker().ready()
+    assert ready["caps"] == ["0000000000000000"] * 5
+    assert ready["no_new_privs"] == "1"
+    assert ready["seccomp"] == "2"

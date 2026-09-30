@@ -60,6 +60,9 @@ BROWSER_NETWORK = "assist-browser-network"
 EGRESS_PROXY_NAME = "assist-egress-proxy"
 EGRESS_PROXY_IMAGE = "assist-egress-proxy"
 EGRESS_PROXY_PORT = 8888
+BROWSER_PROXY_PORT = 8889
+BROWSER_SECCOMP_PROFILE = os.path.join(
+    os.path.dirname(__file__), "..", "dockerfiles", "browser-seccomp.json")
 EGRESS_ALLOWLIST_FILE = os.path.join(
     os.path.dirname(__file__), "..", "dockerfiles", "egress-allowlist.conf"
 )
@@ -90,7 +93,7 @@ def _egress_proxy_config_hash(allowlist_csv: str, approvals_dir: str | None,
     destination policy recreate once and gain the current behavior. The
     service UID/GID binds proxy read access to host-only map mounts."""
     return hashlib.sha256(
-        (allowlist_csv + "|v7-browser-port-user-policy:"
+        (allowlist_csv + "|v8-turn-browser-listener:"
          + f"{os.getuid()}:{os.getgid()}|" + (approvals_dir or "")
          + "|" + (map_dir or "") + "|" + network_ref).encode()
     ).hexdigest()[:16]
@@ -227,6 +230,17 @@ class SandboxManager:
             map_dir = None
 
         with cls._egress_lock, _proxy_setup_lock():
+            browser_armed = False
+            if map_dir:
+                from assist.egress.client_map import sandbox_browser_records
+                browser_armed = bool(sandbox_browser_records(map_dir))
+            if browser_armed and any(runtime_state.pending_creation(kind, name)
+                                     for kind, name in (
+                                         ("network", EGRESS_NETWORK),
+                                         ("network", BROWSER_NETWORK),
+                                         ("proxy", EGRESS_PROXY_NAME))):
+                raise RuntimeError(
+                    "browser turn still pins the egress proxy endpoint")
             ordinary_creation_token = None
             browser_creation_token = None
             for name in ((EGRESS_NETWORK, BROWSER_NETWORK)
@@ -284,6 +298,9 @@ class SandboxManager:
             try:
                 egress_net = client.networks.get(EGRESS_NETWORK)
             except NotFound:
+                if browser_armed:
+                    raise RuntimeError(
+                        "browser turn still pins the egress proxy endpoint")
                 ordinary_creation_token = uuid4().hex
                 runtime_state.begin_creation("network", EGRESS_NETWORK,
                                              ordinary_creation_token)
@@ -313,6 +330,9 @@ class SandboxManager:
                 try:
                     browser_net = client.networks.get(BROWSER_NETWORK)
                 except NotFound:
+                    if browser_armed:
+                        raise RuntimeError(
+                            "browser turn still pins the egress proxy endpoint")
                     browser_creation_token = uuid4().hex
                     runtime_state.begin_creation("network", BROWSER_NETWORK,
                                                  browser_creation_token)
@@ -370,6 +390,10 @@ class SandboxManager:
                 )
             if not needs_recreate:
                 return EGRESS_PROXY_NAME
+
+            if browser_armed:
+                raise RuntimeError(
+                    "browser turn still pins the egress proxy endpoint")
 
             if os.getuid() == 0:
                 raise RuntimeError("egress proxy cannot run as root")
@@ -475,9 +499,9 @@ class SandboxManager:
 
     @classmethod
     def _wait_for_egress_proxy_ready(cls, proxy, timeout: float = 10.0) -> None:
-        """Block until the proxy logs 'listening on'.
+        """Block until both ordinary and browser proxy listeners are bound.
 
-        The proxy's TCP listener is bound only after Python startup +
+        The proxy's TCP listeners are bound only after Python startup +
         allowlist parse + ``socket.bind`` — typically <100ms but not
         instant.  Without this, the very first sandbox launched
         immediately after a proxy recreate can hit connection-refused
@@ -491,18 +515,20 @@ class SandboxManager:
                 logs = proxy.logs().decode("utf-8", errors="replace")
             except Exception:
                 logs = ""
-            if "listening on" in logs:
+            if (f"listening on 0.0.0.0:{EGRESS_PROXY_PORT}" in logs
+                    and f"listening on 0.0.0.0:{BROWSER_PROXY_PORT}" in logs):
                 return
             time.sleep(0.1)
         raise RuntimeError(
-            f"Egress proxy {proxy.id[:12]} did not report 'listening on' "
+            f"Egress proxy {proxy.id[:12]} did not report both listeners "
             f"within {timeout}s.  Last logs: {logs[-500:]!r}"
         )
 
     @classmethod
     def _get_sandbox_backend(cls, work_dir: str, tz: str | None,
                              agent_dir: str | None, include_assist_env: bool,
-                             include_egress_approvals: bool):
+                             include_egress_approvals: bool,
+                             browser_capable: bool = False):
         """Create one per-turn sandbox from a named authority profile.
 
         ``include_assist_env`` is the line between ordinary Deep Agents work and
@@ -518,6 +544,18 @@ class SandboxManager:
         # keyed by work_dir, so creating without reaping would overwrite the
         # reference and orphan it (the 3h backstop TTL would eventually catch
         # it, but reaping now is immediate).
+        from assist.browser import authority
+        from assist.browser.manager import BrowserManager
+
+        thread_dir = os.path.dirname(os.path.realpath(work_dir))
+        threads_root = os.path.dirname(thread_dir)
+        thread_id = os.path.basename(thread_dir)
+        with authority.fence(threads_root, thread_id) as state:
+            browser_stop_owed = state.lease is not None
+        if browser_stop_owed:
+            # System and SMS turns use the same workspace without browser
+            # tools. They still cannot replace an unconfirmed browser sandbox.
+            BrowserManager.confirm_owner_stopped(threads_root, thread_id, None)
         if work_dir in cls._containers:
             cls.cleanup(work_dir)
 
@@ -561,15 +599,16 @@ class SandboxManager:
                 "whole threads dir at once, $ASSIST_THREADS_DIR).  "
                 "See docs/2026-05-08-restrict-git-real-via-non-root-sandbox.org."
             )
+        if browser_capable and st.st_uid == 10001:
+            raise RuntimeError(
+                "Workspace owner conflicts with the reserved browser identity")
         # SINGLE SOURCE OF TRUTH for the sandbox run user.  This one value
         # (the workspace owner) is applied via `containers.run(user=...)`
-        # below and governs everything downstream: every `exec_run` inherits
-        # it (no call passes `user=`), and `DockerSandboxBackend.upload_files`
+        # below and governs agent tool execution; DockerSandboxBackend.upload_files
         # reads it back off the container (`_run_uid_gid`) to stamp uploaded
-        # files with the same ownership — otherwise put_archive's root default
-        # leaves write_file output un-editable.  New features must NOT pass a
-        # different `user=` to `exec_run` or hardcode a uid; derive from the
-        # container's run user so ownership and execution stay aligned.
+        # files with the same ownership. The host-controlled browser launcher
+        # is the deliberate exception: it uses a separate fixed UID and a
+        # private runtime tmpfs so Chromium cannot inherit the agent identity.
         user_arg = f"{st.st_uid}:{st.st_gid}"
 
         runtime_state.assert_outside_mounts(
@@ -596,8 +635,8 @@ class SandboxManager:
             proxy_url = f"http://{EGRESS_PROXY_NAME}:{EGRESS_PROXY_PORT}"
             # This ordinary shell sandbox is on an internal Docker network;
             # its configured HTTP(S) clients use the shared egress proxy.
-            # The browser uses a separate isolated-gateway bridge to block
-            # direct host and upstream routes, including raw TCP/UDP.
+            # A separate browser UID uses a kernel OUTPUT fence and its own
+            # proxy listener; shell traffic keeps this ordinary route.
             #
             # NO_PROXY is not set: configured HTTP(S) client traffic uses
             # the proxy. ASSIST_MODEL_URL (rewritten to host.docker.internal)
@@ -645,6 +684,14 @@ class SandboxManager:
                     "mode": "rw",
                 }
 
+            browser_options = {}
+            if browser_capable:
+                with open(BROWSER_SECCOMP_PROFILE, encoding="utf-8") as profile:
+                    browser_options = {
+                        "tmpfs": {"/run/assist-browser":
+                                  "rw,nosuid,nodev,size=134217728,uid=10001,gid=10001,mode=0700"},
+                        "security_opt": ["seccomp=" + profile.read()],
+                    }
             container = client.containers.run(
                 SANDBOX_IMAGE,
                 detach=True,
@@ -657,6 +704,7 @@ class SandboxManager:
                 labels={"assist.sandbox": "true"},
                 network=EGRESS_NETWORK,
                 environment=sandbox_env,
+                **browser_options,
             )
             logger.info("Started sandbox container %s for %s", container.id[:12], work_dir)
             cls._containers[work_dir] = container
@@ -677,10 +725,12 @@ class SandboxManager:
 
     @classmethod
     def get_sandbox_backend(cls, work_dir: str, tz: str | None = None,
-                            agent_dir: str | None = None):
+                            agent_dir: str | None = None,
+                            browser_capable: bool = False):
         """Return the ordinary Docker sandbox, including its established app env."""
         return cls._get_sandbox_backend(
-            work_dir, tz, agent_dir, include_assist_env=True, include_egress_approvals=True)
+            work_dir, tz, agent_dir, include_assist_env=True,
+            include_egress_approvals=True, browser_capable=browser_capable)
 
     @classmethod
     def get_pi_sandbox_backend(cls, work_dir: str, tz: str | None = None):
@@ -783,8 +833,9 @@ class SandboxManager:
         cannot remove a replacement registered for the same workspace.
 
         SIGKILL, not a graceful ``stop()``.  A sandbox has nothing to shut
-        down gracefully — it is ``--rm`` and all durable work is already
-        flushed to the host bind mount — and its PID 1 is a bare ``sleep``
+        down gracefully — it is ``--rm`` and agent files are already on the
+        host bind mount. Browser auth state has a separate best-effort capture
+        on normal turn exit. Its PID 1 is a bare ``sleep``
         with no SIGTERM handler (PID 1 gets no default handlers), so a
         ``stop()`` would just block the full 5s timeout before the daemon
         SIGKILLs anyway.  Killing keeps the per-turn teardown off that 5s
@@ -807,8 +858,9 @@ class SandboxManager:
     def cleanup_all(cls) -> None:
         """Kill all tracked sandbox containers. Removal is automatic (--rm).
 
-        SIGKILL for the same reason as ``cleanup`` (nothing to flush; PID 1
-        ignores SIGTERM) — and at lifespan shutdown a fast teardown is
+        SIGKILL for the same reason as ``cleanup`` (agent files use the host
+        bind mount; PID 1 ignores SIGTERM). Unsaved browser auth state is
+        intentionally lost on shutdown. A fast teardown is
         strictly better than burning 5s per container on the event loop.
         """
         for path, container in list(cls._containers.items()):

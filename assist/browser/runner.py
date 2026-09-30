@@ -1,4 +1,4 @@
-"""Typed Playwright worker reachable only by a Unix socket inside its sidecar."""
+"""Typed Playwright worker reachable only by a private Unix socket."""
 from __future__ import annotations
 
 import json
@@ -14,9 +14,14 @@ from uuid import uuid4
 
 from playwright.sync_api import sync_playwright
 
-SOCKET = "/run/browser.sock"
-MAX_COMMAND = 32768
+RUNTIME_DIR = os.environ.get("BROWSER_RUNTIME_DIR", "/run")
+SOCKET = os.path.join(RUNTIME_DIR, "browser.sock")
+DOWNLOAD_DIR = os.environ.get("BROWSER_DOWNLOAD_DIR", "/downloads")
+PROXY_HOST = os.environ.get("BROWSER_PROXY_HOST", "assist-egress-proxy")
+PROXY_PORT = int(os.environ.get("BROWSER_PROXY_PORT", "8888"))
+MAX_COMMAND = 65536
 MAX_RESULT = 65536
+MAX_STORAGE = 48 * 1024
 SENSITIVE = re.compile(r"password|passcode|one.time|otp|card|cvv|payment", re.I)
 
 
@@ -72,6 +77,8 @@ class BrowserWorker:
         self.downloads = {}
         self.errors = []
         self.failed_hosts = set()
+        self.initial_storage = None
+        self.page_namespace = os.environ.get("BROWSER_GENERATION", uuid4().hex)[:16]
 
     def _start(self):
         if self.context is not None:
@@ -79,10 +86,12 @@ class BrowserWorker:
         try:
             self.playwright = sync_playwright().start()
             self.browser = self.playwright.chromium.launch(
-                headless=True, chromium_sandbox=True, downloads_path="/downloads",
-                proxy={"server": "http://assist-egress-proxy:8888", "bypass": ""})
+                headless=True, chromium_sandbox=True, downloads_path=DOWNLOAD_DIR,
+                proxy={"server": f"http://{PROXY_HOST}:{PROXY_PORT}", "bypass": ""})
             self.context = self.browser.new_context(
-                accept_downloads=True, service_workers="block")
+                accept_downloads=True, service_workers="block",
+                **({"storage_state": self.initial_storage}
+                   if self.initial_storage is not None else {}))
             self.context.set_default_timeout(10000)
             self.context.on("page", self._register_page)
         except Exception:
@@ -114,7 +123,7 @@ class BrowserWorker:
             page.close()
             self._error("<popup>", "document", "page_limit")
             return None
-        page_id = uuid4().hex[:12]
+        page_id = f"{self.page_namespace}-{uuid4().hex[:12]}"
         self.pages[page_id] = page
         self.page_ids[page] = page_id
         page.on("download", self._register_download)
@@ -392,7 +401,7 @@ class BrowserWorker:
         if download is None:
             raise BrowserInputError("unknown download ID")
         path = download.path()
-        if not path or not os.path.realpath(path).startswith("/downloads/"):
+        if not path or not os.path.realpath(path).startswith(DOWNLOAD_DIR + "/"):
             raise BrowserInputError("download is unavailable")
         stat = os.stat(path)
         if not os.path.isfile(path) or stat.st_size > 20 * 1024 * 1024:
@@ -407,7 +416,7 @@ class BrowserWorker:
         host = host.lower()
         if f"{host}:{port}" not in self.failed_hosts:
             raise BrowserInputError("only an observed failed host can be probed")
-        with socket.create_connection(("assist-egress-proxy", 8888), timeout=3) as conn:
+        with socket.create_connection((PROXY_HOST, PROXY_PORT), timeout=3) as conn:
             conn.settimeout(3)
             conn.sendall(f"CONNECT {host}:{port} HTTP/1.1\r\n\r\n".encode())
             head = b""
@@ -435,16 +444,52 @@ class BrowserWorker:
         args = command.get("args") or {}
         if not isinstance(args, dict):
             raise BrowserInputError("invalid browser arguments")
-        methods = {"open": self.open, "close": self.close,
+        methods = {"ready": self.ready, "open": self.open, "close": self.close,
                    "observe": self.observe, "act": self.act,
                    "wait": self.wait, "download_info": self.download_info,
-                   "probe": self.probe}
+                   "probe": self.probe, "load_storage": self.load_storage,
+                   "storage_state": self.storage_state}
         if operation not in methods:
             raise BrowserInputError("unsupported browser operation")
         return methods[operation](**args)
 
+    def ready(self):
+        with open("/proc/self/status", encoding="ascii") as stream:
+            status = {}
+            for line in stream:
+                name, separator, value = line.partition(":\t")
+                if separator:
+                    status[name] = value.strip()
+        return {"pid": os.getpid(), "uid": status["Uid"].split(),
+                "gid": status["Gid"].split(),
+                "caps": [status[name] for name in (
+                    "CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")],
+                "no_new_privs": status["NoNewPrivs"],
+                "seccomp": status["Seccomp"]}
+
+    def load_storage(self, state):
+        """Load an opaque bounded Playwright snapshot before opening a context."""
+        if self.context is not None or not isinstance(state, dict):
+            raise BrowserInputError("browser storage is already active or invalid")
+        encoded = json.dumps(state, separators=(",", ":")).encode()
+        if len(encoded) > MAX_STORAGE:
+            raise BrowserInputError("browser storage exceeds limit")
+        self.initial_storage = state
+        return {"loaded": True}
+
+    def storage_state(self):
+        """Export bounded auth state to the host, never to the model."""
+        if self.context is None:
+            return None
+        state = self.context.storage_state(indexed_db=False)
+        if len(json.dumps(state, separators=(",", ":")).encode()) > MAX_STORAGE:
+            raise BrowserInputError("browser storage exceeds limit")
+        return state
+
 
 def serve():
+    if os.getpid() != 1:
+        os._exit(124)
     with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as stream:
         if stream.read().strip() != os.environ["BROWSER_BOOT_ID"]:
             os._exit(124)
@@ -455,6 +500,7 @@ def serve():
     signal.signal(signal.SIGALRM, lambda _signum, _frame: os._exit(124))
     signal.setitimer(signal.ITIMER_REAL, ttl)
     worker = BrowserWorker()
+    os.makedirs(DOWNLOAD_DIR, mode=0o700, exist_ok=True)
     with socket.socket(socket.AF_UNIX) as server:
         server.bind(SOCKET)
         os.chmod(SOCKET, 0o600)
@@ -493,8 +539,9 @@ def call():
 
 def export(path):
     """Stream one completed tmpfs download; Docker cp cannot read this mount."""
-    if (not path.startswith("/downloads/") or os.path.realpath(path) != path
-            or "/" in path.removeprefix("/downloads/")):
+    prefix = DOWNLOAD_DIR + "/"
+    if (not path.startswith(prefix) or os.path.realpath(path) != path
+            or "/" in path.removeprefix(prefix)):
         raise SystemExit(2)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)

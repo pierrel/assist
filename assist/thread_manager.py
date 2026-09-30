@@ -220,9 +220,8 @@ class ThreadManager:
         from assist.browser.manager import BrowserManager
 
         with BrowserManager.bounded_thread_gate(tid):
-            if os.path.isdir(self.thread_dir(tid)):
-                BrowserManager.cleanup(tid)
-                BrowserManager.confirm_owner_stopped(self.root_dir, tid, None)
+            BrowserManager.cleanup(tid)
+            BrowserManager.confirm_owner_stopped(self.root_dir, tid, None)
             self._hard_delete_after_browser_stop(tid, on_delete)
 
     def _hard_delete_after_browser_stop(

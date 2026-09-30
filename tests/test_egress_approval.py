@@ -24,7 +24,9 @@ from assist.egress import tools as egress_tools_mod
 from assist.egress.tools import (EGRESS_ORIGIN_THREAD_ID, EGRESS_WAITER_RUN_ID,
                                  EGRESS_WAITER_THREAD_ID, egress_tools,
                                  _parse_host_port)
-from assist.egress.client_map import ClientRecord, record_client, forget_client, read_client
+from assist.egress.client_map import (
+    ClientRecord, record_client, forget_client, read_client,
+    set_sandbox_browser_mode)
 
 
 def _store(tmp_path):
@@ -434,6 +436,30 @@ def test_proxy_browser_source_and_mode_policy(proxy_mod, tmp_path, monkeypatch):
     import ipaddress
     monkeypatch.setattr(proxy_mod, "BROWSER_CIDR", ipaddress.ip_network("172.23.0.0/16"))
     assert proxy_mod.target_policy("pypi.org", 443, ip)[1] == "unknown_proxy_source"
+
+
+def test_sandbox_browser_listener_is_stricter_than_shell_listener(
+        proxy_mod, tmp_path, monkeypatch):
+    ip = "172.20.0.8"
+    shell = ClientRecord("t1", "g1", "sandbox")
+    record_client(str(tmp_path), ip, shell)
+    monkeypatch.setattr(proxy_mod, "vet_resolved", lambda host, port, **kwargs: (
+        "93.184.216.34" if host == "pypi.org" and kwargs.get("global_only", True)
+        else "172.17.0.1" if host == "host.docker.internal"
+        and not kwargs.get("global_only", True) else None))
+    assert proxy_mod.target_policy(
+        "pypi.org", 443, ip, browser_listener=True)[1] == "browser_attribution_missing"
+    assert proxy_mod.target_policy("host.docker.internal", 80, ip) == (None, None)
+    set_sandbox_browser_mode(str(tmp_path), ip, shell, "public")
+    assert proxy_mod.target_policy(
+        "pypi.org", 443, ip, browser_listener=True) == ("93.184.216.34", None)
+    assert proxy_mod.target_policy(
+        "host.docker.internal", 80, ip, browser_listener=True)[1] == (
+            "browser_internal_policy")
+    assert proxy_mod.target_policy("host.docker.internal", 80, ip) == (None, None)
+    record_client(str(tmp_path), ip, ClientRecord("t2", "g2", "sandbox"))
+    assert proxy_mod.target_policy(
+        "pypi.org", 443, ip, browser_listener=True)[1] == "browser_attribution_missing"
 
 
 def test_proxy_rejects_legacy_and_kind_mismatched_records(proxy_mod, tmp_path):

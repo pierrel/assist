@@ -74,6 +74,11 @@
 			"excludes": {}
 		},
 		{
+			"comment": "Keep the nested browser PID namespace tied to its unshare parent",
+			"names": ["pidfd_open"],
+			"action": "SCMP_ACT_ALLOW"
+		},
+		{
 			"names": [
 				"accept",
 				"accept4",

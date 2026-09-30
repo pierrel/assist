@@ -1,4 +1,4 @@
-"""Egress allowlist proxy for Assist shell and isolated browser clients.
+"""Egress allowlist proxy for Assist shell and browser clients.
 
 Exact-match hostname allowlist.  Refuses anything not on the list with
 HTTP 403.  Supports both CONNECT (HTTPS tunnel) and HTTP-via-proxy
@@ -66,6 +66,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8888"))
+BROWSER_LISTEN_PORT = 8889
 PIPE_TIMEOUT = 600  # seconds of idle on a tunnel before tearing down
 APPROVALS_DIR = os.environ.get("APPROVALS_DIR", "/approvals")
 CLIENT_MAP_DIR = os.environ.get("CLIENT_MAP_DIR", "/client-map")
@@ -272,7 +273,7 @@ def client_record(client_ip: str, kind: str) -> dict | None:
     if not isinstance(value, dict) or value.get("kind") != kind:
         return None
     required = {"thread_id", "generation", "kind"}
-    if kind == "browser":
+    if kind == "browser" or (kind == "sandbox" and "browser_mode" in value):
         required.add("browser_mode")
         if value.get("browser_mode") == "internal":
             required.update({"internal_host", "internal_port"})
@@ -285,7 +286,7 @@ def client_record(client_ip: str, kind: str) -> dict | None:
             or not isinstance(value.get("generation"), str)
             or not value["generation"] or len(value["generation"]) > 128):
         return None
-    if kind == "browser" and value.get("browser_mode") == "internal":
+    if value.get("browser_mode") == "internal":
         internal_host = value["internal_host"]
         if (not isinstance(internal_host, str) or not internal_host
                 or internal_host != internal_host.lower()
@@ -333,12 +334,19 @@ def vet_resolved(host: str, port: int, *, global_only: bool = True) -> str | Non
     return None
 
 
-def target_policy(host: str, port: int, client_ip: str) -> tuple[str | None, str | None]:
+def target_policy(host: str, port: int, client_ip: str,
+                  *, browser_listener: bool = False) -> tuple[str | None, str | None]:
     """Return a vetted dial IP and no error, or a stable denial reason."""
     kind = source_kind(client_ip)
     if kind is None:
         return None, "unknown_proxy_source"
+    if browser_listener and kind != "sandbox":
+        return None, "browser_attribution_missing"
     record = client_record(client_ip, kind)
+    if browser_listener:
+        if record is None or record.get("browser_mode") not in {"public", "internal"}:
+            return None, "browser_attribution_missing"
+        kind = "browser"
     if kind == "browser" and record is None:
         return None, "browser_attribution_missing"
     if kind == "browser" and record["browser_mode"] == "internal":
@@ -400,7 +408,7 @@ def read_request_head(client: socket.socket) -> tuple[str, bytes]:
     return head.decode("latin-1"), rest
 
 
-def handle(client: socket.socket, addr) -> None:
+def handle(client: socket.socket, addr, browser_listener: bool = False) -> None:
     upstream = None
     try:
         client.settimeout(30)
@@ -430,7 +438,8 @@ def handle(client: socket.socket, addr) -> None:
             if not 1 <= port <= 65535:
                 deny(client, host, "bad_port")
                 return
-            approved_ip, rejection = target_policy(host, port, addr[0])
+            approved_ip, rejection = target_policy(
+                host, port, addr[0], browser_listener=browser_listener)
             if rejection:
                 deny(client, host, rejection)
                 return
@@ -471,7 +480,8 @@ def handle(client: socket.socket, addr) -> None:
         if not host or not 1 <= port <= 65535 or u.username or u.password:
             deny(client, host or "<malformed>", "bad_request")
             return
-        approved_ip, rejection = target_policy(host, port, addr[0])
+        approved_ip, rejection = target_policy(
+            host, port, addr[0], browser_listener=browser_listener)
         if rejection:
             deny(client, host, rejection)
             return
@@ -533,14 +543,24 @@ def main() -> int:
         log("ERROR: invalid proxy ingress networks")
         return 2
     log(f"allowlist ({len(ALLOWLIST)} entries): {sorted(ALLOWLIST)}")
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("0.0.0.0", LISTEN_PORT))
-    srv.listen(64)
-    log(f"listening on 0.0.0.0:{LISTEN_PORT}")
+    if BROWSER_LISTEN_PORT == LISTEN_PORT or not 1 <= BROWSER_LISTEN_PORT <= 65535:
+        log("ERROR: invalid browser proxy port")
+        return 2
+    listeners = []
+    for port in (LISTEN_PORT, BROWSER_LISTEN_PORT):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("0.0.0.0", port))
+        srv.listen(64)
+        listeners.append(srv)
+        log(f"listening on 0.0.0.0:{port}")
     while True:
-        client, addr = srv.accept()
-        threading.Thread(target=handle, args=(client, addr), daemon=True).start()
+        ready, _, _ = select.select(listeners, [], [])
+        for srv in ready:
+            client, addr = srv.accept()
+            threading.Thread(target=handle,
+                             args=(client, addr, srv is listeners[1]),
+                             daemon=True).start()
 
 
 if __name__ == "__main__":

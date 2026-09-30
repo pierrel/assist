@@ -19,6 +19,7 @@ from assist.sandbox_manager import (
     SandboxManager,
     _load_egress_allowlist,
 )
+from assist.egress.client_map import ClientRecord, record_client
 
 
 class TestLoadEgressAllowlist(TestCase):
@@ -115,7 +116,8 @@ class TestEnsureEgressProxy(TestCase):
         # _wait_for_egress_proxy_ready polls proxy.logs() looking for
         # "listening on".  Without this, the wait blocks for 10s and
         # then raises — which would make every test slow and noisy.
-        new_proxy.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        new_proxy.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n" + \
+            b"egress-proxy: listening on 0.0.0.0:8889\n"
         client.test_proxy = new_proxy
         def create_proxy(**kwargs):
             new_proxy.labels = kwargs.get("labels", {})
@@ -143,6 +145,23 @@ class TestEnsureEgressProxy(TestCase):
         self.assertEqual(kwargs["driver"], "bridge")
         self.assertTrue(kwargs["internal"])
         self.assertTrue(kwargs["labels"]["assist.egress-generation"])
+
+    def test_armed_browser_blocks_proxy_mutation_before_network_work(self):
+        client = self._make_client()
+        map_dir = tempfile.TemporaryDirectory(prefix="browser-map-")
+        self.addCleanup(map_dir.cleanup)
+        record_client(map_dir.name, "172.30.0.8", ClientRecord(
+            "thread", "generation", "sandbox", "public"))
+        identities = [("ordinary-network-id", "172.30.0.0/16"),
+                      ("browser-network-id", "172.31.0.0/16")]
+        with patch.dict(os.environ, {"ASSIST_EGRESS_CLIENT_MAP_DIR": map_dir.name}), \
+                patch("assist.sandbox_manager._network_identity",
+                      side_effect=identities):
+            with self.assertRaisesRegex(RuntimeError, "browser turn still pins"):
+                SandboxManager._ensure_egress_proxy_running_direct(client)
+        client.api.create_network.assert_not_called()
+        client.api.create_container.assert_not_called()
+        client.test_proxy.start.assert_not_called()
 
     def test_creates_proxy_when_absent(self):
         client = self._make_client()
@@ -387,7 +406,8 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
                         _egress_proxy_config_hash(
                             ",".join(_load_egress_allowlist()), None,
                             "ordinary-network-id:172.30.0.0/16|:")}
-        proxy.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        proxy.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n" + \
+            b"egress-proxy: listening on 0.0.0.0:8889\n"
         client.containers.get.return_value = proxy
         sandbox_container = MagicMock()
         sandbox_container.id = "sand123abcdef"
@@ -436,7 +456,8 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
                         _egress_proxy_config_hash(
                             ",".join(_load_egress_allowlist()), None,
                             "ordinary-network-id:172.30.0.0/16|:")}
-        proxy.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        proxy.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n" + \
+            b"egress-proxy: listening on 0.0.0.0:8889\n"
         client.containers.get.return_value = proxy
         sandbox_container = MagicMock()
         sandbox_container.id = "sand123abcdef"

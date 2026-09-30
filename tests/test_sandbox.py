@@ -603,7 +603,8 @@ class TestSandboxManager(TestCase):
         mock_container.status = "running"
         # Doubles as the egress-proxy container too — _wait_for_egress_proxy_ready
         # polls .logs() looking for "listening on" before returning.
-        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n" + \
+            b"egress-proxy: listening on 0.0.0.0:8889\n"
         self._attached_proxy(mock_container, mock_client)
         mock_client.containers.run.return_value = mock_container
 
@@ -622,6 +623,48 @@ class TestSandboxManager(TestCase):
         self.assertIn(test_path, SandboxManager._containers)
 
     @patch('assist.sandbox.DockerSandboxBackend')
+    def test_browser_capable_turn_gets_private_tmpfs_and_seccomp(self, _backend):
+        test_path = os.path.join(self.temp_dir, "browser-turn", "domain")
+        os.makedirs(test_path)
+        client = MagicMock()
+        container = MagicMock()
+        container.id = "browser-turn-generation"
+        container.status = "running"
+        container.logs.return_value = (
+            b"egress-proxy: listening on 0.0.0.0:8888\n"
+            b"egress-proxy: listening on 0.0.0.0:8889\n")
+        self._attached_proxy(container, client)
+        client.containers.run.return_value = container
+        with patch.object(SandboxManager, '_get_docker_client', return_value=client):
+            SandboxManager.get_sandbox_backend(test_path, browser_capable=True)
+        options = client.containers.run.call_args.kwargs
+        assert options["tmpfs"]["/run/assist-browser"].endswith(
+            "uid=10001,gid=10001,mode=0700")
+        assert options["security_opt"][0].startswith("seccomp={")
+
+    def test_browser_lease_requires_stop_proof_before_any_replacement(self):
+        from assist.browser import authority
+        from assist.browser.manager import BrowserManager, BrowserUnavailable
+
+        test_path = os.path.join(self.temp_dir, "browser-turn", "domain")
+        os.makedirs(test_path)
+        authority.mark_new_thread(self.temp_dir, "browser-turn")
+        with authority.fence(self.temp_dir, "browser-turn") as state:
+            state.begin("prior-run", 1)
+            state.add_generation("prior-run", "prior-generation")
+        stale = MagicMock(id="prior-generation")
+        stale.kill.side_effect = RuntimeError("Docker kill uncertain")
+        SandboxManager._containers[test_path] = stale
+
+        with patch.object(BrowserManager, "confirm_owner_stopped",
+                          side_effect=BrowserUnavailable("stop unconfirmed")) as proof:
+            with self.assertRaisesRegex(BrowserUnavailable, "stop unconfirmed"):
+                SandboxManager.get_sandbox_backend(test_path, browser_capable=False)
+        stale.kill.assert_not_called()
+        self.assertIs(SandboxManager._containers[test_path], stale)
+        proof.assert_called_once_with(self.temp_dir, "browser-turn", None)
+
+    @patch('assist.sandbox.DockerSandboxBackend')
     def test_agent_dir_is_created_mounted_and_enables_native_paths(self,
                                                                   mock_backend_cls):
         test_path = os.path.join(self.temp_dir, "thread", "domain")
@@ -630,7 +673,8 @@ class TestSandboxManager(TestCase):
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.id = "test123456ab"
-        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n" + \
+            b"egress-proxy: listening on 0.0.0.0:8889\n"
         self._attached_proxy(mock_container, mock_client)
         mock_client.containers.run.return_value = mock_container
 
@@ -652,7 +696,8 @@ class TestSandboxManager(TestCase):
         os.makedirs(test_path)
         mock_client = MagicMock()
         mock_container = MagicMock(id="test123456ab", status="running")
-        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n" + \
+            b"egress-proxy: listening on 0.0.0.0:8889\n"
         self._attached_proxy(mock_container, mock_client)
         mock_client.containers.run.return_value = mock_container
 
@@ -681,7 +726,8 @@ class TestSandboxManager(TestCase):
         os.makedirs(test_path)
         mock_client = MagicMock()
         mock_container = MagicMock(id="test123456ab", status="running")
-        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n" + \
+            b"egress-proxy: listening on 0.0.0.0:8889\n"
         self._attached_proxy(mock_container, mock_client)
         mock_client.containers.run.return_value = mock_container
 
@@ -713,7 +759,8 @@ class TestSandboxManager(TestCase):
         mock_container = MagicMock()
         mock_container.id = "test123456ab"
         mock_container.status = "running"
-        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n" + \
+            b"egress-proxy: listening on 0.0.0.0:8889\n"
         self._attached_proxy(mock_container, mock_client)
         mock_client.containers.run.return_value = mock_container
 
@@ -793,7 +840,8 @@ class TestSandboxManager(TestCase):
         fresh = MagicMock()
         fresh.id = "fresh1234567"
         fresh.status = "running"
-        fresh.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        fresh.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n" + \
+            b"egress-proxy: listening on 0.0.0.0:8889\n"
         self._attached_proxy(fresh, mock_client)
         mock_client.containers.run.return_value = fresh
 

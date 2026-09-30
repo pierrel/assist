@@ -37,7 +37,7 @@ eval:
 test:
 	$(call with-dev-env,.venv/bin/pytest --junit-xml=tests/history/results-$$(date +%Y%m%d-%H%M).xml tests)
 
-web: sandbox-build browser-smoke pi-runtime-build
+web: sandbox-build pi-runtime-build
 	$(call with-dev-env,.venv/bin/python -m manage.web)
 
 smoke:
@@ -88,11 +88,11 @@ pi-preview-status:
 #     the same call path the agent's tool hits.  Requires Docker;
 #     fails loudly if missing (no skip — too important).
 #
-# `deploy-sandbox-build` runs the Chromium runtime and two shell harnesses on
-# the remote (no venv there); use `make sandbox-smoke` locally / in CI
-# for shell egress integration too. The full browser
-# Docker/proxy regression is separate: `make browser-docker-test`.
-sandbox-smoke: sandbox-build browser-smoke
+# `deploy-sandbox-build` runs the two shell harnesses on the remote (no venv
+# there); use `make sandbox-smoke` locally / in CI for shell egress integration.
+# The turn-scoped Chromium/proxy proof uses isolated images and an explicit
+# Docker test invocation before deployment.
+sandbox-smoke: sandbox-build
 	bash dockerfiles/test-sandbox-shim.sh
 	bash dockerfiles/test-sandbox-egress.sh
 	.venv/bin/pytest tests/test_sandbox_egress_integration.py -v
@@ -128,10 +128,6 @@ deploy-sandbox-build:
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-egress-proxy -f dockerfiles/Dockerfile.egress-proxy .'
 	@echo "→ Building sandbox image on $(DEPLOY_HOST)..."
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-sandbox -f dockerfiles/Dockerfile.sandbox .'
-	@echo "→ Building browser image on $(DEPLOY_HOST)..."
-	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-browser -f dockerfiles/Dockerfile.browser .'
-	@echo "→ Running bounded Chromium sandbox smoke on $(DEPLOY_HOST)..."
-	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && bash dockerfiles/test-browser-runtime.sh'
 	@echo "→ Running sandbox-smoke on $(DEPLOY_HOST) (push-refusal regression gate)..."
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && bash dockerfiles/test-sandbox-shim.sh'
 	@echo "→ Running egress-smoke on $(DEPLOY_HOST) (allowlist regression gate)..."

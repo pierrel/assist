@@ -2934,12 +2934,17 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             sandbox_generation = None
             browser_session = None
             try:
+                browser_capable = bool(
+                    _run is not None and not sender
+                    and assistant_id == "general-agent"
+                    and BrowserManager.ready_for_browser(MANAGER.root_dir, tid))
                 # Inside the try so the `finally` reaps even if sandbox
                 # creation registers a container and then raises — cleanup
                 # keys on work_dir, not on the `sandbox` handle.
                 try:
                     sandbox = _get_sandbox_backend(
-                        tid, tz=rider.tz if rider else None)
+                        tid, tz=rider.tz if rider else None,
+                        browser_capable=browser_capable)
                     sandbox_generation = sandbox.container if sandbox else None
                 except Exception:
                     sandbox_generation = SandboxManager.current_container(
@@ -2952,13 +2957,13 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     user_request = _browser_user_request(
                         _run, _runs().list(tid) if _run is not None else [])
                     extra_browser_tools = ()
-                    if (sandbox is not None and _run is not None and not sender
-                            and assistant_id == "general-agent"
+                    if (sandbox is not None and browser_capable
                             and BrowserManager.ready_for_browser(MANAGER.root_dir, tid)):
                         browser_session = BrowserSession(
                             tid, _run.id if _run is not None else event_id or "legacy",
                             MANAGER.thread_default_working_dir(tid), MANAGER.root_dir,
                             user_request, work_id=_run.work_id if _run else None,
+                            sandbox_generation=sandbox.id,
                             run_service=_runs())
                         BrowserManager.register(browser_session)
                         extra_browser_tools = tuple(browser_tools(browser_session))
@@ -3692,13 +3697,10 @@ def _drain_held_browser_events(tid: str) -> bool:
                     owner = (run.browser_reset_run_id
                              or (state.lease or {}).get("owner_run_id")
                              or (session.run_id if session is not None else None))
-                    covered = state.covered
                 if session is not None and session.run_id == owner:
                     reset = session.revoke_internal()
                 else:
                     reset = False
-                if not covered:
-                    BrowserManager.reap_orphans(MANAGER.root_dir)
                 reset = (BrowserManager.confirm_owner_stopped(
                     MANAGER.root_dir, tid, owner) or reset)
                 with browser_authority.fence(MANAGER.root_dir, tid) as state:
@@ -3717,6 +3719,7 @@ def _drain_held_browser_events(tid: str) -> bool:
                                           for item in _runs().list(tid)
                                           if item.user_event_id == item.id), default=0)
                             if (session is not None and not session.closed
+                                    and current.work_id == session.work_id
                                     and latest == current.admission_sequence):
                                 session.rebind_user_request(BrowserUserRequest(
                                     current.id, current.work_id,
@@ -5478,7 +5481,7 @@ async def delete_thread(tid: str):
 def _delete_thread_and_children(tid: str) -> None:
     """Stop its browser before deleting a thread and non-running children."""
     _PI_RUNTIME.retire(tid)
-    # A deleted Run journal cannot authorize or recover an internal sidecar.
+    # A deleted Run journal cannot authorize or recover a turn browser.
     # Wait for Docker outside the Run admission lock, but keep the browser
     # gate through deletion so another session cannot register in between.
     with BrowserManager.bounded_thread_gate(tid):
@@ -5508,6 +5511,7 @@ def _delete_thread_after_browser_stop(tid: str) -> None:
     """Prove browser stops outside Run admission; delete under its lock."""
     with _RUN_ADMISSION_LOCK:
         child_ids = _deletion_child_ids(tid)
+        parent_runs = _runs().list(tid)
     deleted_children = set()
     for child_tid in sorted(child_ids):
         with BrowserManager.bounded_thread_gate(child_tid):
@@ -5515,24 +5519,22 @@ def _delete_thread_after_browser_stop(tid: str) -> None:
                 child_runs = _runs().list(child_tid)
                 if any(child.status == "running" for child in child_runs):
                     continue
-            if os.path.isdir(MANAGER.thread_dir(child_tid)):
-                BrowserManager.cleanup(child_tid)
-                BrowserManager.confirm_owner_stopped(
-                    MANAGER.root_dir, child_tid, None)
+            BrowserManager.cleanup(child_tid)
+            BrowserManager.confirm_owner_stopped(
+                MANAGER.root_dir, child_tid, None)
             with _RUN_ADMISSION_LOCK:
-                child_runs = _runs().list(child_tid)
-                if any(child.status == "running" for child in child_runs):
-                    continue
+                if _runs().list(child_tid) != child_runs:
+                    raise RuntimeError("child Runs changed during deletion")
                 MANAGER._hard_delete_after_browser_stop(child_tid)
                 RUN_STREAMS.mark_thread_gone(child_tid)
                 deleted_children.add(child_tid)
-    if os.path.isdir(MANAGER.thread_dir(tid)):
-        BrowserManager.confirm_owner_stopped(MANAGER.root_dir, tid, None)
+    BrowserManager.confirm_owner_stopped(MANAGER.root_dir, tid, None)
     with _RUN_ADMISSION_LOCK:
-        if (_deletion_child_ids(tid) - child_ids
+        if (_runs().list(tid) != parent_runs
+                or _deletion_child_ids(tid) - child_ids
                 or any(os.path.isdir(MANAGER.thread_dir(child_tid))
                        for child_tid in deleted_children)):
-            raise RuntimeError("thread children changed during deletion")
+            raise RuntimeError("thread Runs or children changed during deletion")
         MANAGER._hard_delete_after_browser_stop(
             tid, on_delete=[_evict_caches, _evict_egress])
         RUN_STREAMS.mark_thread_gone(tid)

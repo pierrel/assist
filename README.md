@@ -44,15 +44,25 @@ where reliability is harder than with frontier APIs.
   planned rather than shipped.
 
 - **Website browser.** Ordinary web main-agent turns can render and interact
-  with JavaScript pages using a short-lived Chromium sidecar. It is isolated
-  from the shell container and can reach only the existing egress proxy.
+  with JavaScript pages. Chromium starts lazily inside that turn's sandbox and
+  stops when the sandbox ends, including an approval or clarification pause.
+  A separate browser UID can reach only a browser-policy listener on the
+  existing egress proxy; the shell keeps its ordinary egress policy.
   Public visits use the same exact-host list and approvals; private/local
   visits require a fresh user request naming an operator-allowlisted host
   and exact port. A bare host permits only HTTP 80 or HTTPS 443; a
   nondefault port must be explicit, such as `http://host.docker.internal:5050`.
   Browser pages cannot approve access. Browser tools do not return non-HTTP(S)
   page content. An empty new popup can be reused for an HTTP(S) visit.
-  Deleting a thread stops its browser sidecar before removing the thread state.
+  Deleting a thread proves its browser sandbox stopped before removing thread
+  state. A private, size-limited Playwright snapshot can restore cookies and
+  local storage on a later turn. Live tabs, DOM form inputs, page IDs and
+  observed targets do not survive; a site's stored values may reappear, so
+  the agent reopens and observes the page.
+  A short `/agent/browser-recovery.md` note may describe non-sensitive progress.
+  Chromium has its own PID namespace and a 240-second deadline inside the turn
+  sandbox, so its processes stop even during a web service outage. It shares
+  the sandbox's network and mounts with the shell.
 
 - **Specialized agents and skills out of the box.**
   - **Research agent** rigorous fact-checking and critiquing with
@@ -859,7 +869,7 @@ assist/
 │   │   ├── dev/SKILL.md     # TDD workflow + code-task routing
 │   │   ├── org-format/SKILL.md
 │   │   └── …
-│   ├── browser/             # Typed Chromium sidecar, runner, and browser skill
+│   ├── browser/             # Turn-scoped Chromium runner and browser skill
 │   ├── main_skills/         # Supervisor-only skills for the async main
 │   │   └── complex-request/SKILL.md
 │   └── templates/           # Jinja prompt templates
@@ -867,7 +877,7 @@ assist/
 │       └── reference/       # Inline references (legacy; being moved into skills)
 ├── dockerfiles/             # Docker images
 │   ├── Dockerfile.sandbox   # Sandbox container (Arch-based, with git/python/emacs)
-│   └── Dockerfile.browser   # Bounded headless Chromium sidecar
+│   └── Dockerfile.browser   # Legacy separate Chromium image
 ├── edd/                     # Agent evaluations (LLM-driven, network-bound)
 │   ├── eval/                # Evaluation test suite — anything that calls the real model
 │   └── history/             # Test results history (JUnit XML)

@@ -1,0 +1,77 @@
+#+title: Headless browser V1 redesign: turn-scoped Chromium
+#+date: 2026-09-30
+State: In progress
+
+* Problem
+
+The separate Chromium sidecar outlives a visible turn and makes approval or
+clarification handoff harder to reason about. This is a branch candidate, not
+a statement that V1 has been deployed.
+
+* Solution
+
+The first browser navigation in a visible web-main turn starts a Chromium
+worker inside that turn's existing sandbox. The worker's socket, downloads,
+profile and temporary files use a bounded private tmpfs owned by UID 10001;
+the ordinary agent keeps the workspace owner's UID. Every turn exit,
+including approval and clarification, attempts to kill the exact sandbox
+generation. An uncertain kill retains the durable browser lease and prevents
+any replacement sandbox on that workspace until positive stop proof completes.
+The worker starts as PID 1 in a nested PID namespace and exits on its
+240-second deadline. Linux then kills its Playwright and Chromium descendants,
+even if the web host is down or its Docker stop fails. Startup requires a
+live private-socket response proving PID 1, UID 10001, no capabilities,
+=NoNewPrivs= and seccomp confinement. The host timer still stops the exact
+sandbox generation at that deadline; on a web process crash, startup
+reconciliation reaps remaining browser-bearing sandboxes before browser
+tools become available. The nested namespace bounds the browser tree, while
+the host stop removes the containing sandbox.
+
+The browser and shell share one container's network and mount namespace; the
+browser has a nested PID namespace.
+This reduces process-compromise isolation relative to the former sidecar. A
+dedicated proxy listener applies the existing browser destination policy to
+the sandbox's exact IP/generation record. Before Chromium starts, a privileged
+host-initiated exec installs a kernel OUTPUT rule inside the sandbox for
+browser UID 10001. That UID can send TCP only to the verified proxy IP and
+browser listener port; other IPv4
+and IPv6 egress is rejected. Every other sandbox UID is denied the verified
+ordinary-network proxy endpoint's browser listener; the proxy's other bridge
+is not attached to the sandbox and publishes no port. Thus an armed proxy
+map cannot be borrowed by the shell after browser
+PID 1 exits. The ordinary shell listener and UID retain their existing policy.
+Browser public versus exact-consented internal mode stays
+fixed for the turn. Isolated real Docker tests must verify the UID rule,
+including Chromium's direct localhost bypass, before deployment.
+
+* Continuity
+
+At a normal turn end the host may save at most 48 KiB of Playwright
+=storage_state(indexed_db=False)= in one private mode-0600 thread file outside
+the sandbox mounts. It is never returned to the model. Cookies and local
+storage can restore a session. IndexedDB is excluded until a concrete site
+requires it; Playwright does not persist sessionStorage through this API.
+Persistent user-data directories retain a broader, harder-to-bound profile,
+so V1 uses the small state snapshot. Full active URLs may contain secret path
+or query data and become stale; the recovery note records only a safe origin.
+Live tabs, DOM form inputs, download IDs, page IDs and DOM references are
+not restored; a site's local storage may repopulate values. A short
+=/agent/browser-recovery.md= note may retain only the
+goal, safe site origin, completed step and next intended step. It must omit
+passwords, one-time codes, payment/auth secrets, values learned only from the
+page, raw snapshots and URL queries or fragments. Non-sensitive values supplied
+by the user may be retained to resume a partial form. The next turn reads the
+note as a hint and observes
+the live page again before acting. For an internal/local origin, a new direct
+user request naming the exact host and port is still required.
+
+* Historical supersessions
+
+This replaces only the separate sidecar lifetime described in
+=docs/2026-09-24-headless-browser-v11.org=, "One deadline and bounded page
+reuse"; its bounded deadline and page reuse limits remain. V1 runs one browser
+worker inside the per-turn sandbox with exact sandbox stop proof. It replaces
+the sidecar map-publication mechanism in
+=docs/2026-09-25-headless-browser-v17.org=, "Decision",
+with an armed browser mode on the sandbox's existing client-map record.
+Those dated documents remain historical evidence for their deployed designs.

@@ -5,6 +5,9 @@ RUN pacman -Syu --noconfirm && \
     pacman -S --noconfirm \
         python \
         python-pip \
+        chromium \
+        iptables \
+        util-linux \
         # deterministic graph/PNG creation for the render skill
         python-matplotlib \
         base-devel \
@@ -18,6 +21,17 @@ RUN pacman -Syu --noconfirm && \
         # for setcap, used to grant CAP_DAC_OVERRIDE to the git shim
         libcap \
     && pacman -Scc --noconfirm
+
+# Playwright's pinned headless shell runs as a separate UID inside the
+# per-turn sandbox.  Arch's Chromium package supplies its system libraries.
+RUN python -m venv /opt/assist-browser && \
+    /opt/assist-browser/bin/pip install --no-cache-dir playwright==1.58.0 && \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
+      /opt/assist-browser/bin/python -m playwright install --only-shell chromium && \
+    groupadd -g 10001 browser && useradd -u 10001 -g 10001 -M browser
+COPY assist/browser/runner.py /opt/assist/browser_runner.py
+COPY dockerfiles/install-browser-fence.py /opt/assist/install-browser-fence.py
+COPY dockerfiles/launch-turn-browser.py /opt/assist/launch-turn-browser.py
 
 # Privilege-separated git push refusal — three layers:
 #   (a) static GitPushBlockerMiddleware on the agent's `execute` tool

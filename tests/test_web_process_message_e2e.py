@@ -105,10 +105,10 @@ def test_post_message_runs_process_message_without_crashing(
     # AND the threads-module's already-imported reference; _process_message
     # calls the latter.
     monkeypatch.setattr(
-        "manage.web.state._get_sandbox_backend", lambda tid, tz=None: None,
+        "manage.web.state._get_sandbox_backend", lambda tid, tz=None, **_kwargs: None,
     )
     monkeypatch.setattr(
-        "manage.web.threads._get_sandbox_backend", lambda tid, tz=None: None,
+        "manage.web.threads._get_sandbox_backend", lambda tid, tz=None, **_kwargs: None,
     )
 
     # Stub MANAGER.get to return a minimal fake chat whose `.message()`
@@ -180,8 +180,8 @@ def test_post_message_runs_process_message_without_crashing(
 def _stub_happy_path(monkeypatch, chat):
     """Stub the sandbox lookup, MANAGER.get, and the post-message hooks so
     _process_message runs end-to-end against `chat`."""
-    monkeypatch.setattr("manage.web.state._get_sandbox_backend", lambda tid, tz=None: None)
-    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None: None)
+    monkeypatch.setattr("manage.web.state._get_sandbox_backend", lambda tid, tz=None, **_kwargs: None)
+    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None, **_kwargs: None)
     monkeypatch.setattr(
         web.MANAGER, "get",
         lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False, continuation=False: chat,
@@ -335,7 +335,7 @@ def test_process_message_reaps_registered_container_when_creation_then_raises(
     registered = MagicMock()
     SandboxManager._containers[work_dir] = registered
 
-    def _register_then_boom(tid, tz=None):
+    def _register_then_boom(tid, tz=None, **_kwargs):
         # The container is already in the registry (as get_sandbox_backend
         # leaves it); creation now fails before returning a usable backend.
         raise RuntimeError("sandbox creation failed after registering a container")
@@ -493,7 +493,7 @@ def test_rider_flows_to_sandbox_tz_and_private_location_config(client, monkeypat
     from assist.context_rider import CONTEXT_RIDER_KEY
     captured = {}
     monkeypatch.setattr("manage.web.threads._get_sandbox_backend",
-                        lambda tid, tz=None: captured.update(tz=tz) or None)
+                        lambda tid, tz=None, **_kwargs: captured.update(tz=tz) or None)
 
     class _FakeChat:
         def message(self, text):
@@ -575,7 +575,7 @@ def test_child_turn_never_receives_global_location(client, monkeypatch):
         def get_messages(self):
             return [{"role": "user", "content": "child"}]
 
-    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None: None)
+    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None, **_kwargs: None)
     monkeypatch.setattr(
         web.MANAGER, "get",
         lambda *args, **kwargs: captured.update(configurable=kwargs.get("configurable")) or _FakeChat())
@@ -600,7 +600,7 @@ def test_direct_main_turn_never_receives_global_location(client, monkeypatch):
         def get_messages(self):
             return [{"role": "user", "content": "continuation"}]
 
-    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None: None)
+    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None, **_kwargs: None)
     monkeypatch.setattr(
         web.MANAGER, "get",
         lambda *args, **kwargs: captured.update(configurable=kwargs.get("configurable")) or _FakeChat())

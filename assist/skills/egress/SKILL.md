@@ -1,6 +1,6 @@
 ---
 name: egress
-description: "Ordinary sandbox commands use exact-host egress approvals; the isolated browser also enforces a separate public/internal policy. EXAMPLES — curl/pip/git gets a proxy 403; browser_probe reports host_not_approved; auditing or reducing this thread's grants. MUST load before requesting new network access."
+description: "Ordinary sandbox commands use exact-host egress approvals; the turn browser uses a separate public/internal policy. EXAMPLES — curl/pip/git gets a proxy 403; browser_probe reports host_not_approved; auditing or reducing this thread's grants. MUST load before requesting new network access."
 allowed-tools: request_egress list_allowed_hosts remove_allowed_host
 ---
 
@@ -10,7 +10,7 @@ allowed-tools: request_egress list_allowed_hosts remove_allowed_host
 
 Ordinary sandbox commands reach the network through an exact-host proxy.
 A denied host commonly produces a proxy HTTP 403 ("CONNECT tunnel failed",
-"Tunnel connection failed", "Proxy tunneling failed"). The isolated browser
+"Tunnel connection failed", "Proxy tunneling failed"). The turn browser
 uses that proxy too, but has an additional public/internal destination policy:
 an HTTP 403 alone does not mean a host is approvable. For browser failures,
 request a grant only when `browser_probe` reports `host_not_approved` for the
@@ -40,7 +40,7 @@ requesting egress.
 ## Managing this thread's access
 
 - `list_allowed_hosts()` — the operator's base allowlist plus this thread's
-  approved grants. It does not override the isolated browser's internal-host
+  approved grants. It does not override the turn browser's internal-host
   policy or promise that every destination is reachable.
 - `remove_allowed_host(host, port)` — drop one of this thread's grants once
   you're done with it. Good practice: when a granted host has served its

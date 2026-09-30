@@ -1,5 +1,6 @@
 """Direct-message admission and crash recovery use durable browser proofs."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from threading import Event
 from unittest.mock import MagicMock
@@ -7,7 +8,7 @@ import time
 
 import pytest
 
-from assist.browser import authority, manager as browser
+from assist.browser import authority, manager as browser, turn_runtime
 from assist.egress import runtime_state
 from assist.egress.client_map import ClientRecord, read_client, record_client
 from assist.run_service import InvalidRunTransition, RunService
@@ -33,6 +34,9 @@ def admitted(monkeypatch, tmp_path):
     monkeypatch.setattr(threads, "_dispatch_pending_after", lambda _tid: None)
     monkeypatch.setattr(browser, "configured_directory", lambda: str(tmp_path))
     monkeypatch.setattr(threads, "configured_directory", lambda: str(tmp_path))
+    # These admission tests model the pre-existing sidecar journal. Sandbox
+    # enumeration has its own exact-generation tests.
+    monkeypatch.setattr(browser, "_sandbox_generations", lambda *_args: set())
     return tmp_path, runs
 
 
@@ -40,48 +44,45 @@ def test_held_commit_between_create_and_map_publication_denies_old_startup(
         monkeypatch, admitted):
     root, runs = admitted
     old = runs.create("t", "general-agent", "Visit a public site", user_origin=True)
-    session = browser.BrowserSession("t", old.id, str(root), str(root), None)
+    with authority.fence(str(root), "t") as state:
+        state.begin(old.id, old.admission_sequence)
+        state.add_generation(old.id, "old-generation")
     started, release = Event(), Event()
-    killed = []
+    published = []
 
-    def create(_request, **_kwargs):
+    def fence(*_args, **_kwargs):
         started.set()
         assert release.wait(3)
-        return {"generation": "old-generation", "ip": "172.20.0.2"}
+        return b""
 
-    monkeypatch.setattr(browser, "_launch_sidecar_bounded", create)
-    monkeypatch.setattr(browser, "_kill_container", killed.append)
-    monkeypatch.setattr(browser, "_load_egress_allowlist", lambda: [])
-    client = MagicMock()
-    proxy = MagicMock(status="running")
-    proxy.attrs = {
-        "Mounts": [{"Destination": "/client-map", "Source": str(root)}],
-        "NetworkSettings": {"Networks": {
-            browser.BROWSER_NETWORK: {"NetworkID": "network"}}}}
-    sidecar = MagicMock(status="running")
-    sidecar.attrs = {"NetworkSettings": {"Networks": {
-        browser.BROWSER_NETWORK: {
-            "NetworkID": "network", "IPAddress": "172.20.0.2"}}}}
-    client.containers.get.side_effect = lambda key: (
-        proxy if key == browser.EGRESS_PROXY_NAME else sidecar)
-    monkeypatch.setattr(
-        browser, "_register_browser_client_bounded",
-        lambda map_dir, ip, record, threads_root, run_id, timeout:
-            browser._register_browser_client_direct(
-                client, map_dir, ip, record, threads_root, run_id))
+    sandbox = MagicMock(id="old-generation")
+    proxy = MagicMock(id="proxy-generation")
+    monkeypatch.setattr(turn_runtime.SandboxManager, "_get_docker_client",
+                        classmethod(lambda _cls: MagicMock()))
+    monkeypatch.setattr(turn_runtime, "_proxy_setup_lock", nullcontext)
+    monkeypatch.setattr(turn_runtime, "_endpoints",
+                        lambda *_args: (sandbox, proxy, "172.20.0.3"))
+    monkeypatch.setattr(turn_runtime, "read_client", lambda *_args:
+                        ClientRecord("t", "old-generation", "sandbox"))
+    monkeypatch.setattr(turn_runtime, "set_sandbox_browser_mode",
+                        lambda *_args: published.append(True))
+    monkeypatch.setattr(browser, "_bounded_cli", fence)
+    request = {"generation": "old-generation", "ip": "172.20.0.2",
+               "map_dir": str(root), "threads_root": str(root),
+               "thread_id": "t", "run_id": old.id, "mode": "public"}
     with ThreadPoolExecutor(max_workers=1) as pool:
-        opening = pool.submit(session.command, "open", url="https://example.com/")
+        opening = pool.submit(turn_runtime.launch, request)
         assert started.wait(3)
         held, _ = threads._accept_message_run("t", "Now read another page")
         assert held.status == "revocation_pending"
         assert held.browser_reset_run_id == old.id
         release.set()
-        with pytest.raises(browser.BrowserUnavailable, match="newer user message"):
+        with pytest.raises(RuntimeError, match="newer user message"):
             opening.result(timeout=3)
-    assert killed == ["old-generation"]
+    assert published == []
     with authority.fence(str(root), "t") as state:
         assert state.lease["owner_run_id"] == old.id
-        assert state.lease["generations"] == []
+        assert state.lease["generations"] == ["old-generation"]
     assert browser.browser_records(str(root), "t") == {}
 
 
@@ -242,7 +243,7 @@ def test_browser_publication_precedes_n1_to_n2_proxy_replacement(
 def test_missing_or_invalid_map_promotes_clean_never_browser_held_event(
         monkeypatch, admitted, invalid_map):
     root, runs = admitted
-    runs.create("t", "general-agent", "Read a public site", user_origin=True)
+    old = runs.create("t", "general-agent", "Read a public site", user_origin=True)
     held, _ = threads._accept_message_run("t", "Read another page")
     assert held.status == "revocation_pending"
     if invalid_map:
@@ -251,10 +252,15 @@ def test_missing_or_invalid_map_promotes_clean_never_browser_held_event(
     else:
         monkeypatch.setattr(browser, "configured_directory", lambda: None)
     monkeypatch.setattr(browser.BrowserManager, "current_session", lambda _tid: None)
-    monkeypatch.setattr(browser, "_bounded_cli", lambda *_a, **_k: (_ for _ in ()).throw(
-        AssertionError("covered clean thread needs no Docker scan")))
+    scans = []
+    monkeypatch.setattr(browser, "_bounded_cli", lambda argv, **_k: (
+        scans.append(argv) or b""))
+    monkeypatch.setattr(browser, "_sandbox_generations", lambda *_a: (_ for _ in ()).throw(
+        AssertionError("ordinary shell sandbox must remain alive")))
     assert threads._drain_held_browser_events("t") is True
     assert runs.get("t", held.id).status == "pending"
+    assert len(scans) == 1
+    assert "label=assist.browser-run=" + old.id in scans[0]
 
 
 @pytest.mark.parametrize("invalid_map", [False, True])
@@ -362,10 +368,11 @@ def test_crash_after_held_commit_failed_kill_stays_held_then_recovers(
     # Process-local session state vanished after the held journal commit.
     monkeypatch.setattr(browser.BrowserManager, "current_session",
                         lambda _tid: None)
-    monkeypatch.setattr(browser, "_bounded_cli",
-                        lambda args, **_kwargs: (
-                            b"old-generation\n" if "--all" in args else b""))
     kills = []
+    monkeypatch.setattr(browser, "_bounded_cli",
+                            lambda args, **_kwargs: (
+                                b"old-generation\n" if "--all" in args
+                                and len(kills) < 2 else b""))
 
     def stop(generation):
         kills.append(generation)
@@ -386,7 +393,7 @@ def test_crash_after_held_commit_failed_kill_stays_held_then_recovers(
     assert [runs.get("t", item.id).status for item in (first, second)] == [
         "pending", "revocation_pending"]
     assert threads._drain_held_browser_events("t") is True
-    assert kills == ["old-generation", "old-generation", "old-generation"]
+    assert kills == ["old-generation", "old-generation"]
     assert [runs.get("t", item.id).status for item in (first, second)] == [
         "pending", "pending"]
     with authority.fence(str(root), "t") as state:
@@ -784,14 +791,14 @@ def test_held_phone_promotion_wins_before_delete(monkeypatch, admitted):
     assert not runs.get("t", held.id).browser_cancel_reset
 
 
-def test_legacy_unmarked_thread_stays_held_until_migration_scan(monkeypatch, admitted):
+def test_legacy_unmarked_thread_stays_held_until_scoped_scan(monkeypatch, admitted):
     root, runs = admitted
     (root / "t" / authority.STATE_FILE).unlink()
     held, _ = threads._accept_message_run("t", "Read a public page")
     assert held.status == "revocation_pending"
     monkeypatch.setattr(browser.BrowserManager, "current_session",
                         lambda _tid: None)
-    monkeypatch.setattr(browser.BrowserManager, "reap_orphans",
+    monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped",
                         lambda *_args: (_ for _ in ()).throw(
                             browser.BrowserUnavailable("Docker scan failed")))
     monkeypatch.setattr(threads, "_schedule_browser_revocation_retry",
@@ -799,13 +806,12 @@ def test_legacy_unmarked_thread_stays_held_until_migration_scan(monkeypatch, adm
     assert threads._drain_held_browser_events("t") is False
     assert runs.get("t", held.id).status == "revocation_pending"
 
-    def reconciled(root_dir):
+    def reconciled(root_dir, _thread_id, _owner):
         with authority.fence(root_dir, "t") as state:
             state.mark_covered()
+        return False
 
-    monkeypatch.setattr(browser.BrowserManager, "reap_orphans", reconciled)
-    monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped",
-                        lambda *_args: False)
+    monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped", reconciled)
     assert threads._drain_held_browser_events("t") is True
     assert runs.get("t", held.id).status == "pending"
 
