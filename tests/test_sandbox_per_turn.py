@@ -74,7 +74,7 @@ class TestNoReuse(_SandboxStateBase):
     stale one left in the registry (the "new container per request" guarantee).
     """
 
-    def _patches(self):
+    def _patches(self, work_dir):
         ids = itertools.count()
         client = MagicMock()
         client.containers.run.side_effect = lambda *a, **k: _fake_container(
@@ -86,24 +86,24 @@ class TestNoReuse(_SandboxStateBase):
             patch.object(SandboxManager, "_get_docker_client", return_value=client),
             patch.object(SandboxManager, "_ensure_egress_proxy_running"),
             patch("assist.sandbox_manager.os.stat", side_effect=lambda path: (
-                st if str(path) == "/ws/t" else real_stat(path))),
+                st if str(path) == work_dir else real_stat(path))),
             patch("assist.sandbox.DockerSandboxBackend", lambda *a, **k: MagicMock()),
-            # the persistent-/tmp dir is created for real; the work_dir here is a
-            # fake path, so stub the mkdir like os.stat above.
-            patch("assist.sandbox_manager.os.makedirs"),
             # Attribution is covered separately; this lifecycle test uses a
             # fake proxy without inspectable Docker mount attributes.
             patch.object(SandboxManager, "_record_egress_client"),
         ]
 
     def test_second_call_reaps_stale_and_creates_fresh(self):
-        p = self._patches()
-        with p[0], p[1], p[2], p[3], p[4], p[5]:
-            SandboxManager.get_sandbox_backend("/ws/t")
-            first = SandboxManager._containers["/ws/t"]
-            # Second turn for the SAME thread: must NOT reuse `first`.
-            SandboxManager.get_sandbox_backend("/ws/t")
-            second = SandboxManager._containers["/ws/t"]
+        with tempfile.TemporaryDirectory(prefix="sandbox-no-reuse-") as root:
+            work_dir = str(Path(root) / "thread" / "domain")
+            Path(work_dir).mkdir(parents=True)
+            p = self._patches(work_dir)
+            with p[0], p[1], p[2], p[3], p[4]:
+                SandboxManager.get_sandbox_backend(work_dir)
+                first = SandboxManager._containers[work_dir]
+                # Second turn for the SAME thread: must NOT reuse `first`.
+                SandboxManager.get_sandbox_backend(work_dir)
+                second = SandboxManager._containers[work_dir]
 
         self.assertIsNot(second, first, "container was reused across turns")
         first.kill.assert_called_once()  # stale one reaped (SIGKILL)
