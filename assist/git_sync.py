@@ -6,7 +6,7 @@ host Git with agent-writable hooks, helpers, filters or alternates.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import fcntl
 import hashlib
 import json
@@ -239,14 +239,7 @@ def enroll_legacy(thread_dir: str, worktree: str, source: str,
     """
     initial = _initial_binding(source)
     with _workspace_lock(thread_dir):
-        current = read_state(thread_dir)
-        if current is not None:
-            if current["source"] != source:
-                raise GitSyncError("Git source binding changed")
-            if any(current.get(field) for field in (
-                    "branch", "local_revision", "published", "published_branch",
-                    "published_revision", "intent", "preflights", "quarantine", "sandbox_in_flight")):
-                raise GitSyncError("Git source binding is already authorized or needs reconciliation")
+        current = _enrollable_state(thread_dir, source)
         _independent_roots((worktree, os.path.join(os.path.dirname(worktree), "tmp"),
                             os.path.join(thread_dir, "agent")))
         with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
@@ -256,6 +249,211 @@ def enroll_legacy(thread_dir: str, worktree: str, source: str,
         state = current if current is not None else initial
         state.update(branch=branch, local_revision=revision, error=None)
         _write_state(thread_dir, state)
+
+
+def _enrollable_state(thread_dir: str, source: str) -> dict | None:
+    current = read_state(thread_dir)
+    if current is not None:
+        if current["source"] != source:
+            raise GitSyncError("Git source binding changed")
+        if any(current.get(field) for field in (
+                "branch", "local_revision", "published", "published_branch",
+                "published_revision", "intent", "preflights", "quarantine", "sandbox_in_flight")):
+            raise GitSyncError("Git source binding is already authorized or needs reconciliation")
+    return current
+
+
+def _legacy_object_name(parts: tuple[str, ...]) -> bool:
+    if len(parts) != 2:
+        return False
+    directory, name = parts
+    if directory == "info":
+        return name == "packs"
+    if directory == "pack":
+        return (name == "multi-pack-index" or bool(re.fullmatch(
+            r"pack-[0-9a-f]{40}\.(?:pack|idx|rev|bitmap|keep|mtimes)", name)))
+    return bool(re.fullmatch(r"[0-9a-f]{2}", directory)
+                and re.fullmatch(r"[0-9a-f]{38}", name))
+
+
+def _linked_legacy_objects(thread_dir: str, worktree: str) -> list[tuple[str, ...]]:
+    """Locate only standard linked object paths; all writable roots are checked."""
+    with _directory(thread_dir) as private:
+        private_device = os.fstat(private).st_dev
+    roots = ((worktree, "domain"), (os.path.join(os.path.dirname(worktree), "tmp"), "tmp"),
+             (os.path.join(thread_dir, "agent"), "agent"))
+    deadline = time.monotonic() + GIT_TIMEOUT
+    count = total = 0
+    linked = []
+
+    def visit(directory: int, root_name: str, parts: tuple[str, ...], depth: int) -> None:
+        nonlocal count, total
+        if depth > 64:
+            raise GitSyncError("Independent storage verification exceeds its bound")
+        for entry in os.scandir(directory):
+            count += 1
+            if count > MAX_OBJECT_FILES or time.monotonic() > deadline:
+                raise GitSyncError("Independent storage verification exceeds its bound")
+            path = (*parts, entry.name)
+            info = os.stat(entry.name, dir_fd=directory, follow_symlinks=False)
+            in_objects = root_name == "domain" and path[:2] == (".git", "objects")
+            if stat.S_ISDIR(info.st_mode):
+                with _directory(entry.name, parent=directory) as child:
+                    visit(child, root_name, path, depth + 1)
+            elif in_objects and stat.S_ISLNK(info.st_mode):
+                raise GitSyncError("Unsupported Git object entry")
+            elif stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+                if (not in_objects or not _legacy_object_name(path[2:])
+                        or info.st_dev != private_device or info.st_mode & 0o7000
+                        or info.st_size > MAX_BYTES):
+                    raise GitSyncError("Legacy Git objects need operator reconciliation")
+                total += info.st_size
+                if total > 2 * MAX_BYTES:
+                    raise GitSyncError("Git object snapshot exceeds its bound")
+                linked.append(path)
+
+    try:
+        for root, name in roots:
+            if os.path.lexists(root):
+                with _directory(root) as directory:
+                    visit(directory, name, (), 0)
+    except OSError as error:
+        raise GitSyncError("Independent thread storage could not be verified") from error
+    return sorted(linked)
+
+
+def _clear_legacy_detach_temp(directory: int) -> None:
+    """Only this host-private helper can create its bounded temporary names."""
+    stale = []
+    deadline = time.monotonic() + GIT_TIMEOUT
+    for count, entry in enumerate(os.scandir(directory), start=1):
+        if count > MAX_OBJECT_FILES or time.monotonic() > deadline:
+            raise GitSyncError("Legacy Git object copy needs operator reconciliation")
+        if re.fullmatch(r"\.git-detach-[0-9a-f]{32}", entry.name):
+            stale.append(entry.name)
+            if len(stale) > 1:
+                raise GitSyncError("Legacy Git object copy needs operator reconciliation")
+    for name in stale:
+        info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_BYTES:
+            raise GitSyncError("Legacy Git object copy needs operator reconciliation")
+        os.unlink(name, dir_fd=directory)
+        os.fsync(directory)
+
+
+def _copy_legacy_object(thread_dir: str, worktree: str, parts: tuple[str, ...],
+                        deadline: float) -> None:
+    if time.monotonic() > deadline:
+        raise GitSyncError("Legacy Git object copy timed out")
+    with ExitStack() as stack:
+        private = stack.enter_context(_directory(thread_dir))
+        objects = stack.enter_context(_directory(worktree))
+        for component in parts[:-1]:
+            objects = stack.enter_context(_directory(component, parent=objects))
+        name = parts[-1]
+        original = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=objects)
+        stack.callback(os.close, original)
+        before = os.fstat(original)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink == 1
+                or before.st_dev != os.fstat(private).st_dev or before.st_size > MAX_BYTES
+                or before.st_mode & 0o7000):
+            raise GitSyncError("Legacy Git object changed during copy")
+        temporary = ".git-detach-" + os.urandom(16).hex()
+        copied = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=private)
+        stack.callback(os.close, copied)
+        try:
+            old_hash = hashlib.sha256()
+            remaining = before.st_size
+            while remaining:
+                if time.monotonic() > deadline:
+                    raise GitSyncError("Legacy Git object copy timed out")
+                chunk = os.read(original, min(1024 * 1024, remaining))
+                if not chunk:
+                    raise GitSyncError("Legacy Git object changed during copy")
+                old_hash.update(chunk)
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(copied, view)
+                    if not written:
+                        raise GitSyncError("Legacy Git object copy failed")
+                    view = view[written:]
+                remaining -= len(chunk)
+            if (os.fstat(copied).st_uid, os.fstat(copied).st_gid) != (before.st_uid, before.st_gid):
+                os.fchown(copied, before.st_uid, before.st_gid)
+            os.fchmod(copied, stat.S_IMODE(before.st_mode))
+            os.utime(copied, ns=(before.st_atime_ns, before.st_mtime_ns))
+            os.fsync(copied)
+            os.lseek(copied, 0, os.SEEK_SET)
+            copy_hash = hashlib.sha256()
+            while chunk := os.read(copied, 1024 * 1024):
+                copy_hash.update(chunk)
+            after = os.fstat(original)
+            path_now = os.stat(name, dir_fd=objects, follow_symlinks=False)
+            fingerprint = lambda value: (value.st_dev, value.st_ino, value.st_size,
+                                         value.st_nlink, value.st_mtime_ns, value.st_ctime_ns)
+            if (fingerprint(after) != fingerprint(before)
+                    or fingerprint(path_now) != fingerprint(before)
+                    or copy_hash.digest() != old_hash.digest()):
+                raise GitSyncError("Legacy Git object changed during copy")
+            os.replace(temporary, name, src_dir_fd=private, dst_dir_fd=objects)
+            os.fsync(objects)
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=private)
+            except FileNotFoundError:
+                pass
+
+
+def detach_legacy_object_hardlinks(thread_dir: str, worktree: str, *, source: str,
+                                   expected: tuple[str, str], expected_remote: str | None,
+                                   verify_stopped) -> None:
+    """Operator-only object detachment; writer/source exclusion stays held through enrollment.
+
+    The caller independently approves the configured source and holds exclusion
+    of every alias-root and source writer until the separate enrollment finishes.
+    This never writes a source binding or executes workspace Git configuration.
+    """
+    _initial_binding(source)
+    if (not isinstance(expected, tuple) or len(expected) != 2
+            or not isinstance(expected[0], str) or not isinstance(expected[1], str)
+            or not _OID.fullmatch(expected[1])
+            or (expected_remote is not None and
+                (not isinstance(expected_remote, str) or not _OID.fullmatch(expected_remote)))):
+        raise GitSyncError("Approved Git branch identity is unavailable")
+    branch = _branch(expected[0])
+    with _workspace_lock(thread_dir):
+        if verify_stopped() is not None:
+            raise GitSyncError("Stopped Git writer proof is unavailable")
+        before_state = _enrollable_state(thread_dir, source)
+        if identity(worktree) != expected:
+            raise GitSyncError("Legacy Git branch identity changed; verify before enrollment")
+        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
+            remote = _Store(path).fetch(source, branch)
+        if remote != expected_remote:
+            raise GitSyncError("Approved remote Git branch changed")
+        linked = _linked_legacy_objects(thread_dir, worktree)
+        with _directory(thread_dir) as private:
+            _clear_legacy_detach_temp(private)
+        deadline = time.monotonic() + GIT_TIMEOUT
+        for parts in linked:
+            _copy_legacy_object(thread_dir, worktree, parts, deadline)
+        _independent_roots((worktree, os.path.join(os.path.dirname(worktree), "tmp"),
+                            os.path.join(thread_dir, "agent")))
+        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
+            store = _Store(path)
+            if store.snapshot(worktree) != expected:
+                raise GitSyncError("Legacy Git branch identity changed; verify before enrollment")
+            remote = store.fetch(source, branch)
+            main = store.git("rev-parse", "refs/remotes/origin/main")
+            if (remote != expected_remote
+                    or not store.git("merge-base", main, expected[1], allowed=(0, 1))
+                    or (remote and not (store.ancestor(expected[1], remote)
+                                       or store.ancestor(remote, expected[1])))):
+                raise GitSyncError("Approved remote Git history changed")
+        if (identity(worktree) != expected or read_state(thread_dir) != before_state
+                or verify_stopped() is not None):
+            raise GitSyncError("Legacy Git detachment needs operator verification")
 
 
 def recover_stopped(thread_dir: str, worktree: str, *, source: str,

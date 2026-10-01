@@ -371,6 +371,175 @@ def test_legacy_enrollment_rejects_shared_inode_before_binding(repos):
     assert not (binding / "git-sync.json").exists()
 
 
+@pytest.fixture
+def linked_legacy(tmp_path):
+    source, seed = tmp_path / "source.git", tmp_path / "seed"
+    subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(source)],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "clone", "--no-hardlinks", str(source), str(seed)],
+                   check=True, capture_output=True)
+    git(seed, "config", "user.email", "test@example.invalid")
+    git(seed, "config", "user.name", "Test")
+    (seed / "tracked").write_text("base\n")
+    git(seed, "add", "tracked")
+    git(seed, "commit", "-m", "base")
+    git(seed, "push", "origin", "main")
+    roots = [tmp_path / name for name in ("legacy-one", "legacy-two")]
+    for root in roots:
+        root.mkdir()
+        subprocess.run(["git", "clone", str(source), str(root / "domain")],
+                       check=True, capture_output=True)
+        git(root / "domain", "checkout", "-b", "assist/legacy")
+        (root / "tmp").mkdir()
+        (root / "agent").mkdir()
+    return source, seed, roots
+
+
+def _linked_files(worktree):
+    return [file for file in (worktree / ".git" / "objects").rglob("*")
+            if file.is_file() and file.stat().st_nlink > 1]
+
+
+def _detach(linked_legacy, *, verify_stopped=lambda: None, expected_remote=None):
+    source, _, roots = linked_legacy
+    root = roots[0]
+    worktree = root / "domain"
+    return sync.detach_legacy_object_hardlinks(
+        str(root), str(worktree), source=str(source), expected=sync.identity(str(worktree)),
+        expected_remote=expected_remote, verify_stopped=verify_stopped)
+
+
+def test_legacy_detach_preserves_dirty_index_history_and_source(linked_legacy):
+    source, _, roots = linked_legacy
+    root, alias = roots
+    worktree = root / "domain"
+    assert _linked_files(worktree)
+    assert _linked_files(alias / "domain")
+    (worktree / "tracked").write_text("staged\n")
+    git(worktree, "add", "tracked")
+    (worktree / "tracked").write_text("unstaged\n")
+    (worktree / "untracked").write_text("user\n")
+    status = git(worktree, "status", "--porcelain=v1")
+    git(worktree, "config", "core.fsmonitor", "!touch " + str(root / "host-command"))
+    preserved = {name: (worktree / name).read_bytes() for name in
+                 ("tracked", "untracked", ".git/index", ".git/config", ".git/HEAD")}
+    source_objects = {str(file.relative_to(source / "objects")): file.stat().st_ino
+                      for file in (source / "objects").rglob("*") if file.is_file()}
+    _detach(linked_legacy)
+    assert not _linked_files(worktree)
+    assert _linked_files(alias / "domain")
+    assert {name: (worktree / name).read_bytes() for name in preserved} == preserved
+    assert status == "MM tracked\n?? untracked"
+    assert not (root / "host-command").exists()
+    assert all((source / "objects" / name).stat().st_ino == inode
+               for name, inode in source_objects.items())
+    assert not (root / "git-sync.json").exists()
+    sync.enroll_legacy(str(root), str(worktree), str(source), sync.identity(str(worktree)))
+    assert sync.read_state(str(root))["source"] == str(source)
+
+
+def test_legacy_detach_interruption_retry_and_writer_hold(linked_legacy, monkeypatch):
+    _, _, roots = linked_legacy
+    root = roots[0]
+    worktree = root / "domain"
+    before = _linked_files(worktree)
+    assert len(before) >= 2
+    with pytest.raises(sync.GitSyncError, match="Stopped"):
+        _detach(linked_legacy, verify_stopped=lambda: "active alias writer")
+    assert len(_linked_files(worktree)) == len(before)
+    original = sync._copy_legacy_object
+    calls = 0
+
+    def interrupt(*args):
+        nonlocal calls
+        calls += 1
+        original(*args)
+        if calls == 1:
+            raise sync.GitSyncError("simulated interruption")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sync, "_copy_legacy_object", interrupt)
+        with pytest.raises(sync.GitSyncError, match="interruption"):
+            _detach(linked_legacy)
+    assert 0 < len(_linked_files(worktree)) < len(before)
+    assert not (root / "git-sync.json").exists()
+    _detach(linked_legacy)
+    assert not _linked_files(worktree)
+
+
+def test_legacy_detach_rejects_remote_rewrite_and_foreign_links(linked_legacy, monkeypatch):
+    source, seed, roots = linked_legacy
+    root = roots[0]
+    worktree = root / "domain"
+    local = sync.identity(str(worktree))[1]
+    git(source, "update-ref", "refs/heads/assist/legacy", local)
+    with pytest.raises(sync.GitSyncError, match="remote"):
+        _detach(linked_legacy, expected_remote=None)
+    assert _linked_files(worktree)
+    foreign = worktree / "foreign"
+    os.link(worktree / "tracked", foreign)
+    with pytest.raises(sync.GitSyncError, match="reconciliation"):
+        _detach(linked_legacy, expected_remote=local)
+    foreign.unlink()
+    original = sync._copy_legacy_object
+    changed = False
+
+    def rewrite(*args):
+        nonlocal changed
+        original(*args)
+        if not changed:
+            changed = True
+            (seed / "new").write_text("new\n")
+            git(seed, "add", "new")
+            git(seed, "commit", "-m", "advance")
+            git(seed, "push", "origin", "HEAD:main")
+            git(source, "update-ref", "refs/heads/assist/legacy", git(seed, "rev-parse", "HEAD"))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sync, "_copy_legacy_object", rewrite)
+        with pytest.raises(sync.GitSyncError, match="remote.*changed|history changed"):
+            _detach(linked_legacy, expected_remote=local)
+    assert not (root / "git-sync.json").exists()
+    assert sync.identity(str(worktree))[1] == local
+
+
+def test_legacy_detach_copies_inert_pack_metadata_and_reconciles_temp(linked_legacy):
+    source, _, roots = linked_legacy
+    root = roots[0]
+    worktree = root / "domain"
+    source_pack = source / "objects" / "pack"
+    thread_pack = worktree / ".git" / "objects" / "pack"
+    names = ("multi-pack-index", "pack-" + "a" * 40 + ".mtimes")
+    for name in names:
+        (source_pack / name).write_bytes(b"inert fixture\n")
+        os.link(source_pack / name, thread_pack / name)
+    stale = root / (".git-detach-" + "0" * 32)
+    stale.write_bytes(b"partial copy")
+    before = {name: (source_pack / name).stat().st_ino for name in names}
+    _detach(linked_legacy)
+    assert not stale.exists()
+    assert all((thread_pack / name).stat().st_nlink == 1 for name in names)
+    assert all((source_pack / name).stat().st_ino == inode for name, inode in before.items())
+    assert all((thread_pack / name).read_bytes() == b"inert fixture\n" for name in names)
+
+
+def test_legacy_detach_final_writer_proof_holds_binding(linked_legacy):
+    _, _, roots = linked_legacy
+    root = roots[0]
+    calls = 0
+
+    def verify():
+        nonlocal calls
+        calls += 1
+        return None if calls == 1 else "alias writer started"
+
+    with pytest.raises(sync.GitSyncError, match="operator verification"):
+        _detach(linked_legacy, verify_stopped=verify)
+    assert calls == 2
+    assert not (root / "git-sync.json").exists()
+    assert not _linked_files(root / "domain")
+
+
 @pytest.mark.parametrize("source", ["evil::remote", "https://secret@example.test/repo", "-bad"])
 def test_legacy_enrollment_rejects_unsafe_source_without_writing(repos, source):
     _, thread, _, binding = repos

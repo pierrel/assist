@@ -95,6 +95,12 @@ bundle import. Oversized repositories fail explicitly rather than exporting
 partial state. See =docs/2026-09-27-duplicate-pack-runtime.org=.
 Authorization separately caps the metadata-only scan of workspace, scratch and
 private-agent roots at 10,000 total entries to prove independent storage.
+For an old local clone whose only shared inodes are standard =.git/objects=
+files, an operator may first use =detach_legacy_object_hardlinks= under one
+verified write exclusion covering every alias root and the selected source
+through enrollment. It copies only local Git object paths, leaves dirty files
+and the index untouched, and does not select a source or enroll automatically.
+See =docs/2026-10-01-legacy-git-object-detachment.org= for the guarded sequence.
 
 This per-turn path does not repair the existing user-gated main merge/rebranch
 or older host-Git rendering paths. See

@@ -82,7 +82,9 @@ where reliability is harder than with frontier APIs.
 - **Git domain integration.** Each thread works in its own git branch
   of a configured "domain" repo (your life repo, your work repo, etc.)
   with edits isolated until you choose to merge. Multiple domains
-  coexist.
+  coexist. Old local clones with shared Git object inodes need an
+  [operator-verified detachment](docs/2026-10-01-legacy-git-object-detachment.org)
+  before source enrollment; the helper does not infer a source or change work.
 
 - **Multiple frontends, one Deep Agents core.** Web UI, CLI, and an Emacs
   integration share the standard agent runtime, memory, and domain repos.
