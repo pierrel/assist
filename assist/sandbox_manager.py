@@ -127,7 +127,7 @@ def _egress_proxy_config_hash(allowlist_csv: str, approvals_dir: str | None,
     destination policy recreate once and gain the current behavior. The
     service UID/GID binds proxy read access to host-only map mounts."""
     return hashlib.sha256(
-        (allowlist_csv + "|v8-turn-browser-listener:"
+        (allowlist_csv + "|v9-shared-browser-policy:"
          + f"{os.getuid()}:{os.getgid()}|" + (approvals_dir or "")
          + "|" + (map_dir or "") + "|" + network_ref).encode()
     ).hexdigest()[:16]
