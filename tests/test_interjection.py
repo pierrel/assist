@@ -5,6 +5,7 @@ scoping, framing, fate-sharing re-journal, and render surfaces
 mechanical is pinned here.
 """
 import contextlib
+from unittest.mock import Mock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -115,20 +116,22 @@ def test_sms_interjection_waits_behind_held_browser_reset(wired, monkeypatch):
         threads._runs().transition(tid, sms.id, "success", consumed_by=owner.id)
 
     from assist.browser import manager as browser
-    monkeypatch.setattr(browser.BrowserManager, "reap_orphans",
-                        lambda _root: (_ for _ in ()).throw(
-                            browser.BrowserUnavailable("Docker scan stalled")))
+    # Held-event reset uses exact-owner stop proof, not the startup orphan sweep.
+    proof = Mock(side_effect=browser.BrowserUnavailable("Docker scan stalled"))
+    monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped", proof)
     assert threads._drain_held_browser_events(tid) is False
+    proof.assert_called_once_with(str(root), tid, held.browser_reset_run_id)
     assert hook.before_model({"messages": []}, None) is None
     assert threads._runs().get(tid, sms.id).status == "pending"
 
-    def reconciled(root_dir):
-        with threads.browser_authority.fence(root_dir, tid) as state:
+    def reconciled(root_dir, thread_id, owner_run_id):
+        assert (root_dir, thread_id, owner_run_id) == (
+            str(root), tid, held.browser_reset_run_id)
+        with threads.browser_authority.fence(root_dir, thread_id) as state:
             state.mark_covered()
+        return False
 
-    monkeypatch.setattr(browser.BrowserManager, "reap_orphans", reconciled)
-    monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped",
-                        lambda *_args: False)
+    proof.side_effect = reconciled
     monkeypatch.setattr(threads, "_dispatch_pending_after", lambda _tid: None)
     assert threads._drain_held_browser_events(tid) is True
     out = hook.before_model({"messages": []}, None)
