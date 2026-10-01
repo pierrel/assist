@@ -119,8 +119,7 @@ class RegionRegistry:
                 self._write(regions)
 
     def reconcile(self) -> list[str]:
-        """Startup sweep: a record stuck in ``importing`` has no job owned by this
-        process (for example after a crash), so flip it to ``failed`` — nothing
+        """Startup sweep: flip ``importing`` records to ``failed`` — nothing
         half-built is served because the scripts validate-before-swap. Returns the
         slugs reconciled."""
         with self._lock:

@@ -222,6 +222,6 @@ class Provisioner:
                     self._deliver(p.slug, failed=True)
 
     def reconcile(self) -> list[str]:
-        """Startup: flip ``importing`` entries without a job owned by this
-        process to ``failed``, then let deliver_pending() notify."""
+        """Startup: flip ``importing`` entries to ``failed``, then let
+        deliver_pending() notify."""
         return self._registry.reconcile()

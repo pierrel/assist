@@ -333,19 +333,23 @@ See [edd/eval/README.md](edd/eval/README.md) for detailed documentation on evalu
 
 ### Subsequent Deployments
 
-Before the first turn-safe code restart, independently confirm that the old
-process has no active turn or Git sandbox flight. Then sync the new code and
-install its updated unit before restarting:
+The old process has no turn-safe drain. For the first rollout, enforce a quiet
+window that prevents new request admission and scheduled dispatches from the
+quiet check through stopping the old service. While that window is held,
+verify that no turn or Git sandbox flight is active, then stop the old service.
+If the quiet window cannot be enforced, defer this first restart. After the
+old process has stopped, sync code, install its updated unit, and start it.
+Substitute the host and service placeholders from `.deploy.env`:
 
 ```bash
+ssh <DEPLOY_HOST> 'sudo systemctl stop <SERVICE_NAME>'
 make deploy-code
 make deploy-service
-make restart
+ssh <DEPLOY_HOST> 'sudo systemctl start <SERVICE_NAME>'
 ```
 
-The old process has no turn-safe drain, so installing the unit alone cannot
-protect work already running in it. `make deploy-service` reads the unit template
-from the synced code. After that first rollout, deploy with:
+`make deploy-service` reads the unit template from the synced code. After
+that first rollout, deploy with:
 
 ```bash
 make deploy
@@ -356,8 +360,9 @@ This will:
 2. Restart the service using the already installed unit
 3. Show service logs (press Ctrl+C when satisfied)
 
-`make deploy` leaves the systemd unit untouched. Run `make deploy-service`
-before a code restart whenever the unit changes.
+`make deploy` leaves the systemd unit untouched. For a later unit change,
+sync the template with `make deploy-code` and run `make deploy-service`
+before restarting.
 
 An intentional restart waits for accepted web turns and scheduled dispatches to
 finish, including their Git finalization and sandbox teardown. Install the

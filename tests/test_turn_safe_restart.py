@@ -22,6 +22,7 @@ from assist.geo.registry import RegionRegistry
 from assist.schedule.scheduler import Scheduler
 from assist.schedule.model import Cadence, Schedule
 from assist.schedule.store import ScheduleStore
+from assist.run_service import RunService
 from manage.web.__main__ import TurnSafeServer
 from manage.web import protocol_service, state, threads
 from manage.web.drain import DrainClosed, RUN_GATE
@@ -170,18 +171,6 @@ def test_sigterm_waits_for_exact_teardown_and_terminal_run(tmp_path, monkeypatch
         server = TurnSafeServer(uvicorn.Config("manage.web:app"))
         sent = []
 
-        class Lifespan:
-            def __init__(self, config):
-                self.context = state.lifespan(state.app)
-
-            async def startup(self):
-                await self.context.__aenter__()
-
-            async def shutdown(self):
-                await self.context.__aexit__(None, None, None)
-
-        server.config.lifespan_class = Lifespan
-
         async def send(message):
             sent.append(message["type"])
 
@@ -220,6 +209,123 @@ def test_sigterm_waits_for_exact_teardown_and_terminal_run(tmp_path, monkeypatch
     assert state.SandboxManager.current_container(work_dir) is None
     assert killed == [True]
     assert cleanup_calls == [True]
+
+
+def test_os_sigterm_through_server_run_waits_for_accepted_turn(tmp_path):
+    """Production signal installation must wait for terminal Run and exact teardown."""
+    script = r'''
+import asyncio
+import os
+import signal
+import sys
+import threading
+from pathlib import Path
+
+import uvicorn
+from starlette.background import BackgroundTask
+from starlette.responses import Response
+
+from manage.web import state, threads
+from manage.web.__main__ import TurnSafeServer
+
+root = Path(sys.argv[1])
+ready_fd = int(sys.argv[2])
+(root / "turn").mkdir()
+state._recover_interrupted_threads = lambda: None
+state.MANAGER.list = lambda: []
+state.MANAGER.close = lambda: None
+state.CAPTURE_WORKER.start = lambda: None
+state.CAPTURE_WORKER.stop = lambda: None
+threads.start_scheduler = lambda: None
+threads.stop_scheduler = lambda: None
+threads._dispatch_pending_after = lambda *args: None
+run = threads._create_run("turn", "accepted")
+service = threads._runs()
+work_dir = str(root / "turn" / "work")
+release = threading.Event()
+
+class Generation:
+    def kill(self):
+        (root / "killed").touch()
+
+generation = Generation()
+state.SandboxManager._containers = {work_dir: generation}
+actual_cleanup = state.SandboxManager.cleanup
+actual_cleanup_all = state.SandboxManager.cleanup_all
+
+def exact_cleanup(path, expected_container):
+    assert path == work_dir and expected_container is generation
+    assert state.SandboxManager.current_container(path) is generation
+    os.write(ready_fd, b"H")
+    assert release.wait(10)
+    actual_cleanup(path, expected_container=expected_container)
+
+def cleanup_all():
+    assert (root / "killed").exists()
+    (root / "cleanup_all").touch()
+    actual_cleanup_all()
+
+def run_model(tid, text, *, _run, **kwargs):
+    service.claim(tid, _run.id)
+    state.SandboxManager.cleanup(work_dir, expected_container=generation)
+    state._set_status(tid, "ready")
+
+state.SandboxManager.cleanup = exact_cleanup
+state.SandboxManager.cleanup_all = cleanup_all
+threads._process_message = run_model
+threading.Thread(target=lambda: (sys.stdin.readline(), release.set()), daemon=True).start()
+signal.signal(signal.SIGTERM, lambda *args: None)  # Uvicorn replays after its handler exits.
+
+server = TurnSafeServer(uvicorn.Config("manage.web:app"))
+
+async def send(message):
+    pass
+
+async def receive():
+    return {"type": "http.request", "body": b"", "more_body": False}
+
+async def startup(*, sockets=None):
+    await server.lifespan.startup()
+    server.servers = []
+    server.started = True
+    response = Response("accepted", background=BackgroundTask(
+        threads._execute_run, run.id, "turn"))
+    task = asyncio.create_task(response(
+        {"type": "http", "method": "POST", "path": "/"}, receive, send))
+    server.server_state.tasks.add(task)
+    task.add_done_callback(server.server_state.tasks.discard)
+
+server.startup = startup
+server.run()
+'''
+    read_fd, write_fd = os.pipe()
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(tmp_path), str(write_fd)],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        pass_fds=(write_fd,),
+        env={**os.environ, "ASSIST_THREADS_DIR": str(tmp_path)})
+    os.close(write_fd)
+    runs = RunService(str(tmp_path))
+    try:
+        ready, _, _ = select.select([read_fd], [], [], 10)
+        assert ready and os.read(read_fd, 1) == b"H"
+        os.kill(process.pid, signal.SIGTERM)
+        with pytest.raises(subprocess.TimeoutExpired):
+            process.wait(timeout=0.3)
+        assert runs.list("turn")[0].status == "running"
+        assert not (tmp_path / "killed").exists()
+        assert not (tmp_path / "cleanup_all").exists()
+        process.stdin.write(b"release\n")
+        process.stdin.flush()
+        assert process.wait(timeout=10) == 0, process.stderr.read().decode()
+        assert runs.list("turn")[0].status == "success"
+        assert (tmp_path / "killed").exists()
+        assert (tmp_path / "cleanup_all").exists()
+    finally:
+        os.close(read_fd)
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=5)
 
 
 def test_run_creation_at_closure_is_durable_or_refused(tmp_path, monkeypatch):
