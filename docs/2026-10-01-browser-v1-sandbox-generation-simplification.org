@@ -1,0 +1,202 @@
+#+title: Browser V1 simplification: sandbox generation, common egress, observable preflight
+#+date: 2026-10-01
+State: Design for the existing assist-headless-browser effort, epoch 22
+
+* Objective and source
+
+Pierre's new V1 request makes the visible turn's existing sandbox generation
+the Chromium lifetime. The browser still starts lazily. The next turn starts a
+new generation and may load a small private Playwright snapshot plus a safe
+semantic note. Browser and shell traffic use the same egress decisions and
+thread grants. A bounded preflight reports the top-level destination and
+observed dependencies; the agent selects a small subset for ordinary approval.
+
+This design supersedes the independent browser 240-second deadline and the
+browser-only public/internal destination policy. It does not authorize a merge,
+shared Docker mutation, or deployment. The current accepted owner baseline is
+0a8ef9b60d54a5832c25b4c97ed53e0fe1bb6428. The protected composition
+685b0fd6642fb22b046b593e12c943cc32bf20dd/tree
+2c3b7fec9de07745c1f3eb3873038a2c612016e0 was recorded live on
+2026-10-01 at 03:29:11 UTC. This new design does not claim the successor live.
+
+* Contract and flow
+
+1. A claimed managed web Run creates its scoped per-turn sandbox as today.
+   Generic temporary workspaces cannot infer thread authority. Its first
+   browser tool, including a preflight before navigation, checks the exact
+   sandbox generation, installs the UID fence, arms the matching proxy record,
+   and starts the worker in a nested PID namespace. The worker opens Chromium
+   on its first actual page navigation. Subsequent tools use the same
+   generation, token and page IDs.
+2. Success, error, approval, clarification, cancel and supersession all reach
+   the same turn teardown. Save at most 48 KiB of valid Playwright cookies and
+   local storage while the exact Run/generation still owns the private file,
+   then disarm its browser proxy capability and prove the sandbox generation
+   stopped before forgetting its registry, attribution or durable stop
+   obligation. An unresolved kill remains an owed stop proof and prevents
+   replacement. Disarming denies new browser proxy connections. An already
+   established CONNECT tunnel can continue if Docker stop is unresolved;
+   classify that combination as a live-capability incident, never a completed
+   teardown. Keep the exact generation record available for recovery. A stale callback
+   still stops its captured old ID, then compare-removes only that ID's map and
+   registry entries; it cannot stop or clear a later generation.
+3. Host crash with no restart leaves the container only until the existing
+   outer PID 1 common 10800-second TTL. The nested PID namespace's init and
+   Chromium descendants die when the outer container dies. On restart, exact
+   root/workspace scan and confirmed stop precede a replacement. We do not
+   promise immediate death while the host is unavailable. Keep the common TTL
+   above the two-hour active hold cap to avoid normal mid-turn expiry. A
+   noncooperative turn can still reach the TTL; that is an infrastructure
+   failure, not a proof that the turn finished.
+4. Browser UID 10001 may reach only the verified proxy IP on 8889. Other UIDs
+   cannot borrow that listener; direct sockets, IPv6 and UDP remain confined.
+   Both listeners use the same target policy: operator base hosts at any port
+   as today, or live exact thread/host/port grants with the ordinary
+   one-hour or until-revoked duration. The proxy vets non-base resolved IPs as
+   public. Pi remains a no-grant caller. Private base-host browsing now follows
+   the ordinary policy; the former fresh direct-message exact-port rule ends.
+   A public page's own JavaScript can consequently request an operator-private
+   base host without deliberate navigation; restored internal cookies can
+   amplify cross-origin requests. This is a deliberate consequence of one
+   existing allowlist policy, not unchanged security evidence. An adversarial
+   public-page-to-private-service check must make this visible before release.
+5. =browser_preflight(url, page_id?)= returns the top-level origin's current
+   policy decision without upstream dial. With a live page it also returns a
+   bounded set of observed resource/redirect origins and types, each annotated
+   with its current policy result and untrusted source. It never invents unseen
+   dependencies, treats a page request as user consent, navigates, submits a
+   form or grants access. For a blocked top-level origin, dependencies are
+   unknown; for a dynamic or truncated page they are partial. Return only
+   origins, not URL paths, queries, headers, body, cookies or form values.
+   Normal network requests recheck grants and DNS after preflight.
+6. The model chooses at most three needed destinations and requests them
+   together through the ordinary thread store. Reuse existing per-thread/global
+   pending caps, individual approval cards and one-hour/until-revoked decisions.
+   Validate and deduplicate the entire selection before inserting records.
+   Report partial cap/existing/declined results truthfully. For async children,
+   register all selected pending records and waiters before one interruption;
+   looping public =request_egress= would interrupt on the first item.
+
+* Small implementation sequence
+
+1. In =assist/sandbox_manager.py=, move the existing confirmed exact-container
+   kill/inspect proof and scoped discovery out of browser ownership. Its
+   =cleanup= and =cleanup_all= currently forget registry/map before a best-effort
+   kill, which is the concrete safety blocker. The existing private owner
+   generation journal must begin for *every managed sandbox* before Docker
+   creation, including a turn that never opens a browser; add its exact Docker
+   ID before returning the sandbox to the caller. Managed web turns use their
+   already claimed Run/sequence; other explicit scoped callers use an opaque
+   per-generation owner. Generic temporary workspaces never touch this journal.
+   An uncertain create leaves the pending obligation for a successful exact
+   workspace scan; no later managed generation is exposed until it settles.
+   Browser readiness must accept the *current* claimed Run's own generation
+   while rejecting a prior owner's owed lease. Reuse the existing journal and
+   per-thread admission gate, with no second journal or state machine. Keep
+   Docker calls outside short map/fence locks and off the event loop. Capture
+   the old container ID in cleanup: kill/inspect that ID even if a new registry
+   entry occupies the workspace, then compare-remove only matching old
+   registry/map entries. =BrowserSession.close= captures storage, disarms the
+   exact browser record and delegates stop proof; the outer web =finally= can
+   repeat an idempotent confirmed stop. If stop proof fails, hold admission and
+   escalate a possible active tunnel even when map disarm succeeded. If
+   disarming also fails, the browser may still open new connections. Keep the
+   legacy sidecar scan until all old generations have
+   positive retirement proof.
+2. In =assist/run_service.py= delete browser boot/deadline fields and binding.
+   In =assist/browser/manager.py= delete deadline/timer/clamps and browser
+   public/internal consent/mode lifecycle; retain fixed per-operation timeouts,
+   exact Run/generation fences and uncertain-startup refusal. Remove the
+   boot/deadline environment and SIGALRM check from =turn_runtime.py=,
+   =launch-turn-browser.py= and =runner.py=. The new worker still requires PID 1,
+   UID/capability proof, private socket and an HTTP(S)-only page boundary.
+3. In =assist/egress/client_map.py= replace mode/host/port fields with one
+   exact-generation browser-armed provenance flag. In
+   =dockerfiles/egress-proxy.py= call one policy decision from ordinary and
+   browser listeners, retaining ingress attribution, retirement admissibility,
+   resolved-address vetting and fail-closed errors. Before browser map
+   publication, pin and recheck the exact proxy ID and complete attachment set
+   under the proxy mutation lock, and fence *every attached proxy IPv4 endpoint*
+   for ordinary UIDs on port 8889. Refuse an attachment without a valid IPv4.
+   This includes its
+   default bridge, which provides proxy internet egress, as well as the two
+   internal bridges. Browser UID can still reach only the selected ordinary
+   bridge IP/8889. This preserves ordinary external port-8889 grants; do not
+   widen shell denial to arbitrary non-proxy destinations. Proxy retirement or
+   attachment changes revoke armed attribution before an unfenced endpoint can
+   serve new traffic.
+4. In =assist/browser/runner.py= keep an origin-only bounded observation of
+   actual page requests and redirects. Implement a policy-only proxy operation
+   on the existing listener that returns before any upstream connect. Add one
+   typed browser preflight tool and its skill guidance. Replace the old
+   =browser_probe= model tool and its real-CONNECT path; do not expose two
+   policy-reason interfaces. In =assist/egress/tools.py=
+   add a batch wrapper around the same normalization, store, card and child
+   waiter machinery as a single ordinary grant request. No implicit batch
+   approval or wildcard grant.
+5. Keep =assist/browser/storage.py='s private regular 0600/no-follow/one-link
+   atomic snapshot under its 48 KiB bound. Remove the public-mode-only capture
+   and restore condition. Do not add sessionStorage or persistent user-data
+   directories without a measured site need. Semantic notes omit password,
+   OTP, payment, auth secrets and old page/DOM IDs; next turn reopens and
+   re-observes.
+6. Align current =README.md= website-browser section, browse skill operations,
+   egress skill description/body, ordinary request tool docstring, proxy
+   module/policy comments, sandbox cleanup docstrings, and runner/manager
+   deadline/mode/probe comments. Recompute prompt census from final
+   model-visible bytes. Do not rewrite dated records.
+
+* Verified old finding disposition
+
+The earlier IMPORTANT generic-workspace scoping defect is already corrected
+by =da615324=: managed callers pass explicit =thread_scope=, the factory checks
+canonical =root/thread/domain= before authority or Docker, and generic callers
+do not call =authority.fence=. The no-Docker regression
+=tests/test_sandbox.py::TestSandboxManager::test_generic_workspaces_do_not_access_browser_authority=
+patches the fence to raise and Docker to be unavailable, including a generic
+=domain= directory. The manager's storage comment now correctly says a valid
+snapshot is sent only to the worker, never the model. These findings must remain
+closed and their regressions must pass after the new change.
+
+* Acceptance and review
+
+- Deterministic: failed/uncertain stop retains ownership and blocks successor;
+  its browser listener denies new connections after disarm, while existing
+  tunnels remain a live-capability incident; stale cleanup proves the old captured ID
+  stopped without changing a later ID; restart with empty in-memory
+  registry discovers the scoped Docker generation; generic workspace remains
+  outside authority; all turn exits and held-event promotion preserve order.
+- Proxy/security: same allow/deny outcomes across listener kinds for base,
+  live/expired/revoked grants and exact thread/port; private non-base resolution
+  denied; unattributed/Pi/wrong-ingress rejected; browser UID confined even
+  across every proxy attachment, localhost, IPv6 and UDP. Preflight performs no
+  upstream dial or grant mutation, bounds input/output/observations and marks
+  partial results. Page-controlled origins cannot auto-approve. Batch requests
+  respect caps, races, existing/declined items and child checkpoint ordering.
+- Real isolated root-run Docker: a proxied Chromium turn, normal and failed
+  exact sandbox teardown, nested descendants gone on short test-only outer
+  PID 1 natural expiry without host callbacks, and cookie/localStorage capture
+  from generation A with authenticated restoration in distinct generation B.
+  Verify private file bounds/location, stale IDs and no canary in semantic notes.
+  Existing r7 Docker proof measured the old 240-second lifetime, so it cannot
+  validate changed bytes.
+- Natural behavior: new multi-origin preflight/minimal batch and real-storage
+  rows need matched 0a8 pre-change N3, candidate N3, confidence N5, stability
+  N10 under per-unit production model admission. Preserve one-turn, approval,
+  partial form, stale target and sensitive-note behavior; update the old private
+  consent row's expected contract. Existing modeled =auth_cookie=True= checks
+  tool behavior but not Playwright snapshot serialization. Mock unrelated
+  research. No broad rerun of unchanged panels.
+- Independent affected design and code review covers adversarial security,
+  lifetime/concurrency, simplicity and a separate docs/comment alignment pass.
+  Seal only an exact clean source with changed-byte CPU, model and protected
+  Docker evidence. Root alone accepts, composes and deploys; original PR267
+  stays separate, with Copilot cap 7/7 and no merge authority.
+
+* Historical supersessions
+
+This design replaces the =Solution= section of
+=docs/2026-09-30-headless-browser-v1-turn-scoped.org= only for the independent
+240-second deadline and the browser-only public/internal destination policy.
+It retains turn-scoped Chromium, UID/proxy provenance and bounded private
+continuity. No dated historical document is rewritten.
