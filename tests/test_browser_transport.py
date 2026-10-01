@@ -6,7 +6,6 @@ import sys
 import threading
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -94,15 +93,19 @@ def test_uncertain_turn_startup_cannot_repeat_in_one_run(
     run = RunService(str(tmp_path)).create(
         "thread", "general-agent", "Read a public page", user_origin=True)
     session = browser.BrowserSession(
-        "thread", run.id, str(tmp_path), str(tmp_path), None)
+        "thread", run.id, str(tmp_path), str(tmp_path), None,
+        sandbox_generation="generation")
     monkeypatch.setattr(browser, "configured_directory", lambda: str(tmp_path))
-    monkeypatch.setattr(browser, "_load_egress_allowlist", lambda: [])
     monkeypatch.setattr(browser.SandboxManager, "current_container",
                         lambda _work_dir: SimpleNamespace(id="generation"))
     monkeypatch.setattr(browser.SandboxManager, "_egress_client_ips", {
         str(tmp_path): (str(tmp_path), "172.20.0.9", "generation")})
     monkeypatch.setattr(browser, "_kill_container_confirmed", lambda _gen: None)
     monkeypatch.setattr(browser, "forget_client", lambda *_args: None)
+    monkeypatch.setattr(browser, "disarm_sandbox_browser", lambda *_args: None)
+    with authority.fence(str(tmp_path), "thread") as state:
+        state.begin(run.id, run.admission_sequence)
+        state.add_generation(run.id, "generation")
     launches = []
 
     def timed_out(*_args, **_kwargs):
@@ -127,7 +130,7 @@ def test_turn_session_rejects_replaced_sandbox_generation(monkeypatch, tmp_path)
         str(tmp_path): (str(tmp_path), "172.20.0.9", "replacement")})
     monkeypatch.setattr(browser, "configured_directory", lambda: str(tmp_path))
     with pytest.raises(browser.BrowserUnavailable, match="identity changed"):
-        session._start("public", None, None)
+        session._start()
 
 
 def test_invalid_private_snapshot_loses_continuity_without_blocking_browser(
@@ -139,11 +142,10 @@ def test_invalid_private_snapshot_loses_continuity_without_blocking_browser(
                       user_origin=True)
     session = browser.BrowserSession(
         "thread", run.id, str(tmp_path), str(tmp_path), None,
-        run_service=runs)
-    session.boot_id, session.deadline_ns = runs.bind_browser_deadline(
-        "thread", run.id)
+        run_service=runs, sandbox_generation="generation")
     with authority.fence(str(tmp_path), "thread") as state:
         state.begin(run.id, run.admission_sequence)
+        state.add_generation(run.id, "generation")
     monkeypatch.setattr(browser.SandboxManager, "current_container",
                         lambda _work_dir: SimpleNamespace(id="generation"))
     monkeypatch.setattr(browser.SandboxManager, "_egress_client_ips", {
@@ -158,36 +160,49 @@ def test_invalid_private_snapshot_loses_continuity_without_blocking_browser(
                         b'{"result":null}')
     monkeypatch.setattr(browser, "_kill_container_confirmed", lambda _id: None)
     monkeypatch.setattr(browser, "forget_client", lambda *_args: None)
-    session._start("public", None, None)
+    monkeypatch.setattr(browser, "disarm_sandbox_browser", lambda *_args: None)
+    session._start()
     assert session.identity.generation == "generation"
     session.close()
 
 
-def test_failed_stop_keeps_deadline_timer_and_identity(monkeypatch, tmp_path):
+def test_failed_stop_keeps_identity_and_disarms_before_kill(monkeypatch, tmp_path):
     session = browser.BrowserSession(
         "thread", "run", str(tmp_path), str(tmp_path), None)
     session.identity = browser._ContainerIdentity(
-        str(tmp_path), "172.20.0.9", "generation", "public", None)
-    session.expiry_timer = MagicMock()
+        str(tmp_path), "172.20.0.9", "generation")
+    events = []
+    monkeypatch.setattr(browser, "disarm_sandbox_browser",
+                        lambda *_args: events.append("disarm"))
     monkeypatch.setattr(browser, "_kill_container_confirmed", lambda _id: (
-        _ for _ in ()).throw(browser.BrowserUnavailable("stop unconfirmed")))
+        events.append("kill") or (_ for _ in ()).throw(
+            browser.BrowserUnavailable("stop unconfirmed"))))
     with pytest.raises(browser.BrowserUnavailable, match="stop unconfirmed"):
         session._stop()
-    session.expiry_timer.cancel.assert_not_called()
+    assert events == ["disarm", "kill"]
     assert session.identity.generation == "generation"
 
 
-def test_failed_command_kills_sidecar_before_releasing_session(monkeypatch, tmp_path):
+def test_failed_command_stops_generation_before_releasing_session(monkeypatch, tmp_path):
     (tmp_path / "thread").mkdir()
     authority.mark_new_thread(str(tmp_path), "thread")
-    session = browser.BrowserSession("thread", "run", str(tmp_path), str(tmp_path), None)
+    runs = RunService(str(tmp_path))
+    run = runs.create("thread", "general-agent", "Read a page", user_origin=True)
+    with authority.fence(str(tmp_path), "thread") as state:
+        state.begin(run.id, run.admission_sequence)
+        state.add_generation(run.id, "generation")
+    session = browser.BrowserSession(
+        "thread", run.id, str(tmp_path), str(tmp_path), None,
+        run_service=runs, sandbox_generation="generation")
     session.identity = browser._ContainerIdentity(
-        str(tmp_path), "172.20.0.9", "generation", "public", None)
+        str(tmp_path), "172.20.0.9", "generation")
     killed = []
     monkeypatch.setattr(browser, "_docker_exec",
                         lambda *_args, **_kwargs: (_ for _ in ()).throw(
                             browser.BrowserUnavailable("browser transport timed out")))
     monkeypatch.setattr(browser, "_kill_container_confirmed", killed.append)
+    monkeypatch.setattr(browser, "disarm_sandbox_browser", lambda *_args: None)
+    monkeypatch.setattr(browser, "forget_client", lambda *_args: None)
     with pytest.raises(browser.BrowserUnavailable, match="timed out"):
         session.command("observe", page_id="old")
     assert killed == ["generation"]
@@ -198,7 +213,7 @@ def test_failed_attribution_removal_still_kills_and_keeps_retry_identity(
         monkeypatch, tmp_path):
     session = browser.BrowserSession("thread", "run", str(tmp_path), str(tmp_path), None)
     session.identity = browser._ContainerIdentity(
-        str(tmp_path), "172.20.0.9", "generation", "public", None)
+        str(tmp_path), "172.20.0.9", "generation")
     killed = []
     monkeypatch.setattr(browser, "forget_client",
                         lambda *_: (_ for _ in ()).throw(OSError("read-only map")))
@@ -209,49 +224,38 @@ def test_failed_attribution_removal_still_kills_and_keeps_retry_identity(
     assert session.identity.generation == "generation"
 
 
-def test_first_open_deadline_is_one_persisted_work_deadline(tmp_path):
+def test_historical_deadline_fields_are_ignored_on_read(tmp_path):
     (tmp_path / "thread").mkdir()
     runs = RunService(str(tmp_path))
     first = runs.create("thread", "general-agent", "Open a page", user_origin=True)
-    before = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
-    boot_id, deadline = runs.bind_browser_deadline("thread", first.id)
-    after = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
-    assert before + 240_000_000_000 <= deadline <= after + 240_000_000_000
-    successor = runs.create("thread", "general-agent", None,
-                            work_id=first.work_id, resume=True,
-                            user_event_id=first.user_event_id)
-    assert runs.bind_browser_deadline("thread", successor.id) == (boot_id, deadline)
-    assert RunService(str(tmp_path)).bind_browser_deadline(
-        "thread", successor.id) == (boot_id, deadline)
-    assert runs.get("thread", successor.id).browser_deadline_ns == deadline
+    raw = first.to_dict()
+    raw.update(browser_boot_id="old-boot", browser_deadline_ns=1)
+    restored = type(first).from_dict(raw)
+    assert "browser_boot_id" not in restored.to_dict()
+    assert "browser_deadline_ns" not in restored.to_dict()
 
 
-def test_reboot_expires_persisted_browser_capability(tmp_path):
-    session = browser.BrowserSession("thread", "run", str(tmp_path), str(tmp_path), None)
-    session.boot_id = "another-host-boot"
-    session.deadline_ns = time.clock_gettime_ns(time.CLOCK_BOOTTIME) + 240_000_000_000
-    assert session._remaining() == 0
-
-
-def test_command_transport_is_clamped_and_late_result_is_rejected(
+def test_command_transport_uses_fixed_operation_bound(
         monkeypatch, tmp_path):
     (tmp_path / "thread").mkdir()
     authority.mark_new_thread(str(tmp_path), "thread")
-    session = browser.BrowserSession("thread", "run", str(tmp_path), str(tmp_path), None)
+    runs = RunService(str(tmp_path))
+    run = runs.create("thread", "general-agent", "Read a page", user_origin=True)
+    with authority.fence(str(tmp_path), "thread") as state:
+        state.begin(run.id, run.admission_sequence)
+        state.add_generation(run.id, "generation")
+    session = browser.BrowserSession(
+        "thread", run.id, str(tmp_path), str(tmp_path), None,
+        run_service=runs, sandbox_generation="generation")
     session.identity = browser._ContainerIdentity(
-        str(tmp_path), "172.20.0.9", "generation", "public", None)
-    session.deadline_ns = 1
-    remaining = iter((1.0, 0.4, 0.0))
-    monkeypatch.setattr(session, "_remaining", lambda: next(remaining))
+        str(tmp_path), "172.20.0.9", "generation")
     observed = []
     monkeypatch.setattr(browser, "_docker_exec",
                         lambda _gen, _cmd, *, timeout, in_sandbox: (
                             observed.append(timeout) or b'{"result": {}}'))
-    monkeypatch.setattr(browser, "_kill_container_confirmed", lambda gen: None)
-    with pytest.raises(browser.BrowserUnavailable, match="deadline expired"):
-        session.command("observe", page_id="p1")
-    assert observed == [0.4]
-    assert session.identity is None
+    assert session.command("observe", page_id="p1") == {"result": {}}
+    assert observed == [20]
+    assert session.identity.generation == "generation"
 
 
 def test_missing_thread_directory_still_stops_exact_turn_sandbox(

@@ -281,7 +281,8 @@ def _get_domain_manager(tid: str, domain: str | None = None) -> DomainManager | 
 
 def _get_sandbox_backend(tid: str, tz: str | None = None, *,
                          include_agent: bool = True,
-                         browser_capable: bool = False):
+                         browser_capable: bool = False,
+                         owner_run_id: str | None = None):
     """Get sandbox backend for a thread, or None if Docker is unavailable.
 
     ``tz`` is the per-turn context-rider timezone, so this turn's sandbox ``date``
@@ -304,7 +305,8 @@ def _get_sandbox_backend(tid: str, tz: str | None = None, *,
     return SandboxManager.get_sandbox_backend(
         work_dir, tz=tz,
         agent_dir=(MANAGER.thread_agent_dir(tid) if include_agent else None),
-        browser_capable=browser_capable, thread_scope=(MANAGER.root_dir, tid))
+        browser_capable=browser_capable, thread_scope=(MANAGER.root_dir, tid),
+        owner_run_id=owner_run_id)
 
 
 def _has_unmerged_changes(tid: str) -> bool:

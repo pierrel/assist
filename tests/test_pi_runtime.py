@@ -116,8 +116,10 @@ class _SandboxManager:
 
     @classmethod
     def get_pi_sandbox_backend(cls, work_dir: str, timezone: str | None, *,
-                               thread_scope: tuple[str, str] | None = None) -> _Backend:
+                               thread_scope: tuple[str, str] | None = None,
+                               owner_run_id: str | None = None) -> _Backend:
         cls.last_thread_scope = thread_scope
+        cls.last_owner_run_id = owner_run_id
         cls.events.append("sandbox.start")
         assert timezone == "America/Los_Angeles"
         return cls.backend

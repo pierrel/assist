@@ -440,7 +440,8 @@ class PiRuntimeManager:
             result_capability = secrets.token_urlsafe(32)
             result_sink = PiResultSink(control_dir, result_capability)
             sandbox = self._sandbox_manager.get_pi_sandbox_backend(
-                work_dir, timezone, thread_scope=thread_scope)
+                work_dir, timezone, thread_scope=thread_scope,
+                owner_run_id=skill_run_id)
             if sandbox is None:
                 raise PiRuntimeError("Pi workspace sandbox is unavailable")
             if isinstance(sandbox, DockerSandboxBackend):

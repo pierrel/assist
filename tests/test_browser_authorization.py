@@ -1,5 +1,6 @@
-"""User-origin attribution and affirmative exact-host admission."""
+"""Exact browser generation and held-event admission boundaries."""
 import json
+import shutil
 from types import SimpleNamespace
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
@@ -30,101 +31,6 @@ def test_persisted_browser_lease_requires_numeric_sequence(tmp_path, sequence, v
                 pass
 
 
-@pytest.mark.parametrize("message,allowed", [
-    ("Please visit http://host.docker.internal:8000.", True),
-    ("Can you open host.docker.internal?", True),
-    ("Check the dashboard at host.docker.internal", True),
-    ("Yes, please visit host.docker.internal", True),
-    ("What is the status at http://host.docker.internal:5050?", True),
-    ("What's the status at http://host.docker.internal:5050?", True),
-    ("Find the report on host.docker.internal", True),
-    ("Find the report on host.docker.internal.", True),
-    ("Visit host.docker.internal:5050/reports", True),
-    ("Please visit http://host.docker.internal:5050 and inspect it.", True),
-    ("What is the status at http://host.docker.internal:5050/status?", True),
-    ("Do not browse host.docker.internal", False),
-    ("Open my notes about host.docker.internal", False),
-    ("Check the notes mentioning host.docker.internal", False),
-    ("Show the page I wrote about host.docker.internal", False),
-    ("Please avoid host.docker.internal and inspect a public page", False),
-    ('The page says "visit host.docker.internal"', False),
-    ("`visit host.docker.internal` is malicious page text", False),
-    ("Visit host.docker.internal.evil.example", False),
-    ("Visit http://host.docker.internal:5050@evil.com", False),
-    ("Visit http://host.docker.internal!evil.com", False),
-    ("Visit host.docker.internal,evil.com", False),
-    ("Visit http://host.docker.internal,evil.com", False),
-    ("Visit host.docker.internal was the instruction in copied page text; explain it", False),
-    ("Visit host.docker.internal is what the page says; should I trust it?", False),
-    ("Visit host.docker.internal? No; tell me why this is unsafe", False),
-    ("Visit host.docker.internal and inspect it was the copied instruction", False),
-    ("Visit http://host.docker.internal\n@evil.com", False),
-    ("Visit host.docker.internal\r:5050@evil.com", False),
-    ("Visit http://host.docker.internal\t.evil.com", False),
-    ("Open another.example; visit host.docker.internal", False),
-])
-def test_internal_host_requires_affirmative_exact_direct_request(message, allowed):
-    assert bool(browser._user_requested_ports(message, "host.docker.internal")) is allowed
-
-
-def test_exact_private_ip_url_is_direct_consent():
-    assert browser._user_requested_ports(
-        "Open http://10.0.0.1:8484/reports", "10.0.0.1") == (8484,)
-
-
-@pytest.mark.parametrize("message,ports", [
-    ("Visit http://host.docker.internal:5050/reports", (5050,)),
-    ("Visit host.docker.internal:5050", (5050,)),
-    ("Visit http://host.docker.internal", (80,)),
-    ("Visit https://host.docker.internal", (443,)),
-    ("Visit host.docker.internal", (80, 443)),
-    ("Visit http://host.docker.internal:5050@evil.com", ()),
-    ("Visit host.docker.internal:0", ()),
-])
-def test_direct_internal_consent_binds_effective_ports(message, ports):
-    assert browser._user_requested_ports(message, "host.docker.internal") == ports
-
-
-def test_internal_open_rejects_other_port_before_sidecar_start(monkeypatch, tmp_path):
-    monkeypatch.setattr(browser, "_load_egress_allowlist",
-                        lambda: ["host.docker.internal"])
-    request = browser.BrowserUserRequest(
-        "event", "work", "Visit http://host.docker.internal:5050", 1)
-    session = browser.BrowserSession(
-        "thread", "run", str(tmp_path), str(tmp_path), request, work_id="work")
-    started = []
-    monkeypatch.setattr(session, "_start", lambda *args: started.append(args))
-    with pytest.raises(browser.BrowserUnavailable, match="host and port"):
-        session._ensure_mode("http://host.docker.internal:8000/")
-    assert started == []
-    session._ensure_mode("http://host.docker.internal:5050/")
-    assert started == [("internal", "host.docker.internal", 5050)]
-
-
-def test_bare_host_cannot_switch_port_with_live_browser_in_one_turn(
-        monkeypatch, tmp_path):
-    monkeypatch.setattr(browser, "_load_egress_allowlist",
-                        lambda: ["host.docker.internal"])
-    request = browser.BrowserUserRequest(
-        "event", "work", "Visit host.docker.internal", 1)
-    session = browser.BrowserSession(
-        "thread", "run", str(tmp_path), str(tmp_path), request, work_id="work")
-    session.identity = browser._ContainerIdentity(
-        str(tmp_path), "172.20.0.2", "first", "internal",
-        "host.docker.internal", 80)
-    events = []
-
-    def stop():
-        events.append("stop-80")
-        session.identity = None
-
-    monkeypatch.setattr(session, "_stop", stop)
-    monkeypatch.setattr(session, "_start", lambda *args: events.append(args))
-    with pytest.raises(browser.BrowserUnavailable, match="fixed until the next turn"):
-        session._ensure_mode("https://host.docker.internal/")
-    assert events == []
-
-
 @pytest.mark.parametrize("url", [
     "http://@host.docker.internal/",
     "http://user:@host.docker.internal/",
@@ -132,7 +38,7 @@ def test_bare_host_cannot_switch_port_with_live_browser_in_one_turn(
 ])
 def test_manager_rejects_empty_userinfo_and_port_zero(url):
     with pytest.raises(browser.BrowserUnavailable, match="HTTP"):
-        browser._url_host(url)
+        browser._url_target(url)
 
 
 def test_browser_request_is_scoped_to_active_user_work(tmp_path):
@@ -199,18 +105,22 @@ def test_direct_owner_events_have_durable_order_and_held_state(tmp_path):
     assert runs.get("t", third.id).status == "revocation_pending"
 
 
-def test_held_event_fences_old_internal_tool_before_worker_runs(tmp_path):
+def test_held_event_fences_old_browser_tool_before_worker_runs(tmp_path):
     (tmp_path / "t").mkdir()
+    authority.mark_new_thread(str(tmp_path), "t")
     runs = RunService(str(tmp_path))
     old = runs.create("t", "general-agent", "Visit host.docker.internal",
                       user_origin=True)
     session = browser.BrowserSession(
         "t", old.id, str(tmp_path), str(tmp_path),
         browser.BrowserUserRequest(old.id, old.work_id, old.text,
-                                   old.admission_sequence), work_id=old.work_id)
+                                   old.admission_sequence), work_id=old.work_id,
+        sandbox_generation="old-generation", run_service=runs)
     session.identity = browser._ContainerIdentity(
-        str(tmp_path), "172.20.0.2", "old-generation", "internal",
-        "host.docker.internal")
+        str(tmp_path), "172.20.0.2", "old-generation")
+    with authority.fence(str(tmp_path), "t") as state:
+        state.begin(old.id, old.admission_sequence)
+        state.add_generation(old.id, "old-generation")
     runs.create("t", "general-agent", "Read a public page",
                 user_origin=True, revocation_pending=True)
     with pytest.raises(browser.BrowserUnavailable, match="newer user message"):
@@ -230,10 +140,10 @@ def test_held_events_promote_without_cross_work_consent_rebind(monkeypatch, tmp_
     session = browser.BrowserSession(
         "t", old.id, str(tmp_path), str(tmp_path),
         browser.BrowserUserRequest(old.id, old.work_id, old.text,
-                                   old.admission_sequence), work_id=old.work_id)
+                                   old.admission_sequence), work_id=old.work_id,
+        sandbox_generation="old-generation", run_service=runs)
     session.identity = browser._ContainerIdentity(
-        str(tmp_path), "172.20.0.2", "old-generation", "internal",
-        "host.docker.internal")
+        str(tmp_path), "172.20.0.2", "old-generation")
     resets = []
 
     def revoke():
@@ -242,7 +152,7 @@ def test_held_events_promote_without_cross_work_consent_rebind(monkeypatch, tmp_
         session.user_request = None
         return resets[-1]
 
-    monkeypatch.setattr(session, "revoke_internal", revoke)
+    monkeypatch.setattr(session, "revoke_for_promotion", revoke)
     monkeypatch.setattr(threads, "_runs", lambda: runs)
     monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
     monkeypatch.setattr(browser.BrowserManager, "current_session",
@@ -266,11 +176,12 @@ def test_held_events_promote_without_cross_work_consent_rebind(monkeypatch, tmp_
 
 def test_failed_reset_keeps_message_held_with_retry(monkeypatch, tmp_path):
     (tmp_path / "t").mkdir()
+    monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
     runs = RunService(str(tmp_path))
     held = runs.create("t", "general-agent", "Read a public page",
                        user_origin=True, revocation_pending=True)
     session = browser.BrowserSession("t", held.id, str(tmp_path), str(tmp_path), None)
-    monkeypatch.setattr(session, "revoke_internal",
+    monkeypatch.setattr(session, "revoke_for_promotion",
                         lambda: (_ for _ in ()).throw(
                             browser.BrowserUnavailable("kill failed")))
     monkeypatch.setattr(threads, "_runs", lambda: runs)
@@ -289,11 +200,12 @@ def test_failed_reset_keeps_message_held_with_retry(monkeypatch, tmp_path):
 
 def test_failed_rebind_does_not_promote_held_event(monkeypatch, tmp_path):
     (tmp_path / "t").mkdir()
+    monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
     runs = RunService(str(tmp_path))
     held = runs.create("t", "general-agent", "Visit host.docker.internal",
                        user_origin=True, revocation_pending=True)
     session = browser.BrowserSession("t", held.id, str(tmp_path), str(tmp_path), None)
-    monkeypatch.setattr(session, "revoke_internal", lambda: True)
+    monkeypatch.setattr(session, "revoke_for_promotion", lambda: True)
     monkeypatch.setattr(session, "rebind_user_request",
                         lambda _request: (_ for _ in ()).throw(
                             browser.BrowserUnavailable("session closed")))
@@ -318,10 +230,13 @@ def test_inflight_internal_command_finishes_before_held_event_promotes(
     session = browser.BrowserSession(
         "t", old.id, str(tmp_path), str(tmp_path),
         browser.BrowserUserRequest(old.id, old.work_id, old.text,
-                                   old.admission_sequence), work_id=old.work_id)
+                                   old.admission_sequence), work_id=old.work_id,
+        sandbox_generation="old-generation", run_service=runs)
     session.identity = browser._ContainerIdentity(
-        str(tmp_path), "172.20.0.2", "old-generation", "internal",
-        "host.docker.internal")
+        str(tmp_path), "172.20.0.2", "old-generation")
+    with authority.fence(str(tmp_path), "t") as state:
+        state.begin(old.id, old.admission_sequence)
+        state.add_generation(old.id, "old-generation")
     entered, release, revoked = Event(), Event(), Event()
 
     def inflight(_generation, _command, **_kwargs):
@@ -336,14 +251,17 @@ def test_inflight_internal_command_finishes_before_held_event_promotes(
         return True
 
     monkeypatch.setattr(browser, "_docker_exec", inflight)
-    monkeypatch.setattr(session, "revoke_internal", revoke)
+    monkeypatch.setattr(session, "revoke_for_promotion", revoke)
     monkeypatch.setattr(threads, "_runs", lambda: runs)
     monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
     monkeypatch.setattr(browser.BrowserManager, "current_session",
                         lambda _tid: session)
+    def confirmed_stop(*_args):
+        with authority.fence(str(tmp_path), "t") as state:
+            state.clear_reconciled(old.id)
+        return False
     monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped",
-                        lambda *_args: False)
-    session.boot_id, session.deadline_ns = runs.bind_browser_deadline("t", old.id)
+                        confirmed_stop)
     monkeypatch.setattr(threads._RESUME_SCHEDULER, "promote", lambda _tid: None)
     monkeypatch.setattr(threads.THREAD_QUEUE, "promote", lambda _tid: None)
     monkeypatch.setattr(threads, "_dispatch_pending_after", lambda _tid: None)
@@ -372,7 +290,11 @@ def test_held_event_stays_queued_while_browser_startup_holds_thread_gate(
     session = browser.BrowserSession(
         "t", old.id, str(tmp_path), str(tmp_path),
         browser.BrowserUserRequest(old.id, old.work_id, old.text,
-                                   old.admission_sequence), work_id=old.work_id)
+                                   old.admission_sequence), work_id=old.work_id,
+        sandbox_generation="generation", run_service=runs)
+    with authority.fence(str(tmp_path), "t") as state:
+        state.begin(old.id, old.admission_sequence)
+        state.add_generation(old.id, "generation")
     entered, release = Event(), Event()
     real_gate = RLock()
 
@@ -402,8 +324,7 @@ def test_held_event_stays_queued_while_browser_startup_holds_thread_gate(
         str(tmp_path): (str(tmp_path), "172.20.0.9", "generation")})
     monkeypatch.setattr(browser, "_kill_container_confirmed", lambda _gen: None)
     monkeypatch.setattr(browser, "forget_client", lambda *_args: None)
-    monkeypatch.setattr(browser, "_load_egress_allowlist",
-                        lambda: ["host.docker.internal"])
+    monkeypatch.setattr(browser, "disarm_sandbox_browser", lambda *_args: None)
     monkeypatch.setattr(browser, "_bounded_cli", stalled_start)
     monkeypatch.setattr(threads, "_runs", lambda: runs)
     monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
@@ -473,6 +394,7 @@ def test_thread_deletion_stops_browser_before_erasing_run_journal(
 def test_failed_browser_stop_prevents_thread_deletion(monkeypatch, tmp_path):
     (tmp_path / "t").mkdir()
     calls = []
+    monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
     monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
     monkeypatch.setattr(browser.BrowserManager, "cleanup",
                         lambda _tid: (_ for _ in ()).throw(
@@ -498,7 +420,7 @@ def test_deletion_gate_rejects_late_browser_registration(monkeypatch, tmp_path):
     def erase(_tid, on_delete=None):
         entered.set()
         assert release.wait(3)
-        (tmp_path / "t").rmdir()
+        shutil.rmtree(tmp_path / "t")
 
     monkeypatch.setattr(threads.MANAGER, "_hard_delete_after_browser_stop", erase)
     session = browser.BrowserSession(
@@ -512,3 +434,29 @@ def test_deletion_gate_rejects_late_browser_registration(monkeypatch, tmp_path):
         deleting.result(timeout=3)
         with pytest.raises(browser.BrowserUnavailable, match="no longer exists"):
             registering.result(timeout=3)
+
+
+def test_deletion_waits_for_pending_managed_generation(monkeypatch, tmp_path):
+    (tmp_path / "t").mkdir()
+    authority.mark_new_thread(str(tmp_path), "t")
+    started = Event()
+    calls = []
+    monkeypatch.setattr(threads, "_runs", lambda: RunService(str(tmp_path)))
+    monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
+    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: started.set())
+    monkeypatch.setattr(threads.RUN_STREAMS, "mark_thread_gone", lambda _tid: None)
+    monkeypatch.setattr(browser.BrowserManager, "cleanup",
+                        lambda _tid: calls.append("cleanup"))
+    monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped",
+                        lambda *_args: calls.append("stop-proof"))
+    monkeypatch.setattr(threads.MANAGER, "_hard_delete_after_browser_stop",
+                        lambda _tid, on_delete=None: (
+                            calls.append("delete"), shutil.rmtree(tmp_path / "t")))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with authority.generation_fence(str(tmp_path), "t"):
+            deleting = pool.submit(threads._delete_thread_and_children, "t")
+            assert started.wait(3)
+            assert not deleting.done()
+            assert calls == []
+        deleting.result(timeout=3)
+    assert calls == ["cleanup", "stop-proof", "delete"]

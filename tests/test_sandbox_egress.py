@@ -317,6 +317,9 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
         self.addCleanup(env.stop)
         SandboxManager._docker_client = None
         SandboxManager._containers.clear()
+        stop_proof = patch("assist.sandbox_manager.confirm_generation_stopped")
+        self.stopped = stop_proof.start()
+        self.addCleanup(stop_proof.stop)
 
     def tearDown(self):
         SandboxManager._docker_client = None
@@ -364,7 +367,8 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
                         else None, return_value=unavailable)):
                 with self.assertRaisesRegex(RuntimeError, "map mode is unconfirmed"):
                     SandboxManager.get_sandbox_backend(work_dir)
-            sandbox.kill.assert_called_once()
+            self.stopped.assert_called_once_with(sandbox.id)
+            self.stopped.reset_mock()
 
     @patch("assist.sandbox.DockerSandboxBackend")
     def test_proxy_map_path_must_match_record_path(self, _backend):
@@ -379,7 +383,7 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
                     return_value="/host/new-map")):
             with self.assertRaisesRegex(RuntimeError, "map mode is unconfirmed"):
                 SandboxManager.get_sandbox_backend(work_dir)
-        sandbox.kill.assert_called_once()
+        self.stopped.assert_called_once_with(sandbox.id)
 
     @patch("assist.sandbox.DockerSandboxBackend")
     def test_sandbox_joins_internal_network(self, _mock_backend):

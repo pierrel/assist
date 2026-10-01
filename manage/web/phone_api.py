@@ -23,6 +23,7 @@ import tarfile
 import threading
 import unicodedata
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -738,7 +739,10 @@ def _create_and_submit(body: _CreateThread, key: str, *, run_id: str | None = No
         raise HTTPException(status_code=422, detail="Unknown repository")
     tid = _phone_thread_id(key)
     dispatch_key = _phone_dispatch_key(key)
-    with threads.BrowserManager.bounded_thread_gate(tid):
+    with threads.BrowserManager.bounded_thread_gate(tid), ExitStack() as generation_guard:
+        if os.path.isdir(state.MANAGER.thread_dir(tid)):
+            generation_guard.enter_context(threads.browser_authority.generation_fence(
+                state.MANAGER.root_dir, tid))
         with threads._RUN_ADMISSION_LOCK:
             stale = (os.path.isdir(state.MANAGER.thread_dir(tid))
                      and _find_dispatch(tid, dispatch_key) is None

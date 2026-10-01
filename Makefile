@@ -58,7 +58,9 @@ browser-build:
 browser-smoke: browser-build
 	bash dockerfiles/test-browser-runtime.sh
 
-browser-docker-test: egress-proxy-build browser-smoke
+browser-docker-test:
+	@: "$${ASSIST_BROWSER_TEST_SANDBOX_IMAGE:?set an isolated sandbox image tag}"
+	@: "$${ASSIST_BROWSER_TEST_PROXY_IMAGE:?set an isolated proxy image tag}"
 	ASSIST_BROWSER_DOCKER_TEST=1 .venv/bin/pytest -q tests/test_browser_docker.py
 
 # Egress allowlist proxy. Tiny stdlib Python image, shared by shell and
@@ -258,7 +260,7 @@ help:
 	@echo "  make sandbox-build  - Build Docker sandbox image"
 	@echo "  make browser-build  - Build headless browser image"
 	@echo "  make browser-smoke  - Build and launch sandboxed Chromium once"
-	@echo "  make browser-docker-test - Build current images and run real browser/proxy tests"
+	@echo "  make browser-docker-test - Test explicit isolated sandbox/proxy image tags"
 	@echo "  make sandbox-shell  - Run interactive sandbox shell"
 	@echo "  make pull-eval-history - Pull eval results from deploy server"
 	@echo ""

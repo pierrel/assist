@@ -217,12 +217,17 @@ class ThreadManager:
         on_delete: List[Callable[[str], None]] | None = None,
     ) -> None:
         """Stop any browser before permanently deleting a thread."""
+        from contextlib import nullcontext
+        from assist.browser import authority
         from assist.browser.manager import BrowserManager
 
         with BrowserManager.bounded_thread_gate(tid):
-            BrowserManager.cleanup(tid)
-            BrowserManager.confirm_owner_stopped(self.root_dir, tid, None)
-            self._hard_delete_after_browser_stop(tid, on_delete)
+            generation_guard = (authority.generation_fence(self.root_dir, tid)
+                                if os.path.isdir(self.thread_dir(tid)) else nullcontext())
+            with generation_guard:
+                BrowserManager.cleanup(tid)
+                BrowserManager.confirm_owner_stopped(self.root_dir, tid, None)
+                self._hard_delete_after_browser_stop(tid, on_delete)
 
     def _hard_delete_after_browser_stop(
         self,
@@ -238,7 +243,8 @@ class ThreadManager:
         "Approach" section for why each step happens before the next.
         Briefly:
 
-        The caller proves browser teardown while holding its thread gate
+        The caller proves browser teardown while holding its thread gate and
+        exact generation fence
         before these steps. ``hard_delete`` does both for direct callers;
         web deletion proves the stop outside its global Run admission lock.
 

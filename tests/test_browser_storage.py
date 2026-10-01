@@ -33,6 +33,15 @@ def test_storage_is_private_and_old_owner_cannot_overwrite(owner):
     assert storage.load(root, thread_id) == _state()
 
 
+def test_failed_capture_can_discard_only_its_owned_snapshot(owner):
+    root, thread_id = owner
+    storage.save(root, thread_id, "run", "sandbox-generation", _state())
+    storage.discard(root, thread_id, "older-run", "sandbox-generation")
+    assert storage.load(root, thread_id) == _state()
+    storage.discard(root, thread_id, "run", "sandbox-generation")
+    assert storage.load(root, thread_id) is None
+
+
 def test_storage_rejects_unsafe_file_and_oversized_state(owner, tmp_path):
     root, thread_id = owner
     path = tmp_path / thread_id / storage.FILE

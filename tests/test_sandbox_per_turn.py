@@ -1,13 +1,11 @@
-"""One container per turn: each request/response gets a fresh sandbox that is
-killed at turn end, so a container's age can never exceed its turn's age.
+"""One container per turn, with confirmed stop before replacement.
 
-This is what closes the mid-flight-reap caveat: because the container lives
-only for its single turn and a turn is hard-capped at the LLM-queue hold
-timeout, a wall-clock backstop set ABOVE that cap can never fire during a
-legitimate in-progress turn (TestBackstopExceedsHoldCap pins exactly that).
+The wall-clock TTL bounds orphan lifetime after a host outage. Exceeding the
+normal queue hold cap reduces premature expiry; it is not a proof that a
+force-released live turn cannot outlast the TTL.
 
 Covered here:
-  - cleanup() SIGKILLs (a sandbox has nothing to flush; PID 1 ignores SIGTERM).
+  - cleanup() proves the captured generation stopped before registry release.
   - get_sandbox_backend never reuses — a second call reaps the stale
     container and creates a fresh one.
   - the Dockerfile backstop TTL > the queue hold cap (the safety invariant).
@@ -45,11 +43,12 @@ class _SandboxStateBase(TestCase):
 
 
 class TestCleanupKills(_SandboxStateBase):
-    def test_cleanup_uses_sigkill(self):
+    def test_cleanup_requires_confirmed_stop(self):
         c = _fake_container("c0")
         SandboxManager._containers["w"] = c
-        SandboxManager.cleanup("w")
-        c.kill.assert_called_once_with()
+        with patch("assist.sandbox_manager.confirm_generation_stopped") as stopped:
+            SandboxManager.cleanup("w")
+        stopped.assert_called_once_with("c0")
         c.stop.assert_not_called()
         self.assertNotIn("w", SandboxManager._containers)  # registry pruned
 
@@ -61,12 +60,14 @@ class TestCleanupKills(_SandboxStateBase):
         replacement = _fake_container("replacement")
         SandboxManager._containers["w"] = replacement
 
-        SandboxManager.cleanup("w", old)
+        with patch("assist.sandbox_manager.confirm_generation_stopped") as stopped:
+            SandboxManager.cleanup("w", old)
         self.assertIs(SandboxManager._containers["w"], replacement)
-        replacement.kill.assert_not_called()
+        stopped.assert_called_once_with("old")
 
-        SandboxManager.cleanup("w", replacement)
-        replacement.kill.assert_called_once_with()
+        with patch("assist.sandbox_manager.confirm_generation_stopped") as stopped:
+            SandboxManager.cleanup("w", replacement)
+        stopped.assert_called_once_with("replacement")
 
 
 class TestNoReuse(_SandboxStateBase):
@@ -85,20 +86,26 @@ class TestNoReuse(_SandboxStateBase):
         return [
             patch.object(SandboxManager, "_get_docker_client", return_value=client),
             patch.object(SandboxManager, "_ensure_egress_proxy_running"),
-            patch("assist.sandbox_manager.os.stat", side_effect=lambda path: (
-                st if str(path) == work_dir else real_stat(path))),
+            patch("assist.sandbox_manager.os.stat", side_effect=lambda path, **kwargs: (
+                st if str(path) == work_dir else real_stat(path, **kwargs))),
             patch("assist.sandbox.DockerSandboxBackend", lambda *a, **k: MagicMock()),
             # Attribution is covered separately; this lifecycle test uses a
             # fake proxy without inspectable Docker mount attributes.
             patch.object(SandboxManager, "_record_egress_client"),
+            patch("assist.sandbox_manager.confirm_generation_stopped"),
         ]
 
     def test_second_call_reaps_stale_and_creates_fresh(self):
         with tempfile.TemporaryDirectory(prefix="sandbox-no-reuse-") as root:
+            from assist.browser import authority
+            from assist.browser.manager import BrowserManager
             work_dir = str(Path(root) / "thread" / "domain")
             Path(work_dir).mkdir(parents=True)
+            authority.mark_new_thread(root, "thread")
             p = self._patches(work_dir)
-            with p[0], p[1], p[2], p[3], p[4]:
+            with p[0], p[1], p[2], p[3], p[4], p[5] as stopped, \
+                 patch.object(BrowserManager, "reconcile_startup", return_value=True), \
+                 patch.object(BrowserManager, "confirm_owner_stopped", return_value=False):
                 SandboxManager.get_sandbox_backend(
                     work_dir, thread_scope=(root, "thread"))
                 first = SandboxManager._containers[work_dir]
@@ -108,18 +115,13 @@ class TestNoReuse(_SandboxStateBase):
                 second = SandboxManager._containers[work_dir]
 
         self.assertIsNot(second, first, "container was reused across turns")
-        first.kill.assert_called_once()  # stale one reaped (SIGKILL)
+        stopped.assert_called_once_with(first.id)
         # never calls reload() — there is no reuse path that would inspect it
         first.reload.assert_not_called()
 
 
 class TestBackstopExceedsHoldCap(TestCase):
-    """The load-bearing safety invariant: the container's wall-clock backstop
-    TTL must exceed the LLM-queue hold cap.  Since a per-turn container's age
-    equals its turn's age and a turn can't outlive the hold cap, a backstop
-    above the cap can never reap a legitimate in-progress turn.  Guards against
-    a careless lowering of the Dockerfile sleep back toward the old 1h value.
-    """
+    """Keep the orphan TTL above the normal queue hold cap."""
 
     def test_dockerfile_sleep_exceeds_hold_timeout(self):
         from assist.thread_queue import DEFAULT_HOLD_TIMEOUT_S
@@ -131,19 +133,16 @@ class TestBackstopExceedsHoldCap(TestCase):
         backstop = int(m.group(1))
         self.assertGreater(
             backstop, DEFAULT_HOLD_TIMEOUT_S,
-            f"backstop sleep {backstop}s must exceed the queue hold cap "
-            f"{DEFAULT_HOLD_TIMEOUT_S}s — otherwise a legitimate long turn "
-            f"(bounded by the hold cap) could be reaped mid-flight, "
-            f"reintroducing the caveat this design removes",
+            f"backstop sleep {backstop}s must exceed the normal queue hold cap "
+            f"{DEFAULT_HOLD_TIMEOUT_S}s",
         )
 
 
 class TestPerTurnTeardownRealDocker(unittest.TestCase):
-    """Real Docker (no skip, mirroring test_sandbox_egress_integration.py): a
-    container reaped via cleanup() (SIGKILL) is actually gone — the un-mocked
-    symptom.
-    """
+    """Explicit isolated Docker opt-in proves cleanup removes a container."""
 
+    @unittest.skipUnless(os.getenv("ASSIST_SANDBOX_TEST_IMAGE"),
+                         "requires an explicit isolated sandbox image tag")
     def test_kill_actually_destroys_the_container(self):
         import docker
         from docker.errors import NotFound
@@ -154,7 +153,8 @@ class TestPerTurnTeardownRealDocker(unittest.TestCase):
             # Start a bare sandbox container directly and register it, the
             # same shape get_sandbox_backend leaves in the registry.
             c = client.containers.run(
-                "assist-sandbox", "sleep 10800", detach=True, remove=True,
+                os.environ["ASSIST_SANDBOX_TEST_IMAGE"], "sleep 10800",
+                detach=True, remove=True,
                 volumes={work_dir: {"bind": "/workspace", "mode": "rw"}},
                 working_dir="/workspace", labels={"assist.sandbox": "true"},
             )

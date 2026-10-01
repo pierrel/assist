@@ -259,7 +259,7 @@ def test_navigation_during_snapshot_cannot_return_non_http_content():
     assert page.closed
 
 
-def test_denied_http_navigation_keeps_probe_evidence_without_observing_error_page(
+def test_denied_http_navigation_keeps_error_without_observing_error_page(
         monkeypatch):
     worker = BrowserWorker()
     page = _Page()
@@ -272,16 +272,11 @@ def test_denied_http_navigation_keeps_probe_evidence_without_observing_error_pag
     assert result["snapshot"] == ""
     assert result["observation_errors"] == ["navigation_failed"]
     assert page.closed
-    assert "unlisted.example:80" in worker.failed_hosts
+    assert result["network_errors"][-1]["host"] == "unlisted.example:80"
 
 
-def test_http_403_response_is_probeable_with_fragmented_proxy_headers(monkeypatch):
+def test_preflight_inspects_policy_without_opening_chromium(monkeypatch):
     worker = BrowserWorker()
-    worker._response(SimpleNamespace(
-        status=403, url="http://denied.example/",
-        request=SimpleNamespace(resource_type="document")))
-    assert "denied.example:80" in worker.failed_hosts
-
     class _Socket:
         parts = [b"HTTP/1.1 403 Forbidden\r\nX-Assist-Egress-",
                  b"Result: host_not_approved\r\nContent-Length: 0\r\n\r\n"]
@@ -295,16 +290,36 @@ def test_http_403_response_is_probeable_with_fragmented_proxy_headers(monkeypatc
         def settimeout(self, *_args):
             pass
 
-        def sendall(self, *_args):
-            pass
+        def sendall(self, data):
+            assert data == b"POLICY denied.example:80 HTTP/1.1\r\n\r\n"
 
         def recv(self, _size):
             return self.parts.pop(0)
 
     monkeypatch.setattr(runner.socket, "create_connection", lambda *_args, **_kwargs: _Socket())
-    assert worker.probe("denied.example", 80) == {
-        "host": "denied.example", "port": 80,
-        "status": "403", "reason": "host_not_approved"}
+    assert worker.preflight("http://denied.example/private?token=secret") == {
+        "top_level": {"origin": "http://denied.example", "allowed": False,
+                      "reason": "host_not_approved"},
+        "dependencies": [], "partial": True}
+    assert worker.browser is None and worker.context is None
+
+
+def test_preflight_annotates_only_observed_origins_without_url_secrets(monkeypatch):
+    worker = BrowserWorker()
+    page_id = worker._register_page(_Page())
+    worker._record_request(page_id, SimpleNamespace(
+        url="https://cdn.example.net/script.js?key=secret",
+        resource_type="script", redirected_from=None))
+    monkeypatch.setattr(worker, "_policy", lambda host, port, deadline: {
+        "allowed": host == "example.com", "reason": (
+            "allowed" if host == "example.com" else "host_not_approved")})
+    result = worker.preflight("https://example.com/next?password=secret", page_id)
+    assert result["dependencies"] == [{
+        "origin": "https://cdn.example.net", "resource_types": ["script"],
+        "redirect_observed": False, "source": "page_observation_untrusted",
+        "allowed": False, "reason": "host_not_approved"}]
+    assert "secret" not in json.dumps(result)
+    assert result["partial"] is True
 
 
 def test_observation_budget_preserves_targets():

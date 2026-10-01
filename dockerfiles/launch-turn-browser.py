@@ -6,8 +6,8 @@ def main():
     if os.getpid() != 1:
         raise SystemExit("browser worker must own its PID namespace")
     browser_env = {name: os.environ[name] for name in (
-        "BROWSER_SESSION_TOKEN", "BROWSER_BOOT_ID", "BROWSER_DEADLINE_NS",
-        "BROWSER_GENERATION", "BROWSER_PROXY_HOST", "BROWSER_PROXY_PORT")}
+        "BROWSER_SESSION_TOKEN", "BROWSER_GENERATION",
+        "BROWSER_PROXY_HOST", "BROWSER_PROXY_PORT")}
     browser_env.update({
         "HOME": "/run/assist-browser",
         "TMPDIR": "/run/assist-browser",

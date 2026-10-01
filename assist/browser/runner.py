@@ -4,11 +4,10 @@ from __future__ import annotations
 import json
 import os
 import re
-import signal
 import socket
 import stat
 import sys
-import time
+from time import monotonic
 from urllib.parse import urljoin, urlsplit
 from uuid import uuid4
 
@@ -51,6 +50,21 @@ def host_port(url: str) -> str:
         return "<invalid-host>"
 
 
+def origin_target(url: str) -> tuple[str, str, int]:
+    """Reduce an HTTP URL to a policy target without retaining path or query."""
+    http_url(url)
+    parsed = urlsplit(url)
+    host = parsed.hostname.encode("idna").decode("ascii").lower()
+    if not re.fullmatch(r"[a-z0-9.-]{1,253}", host):
+        raise BrowserInputError("unsupported browser hostname")
+    default_port = 443 if parsed.scheme == "https" else 80
+    port = parsed.port or default_port
+    origin = f"{parsed.scheme}://{host}"
+    if port != default_port:
+        origin += f":{port}"
+    return origin, host, port
+
+
 def recv_limited(conn, limit):
     chunks = []
     size = 0
@@ -76,7 +90,8 @@ class BrowserWorker:
         self.targets = {}
         self.downloads = {}
         self.errors = []
-        self.failed_hosts = set()
+        self.requests = {}
+        self.request_partial = set()
         self.initial_storage = None
         self.page_namespace = os.environ.get("BROWSER_GENERATION", uuid4().hex)[:16]
 
@@ -114,6 +129,8 @@ class BrowserWorker:
                 self.web_pages.discard(page)
                 self.snapshots.pop(ident, None)
                 self.targets.pop(ident, None)
+                self.requests.pop(ident, None)
+                self.request_partial.discard(ident)
 
     def _register_page(self, page):
         self._prune_pages()
@@ -126,6 +143,8 @@ class BrowserWorker:
         page_id = f"{self.page_namespace}-{uuid4().hex[:12]}"
         self.pages[page_id] = page
         self.page_ids[page] = page_id
+        self.requests[page_id] = {}
+        page.on("request", lambda request: self._record_request(page_id, request))
         page.on("download", self._register_download)
         page.on("requestfailed", self._request_failed)
         page.on("response", self._response)
@@ -161,15 +180,30 @@ class BrowserWorker:
 
     def _request_failed(self, request):
         host = host_port(request.url)
-        self.failed_hosts.add(host)
         self._error(host, request.resource_type, "request_failed")
 
     def _response(self, response):
         if response.status >= 400:
             host = host_port(response.url)
-            self.failed_hosts.add(host)
             self._error(host, response.request.resource_type,
                         f"http_{response.status}")
+
+    def _record_request(self, page_id, request):
+        try:
+            origin, _, _ = origin_target(request.url)
+        except (BrowserInputError, UnicodeError):
+            return
+        observed = self.requests.get(page_id)
+        if observed is None:
+            return
+        if origin not in observed and len(observed) >= 32:
+            self.request_partial.add(page_id)
+            return
+        record = observed.setdefault(origin, {"types": set(), "redirect": False})
+        if len(record["types"]) < 3:
+            record["types"].add(str(request.resource_type)[:30])
+        if request.redirected_from is not None:
+            record["redirect"] = True
 
     def _error(self, host, resource, reason):
         self.errors.append({"host": host[:255], "resource": resource[:30],
@@ -303,7 +337,6 @@ class BrowserWorker:
             page.goto(url, wait_until="domcontentloaded", timeout=10000)
         except Exception:
             host = host_port(url)
-            self.failed_hosts.add(host)
             self._error(host, "document", "navigation_failed")
             try:
                 http_url(page.url)
@@ -409,32 +442,67 @@ class BrowserWorker:
         return {"path": str(path), "name": download.suggested_filename[:180],
                 "size": stat.st_size}
 
-    def probe(self, host, port):
-        if (not isinstance(host, str) or not isinstance(port, int)
-                or not 1 <= port <= 65535 or re.search(r"\s", host)):
-            raise BrowserInputError("invalid probe target")
-        host = host.lower()
-        if f"{host}:{port}" not in self.failed_hosts:
-            raise BrowserInputError("only an observed failed host can be probed")
-        with socket.create_connection((PROXY_HOST, PROXY_PORT), timeout=3) as conn:
-            conn.settimeout(3)
-            conn.sendall(f"CONNECT {host}:{port} HTTP/1.1\r\n\r\n".encode())
-            head = b""
-            while b"\r\n\r\n" not in head and len(head) < 4096:
-                chunk = conn.recv(min(1024, 4096 - len(head)))
-                if not chunk:
-                    break
-                head += chunk
+    @staticmethod
+    def _policy(host, port, deadline):
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise BrowserInputError("browser preflight budget exhausted")
+        try:
+            with socket.create_connection((PROXY_HOST, PROXY_PORT),
+                                          timeout=min(1, remaining)) as conn:
+                conn.settimeout(min(1, remaining))
+                conn.sendall(f"POLICY {host}:{port} HTTP/1.1\r\n\r\n".encode())
+                head = b""
+                while b"\r\n\r\n" not in head and len(head) < 1024:
+                    chunk = conn.recv(min(512, 1024 - len(head)))
+                    if not chunk:
+                        break
+                    head += chunk
+        except OSError as error:
+            raise BrowserInputError("browser preflight proxy unavailable") from error
         if b"\r\n\r\n" not in head:
-            raise BrowserInputError("incomplete proxy probe response")
-        head = head.decode("latin-1", errors="replace")
-        match = re.search(r"^X-Assist-Egress-Result: ([a-z_]+)\r?$", head, re.M)
-        first_line = head.partition("\r\n")[0].split(" ")
-        if len(first_line) < 2 or not first_line[1].isdigit():
-            raise BrowserInputError("invalid proxy probe response")
-        status = first_line[1]
-        return {"host": host, "port": port, "status": status,
-                "reason": match.group(1) if match else "unknown"}
+            raise BrowserInputError("incomplete browser preflight response")
+        text = head.decode("latin-1")
+        status = text.partition("\r\n")[0].split(" ")
+        reason = re.search(r"^X-Assist-Egress-Result: ([a-z_]+)\r?$", text, re.M)
+        if (len(status) < 2 or status[1] not in {"200", "403"}
+                or reason is None or (status[1] == "200") !=
+                (reason.group(1) == "allowed")):
+            raise BrowserInputError("invalid browser preflight response")
+        return {"allowed": status[1] == "200", "reason": reason.group(1)}
+
+    def preflight(self, url, page_id=None):
+        origin, host, port = origin_target(url)
+        deadline = monotonic() + 8
+        top = {"origin": origin, **self._policy(host, port, deadline)}
+        result = {"top_level": top, "dependencies": [], "partial": True}
+        if page_id is None or not top["allowed"]:
+            return result
+        page = self._page(page_id)
+        try:
+            page_origin = origin_target(page.url)[0]
+        except BrowserInputError:
+            return result
+        result["observed_page_origin"] = page_origin
+        if page_origin != origin:
+            return result
+        for observed_origin, record in self.requests.get(page_id, {}).items():
+            if observed_origin == origin:
+                continue
+            try:
+                _, observed_host, observed_port = origin_target(observed_origin)
+                decision = self._policy(observed_host, observed_port, deadline)
+            except BrowserInputError:
+                result["truncated"] = True
+                break
+            result["dependencies"].append({
+                "origin": observed_origin,
+                "resource_types": sorted(record["types"]),
+                "redirect_observed": record["redirect"],
+                "source": "page_observation_untrusted", **decision})
+        if page_id in self.request_partial:
+            result["truncated"] = True
+        return result
 
     def handle(self, command):
         if not isinstance(command, dict) or command.get("session") != os.environ.get(
@@ -447,8 +515,8 @@ class BrowserWorker:
         methods = {"ready": self.ready, "open": self.open, "close": self.close,
                    "observe": self.observe, "act": self.act,
                    "wait": self.wait, "download_info": self.download_info,
-                   "probe": self.probe, "load_storage": self.load_storage,
-                   "storage_state": self.storage_state}
+                   "preflight": self.preflight, "load_storage": self.load_storage,
+                   "storage_state": self.storage_state, "revoke": self.revoke}
         if operation not in methods:
             raise BrowserInputError("unsupported browser operation")
         return methods[operation](**args)
@@ -487,18 +555,22 @@ class BrowserWorker:
         return state
 
 
+    def revoke(self):
+        """Close an active browser without ending its containing shell turn."""
+        for resource, method in ((self.context, "close"),
+                                 (self.browser, "close"),
+                                 (self.playwright, "stop")):
+            if resource is not None:
+                getattr(resource, method)()
+        self.context = self.browser = self.playwright = None
+        self.pages.clear()
+        self.snapshots.clear()
+        return {"revoked": True}
+
+
 def serve():
     if os.getpid() != 1:
         os._exit(124)
-    with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as stream:
-        if stream.read().strip() != os.environ["BROWSER_BOOT_ID"]:
-            os._exit(124)
-    deadline_ns = int(os.environ["BROWSER_DEADLINE_NS"])
-    ttl = (deadline_ns - time.clock_gettime_ns(time.CLOCK_BOOTTIME)) / 1_000_000_000
-    if ttl <= 0 or ttl > 240:
-        os._exit(124)
-    signal.signal(signal.SIGALRM, lambda _signum, _frame: os._exit(124))
-    signal.setitimer(signal.ITIMER_REAL, ttl)
     worker = BrowserWorker()
     os.makedirs(DOWNLOAD_DIR, mode=0o700, exist_ok=True)
     with socket.socket(socket.AF_UNIX) as server:

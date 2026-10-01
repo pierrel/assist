@@ -31,15 +31,16 @@ User-approved grants (docs/2026-07-21-egress-approval-hitl.org):
   Missing or invalid attribution cannot use a grant. Without /approvals,
   ordinary shell clients retain their base-list-only behavior.
 
-  Approved (non-base) shell hosts additionally pass a RESOLVED-ADDRESS guard:
+  Approved (non-base) hosts additionally pass a RESOLVED-ADDRESS guard:
   resolve, reject private/loopback/link-local/metadata space, and connect
   to the vetted IP — a user-approved hostname is attacker-influenceable
   (DNS rebinding), unlike the operator-curated base entries, so it must
-  never be able to point into the host or LAN. Browser public mode checks
-  the resolved address even for base hosts. Browser internal mode is limited
-  to its one exact operator-base hostname and a non-global address; it never
-  follows approvals. Both modes require source CIDR and current attribution.
-  The 403 body arrives via EGRESS_DENY_BODY in assist/egress/guidance.py.
+  never be able to point into the host or LAN. Operator base hosts retain
+  their ordinary any-port policy on both listeners. The browser listener
+  additionally requires sandbox ingress and an armed exact-generation map
+  record. A policy-only preflight returns the current decision without an
+  upstream connection. The 403 body arrives via EGRESS_DENY_BODY in
+  assist/egress/guidance.py.
 
 Host throttling:
   Every allowed remote hostname receives new connections on a fixed 2s, 4s,
@@ -279,6 +280,10 @@ def client_record(client_ip: str, kind: str) -> dict | None:
             required.update({"internal_host", "internal_port"})
         elif value.get("browser_mode") != "public":
             return None
+    elif kind == "sandbox" and "browser_armed" in value:
+        if value["browser_armed"] is not True:
+            return None
+        required.add("browser_armed")
     if set(value) != required:
         return None
     if (not isinstance(value.get("thread_id"), str)
@@ -340,32 +345,19 @@ def target_policy(host: str, port: int, client_ip: str,
     kind = source_kind(client_ip)
     if kind is None:
         return None, "unknown_proxy_source"
-    if browser_listener and kind != "sandbox":
+    if kind == "browser" or browser_listener and kind != "sandbox":
         return None, "browser_attribution_missing"
     record = client_record(client_ip, kind)
     if browser_listener:
-        if record is None or record.get("browser_mode") not in {"public", "internal"}:
+        if record is None or record.get("browser_armed") is not True:
             return None, "browser_attribution_missing"
-        kind = "browser"
-    if kind == "browser" and record is None:
-        return None, "browser_attribution_missing"
-    if kind == "browser" and record["browser_mode"] == "internal":
-        if (host != record["internal_host"]
-                or port != record["internal_port"] or host not in ALLOWLIST):
-            return None, "browser_internal_policy"
-        address = vet_resolved(host, port, global_only=False)
-        return (address, None) if address else (None, "browser_internal_address")
     if host not in ALLOWLIST:
         if not approved_target(host, port, record["thread_id"] if record else None):
             return None, "host_not_approved"
-    if kind == "browser" or host not in ALLOWLIST:
-        # Every public browser destination, including an operator base
-        # host, dials the checked address. The older shell base list keeps
-        # its existing resolution contract.
+    if host not in ALLOWLIST:
         address = vet_resolved(host, port)
         if address is None:
-            return None, ("browser_internal_policy" if kind == "browser"
-                          else "approved_address_not_public")
+            return None, "approved_address_not_public"
     else:
         address = None
     return address, None
@@ -427,9 +419,16 @@ def handle(client: socket.socket, addr, browser_listener: bool = False) -> None:
             return
         method, target, _ = parts
 
-        if method == "CONNECT":
+        if method in {"CONNECT", "POLICY"}:
+            if method == "POLICY" and not browser_listener:
+                deny(client, "<policy>", "bad_request")
+                return
             host, _, port_str = target.partition(":")
             host = host.lower()  # DNS hostnames are case-insensitive (RFC 4343)
+            if (len(host) > 253 or not re.fullmatch(r"[a-z0-9.-]+", host)
+                    or method == "POLICY" and not port_str):
+                deny(client, "<malformed>", "bad_request")
+                return
             try:
                 port = int(port_str) if port_str else 443
             except ValueError:
@@ -440,6 +439,14 @@ def handle(client: socket.socket, addr, browser_listener: bool = False) -> None:
                 return
             approved_ip, rejection = target_policy(
                 host, port, addr[0], browser_listener=browser_listener)
+            if method == "POLICY":
+                reason = rejection or "allowed"
+                status = b"403 Forbidden" if rejection else b"200 OK"
+                client.sendall(
+                    b"HTTP/1.1 " + status + b"\r\n"
+                    + f"X-Assist-Egress-Result: {reason}\r\n".encode()
+                    + b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+                return
             if rejection:
                 deny(client, host, rejection)
                 return

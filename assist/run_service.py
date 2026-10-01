@@ -12,7 +12,6 @@ import os
 import shutil
 import stat
 import threading
-import time
 import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -109,8 +108,6 @@ class Run:
     # A cancelled held phone Run still owes exact browser teardown before
     # cancellation cleanup may dispatch a follower.
     browser_cancel_reset: bool = False
-    browser_boot_id: str | None = None
-    browser_deadline_ns: int | None = None
 
     _MAX_OPAQUE_ID_CHARS = 256
 
@@ -167,10 +164,6 @@ class Run:
             value.pop("browser_reset_run_id")
         if not self.browser_cancel_reset:
             value.pop("browser_cancel_reset")
-        if self.browser_boot_id is None:
-            value.pop("browser_boot_id")
-        if self.browser_deadline_ns is None:
-            value.pop("browser_deadline_ns")
         return value
 
     @staticmethod
@@ -205,15 +198,6 @@ class Run:
         browser_cancel_reset = value.get("browser_cancel_reset", False)
         if not isinstance(browser_cancel_reset, bool):
             raise ValueError("invalid browser cancellation reset")
-        deadline_ns = value.get("browser_deadline_ns")
-        if (deadline_ns is not None and
-                (isinstance(deadline_ns, bool) or not isinstance(deadline_ns, int)
-                 or deadline_ns <= 0)):
-            raise ValueError("invalid browser deadline")
-        boot_id = Run._optional_opaque_id(value.get("browser_boot_id"),
-                                          "browser boot id")
-        if (boot_id is None) != (deadline_ns is None):
-            raise ValueError("incomplete browser deadline")
         return Run(
             thread_id=Run._required_opaque_id(value["thread_id"], "thread id"),
             assistant_id=Run._required_opaque_id(value["assistant_id"], "assistant id"),
@@ -254,8 +238,6 @@ class Run:
             browser_reset_run_id=Run._optional_opaque_id(
                 value.get("browser_reset_run_id"), "browser reset run id"),
             browser_cancel_reset=browser_cancel_reset,
-            browser_boot_id=boot_id,
-            browser_deadline_ns=deadline_ns,
         )
 
 
@@ -523,29 +505,6 @@ class RunService(PerThreadJsonStore[Run]):
     def get(self, thread_id: str, run_id: str) -> Run:
         with self._lock:
             return self._find(self._read(thread_id), run_id)
-
-    def bind_browser_deadline(self, thread_id: str, run_id: str) -> tuple[str, int]:
-        """Persist one boot-relative first-open deadline for the logical work."""
-        with self._lock:
-            runs = self._read(thread_id)
-            current = self._find(runs, run_id)
-            existing = [run for run in runs if run.work_id == current.work_id
-                        and run.browser_deadline_ns is not None]
-            if existing:
-                boot_id = existing[0].browser_boot_id
-                deadline_ns = min(run.browser_deadline_ns for run in existing)
-                if any(run.browser_boot_id != boot_id for run in existing):
-                    raise RuntimeError("browser work crossed a host reboot")
-            else:
-                with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as stream:
-                    boot_id = stream.read().strip()
-                deadline_ns = time.clock_gettime_ns(time.CLOCK_BOOTTIME) + 240_000_000_000
-            if current.browser_deadline_ns is None:
-                runs[runs.index(current)] = replace(
-                    current, browser_boot_id=boot_id,
-                    browser_deadline_ns=deadline_ns, updated_at=_now())
-                self._write(thread_id, runs)
-            return boot_id, deadline_ns
 
     def list(self, thread_id: str) -> list[Run]:
         return self.for_thread(thread_id)

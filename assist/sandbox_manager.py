@@ -3,6 +3,7 @@ import ipaddress
 import logging
 import os
 import re
+import subprocess
 import threading
 import time
 import fcntl
@@ -13,6 +14,39 @@ from assist.egress import runtime_state
 
 logger = logging.getLogger(__name__)
 _ANY_CONTAINER = object()
+
+
+def confirm_generation_stopped(container_id: str) -> None:
+    """Prove one exact sandbox generation is gone and its name is reusable."""
+    try:
+        subprocess.run(["docker", "kill", container_id],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError("sandbox generation teardown is unconfirmed") from error
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            inspected = subprocess.run(
+                ["docker", "inspect", "--format", "{{.State.Running}}", container_id],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2,
+                check=False)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError("sandbox generation teardown is unconfirmed") from error
+        if inspected.returncode == 0 and inspected.stdout.strip() == b"false":
+            try:
+                subprocess.run(["docker", "rm", "-f", container_id],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=2,
+                               check=False)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise RuntimeError("sandbox generation removal is unconfirmed") from error
+        if (inspected.returncode != 0 and
+                (b"no such object" in inspected.stderr.lower()
+                 or b"no such container" in inspected.stderr.lower())):
+            return
+        time.sleep(0.05)
+    raise RuntimeError("sandbox generation teardown is unconfirmed")
 
 
 def _rewrite_localhost(value: str) -> str:
@@ -224,8 +258,8 @@ class SandboxManager:
         try:
             map_dir = configured_directory()
         except (OSError, RuntimeError) as error:
-            # Browser attribution is optional for an ordinary shell sandbox.
-            # A bad browser-only map must not remove its base-list egress.
+            # Client attribution is optional for an ordinary shell sandbox.
+            # A bad client map must not remove its base-list egress.
             logger.warning("browser client map unavailable: %s", error)
             map_dir = None
 
@@ -529,7 +563,35 @@ class SandboxManager:
                              agent_dir: str | None, include_assist_env: bool,
                              include_egress_approvals: bool,
                              browser_capable: bool = False,
-                             thread_scope: tuple[str, str] | None = None):
+                             thread_scope: tuple[str, str] | None = None,
+                             owner_run_id: str | None = None):
+        if thread_scope is None:
+            return cls._create_sandbox_backend(
+                work_dir, tz, agent_dir, include_assist_env,
+                include_egress_approvals, browser_capable,
+                thread_scope, owner_run_id)
+        from assist.browser import authority
+        from assist.browser.manager import BrowserManager
+        threads_root, thread_id = thread_scope
+        authority._thread_dir(threads_root, thread_id)
+        expected = os.path.join(os.path.realpath(threads_root), thread_id, "domain")
+        if os.path.realpath(work_dir) != expected:
+            raise RuntimeError("sandbox workspace does not match thread authority")
+        if not BrowserManager.reconcile_startup(threads_root):
+            raise RuntimeError("sandbox startup reconciliation is incomplete")
+        with authority.generation_fence(threads_root, thread_id):
+            return cls._create_sandbox_backend(
+                work_dir, tz, agent_dir, include_assist_env,
+                include_egress_approvals, browser_capable,
+                thread_scope, owner_run_id)
+
+    @classmethod
+    def _create_sandbox_backend(cls, work_dir: str, tz: str | None,
+                                agent_dir: str | None, include_assist_env: bool,
+                                include_egress_approvals: bool,
+                                browser_capable: bool = False,
+                                thread_scope: tuple[str, str] | None = None,
+                                owner_run_id: str | None = None):
         """Create one per-turn sandbox from a named authority profile.
 
         ``include_assist_env`` is the line between ordinary Deep Agents work and
@@ -556,12 +618,10 @@ class SandboxManager:
             expected = os.path.join(os.path.realpath(threads_root), thread_id, "domain")
             if os.path.realpath(work_dir) != expected:
                 raise RuntimeError("sandbox workspace does not match thread authority")
-            with authority.fence(threads_root, thread_id) as state:
-                browser_stop_owed = state.lease is not None
-            if browser_stop_owed:
-                # Managed system, SMS and Pi turns also need the browser stop
-                # proof before replacing this thread's sandbox generation.
-                BrowserManager.confirm_owner_stopped(threads_root, thread_id, None)
+            # The scoped Docker scan also covers pre-journal generations whose
+            # host registry disappeared with a former web worker.
+            BrowserManager.confirm_owner_stopped(
+                threads_root, thread_id, None, before_replacement=True)
         if work_dir in cls._containers:
             cls.cleanup(work_dir)
 
@@ -698,10 +758,21 @@ class SandboxManager:
                                   "rw,nosuid,nodev,size=134217728,uid=10001,gid=10001,mode=0700"},
                         "security_opt": ["seccomp=" + profile.read()],
                     }
+            owner = owner_run_id or uuid4().hex
+            if thread_scope is not None:
+                from assist.run_service import RunService
+                runs = RunService(threads_root).list(thread_id)
+                sequence = max((run.admission_sequence for run in runs
+                                if run.user_event_id == run.id), default=0)
+                with authority.fence(threads_root, thread_id) as state:
+                    state.begin(owner, sequence)
             container = client.containers.run(
                 SANDBOX_IMAGE,
                 detach=True,
                 remove=True,
+                **({"name": "assist-turn-" + hashlib.sha256(
+                    (os.path.realpath(threads_root) + "\0" + thread_id).encode()
+                ).hexdigest()[:32]} if thread_scope is not None else {}),
                 user=user_arg,
                 volumes=volumes,
                 working_dir="/workspace",
@@ -712,6 +783,10 @@ class SandboxManager:
                 environment=sandbox_env,
                 **browser_options,
             )
+            if thread_scope is not None:
+                with authority.fence(threads_root, thread_id) as state:
+                    state.add_generation(owner, container.id)
+                cls._generation_owners[container.id] = (threads_root, thread_id, owner)
             logger.info("Started sandbox container %s for %s", container.id[:12], work_dir)
             cls._containers[work_dir] = container
             try:
@@ -719,8 +794,7 @@ class SandboxManager:
                     client, container, work_dir,
                     kind="sandbox" if include_egress_approvals else "pi")
             except Exception:
-                cls._containers.pop(work_dir, None)
-                container.kill()
+                cls.cleanup(work_dir, container)
                 raise
             from assist.sandbox import DockerSandboxBackend
             return DockerSandboxBackend(
@@ -733,24 +807,28 @@ class SandboxManager:
     def get_sandbox_backend(cls, work_dir: str, tz: str | None = None,
                             agent_dir: str | None = None,
                             browser_capable: bool = False,
-                            thread_scope: tuple[str, str] | None = None):
+                            thread_scope: tuple[str, str] | None = None,
+                            owner_run_id: str | None = None):
         """Return the ordinary sandbox; managed callers bind its thread authority."""
         return cls._get_sandbox_backend(
             work_dir, tz, agent_dir, include_assist_env=True,
             include_egress_approvals=True, browser_capable=browser_capable,
-            thread_scope=thread_scope)
+            thread_scope=thread_scope, owner_run_id=owner_run_id)
 
     @classmethod
     def get_pi_sandbox_backend(cls, work_dir: str, tz: str | None = None, *,
-                               thread_scope: tuple[str, str] | None = None):
+                               thread_scope: tuple[str, str] | None = None,
+                               owner_run_id: str | None = None):
         """Return Pi's workspace-only Docker sandbox, without app secrets or `/agent`."""
         return cls._get_sandbox_backend(
             work_dir, tz, None, include_assist_env=False,
-            include_egress_approvals=False, thread_scope=thread_scope)
+            include_egress_approvals=False, thread_scope=thread_scope,
+            owner_run_id=owner_run_id)
 
     # work_dir -> (map directory, egress-network IP, container generation)
     # for shell attribution or an explicit Pi no-grant marker.
     _egress_client_ips: dict[str, tuple[str, str, str]] = {}
+    _generation_owners: dict[str, tuple[str, str, str]] = {}
 
     @classmethod
     def _record_egress_client(cls, client, container, work_dir: str,
@@ -821,14 +899,13 @@ class SandboxManager:
             return directory, ip, container.id
 
     @classmethod
-    def _forget_egress_client(cls, work_dir: str) -> None:
-        identity = cls._egress_client_ips.pop(work_dir, None)
-        if identity:
+    def _forget_egress_client(cls, work_dir: str, generation: str | None = None) -> None:
+        identity = cls._egress_client_ips.get(work_dir)
+        if identity and (generation is None or identity[2] == generation):
             from assist.egress.client_map import forget_client
-            try:
-                forget_client(*identity)
-            except Exception:
-                logger.warning("proxy client-map cleanup failed", exc_info=True)
+            forget_client(*identity)
+            if cls._egress_client_ips.get(work_dir) == identity:
+                cls._egress_client_ips.pop(work_dir, None)
 
     @classmethod
     def current_container(cls, work_dir: str):
@@ -837,88 +914,37 @@ class SandboxManager:
 
     @classmethod
     def cleanup(cls, work_dir: str, expected_container=_ANY_CONTAINER) -> None:
-        """Tear down the container for a work_dir. Removal is automatic (--rm).
+        """Prove the captured generation stopped before releasing its identity.
 
-        With an ``expected_container``, cleanup is generation-safe: a stale turn
-        cannot remove a replacement registered for the same workspace.
-
-        SIGKILL, not a graceful ``stop()``.  A sandbox has nothing to shut
-        down gracefully — it is ``--rm`` and agent files are already on the
-        host bind mount. Browser auth state has a separate best-effort capture
-        on normal turn exit. Its PID 1 is a bare ``sleep``
-        with no SIGTERM handler (PID 1 gets no default handlers), so a
-        ``stop()`` would just block the full 5s timeout before the daemon
-        SIGKILLs anyway.  Killing keeps the per-turn teardown off that 5s
-        path (and the same applies to thread-delete and shutdown).
+        A stale caller may still stop its own captured container, but cannot
+        remove a newer registry entry or proxy attribution for the workspace.
         """
-        container = cls._containers.get(work_dir)
-        if (expected_container is not _ANY_CONTAINER
-                and container is not expected_container):
+        container = (cls._containers.get(work_dir)
+                     if expected_container is _ANY_CONTAINER else expected_container)
+        if container is None:
             return
-        container = cls._containers.pop(work_dir, None)
-        cls._forget_egress_client(work_dir)
-        if container:
-            try:
-                container.kill()
-                logger.info("Cleaned up container for %s", work_dir)
-            except Exception as e:
-                logger.warning("Container cleanup failed: %s", e)
+        confirm_generation_stopped(container.id)
+        scoped_owner = cls._generation_owners.get(container.id)
+        if scoped_owner is not None:
+            from assist.browser import authority
+            threads_root, thread_id, owner = scoped_owner
+            if os.path.isdir(os.path.join(threads_root, thread_id)):
+                with authority.fence(threads_root, thread_id) as state:
+                    if (state.lease is not None
+                            and state.lease["owner_run_id"] == owner):
+                        state.remove_generation(owner, container.id)
+                        state.clear(owner)
+        if cls._containers.get(work_dir) is container:
+            cls._forget_egress_client(work_dir, container.id)
+            cls._containers.pop(work_dir, None)
+        cls._generation_owners.pop(container.id, None)
+        logger.info("Cleaned up container %s for %s", container.id[:12], work_dir)
 
     @classmethod
     def cleanup_all(cls) -> None:
-        """Kill all tracked sandbox containers. Removal is automatic (--rm).
-
-        SIGKILL for the same reason as ``cleanup`` (agent files use the host
-        bind mount; PID 1 ignores SIGTERM). Unsaved browser auth state is
-        intentionally lost on shutdown. A fast teardown is
-        strictly better than burning 5s per container on the event loop.
-        """
+        """Confirm tracked generations stopped; retain failed obligations."""
         for path, container in list(cls._containers.items()):
-            cls._forget_egress_client(path)
             try:
-                container.kill()
-                logger.info("Cleaned up container for %s", path)
+                cls.cleanup(path, container)
             except Exception as e:
-                logger.warning("Container cleanup failed for %s: %s", path, e)
-        cls._containers.clear()
-
-    @classmethod
-    def reap_orphans(cls, root_dir: str) -> None:
-        """Kill THIS INSTANCE's surviving sandbox containers — by docker label
-        plus workspace mount, not the in-memory registry. After a web-process
-        crash ``_containers`` is empty, but the containers survive — and a
-        ``docker exec``'d tool command keeps running inside one, mutating the
-        host-bind-mounted /workspace that a recovery resume's FRESH container
-        mounts too, for up to the 3h backstop TTL. Startup recovery calls this
-        before dispatching any resume so a zombie writer can never share a
-        workspace with a resumed turn.
-
-        Scoped to containers whose /workspace bind-mount lives under
-        ``root_dir`` (this deployment's threads root): the label alone is
-        host-global, and prod + eval/dev sandboxes share ONE docker daemon on
-        this box — a bare-label reap would kill a concurrently running eval's
-        LIVE containers mid-turn. The mount filter needs no new create-time
-        labeling, so it also covers orphans from pre-existing code. Best-effort:
-        docker being down must not block recovery (turns fail fast on their own
-        if it stays down)."""
-        root = os.path.realpath(root_dir) + os.sep
-        try:
-            client = cls._get_docker_client()
-            candidates = client.containers.list(
-                filters={"label": "assist.sandbox=true"})
-        except Exception as e:
-            logger.warning("orphan-sandbox reap skipped (docker unavailable): %s", e)
-            return
-        for container in candidates:
-            mounts = (container.attrs or {}).get("Mounts", [])
-            ours = any(m.get("Destination") == "/workspace"
-                       and os.path.realpath(m.get("Source", "")).startswith(root)
-                       for m in mounts)
-            if not ours:
-                continue
-            try:
-                container.kill()
-                logger.info("Reaped orphaned sandbox %s", container.id[:12])
-            except Exception as e:
-                logger.warning("orphan reap failed for %s: %s", container.id[:12], e)
-        cls._containers.clear()
+                logger.error("Container cleanup unconfirmed for %s: %s", path, e)

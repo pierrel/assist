@@ -46,13 +46,14 @@ where reliability is harder than with frontier APIs.
 - **Website browser.** Ordinary web main-agent turns can render and interact
   with JavaScript pages. Chromium starts lazily inside that turn's sandbox and
   stops when the sandbox ends, including an approval or clarification pause.
-  A separate browser UID can reach only a browser-policy listener on the
-  existing egress proxy; the shell keeps its ordinary egress policy.
-  Public visits use the same exact-host list and approvals; private/local
-  visits require a fresh user request naming an operator-allowlisted host
-  and exact port. A bare host permits only HTTP 80 or HTTPS 443; a
-  nondefault port must be explicit, such as `http://host.docker.internal:5050`.
-  Browser pages cannot approve access. Browser tools do not return non-HTTP(S)
+  A separate browser UID can reach only its attributed listener on the
+  existing egress proxy. Browser and shell destinations follow the same
+  operator allowlist (any port) and exact thread/host/port grants; page content
+  cannot approve access. A policy-only browser preflight checks a top-level
+  origin without contacting it and can annotate origins observed from an open
+  page. Those dependencies may be incomplete or incidental; the agent can
+  request up to three needed hosts through ordinary individual approval cards.
+  Browser tools do not return non-HTTP(S)
   page content. An empty new popup can be reused for an HTTP(S) visit.
   Deleting a thread proves its browser sandbox stopped before removing thread
   state. A private, size-limited Playwright snapshot can restore cookies and
@@ -60,9 +61,11 @@ where reliability is harder than with frontier APIs.
   observed targets do not survive; a site's stored values may reappear, so
   the agent reopens and observes the page.
   A short `/agent/browser-recovery.md` note may describe non-sensitive progress.
-  Chromium has its own PID namespace and a 240-second deadline inside the turn
-  sandbox, so its processes stop even during a web service outage. It shares
-  the sandbox's network and mounts with the shell.
+  Chromium has its own PID namespace inside the turn sandbox. Its processes
+  stop when that exact sandbox generation stops; during a host outage without
+  restart, the sandbox's common three-hour PID 1 expiry bounds their lifetime.
+  On restart, a new managed generation waits for confirmed cleanup. Browser
+  and shell share the sandbox's network and mounts.
 
 - **Specialized agents and skills out of the box.**
   - **Research agent** rigorous fact-checking and critiquing with

@@ -18,7 +18,8 @@ def test_uid_fence_denies_every_other_ipv4_and_all_ipv6(monkeypatch):
     fence = _fence()
     calls = []
     monkeypatch.setattr(fence, "run", lambda _deadline, *args: calls.append(args))
-    fence.install("172.20.0.3")
+    attached = ("172.20.0.3", "172.21.0.3", "172.22.0.3")
+    fence.install("172.20.0.3", attached)
     assert ("/usr/bin/iptables", "-w", "3", "-A", "ASSIST_BROWSER", "-d",
             "172.20.0.3", "-p", "tcp", "--dport", "8889",
             "-j", "RETURN") in calls
@@ -26,9 +27,10 @@ def test_uid_fence_denies_every_other_ipv4_and_all_ipv6(monkeypatch):
             "-j", "REJECT") in calls
     assert ("/usr/bin/iptables", "-w", "3", "-I", "OUTPUT", "1", "-m",
             "owner", "--uid-owner", "10001", "-j", "ASSIST_BROWSER") in calls
-    assert ("/usr/bin/iptables", "-w", "3", "-I", "OUTPUT", "1", "-d",
-            "172.20.0.3", "-p", "tcp", "--dport", "8889", "-m", "owner",
-            "!", "--uid-owner", "10001", "-j", "REJECT") in calls
+    for address in attached:
+        assert ("/usr/bin/iptables", "-w", "3", "-I", "OUTPUT", "1", "-d",
+                address, "-p", "tcp", "--dport", "8889", "-m", "owner",
+                "!", "--uid-owner", "10001", "-j", "REJECT") in calls
     assert ("/usr/bin/ip6tables", "-w", "3", "-I", "OUTPUT", "1", "-m",
             "owner", "--uid-owner", "10001", "-j", "REJECT") in calls
     assert calls.index(("/usr/bin/iptables", "-w", "3", "-A", "ASSIST_BROWSER",
@@ -42,4 +44,11 @@ def test_uid_fence_denies_every_other_ipv4_and_all_ipv6(monkeypatch):
                                      "::1", "bad-ip"])
 def test_uid_fence_rejects_non_bridge_endpoint(address):
     with pytest.raises(ValueError):
-        _fence().install(address)
+        _fence().install(address, [address])
+
+
+def test_uid_fence_requires_complete_unique_attachment_set():
+    with pytest.raises(ValueError, match="incomplete"):
+        _fence().install("172.20.0.3", ["172.21.0.3"])
+    with pytest.raises(ValueError, match="incomplete"):
+        _fence().install("172.20.0.3", ["172.20.0.3", "172.20.0.3"])

@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import os
 import sys
 import time
 
 from assist.browser import authority
 from assist.egress import runtime_state
-from assist.egress.client_map import ClientRecord, read_client, set_sandbox_browser_mode
+from assist.egress.client_map import ClientRecord, arm_sandbox_browser, read_client
 from assist.run_service import RunService
 from assist.sandbox_manager import (
-    BROWSER_PROXY_PORT, EGRESS_NETWORK, EGRESS_PROXY_NAME, _proxy_setup_lock,
+    BROWSER_NETWORK, BROWSER_PROXY_PORT, EGRESS_NETWORK, EGRESS_PROXY_NAME,
+    _proxy_setup_lock,
     SandboxManager)
 
 
@@ -21,7 +23,9 @@ def _endpoints(client, request):
     sandbox.reload()
     proxy.reload()
     sandbox_network = sandbox.attrs["NetworkSettings"]["Networks"][EGRESS_NETWORK]
-    proxy_network = proxy.attrs["NetworkSettings"]["Networks"][EGRESS_NETWORK]
+    attachments = proxy.attrs["NetworkSettings"]["Networks"]
+    proxy_network = attachments[EGRESS_NETWORK]
+    browser_network = attachments[BROWSER_NETWORK]
     mounts = sandbox.attrs.get("Mounts") or []
     proxy_mounts = proxy.attrs.get("Mounts") or []
     if (sandbox.status != "running" or proxy.status != "running"
@@ -33,11 +37,24 @@ def _endpoints(client, request):
                 if m.get("Destination") == "/client-map"] != [request["map_dir"]]
             or sandbox_network["NetworkID"] != proxy_network["NetworkID"]
             or sandbox_network["IPAddress"] != request["ip"]
-            or not proxy_network["IPAddress"]):
+            or not proxy_network["IPAddress"]
+            or not browser_network["NetworkID"]):
         raise RuntimeError("browser sandbox or proxy identity changed")
+    proxy_ips = set()
+    for attached in attachments.values():
+        if not isinstance(attached, dict) or not attached.get("NetworkID"):
+            raise RuntimeError("browser proxy attachment is incomplete")
+        try:
+            ip = ipaddress.IPv4Address(attached["IPAddress"])
+        except (KeyError, ValueError, ipaddress.AddressValueError) as error:
+            raise RuntimeError("browser proxy attachment lacks IPv4") from error
+        if not ip.is_private or ip.is_loopback or ip.is_link_local:
+            raise RuntimeError("browser proxy attachment is invalid")
+        proxy_ips.add(str(ip))
     runtime_state.assert_admissible("proxy", proxy.id)
     runtime_state.assert_admissible("network", proxy_network["NetworkID"])
-    return sandbox, proxy, proxy_network["IPAddress"]
+    runtime_state.assert_admissible("network", browser_network["NetworkID"])
+    return sandbox, proxy, proxy_network["IPAddress"], tuple(sorted(proxy_ips))
 
 
 def _check_lease(request):
@@ -56,12 +73,12 @@ def _check_lease(request):
 
 
 def launch(request):
-    """Fence UID, publish exact mode, then launch; caller kills on any doubt."""
+    """Fence UID, publish exact browser provenance, then launch."""
     from assist.browser.manager import _bounded_cli
 
     client = SandboxManager._get_docker_client()
     with _proxy_setup_lock():
-        _, proxy, proxy_ip = _endpoints(client, request)
+        _, proxy, proxy_ip, proxy_ips = _endpoints(client, request)
         if read_client(request["map_dir"], request["ip"]) != ClientRecord(
                 request["thread_id"], request["generation"], "sandbox"):
             raise RuntimeError("browser sandbox attribution changed")
@@ -69,22 +86,20 @@ def launch(request):
     _check_lease(request)
     _bounded_cli([
         "docker", "exec", "--privileged", "--user", "0", request["generation"],
-        "/usr/bin/python", "-I", "/opt/assist/install-browser-fence.py", proxy_ip],
+        "/usr/bin/python", "-I", "/opt/assist/install-browser-fence.py",
+        proxy_ip, *proxy_ips],
         limit=1024, timeout=15)
     with _proxy_setup_lock():
-        sandbox, proxy, current_ip = _endpoints(client, request)
-        if proxy.id != proxy_id or current_ip != proxy_ip:
+        sandbox, proxy, current_ip, current_ips = _endpoints(client, request)
+        if (proxy.id != proxy_id or current_ip != proxy_ip
+                or current_ips != proxy_ips):
             raise RuntimeError("browser proxy changed during network fence setup")
         _check_lease(request)
-        set_sandbox_browser_mode(
+        arm_sandbox_browser(
             request["map_dir"], request["ip"],
-            ClientRecord(request["thread_id"], request["generation"], "sandbox"),
-            request["mode"], request.get("internal_host"),
-            request.get("internal_port"))
+            ClientRecord(request["thread_id"], request["generation"], "sandbox"))
     environment = {
         "BROWSER_SESSION_TOKEN": request["token"],
-        "BROWSER_BOOT_ID": request["boot_id"],
-        "BROWSER_DEADLINE_NS": str(request["deadline_ns"]),
         "BROWSER_GENERATION": request["generation"],
         "BROWSER_PROXY_HOST": proxy_ip,
         "BROWSER_PROXY_PORT": str(BROWSER_PROXY_PORT),

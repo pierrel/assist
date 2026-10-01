@@ -20,6 +20,22 @@ from deepagents.backends.protocol import EditResult, WriteResult
 from deepagents.backends.sandbox import BaseSandbox
 
 
+def test_stop_proof_waits_for_auto_removed_name_release():
+    from assist.sandbox_manager import confirm_generation_stopped
+
+    responses = [
+        MagicMock(returncode=0, stdout=b"", stderr=b""),
+        MagicMock(returncode=0, stdout=b"false\n", stderr=b""),
+        MagicMock(returncode=0, stdout=b"", stderr=b""),
+        MagicMock(returncode=1, stdout=b"", stderr=b"No such container"),
+    ]
+    with patch("assist.sandbox_manager.subprocess.run", side_effect=responses) as run:
+        confirm_generation_stopped("exact-generation")
+    assert [call.args[0][:2] for call in run.call_args_list] == [
+        ["docker", "kill"], ["docker", "inspect"],
+        ["docker", "rm"], ["docker", "inspect"]]
+
+
 class TestDockerSandboxBackend(TestCase):
     """Test DockerSandboxBackend with mocked Docker container."""
 
@@ -576,6 +592,7 @@ class TestSandboxManager(TestCase):
         # Clear class-level state between tests
         SandboxManager._docker_client = None
         SandboxManager._containers.clear()
+        SandboxManager._generation_owners.clear()
         # These lifecycle mocks have no Docker network attributes; live
         # routing validation is covered by the real browser Docker tests.
         self.network_identity = patch(
@@ -589,6 +606,7 @@ class TestSandboxManager(TestCase):
         self.network_identity.stop()
         SandboxManager._docker_client = None
         SandboxManager._containers.clear()
+        SandboxManager._generation_owners.clear()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
@@ -624,8 +642,11 @@ class TestSandboxManager(TestCase):
 
     @patch('assist.sandbox.DockerSandboxBackend')
     def test_browser_capable_turn_gets_private_tmpfs_and_seccomp(self, _backend):
+        from assist.browser.authority import mark_new_thread
+        from assist.browser.manager import BrowserManager
         test_path = os.path.join(self.temp_dir, "browser-turn", "domain")
         os.makedirs(test_path)
+        mark_new_thread(self.temp_dir, "browser-turn")
         client = MagicMock()
         container = MagicMock()
         container.id = "browser-turn-generation"
@@ -635,7 +656,9 @@ class TestSandboxManager(TestCase):
             b"egress-proxy: listening on 0.0.0.0:8889\n")
         self._attached_proxy(container, client)
         client.containers.run.return_value = container
-        with patch.object(SandboxManager, '_get_docker_client', return_value=client):
+        with patch.object(SandboxManager, '_get_docker_client', return_value=client), \
+             patch.object(BrowserManager, 'reconcile_startup', return_value=True), \
+             patch.object(BrowserManager, 'confirm_owner_stopped', return_value=False):
             SandboxManager.get_sandbox_backend(
                 test_path, browser_capable=True,
                 thread_scope=(self.temp_dir, "browser-turn"))
@@ -643,6 +666,38 @@ class TestSandboxManager(TestCase):
         assert options["tmpfs"]["/run/assist-browser"].endswith(
             "uid=10001,gid=10001,mode=0700")
         assert options["security_opt"][0].startswith("seccomp={")
+
+    @patch('assist.sandbox.DockerSandboxBackend')
+    def test_managed_shell_generation_is_journaled_and_cleared(self, _backend):
+        from assist.browser import authority
+        from assist.browser.manager import BrowserManager
+
+        test_path = os.path.join(self.temp_dir, "managed-turn", "domain")
+        os.makedirs(test_path)
+        authority.mark_new_thread(self.temp_dir, "managed-turn")
+        client = MagicMock()
+        container = MagicMock()
+        container.id = "managed-generation"
+        container.status = "running"
+        container.logs.return_value = (
+            b"egress-proxy: listening on 0.0.0.0:8888\n"
+            b"egress-proxy: listening on 0.0.0.0:8889\n")
+        self._attached_proxy(container, client)
+        client.containers.run.return_value = container
+        with patch.object(SandboxManager, '_get_docker_client', return_value=client), \
+             patch.object(BrowserManager, 'reconcile_startup', return_value=True), \
+             patch.object(BrowserManager, 'confirm_owner_stopped', return_value=False):
+            SandboxManager.get_sandbox_backend(
+                test_path, thread_scope=(self.temp_dir, "managed-turn"),
+                owner_run_id="claimed-run")
+        with authority.fence(self.temp_dir, "managed-turn") as state:
+            self.assertEqual(state.lease["owner_run_id"], "claimed-run")
+            self.assertEqual(state.lease["generations"], [container.id])
+        with patch('assist.sandbox_manager.confirm_generation_stopped') as stopped:
+            SandboxManager.cleanup(test_path, container)
+        stopped.assert_called_once_with(container.id)
+        with authority.fence(self.temp_dir, "managed-turn") as state:
+            self.assertIsNone(state.lease)
 
     def test_generic_workspaces_do_not_access_browser_authority(self):
         from docker.errors import DockerException
@@ -705,7 +760,8 @@ class TestSandboxManager(TestCase):
         stale.kill.side_effect = RuntimeError("Docker kill uncertain")
         SandboxManager._containers[test_path] = stale
 
-        with patch.object(BrowserManager, "confirm_owner_stopped",
+        with patch.object(BrowserManager, "reconcile_startup", return_value=True), \
+             patch.object(BrowserManager, "confirm_owner_stopped",
                           side_effect=BrowserUnavailable("stop unconfirmed")) as proof:
             with self.assertRaisesRegex(BrowserUnavailable, "stop unconfirmed"):
                 SandboxManager.get_sandbox_backend(
@@ -718,7 +774,24 @@ class TestSandboxManager(TestCase):
         self.assertIs(SandboxManager._containers[test_path], stale)
         self.assertEqual(proof.call_count, 2)
         self.assertEqual(proof.call_args_list[0], proof.call_args_list[1])
-        proof.assert_called_with(self.temp_dir, "browser-turn", None)
+        proof.assert_called_with(
+            self.temp_dir, "browser-turn", None, before_replacement=True)
+
+    def test_covered_prejournal_thread_still_requires_scoped_stop_proof(self):
+        from assist.browser import authority
+        from assist.browser.manager import BrowserManager, BrowserUnavailable
+
+        test_path = os.path.join(self.temp_dir, "covered-thread", "domain")
+        os.makedirs(test_path)
+        authority.mark_new_thread(self.temp_dir, "covered-thread")
+        with patch.object(BrowserManager, "reconcile_startup", return_value=True), \
+             patch.object(BrowserManager, "confirm_owner_stopped",
+                          side_effect=BrowserUnavailable("old generation unconfirmed")) as proof:
+            with self.assertRaisesRegex(BrowserUnavailable, "old generation unconfirmed"):
+                SandboxManager.get_sandbox_backend(
+                    test_path, thread_scope=(self.temp_dir, "covered-thread"))
+        proof.assert_called_once_with(
+            self.temp_dir, "covered-thread", None, before_replacement=True)
 
     @patch('assist.sandbox.DockerSandboxBackend')
     def test_agent_dir_is_created_mounted_and_enables_native_paths(self,
@@ -901,12 +974,13 @@ class TestSandboxManager(TestCase):
         self._attached_proxy(fresh, mock_client)
         mock_client.containers.run.return_value = fresh
 
-        with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
+        with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client), \
+             patch('assist.sandbox_manager.confirm_generation_stopped') as stopped:
             sandbox = SandboxManager.get_sandbox_backend(test_path)
 
         self.assertIsNotNone(sandbox)
         # The stale container was SIGKILLed, not reused (never reload()'d).
-        stale.kill.assert_called_once()
+        stopped.assert_called_once_with(stale.id)
         stale.reload.assert_not_called()
         # A fresh container replaced it in the registry.
         self.assertIs(SandboxManager._containers[test_path], fresh)
@@ -939,11 +1013,12 @@ class TestSandboxManager(TestCase):
         mock_container = MagicMock()
         SandboxManager._containers[test_path] = mock_container
 
-        SandboxManager.cleanup(test_path)
+        with patch('assist.sandbox_manager.confirm_generation_stopped') as stopped:
+            SandboxManager.cleanup(test_path)
 
         # SIGKILL, not a graceful stop: a sandbox has nothing to flush and its
         # bare-`sleep` PID 1 ignores SIGTERM, so stop() only burns the timeout.
-        mock_container.kill.assert_called_once_with()
+        stopped.assert_called_once_with(mock_container.id)
         mock_container.stop.assert_not_called()
         self.assertNotIn(test_path, SandboxManager._containers)
 
@@ -952,11 +1027,47 @@ class TestSandboxManager(TestCase):
         mock_c2 = MagicMock()
         SandboxManager._containers = {"/path/a": mock_c1, "/path/b": mock_c2}
 
-        SandboxManager.cleanup_all()
+        with patch('assist.sandbox_manager.confirm_generation_stopped') as stopped:
+            SandboxManager.cleanup_all()
 
-        mock_c1.kill.assert_called_once()
-        mock_c2.kill.assert_called_once()
+        self.assertEqual(stopped.call_count, 2)
+        stopped.assert_any_call(mock_c1.id)
+        stopped.assert_any_call(mock_c2.id)
         self.assertEqual(len(SandboxManager._containers), 0)
+
+    def test_unconfirmed_cleanup_retains_generation(self):
+        test_path = os.path.join(self.temp_dir, "domain")
+        os.makedirs(test_path)
+        container = MagicMock()
+        container.id = "old-generation"
+        SandboxManager._containers[test_path] = container
+        with patch('assist.sandbox_manager.confirm_generation_stopped',
+                   side_effect=RuntimeError("stop unconfirmed")):
+            with self.assertRaisesRegex(RuntimeError, "stop unconfirmed"):
+                SandboxManager.cleanup(test_path, container)
+        self.assertIs(SandboxManager._containers[test_path], container)
+
+    def test_stale_cleanup_stops_only_captured_generation(self):
+        from assist.browser import authority
+
+        test_path = os.path.join(self.temp_dir, "thread", "domain")
+        os.makedirs(test_path)
+        authority.mark_new_thread(self.temp_dir, "thread")
+        old = MagicMock(id="old-generation")
+        new = MagicMock(id="new-generation")
+        SandboxManager._containers[test_path] = new
+        SandboxManager._generation_owners[old.id] = (
+            self.temp_dir, "thread", "old-owner")
+        with authority.fence(self.temp_dir, "thread") as state:
+            state.begin("new-owner", 2)
+            state.add_generation("new-owner", new.id)
+        with patch('assist.sandbox_manager.confirm_generation_stopped') as stopped:
+            SandboxManager.cleanup(test_path, old)
+        stopped.assert_called_once_with("old-generation")
+        self.assertIs(SandboxManager._containers[test_path], new)
+        with authority.fence(self.temp_dir, "thread") as state:
+            self.assertEqual(state.lease["owner_run_id"], "new-owner")
+            self.assertEqual(state.lease["generations"], [new.id])
 
     def test_domain_manager_without_git(self):
         """Test that DomainManager works without git remote."""

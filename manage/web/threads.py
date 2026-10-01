@@ -22,6 +22,7 @@ import threading
 import time
 import urllib.parse
 from collections import deque
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 
 import markdown
@@ -987,7 +988,7 @@ def render_thread(
         if held:
             detail = ("<div class=\"content\" style=\"font-size:.8rem;\">"
                       "Not yet delivered. "
-                      + html.escape(r.error or "Closing the previous internal browser")
+                      + html.escape(r.error or "Closing the previous turn browser")
                       + ("; retry after " + html.escape(r.revocation_retry_at)
                          if r.revocation_retry_at else "") + "</div>")
         rendered.insert(0, (
@@ -1003,10 +1004,10 @@ def render_thread(
         prior_status = prior.status if prior else "unavailable"
         rendered.insert(0, (
             '<div class="msg tools"><div class="content">'
-            'Internal browsing stopped; page and form state was lost. '
+            'The previous turn browser stopped; live page and form state was lost. '
             'The earlier task was not canceled by this safety reset '
             f'(current Run status: {html.escape(prior_status)}). '
-            'A fresh exact-host request is needed unless the new message named that host.'
+            'Reopen the page and inspect its current state before acting.'
             '</div></div>'))
     rendered_body = "\n".join(rendered) or "<p><em>No messages yet.</em></p>"
     cursor_attr = (f' data-history-cursor="{html.escape(history_cursor, quote=True)}"'
@@ -1868,11 +1869,10 @@ def _frame_interjection(rec: "PendingMessage") -> str:
             prior = (_runs().get(rec.thread_id, admitted.browser_reset_run_id)
                      if admitted.browser_reset_run_id else None)
             state = prior.status if prior else "unavailable"
-            guide += (" Trusted browser safety reset: internal browsing stopped; "
-                      "page and form state was lost. The earlier task was not "
+            guide += (" Trusted browser safety reset: the previous browser page "
+                      "and form state was lost. The earlier task was not "
                       f"canceled by this reset; its Run status is {state}. "
-                      "A new exact-host user request is needed unless this direct "
-                      "message itself names that host.")
+                      "Reopen and observe the live page before acting.")
     except RunNotFound:
         pass
     return _INTERJECTION_FRAME + rec.text + guide + ")"
@@ -2234,7 +2234,8 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                         run.parent_thread_id)
                     try:
                         sandbox = _get_sandbox_backend(
-                            run.parent_thread_id, include_agent=False)
+                            run.parent_thread_id, include_agent=False,
+                            owner_run_id=run.id)
                         sandbox_generation = sandbox.container if sandbox else None
                     except Exception:
                         sandbox_generation = SandboxManager.current_container(
@@ -2938,6 +2939,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 browser_capable = bool(
                     _run is not None and not sender
                     and assistant_id == "general-agent"
+                    and BrowserManager.reconcile_startup(MANAGER.root_dir)
                     and BrowserManager.ready_for_browser(MANAGER.root_dir, tid))
                 # Inside the try so the `finally` reaps even if sandbox
                 # creation registers a container and then raises — cleanup
@@ -2945,21 +2947,22 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 try:
                     sandbox = _get_sandbox_backend(
                         tid, tz=rider.tz if rider else None,
-                        browser_capable=browser_capable)
+                        browser_capable=browser_capable,
+                        owner_run_id=_run.id if _run is not None else None)
                     sandbox_generation = sandbox.container if sandbox else None
                 except Exception:
                     sandbox_generation = SandboxManager.current_container(
                         MANAGER.thread_default_working_dir(tid))
                     raise
                 try:
-                    # Only a direct user-origin event in this active work lineage
-                    # can authorize an internal host. Approval-generated system
-                    # Runs deliberately inherit no such authorization.
+                    # Bind the browser to this Run's latest user event; ordinary
+                    # egress policy and grants decide which origins are reachable.
                     user_request = _browser_user_request(
                         _run, _runs().list(tid) if _run is not None else [])
                     extra_browser_tools = ()
                     if (sandbox is not None and browser_capable
-                            and BrowserManager.ready_for_browser(MANAGER.root_dir, tid)):
+                            and BrowserManager.ready_for_browser(
+                                MANAGER.root_dir, tid, _run.id, sandbox.id)):
                         browser_session = BrowserSession(
                             tid, _run.id if _run is not None else event_id or "legacy",
                             MANAGER.thread_default_working_dir(tid), MANAGER.root_dir,
@@ -3065,19 +3068,19 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     else:
                         resp = chat.message(text)
             finally:
-                # One container per turn: kill it as soon as this turn's agent
-                # run finishes — success, error, or the early return above —
-                # while we still hold the queue, so the next turn always starts
-                # in a fresh sandbox and no container outlives its turn.  This,
-                # plus the >2h backstop TTL, is what makes the mid-flight reap
-                # impossible: container age == turn age, capped by the queue.
-                # cleanup() SIGKILLs (the response is already committed to the
-                # checkpoint here, and the sandbox has nothing to flush).
+                # One container per turn: prove its exact generation stopped
+                # before admitting the next turn. The outer TTL bounds orphan
+                # lifetime after a host outage; expiry during a live turn is an
+                # infrastructure failure, not a successful turn completion.
                 _work_dir = MANAGER.thread_default_working_dir(tid)
                 try:
                     BrowserManager.cleanup(tid, browser_session)
                 finally:
-                    SandboxManager.cleanup(_work_dir, sandbox_generation)
+                    try:
+                        SandboxManager.cleanup(_work_dir, sandbox_generation)
+                    finally:
+                        if any(browser_reset_owed(item) for item in _runs().list(tid)):
+                            _queue_browser_revocation(tid)
         MANAGER.touch(tid)
 
         # Generate description if there is none
@@ -3670,7 +3673,10 @@ def _drain_held_browser_events(tid: str) -> bool:
         failure = "Browser safety reset is waiting for an in-flight browser command"
     else:
         failure = None
+        generation_guard = ExitStack()
         try:
+            generation_guard.enter_context(
+                browser_authority.generation_fence(MANAGER.root_dir, tid))
             # A prior reset can have committed A while its scheduler notification
             # failed. Retry A before attempting held B, whose reset may fail too.
             with _BROWSER_RETRY_LOCK:
@@ -3698,8 +3704,21 @@ def _drain_held_browser_events(tid: str) -> bool:
                     owner = (run.browser_reset_run_id
                              or (state.lease or {}).get("owner_run_id")
                              or (session.run_id if session is not None else None))
+                    lease = state.lease
+                if lease is not None:
+                    active_owner = any(item.id == lease["owner_run_id"]
+                                       and item.status == "running"
+                                       for item in _runs().list(tid))
+                    current_sandbox = SandboxManager.current_container(
+                        MANAGER.thread_default_working_dir(tid))
+                    live_generation = (current_sandbox is not None
+                                       and current_sandbox.id in lease["generations"])
+                    if active_owner or live_generation:
+                        if session is not None and session.run_id == owner:
+                            session.disarm_for_held_event()
+                        return False
                 if session is not None and session.run_id == owner:
-                    reset = session.revoke_internal()
+                    reset = session.revoke_for_promotion()
                 else:
                     reset = False
                 reset = (BrowserManager.confirm_owner_stopped(
@@ -3750,6 +3769,7 @@ def _drain_held_browser_events(tid: str) -> bool:
         except Exception as error:
             failure = f"Browser safety reset could not read held Runs ({type(error).__name__})"
         finally:
+            generation_guard.close()
             gate.release()
     if failure:
         retry_at = (datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()
@@ -4254,14 +4274,8 @@ _PROVISIONER = (
 
 
 def _recovery_prep(q: "queue.Queue") -> None:
-    """One-time worker-thread prep before draining recovery jobs. Browser
-    orphan/map reconciliation runs even when the queue is empty; only shell
-    cleanup and model-wait depend on pending jobs. Reap THIS deployment's
-    orphaned sandbox containers (by
-    label + /workspace-mount scope — see ``reap_orphans``): a killed web process
-    reaps nothing, and a ``docker exec``'d tool command keeps mutating the
-    host-bind-mounted /workspace for up to the 3h TTL — a resumed turn's fresh
-    container must never share a workspace with a zombie writer. (b) Wait
+    """Reconcile browser authority before recovery; managed sandbox creation
+    proves each exact workspace clear before admitting its replacement. Wait
     (bounded) for the model endpoint: on a cold boot llamacpp loads for minutes
     after assist-web is up, and erroring every recovered thread against a
     still-loading model would defeat recovery."""
@@ -4276,7 +4290,6 @@ def _recovery_prep(q: "queue.Queue") -> None:
         _queue_browser_revocation(tid)
     if q.empty():
         return
-    SandboxManager.reap_orphans(MANAGER.root_dir)
     if not os.getenv("ASSIST_MODEL_URL"):
         return
     # _llm_reachable requires a 200 — llama-server binds its port immediately on a
@@ -5486,8 +5499,9 @@ def _delete_thread_and_children(tid: str) -> None:
     # Wait for Docker outside the Run admission lock, but keep the browser
     # gate through deletion so another session cannot register in between.
     with BrowserManager.bounded_thread_gate(tid):
-        BrowserManager.cleanup(tid)
-        _delete_thread_after_browser_stop(tid)
+        with browser_authority.generation_fence(MANAGER.root_dir, tid):
+            BrowserManager.cleanup(tid)
+            _delete_thread_after_browser_stop(tid)
 
 
 def _deletion_child_ids(tid: str) -> set[str]:
@@ -5516,19 +5530,20 @@ def _delete_thread_after_browser_stop(tid: str) -> None:
     deleted_children = set()
     for child_tid in sorted(child_ids):
         with BrowserManager.bounded_thread_gate(child_tid):
-            with _RUN_ADMISSION_LOCK:
-                child_runs = _runs().list(child_tid)
-                if any(child.status == "running" for child in child_runs):
-                    continue
-            BrowserManager.cleanup(child_tid)
-            BrowserManager.confirm_owner_stopped(
-                MANAGER.root_dir, child_tid, None)
-            with _RUN_ADMISSION_LOCK:
-                if _runs().list(child_tid) != child_runs:
-                    raise RuntimeError("child Runs changed during deletion")
-                MANAGER._hard_delete_after_browser_stop(child_tid)
-                RUN_STREAMS.mark_thread_gone(child_tid)
-                deleted_children.add(child_tid)
+            with browser_authority.generation_fence(MANAGER.root_dir, child_tid):
+                with _RUN_ADMISSION_LOCK:
+                    child_runs = _runs().list(child_tid)
+                    if any(child.status == "running" for child in child_runs):
+                        continue
+                BrowserManager.cleanup(child_tid)
+                BrowserManager.confirm_owner_stopped(
+                    MANAGER.root_dir, child_tid, None)
+                with _RUN_ADMISSION_LOCK:
+                    if _runs().list(child_tid) != child_runs:
+                        raise RuntimeError("child Runs changed during deletion")
+                    MANAGER._hard_delete_after_browser_stop(child_tid)
+                    RUN_STREAMS.mark_thread_gone(child_tid)
+                    deleted_children.add(child_tid)
     BrowserManager.confirm_owner_stopped(MANAGER.root_dir, tid, None)
     with _RUN_ADMISSION_LOCK:
         if (_runs().list(tid) != parent_runs

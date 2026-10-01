@@ -129,6 +129,7 @@ class TestHardDeleteBrowserStop(TestCase):
                     calls.append("confirmed")
 
                 session = Mock()
+                session.threads_root = tmp
                 session.close.side_effect = lambda: stop(tid)
                 with patch.object(BrowserManager, "_sessions", {tid: session}), \
                      patch("assist.browser.manager.BrowserManager.confirm_owner_stopped",
@@ -253,7 +254,8 @@ class TestHardDeleteIdempotent(TestCase):
                 self.assertFalse(os.path.exists(tdir))
                 self.assertEqual(_count_rows(mgr, "checkpoints", tid), 1)
 
-                with patch("assist.thread_manager.SandboxManager.cleanup"):
+                with patch("assist.thread_manager.SandboxManager.cleanup"), \
+                     patch.object(BrowserManager, "confirm_owner_stopped", return_value=False):
                     # Should complete without raising.
                     mgr.hard_delete(tid)
 
@@ -270,7 +272,8 @@ class TestHardDeleteIdempotent(TestCase):
                 tid = "20260504000004-eeeeeeee"
                 _seed_thread(mgr, tid)
 
-                with patch("assist.thread_manager.SandboxManager.cleanup"):
+                with patch("assist.thread_manager.SandboxManager.cleanup"), \
+                     patch.object(BrowserManager, "confirm_owner_stopped", return_value=False):
                     mgr.hard_delete(tid)
                     # Second call: pure no-op path, must not raise.
                     mgr.hard_delete(tid)

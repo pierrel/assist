@@ -1289,9 +1289,9 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
         separators=(",", ":"),
     )
     assert len(historical_p0_prompt) == 31_279
-    # V1's egress catalog description is 13 characters shorter. The historical
-    # rows below deliberately retain their original P0-P2b3 values.
-    assert len(current_prompt) == 26_751
+    # V1's current browser and egress catalog descriptions replace the old
+    # policy wording. Historical rows retain their original P0-P2b3 values.
+    assert len(current_prompt) == 26_712
     assert len(schemas) == 18_554
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 37

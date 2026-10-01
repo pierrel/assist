@@ -2,15 +2,14 @@
 import json
 import multiprocessing
 import fcntl
-import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from assist.egress.client_map import (
-    ClientRecord, _locked, clear_clients, forget_client, prune_absent_browser_clients,
-    record_browser_client,
-    record_client, read_client, set_sandbox_browser_mode)
+    ClientRecord, _locked, arm_sandbox_browser, clear_clients,
+    disarm_sandbox_browser, forget_client, prune_absent_browser_clients,
+    record_client, read_client)
 
 
 def _writer(directory, ip, generation, entered=None, release=None):
@@ -52,67 +51,21 @@ def test_pi_registration_overwrites_recycled_shell_grant(tmp_path):
     assert read_client(str(tmp_path), ip).kind == "pi"
 
 
-def test_sandbox_browser_mode_preserves_shell_identity_and_pins_turn(tmp_path):
+def test_sandbox_browser_arm_disarm_preserves_shell_identity(tmp_path):
     directory = str(tmp_path)
     ip = "172.20.0.2"
     initial = ClientRecord("thread", "generation", "sandbox")
     record_client(directory, ip, initial)
-    armed = set_sandbox_browser_mode(directory, ip, initial, "public")
+    armed = arm_sandbox_browser(directory, ip, initial)
     assert read_client(directory, ip) == armed
     with pytest.raises(RuntimeError, match="identity changed"):
-        set_sandbox_browser_mode(directory, ip, initial, "internal",
-                                 "host.docker.internal", 5050)
+        arm_sandbox_browser(directory, ip, initial)
+    disarm_sandbox_browser(directory, ip, "generation")
+    assert read_client(directory, ip) == initial
     record_client(directory, ip, ClientRecord("other", "new-generation", "sandbox"))
     with pytest.raises(RuntimeError, match="identity changed"):
-        set_sandbox_browser_mode(directory, ip, initial, "public")
+        disarm_sandbox_browser(directory, ip, "generation")
     assert read_client(directory, ip).generation == "new-generation"
-
-
-def test_late_browser_a_cannot_overwrite_recycled_ip_owner_b(tmp_path):
-    ip = "172.20.0.2"
-    a = ClientRecord("A", "generation-A", "browser", "internal",
-                     "host.docker.internal", 5050)
-    b = ClientRecord("B", "generation-B", "browser", "public")
-    a_ready, b_published = threading.Event(), threading.Event()
-    failures = []
-
-    def late_a():
-        a_ready.set()
-        assert b_published.wait(2)
-        try:
-            record_browser_client(str(tmp_path), ip, a)
-        except RuntimeError as error:
-            failures.append(str(error))
-
-    thread = threading.Thread(target=late_a)
-    thread.start()
-    assert a_ready.wait(2)
-    record_browser_client(str(tmp_path), ip, b)
-    b_published.set()
-    thread.join(2)
-    assert not thread.is_alive()
-    assert failures == ["browser IP is already attributed to another generation"]
-    assert read_client(str(tmp_path), ip) == b
-
-
-def test_browser_endpoint_must_still_be_running_at_observed_ip(tmp_path):
-    from assist.browser import manager as browser
-    client = MagicMock()
-    proxy = MagicMock(status="running")
-    proxy.attrs = {
-        "Mounts": [{"Destination": "/client-map", "Source": str(tmp_path)}],
-        "NetworkSettings": {"Networks": {
-            browser.BROWSER_NETWORK: {"NetworkID": "network-N2"}}}}
-    sidecar = MagicMock(status="running")
-    sidecar.attrs = {"NetworkSettings": {"Networks": {
-        browser.BROWSER_NETWORK: {
-            "NetworkID": "network-N1", "IPAddress": "172.20.0.2"}}}}
-    client.containers.get.side_effect = lambda key: (
-        proxy if key == browser.EGRESS_PROXY_NAME else sidecar)
-    record = ClientRecord("t", "generation", "browser", "public")
-    with pytest.raises(browser.BrowserUnavailable, match="endpoint changed"):
-        browser._register_browser_client_direct(
-            client, str(tmp_path), "172.20.0.2", record, str(tmp_path), "run")
 
 
 def test_two_processes_preserve_both_records(tmp_path):
@@ -266,8 +219,5 @@ def test_empty_recovery_queue_still_reconciles_browser_attribution(monkeypatch):
         return True
 
     monkeypatch.setattr(threads.BrowserManager, "reconcile_startup", reconcile)
-    monkeypatch.setattr(threads.SandboxManager, "reap_orphans",
-                        lambda _root: (_ for _ in ()).throw(
-                            AssertionError("empty queue should skip sandbox recovery")))
     threads._recovery_prep(queue.Queue())
     assert called == [threads.MANAGER.root_dir]

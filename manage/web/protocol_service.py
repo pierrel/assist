@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import threading
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from fastapi import HTTPException
 
@@ -11,6 +12,7 @@ from assist.run_service import (
     NONTERMINAL_STATUSES,
     TERMINAL_STATUSES,
 )
+from assist.browser import authority as browser_authority
 from assist.middleware.url_provenance import (
     normalize_url,
     url_userinfo,
@@ -132,7 +134,12 @@ class WebAgentProtocolService:
                             key=lambda child: child.created_at)[:
                                 len(latest_by_task) - self.MAX_RETAINED_TASKS_PER_PARENT + 1]
                 for child in terminal:
-                    with BrowserManager.bounded_thread_gate(child.thread_id):
+                    with (BrowserManager.bounded_thread_gate(child.thread_id),
+                          ExitStack() as generation_guard):
+                        if os.path.isdir(MANAGER.thread_dir(child.thread_id)):
+                            generation_guard.enter_context(
+                                browser_authority.generation_fence(
+                                    MANAGER.root_dir, child.thread_id))
                         with _RUN_ADMISSION_LOCK:
                             current = _runs().list(child.thread_id)
                             if (not current or current[-1].id != child.id

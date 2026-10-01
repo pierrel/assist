@@ -22,22 +22,6 @@ def main() -> int:
             client, container, sys.argv[3], kind=sys.argv[4])
         print(json.dumps(identity), flush=True)
         return 0
-    if (len(sys.argv) == 13 and sys.argv[1] == "browser-record"
-            and re.fullmatch(r"[0-9a-f]{64}", sys.argv[2])
-            and all(re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", name)
-                    for name in sys.argv[11:13])):
-        from assist.browser.manager import _register_browser_client_direct
-        from assist.egress.client_map import ClientRecord
-        mode = sys.argv[6]
-        host = None if sys.argv[7] == "-" else sys.argv[7]
-        port = int(sys.argv[8]) or None
-        record = ClientRecord(sys.argv[5], sys.argv[2], "browser", mode,
-                              host, port)
-        _register_browser_client_direct(
-            client, sys.argv[3], sys.argv[4], record, sys.argv[9], sys.argv[10],
-            proxy_name=sys.argv[11], network_name=sys.argv[12])
-        print("ok", flush=True)
-        return 0
     return 2
 
 

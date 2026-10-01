@@ -80,3 +80,22 @@ def save(root: str, thread_id: str, run_id: str,
             except FileNotFoundError:
                 pass
             os.close(directory)
+
+
+def discard(root: str, thread_id: str, run_id: str,
+            generation: str) -> None:
+    """Remove stale auth state only while this exact turn owns the lease."""
+    with authority.fence(root, thread_id) as current:
+        lease = current.lease
+        if (lease is None or lease["owner_run_id"] != run_id
+                or generation not in lease["generations"]):
+            return
+        directory = _directory(root, thread_id)
+        try:
+            try:
+                os.unlink(FILE, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+            os.fsync(directory)
+        finally:
+            os.close(directory)

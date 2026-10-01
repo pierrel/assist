@@ -1,4 +1,4 @@
-"""Host-only per-thread browser lease and short admission/publication fence.
+"""Host-only per-thread turn lease and short admission/publication fence.
 
 The file lives beside, never inside, the thread's mounted workspace, scratch
 or agent directories. Missing state on an older thread is not a clean proof.
@@ -15,6 +15,7 @@ from contextlib import contextmanager
 
 STATE_FILE = "browser-authority.json"
 LOCK_FILE = ".browser-authority.lock"
+GENERATION_LOCK_FILE = ".sandbox-generation.lock"
 
 
 def _thread_dir(root: str, thread_id: str) -> str:
@@ -157,6 +158,34 @@ def fence(root: str, thread_id: str, timeout: float = 5):
                 time.sleep(0.01)
         try:
             yield Authority(os.path.join(directory, STATE_FILE))
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def generation_fence(root: str, thread_id: str, timeout: float = 30):
+    """Serialize exact-thread Docker replacement across host processes."""
+    directory = _thread_dir(root, thread_id)
+    identity = os.stat(directory, follow_symlinks=False)
+    fd = os.open(os.path.join(directory, GENERATION_LOCK_FILE),
+                 os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("sandbox generation fence timed out")
+                time.sleep(0.01)
+        try:
+            current = os.stat(_thread_dir(root, thread_id), follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
+                raise RuntimeError("sandbox thread directory changed under generation fence")
+            yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:

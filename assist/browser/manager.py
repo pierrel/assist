@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import io
 import hashlib
-import ipaddress
 import json
 import logging
 import os
@@ -21,19 +20,14 @@ from uuid import uuid4
 
 from assist.browser import authority
 from assist.egress.client_map import (
-    ClientRecord, browser_records, configured_directory, forget_client,
-    prune_absent_browser_clients, read_client, record_browser_client)
-from assist.egress import runtime_state
+    ClientRecord, browser_records, configured_directory, disarm_sandbox_browser,
+    forget_client, prune_absent_browser_clients)
 from assist.sandbox_manager import (
     BROWSER_NETWORK, EGRESS_NETWORK, EGRESS_PROXY_NAME, SandboxManager,
-    _load_egress_allowlist,
-    _network_identity, _bounded_egress_worker, _proxy_setup_lock)
+    confirm_generation_stopped)
 from assist.run_service import RunService
 
 logger = logging.getLogger(__name__)
-BROWSER_IMAGE = "assist-browser"
-SECCOMP_PROFILE = os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "..", "..", "dockerfiles", "browser-seccomp.json"))
 MAX_DOWNLOAD = 20 * 1024 * 1024
 
 
@@ -61,67 +55,6 @@ def _url_target(url: str) -> tuple[str, int]:
     except ValueError as error:
         raise BrowserUnavailable("use an HTTP(S) URL without userinfo") from error
     return parsed.hostname.lower(), parsed.port or (443 if parsed.scheme == "https" else 80)
-
-
-def _url_host(url: str) -> str:
-    return _url_target(url)[0]
-
-
-def _internal_host(host: str) -> bool:
-    if host == "host.docker.internal":
-        return True
-    try:
-        return not ipaddress.ip_address(host).is_global
-    except ValueError:
-        return False
-
-
-def _user_requested_ports(message: str | None, host: str) -> tuple[int, ...]:
-    """Return explicit port, scheme default, or both web defaults for a bare host."""
-    if not message or any(character in message for character in "\r\n\t"):
-        return ()
-    message = re.sub(r"^\s*what's\b", "What is", message, flags=re.I)
-    # Reject quoted text and prohibitions anywhere in the request. False negatives
-    # require a fresh exact-host request; false positives grant LAN access.
-    if re.search(r"['\"`]|\b(?:not|never|avoid|without|don.t|cannot|can.t)\b",
-                 message, re.I):
-        return ()
-    visit = (r"^\s*(?:yes,\s*)?(?:(?:please|can you|could you|would you)\s+)?"
-               r"(?:visit|open|browse|go to|look at|inspect|check|show)\s+"
-               r"(?:(?:me\s+)?(?:the\s+)?"
-               r"(?:site|website|page|dashboard)\s+(?:(?:at|on)\s+)?)?"
-               r"(?P<target>\S+)")
-    outcome = (r"^\s*(?:please\s+)?(?:what(?: is|'s)|find|show me|tell me)\s+"
-               r"(?:the\s+)?(?:status|report|dashboard|release|arrival|manual)\s+"
-               r"(?:at|on|from)\s+(?P<target>\S+)")
-    match = re.search(visit, message, re.I)
-    continuation = r"(?:\s+and\s+inspect\s+it)?" if match else ""
-    if match is None:
-        match = re.search(outcome, message, re.I)
-    if match is None or not re.fullmatch(
-            continuation + r"\s*[.!?]*\s*", message[match.end():], re.I):
-        return ()
-    # Parse the whole authority token: a host-looking prefix before userinfo,
-    # punctuation or another hostname is not consent for the internal host.
-    token = match.group("target").rstrip(".,!?")
-    if not token or len(token) > 4096:
-        return ()
-    try:
-        parsed = urlsplit(token if token.lower().startswith(("http://", "https://"))
-                          else "//" + token)
-        if (parsed.hostname is None or parsed.hostname.lower() != host
-                or parsed.username is not None or parsed.password is not None
-                or parsed.netloc.endswith(":")):
-            return ()
-        if parsed.port is not None:
-            return (parsed.port,) if 1 <= parsed.port <= 65535 else ()
-        if parsed.scheme == "http":
-            return (80,)
-        if parsed.scheme == "https":
-            return (443,)
-        return (80, 443)
-    except ValueError:
-        return ()
 
 
 def _owner_start() -> str:
@@ -216,177 +149,12 @@ def _docker_download(container_id: str, source: str, timeout: float = 20,
         limit=MAX_DOWNLOAD, timeout=timeout)
 
 
-def _register_browser_client_direct(client, map_dir: str, ip: str,
-                                    record: ClientRecord, threads_root: str,
-                                    run_id: str, *, proxy_name: str | None = None,
-                                    network_name: str | None = None) -> None:
-    """Publish only against the same running proxy/browser network generation."""
-    from docker.errors import NotFound
-    proxy_name = proxy_name or EGRESS_PROXY_NAME
-    network_name = network_name or BROWSER_NETWORK
-    with _proxy_setup_lock():
-        proxy = client.containers.get(proxy_name)
-        proxy.reload()
-        sidecar = client.containers.get(record.generation)
-        sidecar.reload()
-        mounted = [mount.get("Source") for mount in proxy.attrs.get("Mounts", [])
-                   if mount.get("Destination") == "/client-map"]
-        proxy_network = proxy.attrs["NetworkSettings"]["Networks"][network_name]
-        endpoint = sidecar.attrs["NetworkSettings"]["Networks"][network_name]
-        if (proxy.status != "running" or sidecar.status != "running"
-                or mounted != [map_dir]
-                or endpoint["NetworkID"] != proxy_network["NetworkID"]
-                or endpoint["IPAddress"] != ip):
-            raise BrowserUnavailable("browser endpoint changed before attribution")
-        runtime_state.assert_admissible("proxy", proxy.id)
-        runtime_state.assert_admissible("network", proxy_network["NetworkID"])
-        prior = read_client(map_dir, ip)
-        if prior is not None and prior != record and prior.kind == "browser":
-            try:
-                old = client.containers.get(prior.generation)
-                old.reload()
-            except NotFound:
-                old_endpoint = None
-            else:
-                old_endpoint = (old.attrs.get("NetworkSettings", {})
-                                .get("Networks", {}).get(network_name))
-                if old.status != "running":
-                    old_endpoint = None
-            if (old_endpoint is None or old_endpoint.get("IPAddress") != ip
-                    or old_endpoint.get("NetworkID") != proxy_network["NetworkID"]):
-                forget_client(map_dir, ip, prior.generation)
-        with authority.fence(threads_root, record.thread_id) as state:
-            runs = RunService(threads_root).list(record.thread_id)
-            if any(run.status == "revocation_pending" for run in runs):
-                raise BrowserUnavailable("newer user message revoked browser startup")
-            latest = max((run.admission_sequence for run in runs
-                          if run.user_event_id == run.id), default=0)
-            if (state.lease is None or state.lease["owner_run_id"] != run_id
-                    or latest != state.lease["sequence"]):
-                raise BrowserUnavailable("newer user message revoked browser startup")
-            state.add_generation(run_id, record.generation)
-            record_browser_client(map_dir, ip, record)
-
-
-def _register_browser_client_bounded(map_dir: str, ip: str,
-                                     record: ClientRecord, threads_root: str,
-                                     run_id: str, timeout: float) -> None:
-    """Cancel Docker inspect/setup-lock stalls before the Run can continue."""
-    argv = [sys.executable, "-m", "assist.egress.runtime_worker", "browser-record",
-            record.generation, map_dir, ip, record.thread_id,
-            record.browser_mode or "public", record.internal_host or "-",
-            str(record.internal_port or 0), threads_root, run_id,
-            EGRESS_PROXY_NAME, BROWSER_NETWORK]
-    result = _bounded_egress_worker(argv, timeout=timeout)
-    if result.returncode or result.stdout.strip() != b"ok":
-        raise BrowserUnavailable(
-            "browser attribution failed: "
-            + result.stderr.decode("utf-8", errors="replace")[-500:])
-
-
-def _kill_container(container_id: str) -> None:
-    try:
-        killed = subprocess.run(["docker", "kill", container_id],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                timeout=5, check=False)
-        if killed.returncode:
-            logger.warning("browser generation kill rc=%s stderr=%r", killed.returncode,
-                           killed.stderr[-200:])
-    except (OSError, subprocess.TimeoutExpired):
-        logger.warning("browser generation kill could not complete")
-
-
 def _kill_container_confirmed(container_id: str) -> None:
-    """Stop one exact Docker generation before releasing user admission."""
+    """Compatibility delegate for the shared sandbox stop proof."""
     try:
-        subprocess.run(["docker", "kill", container_id],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=5, check=False)
-    except (OSError, subprocess.TimeoutExpired) as error:
+        confirm_generation_stopped(container_id)
+    except RuntimeError as error:
         raise BrowserUnavailable("browser generation teardown is unconfirmed") from error
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        try:
-            inspected = subprocess.run(
-                ["docker", "inspect", "--format", "{{.State.Running}}", container_id],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2,
-                check=False)
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise BrowserUnavailable("browser generation teardown is unconfirmed") from error
-        if inspected.returncode == 0 and inspected.stdout.strip() == b"false":
-            return
-        if (inspected.returncode != 0 and
-                (b"no such object" in inspected.stderr.lower()
-                 or b"no such container" in inspected.stderr.lower())):
-            return
-        time.sleep(0.05)
-    logger.warning("browser generation teardown unresolved: rc=%s stdout=%r stderr=%r",
-                   inspected.returncode, inspected.stdout[-200:],
-                   inspected.stderr[-200:])
-    raise BrowserUnavailable("browser generation teardown is unconfirmed")
-
-
-def _launch_sidecar_direct(request: dict, *, ensure_proxy: bool = True):
-    """Docker SDK work performed only in a disposable host worker process."""
-    client = SandboxManager._get_docker_client()
-    BrowserManager.prune_absent_clients(request["map_dir"])
-    if ensure_proxy:
-        SandboxManager._ensure_egress_proxy_running_direct(client)
-    network = client.networks.get(BROWSER_NETWORK)
-    network_id, _ = _network_identity(network, isolated=True)
-    runtime_state.assert_admissible("network", network_id)
-    proxy = client.containers.get(EGRESS_PROXY_NAME)
-    proxy.reload()
-    runtime_state.assert_admissible("proxy", proxy.id)
-    attached = proxy.attrs.get("NetworkSettings", {}).get("Networks", {})
-    if attached.get(BROWSER_NETWORK, {}).get("NetworkID") != network_id:
-        raise BrowserUnavailable("egress proxy is not on the browser network")
-    with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as stream:
-        if stream.read().strip() != request["boot_id"]:
-            raise BrowserUnavailable("browser Run expired across host reboot")
-    if time.clock_gettime_ns(time.CLOCK_BOOTTIME) >= request["deadline_ns"]:
-        raise BrowserUnavailable("browser Run deadline expired")
-    with open(SECCOMP_PROFILE, encoding="utf-8") as profile:
-        seccomp = profile.read()
-    container = client.containers.run(
-        BROWSER_IMAGE, detach=True, network=BROWSER_NETWORK,
-        name=f"assist-browser-{uuid4().hex[:16]}",
-        user="10001:10001", read_only=True, remove=True,
-        mem_limit="1g", pids_limit=128, nano_cpus=1_000_000_000,
-        shm_size="64m", cap_drop=["ALL"],
-        security_opt=[f"seccomp={seccomp}", "no-new-privileges"],
-        tmpfs={
-            "/run": "rw,nosuid,size=1048576,uid=10001,gid=10001",
-            "/tmp": "rw,nosuid,size=33554432,uid=10001,gid=10001",
-            "/home/browser": "rw,nosuid,size=134217728,uid=10001,gid=10001",
-            "/downloads": "rw,nosuid,size=33554432,uid=10001,gid=10001",
-        },
-        environment={"BROWSER_SESSION_TOKEN": request["token"],
-                     "BROWSER_BOOT_ID": request["boot_id"],
-                     "BROWSER_DEADLINE_NS": str(request["deadline_ns"])},
-        labels={"assist.browser": "true", "assist.browser-root": request["label_root"],
-                "assist.browser-run": request["run_id"],
-                "assist.browser-owner-pid": str(request["owner_pid"]),
-                "assist.browser-owner-start": request["owner_start"]},
-    )
-    container.reload()
-    ip = container.attrs["NetworkSettings"]["Networks"][BROWSER_NETWORK]["IPAddress"]
-    if not ip:
-        raise BrowserUnavailable("browser sidecar has no network identity")
-    return {"generation": container.id, "ip": ip}, container
-
-
-def _launch_sidecar_bounded(request: dict, timeout: float) -> dict:
-    payload = json.dumps(request, separators=(",", ":")).encode()
-    output = _bounded_cli(
-        [sys.executable, "-m", "assist.browser.startup_worker"],
-        payload=payload, limit=4096, timeout=timeout)
-    result = json.loads(output)
-    if (not isinstance(result, dict) or
-            not isinstance(result.get("generation"), str) or
-            not isinstance(result.get("ip"), str)):
-        raise BrowserUnavailable("browser startup returned invalid identity")
-    return result
 
 
 @dataclass
@@ -394,9 +162,6 @@ class _ContainerIdentity:
     map_dir: str
     ip: str
     generation: str
-    mode: str
-    internal_host: str | None
-    internal_port: int | None = None
 
 
 def _sandbox_generations(threads_root: str,
@@ -452,16 +217,12 @@ class BrowserSession:
                 and user_request.work_id != work_id):
             raise BrowserUnavailable("browser request belongs to another work")
         self.token = uuid4().hex
-        self.boot_id = None
-        self.deadline_ns = None
         self.identity: _ContainerIdentity | None = None
         self.startup_uncertain = False
         self.closed = False
-        self.expiry_timer: threading.Timer | None = None
         self._lock = threading.RLock()
 
-    def _start(self, mode: str, internal_host: str | None,
-               internal_port: int | None):
+    def _start(self):
         if self.startup_uncertain:
             raise BrowserUnavailable("browser startup outcome is unconfirmed for this Run")
         sandbox = SandboxManager.current_container(self.work_dir)
@@ -473,24 +234,19 @@ class BrowserSession:
                 or (self.sandbox_generation is not None
                     and generation != self.sandbox_generation)):
             raise BrowserUnavailable("browser turn sandbox identity changed")
-        remaining = self._remaining()
-        if remaining <= 0:
-            raise BrowserUnavailable("browser Run deadline expired")
         with authority.fence(self.threads_root, self.thread_id) as state:
             state.add_generation(self.run_id, generation)
         request = {
-            "token": self.token, "deadline_ns": self.deadline_ns,
-            "boot_id": self.boot_id, "run_id": self.run_id,
+            "token": self.token, "run_id": self.run_id,
             "thread_id": self.thread_id, "threads_root": self.threads_root,
             "work_dir": self.work_dir, "map_dir": map_dir, "ip": ip,
-            "generation": generation, "mode": mode,
-            "internal_host": internal_host, "internal_port": internal_port,
+            "generation": generation,
         }
         try:
             result = json.loads(_bounded_cli(
                 [sys.executable, "-m", "assist.browser.turn_runtime"],
                 payload=json.dumps(request, separators=(",", ":")).encode(),
-                limit=4096, timeout=min(20, remaining)))
+                limit=4096, timeout=20))
             if (result != {"generation": generation, "ip": ip,
                            "map_dir": map_dir}):
                 raise BrowserUnavailable("browser startup returned invalid identity")
@@ -502,46 +258,32 @@ class BrowserSession:
                 # the browser. Valid snapshots go only to the worker, never the model.
                 logger.warning("browser auth state could not be restored")
                 prior_state = None
-            if mode == "public" and prior_state is not None:
+            if prior_state is not None:
                 command = json.dumps({"session": self.token,
                                       "operation": "load_storage",
                                       "args": {"state": prior_state}}).encode()
                 loaded = json.loads(_docker_exec(
-                    generation, command, timeout=min(10, self._remaining()),
+                    generation, command, timeout=10,
                     in_sandbox=True))
                 if loaded.get("result") != {"loaded": True}:
                     raise BrowserUnavailable("browser auth state could not be loaded")
         except Exception as error:
             self.startup_uncertain = True
-            _kill_container_confirmed(generation)
-            forget_client(map_dir, ip, generation)
+            self._stop_identity(_ContainerIdentity(map_dir, ip, generation))
             with authority.fence(self.threads_root, self.thread_id) as state:
-                state.remove_generation(self.run_id, generation)
                 state.clear(self.run_id)
             raise BrowserUnavailable("browser turn startup failed") from error
-        self.identity = _ContainerIdentity(
-            map_dir, ip, generation, mode, internal_host, internal_port)
-        self.expiry_timer = threading.Timer(
-            self._remaining(), self._expire_sandbox, args=(generation,))
-        self.expiry_timer.daemon = True
-        self.expiry_timer.start()
+        self.identity = _ContainerIdentity(map_dir, ip, generation)
 
-    @staticmethod
-    def _expire_sandbox(generation: str) -> None:
-        """Remove the exact sandbox when its browser deadline expires."""
+    def _stop_identity(self, identity: _ContainerIdentity) -> None:
         try:
-            _kill_container_confirmed(generation)
-        except BrowserUnavailable:
-            logger.error("browser deadline sandbox teardown is unconfirmed")
-
-    def _stop(self):
-        identity = self.identity
-        if identity is None:
-            return
+            disarm_sandbox_browser(identity.map_dir, identity.ip,
+                                   identity.generation)
+        except Exception:
+            # A confirmed kill still closes any existing proxy tunnel and
+            # prevents further browser traffic despite a failed map update.
+            logger.error("browser map disarm failed; proving exact stop", exc_info=True)
         _kill_container_confirmed(identity.generation)
-        if self.expiry_timer is not None:
-            self.expiry_timer.cancel()
-            self.expiry_timer = None
         try:
             forget_client(identity.map_dir, identity.ip, identity.generation)
         except Exception as error:
@@ -549,6 +291,12 @@ class BrowserSession:
         with authority.fence(self.threads_root, self.thread_id) as state:
             if state.lease is not None:
                 state.remove_generation(self.run_id, identity.generation)
+
+    def _stop(self):
+        identity = self.identity
+        if identity is None:
+            return
+        self._stop_identity(identity)
         self.identity = None
 
     def _latest_direct_sequence(self) -> int:
@@ -566,15 +314,14 @@ class BrowserSession:
                 raise BrowserUnavailable("newer user message revoked browser startup")
             state.begin(self.run_id, sequence)
 
-    def _remaining(self) -> float:
-        if self.deadline_ns is None:
-            return 0
-        if self.boot_id is not None:
-            with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as stream:
-                if stream.read().strip() != self.boot_id:
-                    return 0
-        return max(0.0, (self.deadline_ns - time.clock_gettime_ns(
-            time.CLOCK_BOOTTIME)) / 1_000_000_000)
+    def _fence_command(self) -> None:
+        sequence = self._latest_direct_sequence()
+        with authority.fence(self.threads_root, self.thread_id) as state:
+            lease = state.lease
+            if (lease is None or lease["owner_run_id"] != self.run_id
+                    or lease["sequence"] != sequence
+                    or self.sandbox_generation not in lease["generations"]):
+                raise BrowserUnavailable("browser turn generation changed")
 
     def close(self):
         with self._lock:
@@ -583,13 +330,9 @@ class BrowserSession:
                 self._capture_storage()
             finally:
                 self._stop()
-            if not self.startup_uncertain:
-                with authority.fence(self.threads_root, self.thread_id) as state:
-                    state.clear(self.run_id)
 
     def _capture_storage(self):
-        if (self.identity is None or self.identity.mode != "public"
-                or self._remaining() <= 0):
+        if self.identity is None:
             return
         from assist.browser import storage
         try:
@@ -597,77 +340,48 @@ class BrowserSession:
                                   "operation": "storage_state", "args": {}}).encode()
             response = json.loads(_docker_exec(
                 self.identity.generation, command,
-                timeout=min(5, self._remaining()), in_sandbox=True))
+                timeout=5, in_sandbox=True))
             if "result" in response and response["result"] is not None:
                 storage.save(self.threads_root, self.thread_id, self.run_id,
                              self.identity.generation, response["result"])
         except Exception:
             logger.warning("browser auth state was not saved for this turn")
+            storage.discard(self.threads_root, self.thread_id, self.run_id,
+                            self.identity.generation)
 
-    def _ensure_mode(self, url: str):
-        host, port = _url_target(url)
-        allowlist = frozenset(_load_egress_allowlist())
-        if _internal_host(host):
-            if host not in allowlist:
-                raise BrowserUnavailable("internal host is outside the base allowlist")
-            if (self.user_request is None
-                    or port not in _user_requested_ports(
-                        self.user_request.text, host)):
-                raise BrowserUnavailable(
-                    "internal browsing needs a fresh user request naming this exact host and port")
-            mode, internal_host, internal_port = "internal", host, port
-        else:
-            mode, internal_host, internal_port = "public", None, None
-        if (self.identity is not None
-                and (self.identity.mode, self.identity.internal_host,
-                     self.identity.internal_port)
-                != (mode, internal_host, internal_port)):
-            raise BrowserUnavailable("browser mode is fixed until the next turn")
-        if self.identity is None:
-            self._start(mode, internal_host, internal_port)
+    def disarm_for_held_event(self) -> None:
+        """Deny new browser proxy connections, then ask its worker to close."""
+        with self._lock:
+            self.user_request = None
+            identity = self.identity
+            if identity is None:
+                return
+            disarm_sandbox_browser(identity.map_dir, identity.ip,
+                                   identity.generation)
+            try:
+                self._capture_storage()
+            finally:
+                try:
+                    _docker_exec(identity.generation, json.dumps({
+                        "session": self.token, "operation": "revoke", "args": {}
+                    }).encode(), timeout=5, in_sandbox=True)
+                except Exception:
+                    logger.warning(
+                        "browser worker revocation incomplete; sandbox stop owed")
 
-    def _direct_authority_state(self, bound_sequence):
-        try:
-            runs = self.run_service.list(self.thread_id)
-        except Exception as error:
-            raise BrowserUnavailable("direct-user authority is unavailable") from error
-        if not runs and self.user_request and self.user_request.admission_sequence:
-            raise BrowserUnavailable("direct-user authority is unavailable")
-        direct = [run for run in runs if run.user_event_id == run.id
-                  and run.origin is None and run.sender is None]
-        latest = max((run.admission_sequence for run in direct), default=0)
-        bound = next((run for run in direct
-                      if run.admission_sequence == bound_sequence), None)
-        return latest, bound
-
-    def _fence_internal_command(self, operation, args):
-        internal = (self.identity is not None and self.identity.mode == "internal")
-        if operation == "open":
-            internal = internal or _internal_host(_url_host(args["url"]))
-        if internal:
-            bound = self.user_request.admission_sequence if self.user_request else -1
-            latest, source = self._direct_authority_state(bound)
-            if (latest > bound or (bound > 0 and
-                                   (source is None or source.status == "revocation_pending"))):
-                raise BrowserUnavailable("newer user message revoked internal browsing")
-
-    def revoke_internal(self):
+    def revoke_for_promotion(self):
         """Under the thread gate, destroy old state before promotion or cancel cleanup."""
         with self._lock:
             self.user_request = None
             reset = self.identity is not None
             if reset:
                 self._stop()
-            if not self.startup_uncertain:
-                with authority.fence(self.threads_root, self.thread_id) as state:
-                    state.clear(self.run_id)
             return reset
 
     def rebind_user_request(self, request: BrowserUserRequest):
         """Bind the same tool session to one promoted direct owner event."""
         with self._lock:
-            if (self.closed or request.work_id != self.work_id
-                    or (self.identity and self.identity.mode == "internal")):
+            if self.closed or request.work_id != self.work_id:
                 raise BrowserUnavailable("browser session cannot adopt this request")
             self.user_request = request
 
@@ -675,24 +389,17 @@ class BrowserSession:
         with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
             if self.closed:
                 raise BrowserUnavailable("browser Run has ended")
-            self._fence_internal_command(operation, args)
-            if operation == "open":
-                if self.startup_uncertain:
-                    raise BrowserUnavailable(
-                        "browser startup outcome is unconfirmed for this Run")
-                if self.deadline_ns is None:
-                    with authority.fence(self.threads_root, self.thread_id):
-                        self.boot_id, self.deadline_ns = (
-                            self.run_service.bind_browser_deadline(
-                                self.thread_id, self.run_id))
+            if self.startup_uncertain:
+                raise BrowserUnavailable(
+                    "browser startup outcome is unconfirmed for this Run")
+            self._fence_command()
+            if operation in {"open", "preflight"}:
+                _url_target(args["url"])
                 if self.identity is None:
                     self._begin_lease()
-                self._ensure_mode(args["url"])
+                    self._start()
             elif self.identity is None:
                 raise BrowserUnavailable("open a page first")
-            if self.deadline_ns is not None and self._remaining() <= 0:
-                self._stop()
-                raise BrowserUnavailable("browser Run deadline expired")
             identity = self.identity
             command = json.dumps({"session": self.token, "operation": operation,
                                   "args": args}, ensure_ascii=False).encode()
@@ -701,9 +408,7 @@ class BrowserSession:
             try:
                 parsed = json.loads(_docker_exec(
                     identity.generation, command,
-                    timeout=min(20, self._remaining()), in_sandbox=True))
-                if self._remaining() <= 0:
-                    raise BrowserUnavailable("browser Run deadline expired")
+                    timeout=20, in_sandbox=True))
                 if not isinstance(parsed, dict):
                     raise BrowserUnavailable("browser worker returned invalid data")
                 return parsed
@@ -729,10 +434,8 @@ class BrowserSession:
         identity = self.identity
         try:
             data = _docker_download(
-                identity.generation, source, timeout=min(20, self._remaining()),
+                identity.generation, source, timeout=20,
                 in_sandbox=True)
-            if self._remaining() <= 0:
-                raise BrowserUnavailable("browser Run deadline expired")
         except Exception:
             self._stop()
             raise
@@ -838,7 +541,9 @@ class BrowserManager:
             cls.schedule_reconciliation(root)
 
     @classmethod
-    def ready_for_browser(cls, threads_root: str, thread_id: str) -> bool:
+    def ready_for_browser(cls, threads_root: str, thread_id: str,
+                          owner_run_id: str | None = None,
+                          generation: str | None = None) -> bool:
         """A browser tool needs global recovery and exact thread readiness."""
         if os.path.realpath(threads_root) not in cls._reconciled_roots:
             return False
@@ -847,14 +552,20 @@ class BrowserManager:
             if map_dir is None:
                 return False
             with authority.fence(threads_root, thread_id) as state:
-                return (state.covered and state.lease is None
+                lease = state.lease
+                admitted = (lease is None if owner_run_id is None else
+                            lease is not None
+                            and lease["owner_run_id"] == owner_run_id
+                            and generation in lease["generations"])
+                return (state.covered and admitted
                         and not browser_records(map_dir, thread_id))
         except (OSError, RuntimeError, ValueError, TimeoutError):
             return False
 
     @classmethod
     def confirm_owner_stopped(cls, threads_root: str, thread_id: str,
-                              owner_run_id: str | None) -> bool:
+                              owner_run_id: str | None,
+                              *, before_replacement: bool = False) -> bool:
         """Positive proof; failure retains a held or cancelled reset obligation."""
         try:
             map_dir = configured_directory()
@@ -873,11 +584,15 @@ class BrowserManager:
                         raise BrowserUnavailable("browser owner changed during reset")
                     owner_run_id = lease["owner_run_id"]
         records = browser_records(map_dir, thread_id) if map_dir else {}
+        for ip, record in records.items():
+            if record.kind == "sandbox" and record.browser_armed:
+                disarm_sandbox_browser(map_dir, ip, record.generation)
         generations = set(lease["generations"] if lease else [])
         generations.update(record.generation for record in records.values())
-        # A held event can belong to a Run that never opened a browser.
-        # Its ordinary shell sandbox must stay alive for the Run to finish.
-        if lease is not None or records or not exists or not covered:
+        # A held event from an active Run must leave its ordinary shell alive.
+        # A replacement turn instead proves the workspace empty even when a
+        # pre-journal generation survived a crashed host worker.
+        if before_replacement or lease is not None or records or not exists or not covered:
             generations.update(_sandbox_generations(threads_root, thread_id))
         label_root = hashlib.sha256(
             os.path.realpath(threads_root).encode()).hexdigest()[:20]
@@ -949,7 +664,9 @@ class BrowserManager:
         with cls.bounded_thread_gate(session.thread_id):
             if not os.path.isdir(os.path.join(session.threads_root, session.thread_id)):
                 raise BrowserUnavailable("browser thread no longer exists")
-            if not cls.ready_for_browser(session.threads_root, session.thread_id):
+            if not cls.ready_for_browser(
+                    session.threads_root, session.thread_id,
+                    session.run_id, session.sandbox_generation):
                 raise BrowserUnavailable("browser startup reconciliation is incomplete")
             with cls._lock:
                 if session.thread_id in cls._sessions:
@@ -987,14 +704,22 @@ class BrowserManager:
 
     @classmethod
     def reap_orphans(cls, threads_root: str):
-        """Reconcile browser-bearing turns without killing unrelated sandboxes."""
+        """Disarm old browser access and reconcile managed turn ownership."""
+        map_dir = configured_directory()
+        if map_dir is not None:
+            for thread_id in os.listdir(threads_root):
+                directory = os.path.join(threads_root, thread_id)
+                if not os.path.isdir(directory) or os.path.islink(directory):
+                    continue
+                for ip, record in browser_records(map_dir, thread_id).items():
+                    if record.kind == "sandbox" and record.browser_armed:
+                        disarm_sandbox_browser(map_dir, ip, record.generation)
         label_root = hashlib.sha256(
             os.path.realpath(threads_root).encode()).hexdigest()[:20]
         output = _bounded_cli(
             ["docker", "ps", "--no-trunc", "--filter", "label=assist.browser=true",
              "--filter", f"label=assist.browser-root={label_root}",
              "--format", "{{.ID}}"], limit=65536, timeout=5)
-        map_dir = configured_directory()
         for generation in output.decode("ascii").splitlines():
             labels = json.loads(_bounded_cli(
                 ["docker", "inspect", "--format", "{{json .Config.Labels}}",
@@ -1054,9 +779,10 @@ def browser_tools(session: BrowserSession):
         """Wait up to ten seconds for a named semantic element on this page."""
         return invoke("wait", page_id=page_id, role=role, name=name)
 
-    def browser_probe(host: str, port: int) -> str:
-        """Probe the proxy reason for a host whose browser request already failed."""
-        return invoke("probe", host=host, port=port)
+    def browser_preflight(url: str, page_id: str = "") -> str:
+        """Inspect current policy and bounded observed page origins without navigating."""
+        return invoke("preflight", url=url,
+                      **({"page_id": page_id} if page_id else {}))
 
     def browser_save_download(download_id: str, filename: str = "") -> str:
         """Save one completed download under /workspace/downloads without replacing a file."""
@@ -1071,4 +797,4 @@ def browser_tools(session: BrowserSession):
             return "Download not saved: browser transfer failed."
 
     return [browser_open, browser_close, browser_observe, browser_act,
-            browser_wait, browser_probe, browser_save_download]
+            browser_wait, browser_preflight, browser_save_download]
