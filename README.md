@@ -334,11 +334,13 @@ See [edd/eval/README.md](edd/eval/README.md) for detailed documentation on evalu
 ### Subsequent Deployments
 
 The old process has no turn-safe drain. For the first rollout, enforce a quiet
-window that prevents new request admission and scheduled dispatches from the
-quiet check through stopping the old service. While that window is held,
-verify that no turn or Git sandbox flight is active, then stop the old service.
-If the quiet window cannot be enforced, defer this first restart. After the
-old process has stopped, sync code, install its updated unit, and start it.
+window for **all** old-process Run producers: block new request admission and
+quiesce existing voice sessions, scheduled dispatches, and queued notifications.
+Keep that window in force from verification through stopping the old service.
+While it is held, verify that no active or queued turn or Git sandbox flight
+remains, then stop the old service. If this quiet window cannot be enforced,
+defer the first restart. Once the old process has stopped, sync code, install
+its updated unit, and start it.
 Substitute the host and service placeholders from `.deploy.env`:
 
 ```bash

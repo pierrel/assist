@@ -212,7 +212,10 @@ def test_sigterm_waits_for_exact_teardown_and_terminal_run(tmp_path, monkeypatch
 
 
 def test_os_sigterm_through_server_run_waits_for_accepted_turn(tmp_path):
-    """Production signal installation must wait for terminal Run and exact teardown."""
+    """Production signal installation waits for a Run and synthetic generation cleanup.
+
+    Git ``cleanup_verified`` remains for the sibling composition test.
+    """
     script = r'''
 import asyncio
 import os
@@ -253,7 +256,7 @@ state.SandboxManager._containers = {work_dir: generation}
 actual_cleanup = state.SandboxManager.cleanup
 actual_cleanup_all = state.SandboxManager.cleanup_all
 
-def exact_cleanup(path, expected_container):
+def synthetic_generation_cleanup(path, expected_container):
     assert path == work_dir and expected_container is generation
     assert state.SandboxManager.current_container(path) is generation
     os.write(ready_fd, b"H")
@@ -270,7 +273,7 @@ def run_model(tid, text, *, _run, **kwargs):
     state.SandboxManager.cleanup(work_dir, expected_container=generation)
     state._set_status(tid, "ready")
 
-state.SandboxManager.cleanup = exact_cleanup
+state.SandboxManager.cleanup = synthetic_generation_cleanup
 state.SandboxManager.cleanup_all = cleanup_all
 threads._process_message = run_model
 threading.Thread(target=lambda: (sys.stdin.readline(), release.set()), daemon=True).start()
