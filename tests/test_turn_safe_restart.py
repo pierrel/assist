@@ -117,7 +117,8 @@ def test_full_asgi_background_turn_blocks_shutdown_until_terminal_run(
     assert service.get("turn", run.id).status == "success"
 
 
-def test_sigterm_waits_for_exact_teardown_and_terminal_run(tmp_path, monkeypatch):
+def test_sigterm_waits_for_synthetic_generation_cleanup_and_terminal_run(
+        tmp_path, monkeypatch):
     """Pinned Uvicorn stop includes Starlette's full BackgroundTask and lifespan."""
     _thread_root(tmp_path, monkeypatch)
     monkeypatch.setattr(state, "ROOT", str(tmp_path))
@@ -147,7 +148,7 @@ def test_sigterm_waits_for_exact_teardown_and_terminal_run(tmp_path, monkeypatch
     actual_cleanup = state.SandboxManager.cleanup
     actual_cleanup_all = state.SandboxManager.cleanup_all
 
-    def exact_cleanup(path, expected_container):
+    def synthetic_generation_cleanup(path, expected_container):
         assert path == work_dir and expected_container is generation
         assert state.SandboxManager.current_container(path) is generation
         tearing_down.set()
@@ -163,7 +164,7 @@ def test_sigterm_waits_for_exact_teardown_and_terminal_run(tmp_path, monkeypatch
         state.SandboxManager.cleanup(work_dir, expected_container=generation)
         state._set_status(tid, "ready")
 
-    monkeypatch.setattr(state.SandboxManager, "cleanup", exact_cleanup)
+    monkeypatch.setattr(state.SandboxManager, "cleanup", synthetic_generation_cleanup)
     monkeypatch.setattr(state.SandboxManager, "cleanup_all", cleanup_all)
     monkeypatch.setattr(threads, "_process_message", run_model)
 
