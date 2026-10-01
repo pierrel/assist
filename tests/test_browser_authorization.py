@@ -200,15 +200,26 @@ def test_failed_reset_keeps_message_held_with_retry(monkeypatch, tmp_path):
 
 def test_failed_rebind_does_not_promote_held_event(monkeypatch, tmp_path):
     (tmp_path / "t").mkdir()
+    authority.mark_new_thread(str(tmp_path), "t")
     monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
     runs = RunService(str(tmp_path))
+    old = runs.create("t", "general-agent", "Visit host.docker.internal",
+                      user_origin=True)
     held = runs.create("t", "general-agent", "Visit host.docker.internal",
-                       user_origin=True, revocation_pending=True)
-    session = browser.BrowserSession("t", held.id, str(tmp_path), str(tmp_path), None)
+                       work_id=old.work_id, user_origin=True,
+                       revocation_pending=True, browser_reset_run_id=old.id)
+    session = browser.BrowserSession(
+        "t", old.id, str(tmp_path), str(tmp_path), None, work_id=old.work_id)
     monkeypatch.setattr(session, "revoke_for_promotion", lambda: True)
-    monkeypatch.setattr(session, "rebind_user_request",
-                        lambda _request: (_ for _ in ()).throw(
-                            browser.BrowserUnavailable("session closed")))
+    rebound = []
+
+    def fail_rebind(request):
+        rebound.append(request.event_id)
+        raise browser.BrowserUnavailable("session closed")
+
+    monkeypatch.setattr(session, "rebind_user_request", fail_rebind)
+    monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped",
+                        lambda *_args: False)
     monkeypatch.setattr(threads, "_runs", lambda: runs)
     monkeypatch.setattr(browser.BrowserManager, "current_session",
                         lambda _tid: session)
@@ -216,6 +227,7 @@ def test_failed_rebind_does_not_promote_held_event(monkeypatch, tmp_path):
     monkeypatch.setattr(threads, "_schedule_browser_revocation_retry",
                         lambda tid: scheduled.append(tid))
     threads._drain_held_browser_events("t")
+    assert rebound == [held.id]
     assert runs.get("t", held.id).status == "revocation_pending"
     assert scheduled == ["t"]
 

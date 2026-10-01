@@ -22,8 +22,9 @@ What this test runs FOR REAL (catches regressions in):
 
 What is STUBBED (NOT exercised here — would need an integration test
 with real Docker + a real LLM):
-  - `_get_sandbox_backend` — stubbed to None (the same shape it
-    returns when Docker is unavailable)
+  - `_get_sandbox_backend` — stubbed at the external Docker boundary,
+    usually to None (Docker unavailable), or to raise after registration
+    in the creation-failure regression
   - `MANAGER.get` — returns a `_FakeChat` (Thread / agent / LLM stack
     is not exercised)
   - The domain-manager sync and description-generation paths
@@ -320,20 +321,29 @@ def test_recursion_limit_sets_error_status(client, monkeypatch):
 def test_process_message_reaps_registered_container_when_creation_then_raises(
         client, monkeypatch, tmp_path):
     """The exact round-1 gap: sandbox creation registers a container and THEN
-    raises.  Because the creation is inside the try, the teardown `finally`
-    runs, and because cleanup keys on work_dir (not the `sandbox` handle that
-    was never returned), the registered container is reaped — no leak until the
-    backstop TTL.  (Copilot review, PR #139.)
+    raises. The error path captures the registered generation even though no
+    backend was returned, and the teardown `finally` proves it stopped before
+    dropping the registry entry. (Copilot review, PR #139.)
 
-    Exercised un-mocked: cleanup is NOT stubbed.  A real container handle is put
-    in the registry to stand in for "creation registered it", then creation
-    raises; we assert the turn actually removed it (SIGKILL + dropped)."""
+    Cleanup is real; only its external generation-stop boundary is mocked.
+    This CPU test asserts exact stop proof precedes releasing registration."""
     from unittest.mock import MagicMock
     from assist.sandbox_manager import SandboxManager
 
     work_dir = str(tmp_path / "thread-e2e")  # == MANAGER.thread_default_working_dir
     registered = MagicMock()
+    registered.id = "creation-failure-generation"
     SandboxManager._containers[work_dir] = registered
+    stopped = []
+
+    def confirm_stopped(generation):
+        assert SandboxManager.current_container(work_dir) is registered
+        stopped.append(generation)
+
+    monkeypatch.setattr(
+        "assist.sandbox_manager.confirm_generation_stopped", confirm_stopped)
+    monkeypatch.setattr(threads.BrowserManager, "reconcile_startup",
+                        lambda _root: True)
 
     def _register_then_boom(tid, tz=None, **_kwargs):
         # The container is already in the registry (as get_sandbox_backend
@@ -351,7 +361,7 @@ def test_process_message_reaps_registered_container_when_creation_then_raises(
         assert r.status_code == 303, r.text
         assert _wait_for_terminal_status("thread-e2e").get("stage") == "error"
 
-        registered.kill.assert_called_once()  # reaped (SIGKILL), not leaked
+        assert stopped == [registered.id]
         assert work_dir not in SandboxManager._containers
     finally:
         SandboxManager._containers.pop(work_dir, None)

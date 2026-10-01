@@ -87,7 +87,8 @@ def test_child_sandbox_explicitly_omits_parent_agent_mount(monkeypatch, tmp_path
 
     threads._execute_child_run(child)
 
-    assert sandbox_calls == [("parent", {"include_agent": False})]
+    assert sandbox_calls == [("parent", {
+        "include_agent": False, "owner_run_id": child.id})]
 
 
 def test_child_egress_wait_releases_then_resumes_only_its_run(monkeypatch, tmp_path):
