@@ -269,7 +269,8 @@ class _BrowserSite:
                     "https://partner.fern.example/"):
                 return {"result": {"top_level": {
                     "origin": "https://partner.fern.example:443",
-                    "allowed": False, "reason": "host_not_approved"},
+                    "allowed": self.approved,
+                    "reason": "allowed" if self.approved else "host_not_approved"},
                     "dependencies": [], "partial": True}}
             if self.scenario == "base-private" and url.startswith(
                     "http://host.docker.internal:8000/"):
@@ -558,7 +559,7 @@ class TestBrowserAgent(TestCase):
             site = _BrowserSite("approval", root)
             store = EgressStore(approval_root)
             tid = "browser-approval-eval"
-            tools = egress_tools(store, frozenset())
+            tools = egress_tools(store, frozenset({"approval.fern.example"}))
             spec = replace(
                 prompt_rewrite_web_main_spec(
                     tools=tuple(browser_tools(site))),
@@ -613,7 +614,7 @@ class TestBrowserAgent(TestCase):
                 self.assertIn("approv", first.lower())
                 before_followup = len(site.calls)
 
-                # External approval and per-Run browser expiry are fixture
+                # External approval and turn-scoped browser teardown are fixture
                 # events, not instructions embedded in either user prompt.
                 store.resolve(key, "hour")
                 site.approved = True
