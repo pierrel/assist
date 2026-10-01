@@ -20,13 +20,24 @@ from assist.sandbox_manager import (SandboxManager, _egress_proxy_config_hash,
 
 ORIGIN_SCRIPT = r'''
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Condition
 from urllib.parse import parse_qs, urlsplit
 class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     events = []
+    changed = Condition()
+    def record(self, event):
+        with self.changed:
+            self.events.append(event)
+            self.changed.notify_all()
     def do_GET(self):
         if self.path == '/events':
-            body = '\n'.join(self.events).encode()
+            with self.changed:
+                self.changed.wait_for(
+                    lambda: 'popup-get-auth=True' in self.events
+                    and sum(item.startswith('post-auth=') for item in self.events) >= 2,
+                    timeout=5)
+                body = '\n'.join(self.events).encode()
             self.send_response(200)
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
@@ -34,7 +45,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == '/post':
             authenticated = 'session=synthetic-cookie-canary' in self.headers.get('Cookie', '')
-            self.events.append('popup-get-auth=' + str(authenticated))
+            self.record('popup-get-auth=' + str(authenticated))
             body = (b'<h1>Authenticated popup fixture</h1>' if authenticated
                     else b'<h1>Denied popup fixture</h1>')
             self.send_response(200)
@@ -155,7 +166,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
     def do_POST(self):
         authenticated = 'session=synthetic-cookie-canary' in self.headers.get('Cookie', '')
-        self.events.append('post-auth=' + str(authenticated))
+        self.record('post-auth=' + str(authenticated))
         body = b'<h1>Private POST reached</h1>'
         self.send_response(200)
         self.send_header('Content-Type', 'text/html')
@@ -422,11 +433,10 @@ def test_turn_sandbox_restores_private_storage_in_new_generation(tmp_path, monke
                     "act", page_id=public_page,
                     snapshot_id=hostile["snapshot_id"], action="click",
                     target={"role": "button", "name": "Fetch internal"})["result"]
-                popup = session.command(
+                session.command(
                     "act", page_id=public_page,
                     snapshot_id=fetched["snapshot_id"], action="click",
                     target={"role": "button", "name": "Popup internal"})["result"]
-                assert "Authenticated popup fixture" in popup["snapshot"]
                 refreshed = session.command("observe", page_id=public_page)["result"]
                 submitted = session.command(
                     "act", page_id=public_page,
