@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import threading
+from datetime import datetime, timezone
 
 import pytest
 import uvicorn
@@ -19,6 +20,8 @@ from assist.geo.provisioner import Provisioner
 from assist.geo.proposals import Proposal, ProposalStore
 from assist.geo.registry import RegionRegistry
 from assist.schedule.scheduler import Scheduler
+from assist.schedule.model import Cadence, Schedule
+from assist.schedule.store import ScheduleStore
 from manage.web.__main__ import TurnSafeServer
 from manage.web import protocol_service, state, threads
 from manage.web.drain import DrainClosed, RUN_GATE
@@ -113,6 +116,112 @@ def test_full_asgi_background_turn_blocks_shutdown_until_terminal_run(
     assert service.get("turn", run.id).status == "success"
 
 
+def test_sigterm_waits_for_exact_teardown_and_terminal_run(tmp_path, monkeypatch):
+    """Pinned Uvicorn stop includes Starlette's full BackgroundTask and lifespan."""
+    _thread_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "ROOT", str(tmp_path))
+    monkeypatch.setattr(state, "_recover_interrupted_threads", lambda: None)
+    monkeypatch.setattr(state.MANAGER, "list", lambda: [])
+    monkeypatch.setattr(state.MANAGER, "close", lambda: None)
+    monkeypatch.setattr(state.CAPTURE_WORKER, "start", lambda: None)
+    monkeypatch.setattr(state.CAPTURE_WORKER, "stop", lambda: None)
+    monkeypatch.setattr(threads, "start_scheduler", lambda: None)
+    monkeypatch.setattr(threads, "stop_scheduler", lambda: None)
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *args: None)
+
+    run = threads._create_run("turn", "accepted")
+    service = threads._runs()
+    work_dir = str(tmp_path / "turn" / "work")
+    killed = []
+
+    class Generation:
+        def kill(self):
+            killed.append(True)
+
+    generation = Generation()
+    monkeypatch.setattr(state.SandboxManager, "_containers", {work_dir: generation})
+    tearing_down = threading.Event()
+    finish_teardown = threading.Event()
+    cleanup_calls = []
+    actual_cleanup = state.SandboxManager.cleanup
+    actual_cleanup_all = state.SandboxManager.cleanup_all
+
+    def exact_cleanup(path, expected_container):
+        assert path == work_dir and expected_container is generation
+        assert state.SandboxManager.current_container(path) is generation
+        tearing_down.set()
+        assert finish_teardown.wait(5)
+        actual_cleanup(path, expected_container=expected_container)
+
+    def cleanup_all():
+        cleanup_calls.append(True)
+        actual_cleanup_all()
+
+    def run_model(tid, text, *, _run, **kwargs):
+        service.claim(tid, _run.id)
+        state.SandboxManager.cleanup(work_dir, expected_container=generation)
+        state._set_status(tid, "ready")
+
+    monkeypatch.setattr(state.SandboxManager, "cleanup", exact_cleanup)
+    monkeypatch.setattr(state.SandboxManager, "cleanup_all", cleanup_all)
+    monkeypatch.setattr(threads, "_process_message", run_model)
+
+    async def scenario():
+        server = TurnSafeServer(uvicorn.Config("manage.web:app"))
+        sent = []
+
+        class Lifespan:
+            def __init__(self, config):
+                self.context = state.lifespan(state.app)
+
+            async def startup(self):
+                await self.context.__aenter__()
+
+            async def shutdown(self):
+                await self.context.__aexit__(None, None, None)
+
+        server.config.lifespan_class = Lifespan
+
+        async def send(message):
+            sent.append(message["type"])
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def startup(*, sockets=None):
+            await server.lifespan.startup()
+            server.servers = []
+            server.started = True
+            response = Response("accepted", background=BackgroundTask(
+                threads._execute_run, run.id, "turn"))
+            task = asyncio.create_task(response(
+                {"type": "http", "method": "POST", "path": "/"}, receive, send))
+            server.server_state.tasks.add(task)
+            task.add_done_callback(server.server_state.tasks.discard)
+
+        monkeypatch.setattr(server, "startup", startup)
+        serving = asyncio.create_task(server._serve())
+        assert await asyncio.to_thread(tearing_down.wait, 5)
+        server.handle_exit(signal.SIGTERM, None)
+        await asyncio.sleep(0.3)
+        assert server.should_exit and not serving.done()
+        assert sent == ["http.response.start", "http.response.body"]
+        assert service.get("turn", run.id).status == "running"
+        assert state.SandboxManager.current_container(work_dir) is generation
+        assert cleanup_calls == []
+        finish_teardown.set()
+        await asyncio.wait_for(serving, 5)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        finish_teardown.set()
+    assert service.get("turn", run.id).status == "success"
+    assert state.SandboxManager.current_container(work_dir) is None
+    assert killed == [True]
+    assert cleanup_calls == [True]
+
+
 def test_run_creation_at_closure_is_durable_or_refused(tmp_path, monkeypatch):
     _thread_root(tmp_path, monkeypatch)
     service = threads._runs()
@@ -183,34 +292,49 @@ def test_private_child_update_cannot_cancel_waiting_run_after_closure(
         (first.id, "awaiting_approval")]
 
 
-def test_schedule_stop_joins_fire_after_advance_and_dispatch(monkeypatch):
-    advanced = threading.Event()
+def test_schedule_stop_joins_durable_fire_and_run(tmp_path, monkeypatch):
+    _thread_root(tmp_path, monkeypatch)
+    now = datetime(2026, 6, 15, 18, 0, tzinfo=timezone.utc)
+    store = ScheduleStore(str(tmp_path))
+    store.add(Schedule("one", "turn", "wake", Cadence(hour=7), "UTC",
+                       next_fire_at="2026-06-15T00:00:00+00:00"))
+    advancing = threading.Event()
     dispatching = threading.Event()
     release_advance = threading.Event()
     release_dispatch = threading.Event()
     stopped = threading.Event()
-    def dispatch(*args):
+    original_update = store.update
+
+    def delayed_update(*args):
+        advancing.set()
+        assert release_advance.wait(5)
+        return original_update(*args)
+
+    def execute_run(run_id, tid):
+        service = threads._runs()
+        run = service.get(tid, run_id)
+        assert run.text == "wake" and run.origin == "system"
+        service.claim(tid, run_id)
         dispatching.set()
         assert release_dispatch.wait(5)
+        service.transition(tid, run_id, "success")
 
-    scheduler = Scheduler(object(), dispatch, lambda: True, tick_seconds=0.01)
+    monkeypatch.setattr(store, "update", delayed_update)
+    monkeypatch.setattr(threads, "_require_deep_thread", lambda tid: None)
+    monkeypatch.setattr(threads, "_execute_run", execute_run)
+    scheduler = Scheduler(store, threads._scheduled_dispatch, lambda: True,
+                          tick_seconds=0.01, now_fn=lambda: now)
     monkeypatch.setattr(scheduler, "reconcile", lambda: None)
-    due = type("Due", (), {"id": "one", "thread_id": "turn", "prompt": "wake", "tz": "UTC"})()
-    monkeypatch.setattr(scheduler, "poll", lambda: scheduler._fire(due, None, True))
-
-    def advance(*args):
-        advanced.set()
-        assert release_advance.wait(5)
-
-    monkeypatch.setattr(scheduler, "_advance", advance)
     scheduler.start()
-    assert advanced.wait(5)
+    assert advancing.wait(5)
     stopper = threading.Thread(target=lambda: (scheduler.stop(), stopped.set()))
     stopper.start()
     try:
         assert not stopped.wait(0.1)
         release_advance.set()
         assert dispatching.wait(5)
+        assert datetime.fromisoformat(store.for_thread("turn")[0].next_fire_at) > now
+        assert threads._runs().list("turn")[0].status == "running"
         assert not stopped.wait(0.1)
         release_dispatch.set()
         assert stopped.wait(5)
@@ -218,6 +342,7 @@ def test_schedule_stop_joins_fire_after_advance_and_dispatch(monkeypatch):
         release_advance.set()
         release_dispatch.set()
         stopper.join(5)
+    assert threads._runs().list("turn")[0].status == "success"
 
 
 def test_geo_close_waits_through_proposal_ack_and_defers_later_delivery(
@@ -272,6 +397,32 @@ def test_shutdown_proof_retains_failed_git_fence(tmp_path, monkeypatch):
     assert json.loads(fence.read_text())["sandbox_in_flight"] is True
     fence.write_text(json.dumps({"version": 1, "source": "repo"}))
     state._verify_shutdown_sandboxes()  # Initial binding precedes any flight field.
+
+
+def test_capture_deadline_after_proof_does_not_hold_shutdown(tmp_path, monkeypatch):
+    _thread_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "ROOT", str(tmp_path))
+    monkeypatch.setattr(state, "_recover_interrupted_threads", lambda: None)
+    monkeypatch.setattr(state.MANAGER, "list", lambda: [])
+    monkeypatch.setattr(state.MANAGER, "close", lambda: None)
+    monkeypatch.setattr(state.CAPTURE_WORKER, "start", lambda: None)
+    monkeypatch.setattr(threads, "start_scheduler", lambda: None)
+    monkeypatch.setattr(threads, "stop_scheduler", lambda: None)
+    monkeypatch.setattr(state.SandboxManager, "_containers", {})
+    cleaned = []
+
+    def capture_deadline():
+        raise RuntimeError("capture worker did not stop before its bounded deadline")
+
+    monkeypatch.setattr(state.CAPTURE_WORKER, "stop", capture_deadline)
+    monkeypatch.setattr(state.SandboxManager, "cleanup_all", lambda: cleaned.append(True))
+
+    async def scenario():
+        async with state.lifespan(None):
+            pass
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+    assert cleaned == [True]
 
 
 def test_failed_shutdown_proof_keeps_lifespan_pending_without_cleanup(tmp_path):

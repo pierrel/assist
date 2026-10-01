@@ -529,7 +529,7 @@ class SandboxManager:
 
         SIGKILL for the same reason as ``cleanup`` (nothing to flush; PID 1
         ignores SIGTERM) — and at lifespan shutdown a fast teardown is
-        strictly better than burning 5s per container on the event loop.
+        strictly better than burning 5s per container during shutdown.
         """
         for path, container in list(cls._containers.items()):
             cls._forget_egress_client(path)

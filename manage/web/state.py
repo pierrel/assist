@@ -796,11 +796,17 @@ async def lifespan(app: FastAPI):
             await run_in_threadpool(stop_scheduler)
             await run_in_threadpool(RUN_GATE.close_when_idle)
             await run_in_threadpool(_verify_shutdown_sandboxes)
-            await anyio.to_thread.run_sync(
-                CAPTURE_WORKER.stop, limiter=CAPTURE_THREAD_LIMITER)
-            await run_in_threadpool(SandboxManager.cleanup_all)
         except Exception as error:
             await _hold_unsafe_shutdown(error)
+        try:
+            await anyio.to_thread.run_sync(
+                CAPTURE_WORKER.stop, limiter=CAPTURE_THREAD_LIMITER)
+        except Exception:
+            logging.getLogger(__name__).warning("capture worker shutdown failed", exc_info=True)
+        try:
+            await run_in_threadpool(SandboxManager.cleanup_all)
+        except Exception:
+            logging.getLogger(__name__).warning("sandbox cleanup failed after shutdown proof", exc_info=True)
         # Close shared resources (e.g., sqlite connection) to avoid leaks
         try:
             MANAGER.close()
