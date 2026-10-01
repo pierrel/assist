@@ -15,6 +15,32 @@ from manage.web.state import ROOT
 from manage.voice.wire import MAX_WS_MESSAGE_BYTES
 
 
+class TurnSafeServer(uvicorn.Server):
+    """Route a signal during lifespan startup through normal shutdown."""
+
+    def __init__(self, config: uvicorn.Config) -> None:
+        super().__init__(config)
+        self._main_loop_entered = False
+        self._early_stop = False
+        self._stop_received = False
+
+    def handle_exit(self, sig, frame) -> None:
+        if self._stop_received:
+            return  # A repeated INT must not set Uvicorn's force_exit.
+        self._stop_received = True
+        self._captured_signals.append(sig)
+        if self._main_loop_entered:
+            self.should_exit = True
+        else:
+            self._early_stop = True
+
+    async def main_loop(self) -> None:
+        self._main_loop_entered = True
+        if self._early_stop:
+            self.should_exit = True
+        await super().main_loop()
+
+
 if __name__ == "__main__":
     os.makedirs(ROOT, exist_ok=True)
     port = int(os.getenv("ASSIST_PORT", "8000"))
@@ -30,7 +56,7 @@ if __name__ == "__main__":
         )
     if cert and key:
         ssl_kwargs = {"ssl_certfile": cert, "ssl_keyfile": key}
-    uvicorn.run(
+    server = TurnSafeServer(uvicorn.Config(
         "manage.web:app",
         host="0.0.0.0",
         port=port,
@@ -39,4 +65,10 @@ if __name__ == "__main__":
         ws_max_size=MAX_WS_MESSAGE_BYTES,
         ws_per_message_deflate=False,
         **ssl_kwargs,
-    )
+    ))
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        pass  # Uvicorn replays captured SIGINT after shutdown.
+    if not server.started:
+        raise SystemExit(3)  # Uvicorn's startup-failure exit status.

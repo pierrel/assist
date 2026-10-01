@@ -87,6 +87,7 @@ class Provisioner:
         # Serializes completion delivery: _run's inline delivery vs a concurrent
         # deliver_pending() tick can't both dispatch the same completion.
         self._deliver_lock = threading.Lock()
+        self._delivery_closed = False
         # In-memory transit-job claims. Transit never changes a region's serveability
         # (it stays READY), so — unlike add/remove — it must NOT move to importing:
         # a restart mid-transit would leave a fully-served region wrongly failed and
@@ -179,6 +180,8 @@ class Provisioner:
         # can't dispatch the same completion twice (it re-reads inside → finds the
         # proposal gone → returns).
         with self._deliver_lock:
+            if self._delivery_closed:
+                return
             p = self._proposals.get(slug)
             if p is None or not p.origin_tid:
                 return
@@ -195,6 +198,15 @@ class Provisioner:
             if not failed:
                 self._registry.update(slug, lambda r: replace(r, completion_delivered=True))
             self._proposals.remove(slug)
+
+    def close_delivery(self) -> None:
+        """Wait through callback and acknowledgment, then defer later attempts."""
+        with self._deliver_lock:
+            self._delivery_closed = True
+
+    def reopen_delivery(self) -> None:
+        with self._deliver_lock:
+            self._delivery_closed = False
 
     def deliver_pending(self) -> None:
         """Re-attempt held completions (LLM was down, or the web restarted between

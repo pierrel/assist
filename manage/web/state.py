@@ -8,6 +8,7 @@ sit alongside the screen they render (``threads.py``, ``review.py``,
 """
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -46,6 +47,7 @@ from assist.geo.catalog import Catalog
 from assist.geo.proposals import ProposalStore
 from assist.geo.registry import RegionRegistry
 from assist.geo.tools import geo_tools
+from manage.web.drain import RUN_GATE
 from assist.thread_manager import (
     ThreadManager, set_web_tools, set_web_triage_tools, set_web_interrupt_on,
     set_web_triage_interrupt_on)
@@ -717,8 +719,44 @@ def _recover_interrupted_threads() -> None:
     queue_recovery_runs()
 
 
+def _verify_shutdown_sandboxes() -> None:
+    """Refuse exit while an exact generation or Git flight fence remains."""
+    if SandboxManager._containers:
+        raise RuntimeError("sandbox generation still tracked")
+    # The sibling Git transport keeps this fence on failed exact teardown.
+    for entry in os.scandir(MANAGER.root_dir):
+        if not entry.is_dir(follow_symlinks=False):
+            continue
+        path = os.path.join(entry.path, "git-sync.json")
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            continue
+        with os.fdopen(fd, "rb") as state_file:
+            raw = state_file.read(65537)
+        if len(raw) > 65536:
+            raise RuntimeError("Git flight fence is oversized")
+        state = json.loads(raw)
+        if not isinstance(state, dict) or state.get("sandbox_in_flight", False) is not False:
+            raise RuntimeError("Git sandbox flight remains unverified")
+
+
+async def _hold_unsafe_shutdown(error: Exception) -> None:
+    """A failed proof must leave the original process alive for guarded recovery."""
+    logging.getLogger(__name__).critical(
+        "Intentional stop withheld: %s; inspect the running process and Git fence",
+        type(error).__name__)
+    never = asyncio.Event()
+    while True:
+        try:
+            await never.wait()
+        except asyncio.CancelledError:
+            logging.getLogger(__name__).critical("Unsafe shutdown cancellation ignored")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    RUN_GATE.reopen()
     # Ensure thread root exists at startup
     os.makedirs(ROOT, exist_ok=True)
 
@@ -753,19 +791,16 @@ async def lifespan(app: FastAPI):
     finally:
         configure_call_runner(None)
         try:
-            stop_scheduler()
-        except Exception:
-            logging.getLogger(__name__).warning("scheduler shutdown failed", exc_info=True)
-        try:
+            # Uvicorn has closed admission and awaited full ASGI BackgroundTasks.
+            # The scheduler and geo callbacks can still create Runs off-loop.
+            await run_in_threadpool(stop_scheduler)
+            await run_in_threadpool(RUN_GATE.close_when_idle)
+            await run_in_threadpool(_verify_shutdown_sandboxes)
             await anyio.to_thread.run_sync(
                 CAPTURE_WORKER.stop, limiter=CAPTURE_THREAD_LIMITER)
-        except Exception:
-            logging.getLogger(__name__).warning("capture worker shutdown failed", exc_info=True)
-        # Clean up Docker sandbox containers
-        try:
-            SandboxManager.cleanup_all()
-        except Exception:
-            pass
+            await run_in_threadpool(SandboxManager.cleanup_all)
+        except Exception as error:
+            await _hold_unsafe_shutdown(error)
         # Close shared resources (e.g., sqlite connection) to avoid leaks
         try:
             MANAGER.close()

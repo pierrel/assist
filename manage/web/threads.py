@@ -65,6 +65,7 @@ from assist.frequency import FREQUENCY_RUN_ID_KEY
 from assist.events.reply import SMS_SENDER_KEY
 from assist.events.email import email_identity, valid_email_content
 from assist.schedule.scheduler import Scheduler
+from manage.web.drain import DrainClosed, RUN_GATE
 from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
 from assist.thread import Thread
@@ -1640,6 +1641,15 @@ def _initialize_thread(
     rider: ContextRider | None = None,
 ) -> None:
     """Dedicated initialization worker: clone, then execute the first durable Run."""
+    with RUN_GATE.active() as accepted:
+        if accepted:
+            _initialize_thread_active(tid, run_id, domain, rider)
+
+
+def _initialize_thread_active(
+    tid: str, run_id: str, domain: str | None,
+    rider: ContextRider | None = None,
+) -> None:
     try:
         current = _runs().get(tid, run_id)
         pending = current.text or ""
@@ -2091,17 +2101,20 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 max_pending=None, multitask_strategy="enqueue",
                 delegate_user_urls=(), location: LocationSnapshot | None = None) -> Run:
     """Commit one web turn before placing its id on a dispatch queue."""
-    return _runs().create(
-        tid, assistant_id, text, run_id=run_id, work_id=work_id, mode=mode,
-        parent_thread_id=parent_thread_id, parent_run_id=parent_run_id,
-        dispatch_key=dispatch_key, sender=sender,
-        rider=_rider_to_fields(rider) if rider is not None else None,
-        origin=origin, resume=resume, resume_decision=resume_decision,
-        pending_text=pending_text, active_ms=active_ms,
-        cancel_pending=cancel_pending, max_runs=max_runs,
-        max_pending=max_pending, multitask_strategy=multitask_strategy,
-        delegate_user_urls=delegate_user_urls,
-        location=_location_to_fields(location) if location else None)
+    with RUN_GATE.active() as accepted:
+        if not accepted:
+            raise DrainClosed("web process is stopping")
+        return _runs().create(
+            tid, assistant_id, text, run_id=run_id, work_id=work_id, mode=mode,
+            parent_thread_id=parent_thread_id, parent_run_id=parent_run_id,
+            dispatch_key=dispatch_key, sender=sender,
+            rider=_rider_to_fields(rider) if rider is not None else None,
+            origin=origin, resume=resume, resume_decision=resume_decision,
+            pending_text=pending_text, active_ms=active_ms,
+            cancel_pending=cancel_pending, max_runs=max_runs,
+            max_pending=max_pending, multitask_strategy=multitask_strategy,
+            delegate_user_urls=delegate_user_urls,
+            location=_location_to_fields(location) if location else None)
 
 
 def _publish_phone_text(tid: str, work_id: str, text: str) -> None:
@@ -2381,6 +2394,12 @@ def _complete_child_handoff(run: Run) -> Run | None:
 
 def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
     """Load and execute one durable run; dispatch queues carry ids only."""
+    with RUN_GATE.active() as accepted:
+        if accepted:
+            _execute_run_active(run_id, tid, user_priority=user_priority)
+
+
+def _execute_run_active(run_id: str, tid: str, *, user_priority: bool = False) -> None:
     try:
         run = _runs().get(tid, run_id)
     except RunNotFound:
@@ -4379,6 +4398,8 @@ _INITIALIZATION_ADMISSION_LOCK = threading.Lock()
 
 
 _GEO_DELIVER_INTERVAL_S = 120   # retry held completions (D4) roughly every 2 min
+_GEO_DELIVER_STOP = threading.Event()
+_GEO_DELIVER_THREAD: threading.Thread | None = None
 
 
 def _geo_startup() -> None:
@@ -4396,24 +4417,35 @@ def _geo_startup() -> None:
         _PROVISIONER.reconcile()        # orphaned importing → failed
     except Exception:
         logging.exception("geo: startup seed/reconcile failed")
-    while True:
+    while not _GEO_DELIVER_STOP.is_set():
         try:
             _PROVISIONER.deliver_pending()   # any completion held (restart/LLM-down) — C1/D4
         except Exception:
             logging.exception("geo: deliver_pending failed")
-        time.sleep(_GEO_DELIVER_INTERVAL_S)
+        _GEO_DELIVER_STOP.wait(_GEO_DELIVER_INTERVAL_S)
 
 
 def start_scheduler() -> None:
+    global _GEO_DELIVER_THREAD
     _SCHEDULER.start()
     _INITIALIZATION_SCHEDULER.start()
     _RESUME_SCHEDULER.start()
     if _PROVISIONER is not None and GEO_DIR is not None:
-        threading.Thread(target=_geo_startup, name="geo-startup", daemon=True).start()
+        _PROVISIONER.reopen_delivery()
+        _GEO_DELIVER_STOP.clear()
+        if _GEO_DELIVER_THREAD is None or not _GEO_DELIVER_THREAD.is_alive():
+            _GEO_DELIVER_THREAD = threading.Thread(
+                target=_geo_startup, name="geo-startup", daemon=True)
+            _GEO_DELIVER_THREAD.start()
 
 
 def stop_scheduler() -> None:
     _SCHEDULER.stop()
+    _GEO_DELIVER_STOP.set()
+    if _GEO_DELIVER_THREAD is not None:
+        _GEO_DELIVER_THREAD.join()
+    if _PROVISIONER is not None:
+        _PROVISIONER.close_delivery()
 
 
 # Private capacity for durable run admission — NOT the shared threadpool: every follow-up

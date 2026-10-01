@@ -345,6 +345,14 @@ This will:
 3. Restart the service
 4. Show service logs (press Ctrl+C when satisfied)
 
+An intentional restart waits for accepted web turns and scheduled dispatches to
+finish, including their Git finalization and sandbox teardown. Install the
+updated service unit before relying on this behavior. A long turn can leave
+`systemctl restart` waiting; inspect the running stop job and service log rather
+than forcing the process down. If exact Git teardown cannot be verified, the
+old process stays alive with its listener closed and needs guarded operator
+recovery. A crash or SIGKILL still retains the Git fence.
+
 ### Deployment Commands
 
 ```bash
