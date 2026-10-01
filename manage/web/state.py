@@ -720,7 +720,7 @@ def _recover_interrupted_threads() -> None:
 
 
 def _verify_shutdown_sandboxes() -> None:
-    """Refuse exit while an exact generation or Git flight fence remains."""
+    """Git cleanup_verified proves kill/wait; retained generations or fences refuse exit."""
     if SandboxManager._containers:
         raise RuntimeError("sandbox generation still tracked")
     # The sibling Git transport keeps this fence on failed exact teardown.
@@ -743,9 +743,13 @@ def _verify_shutdown_sandboxes() -> None:
 
 async def _hold_unsafe_shutdown(error: Exception) -> None:
     """A failed proof must leave the original process alive for guarded recovery."""
+    reason = str(error)[:256]
+    if reason not in {"sandbox generation still tracked", "Git flight fence is oversized",
+                      "Git sandbox flight remains unverified"}:
+        reason = "details withheld"
     logging.getLogger(__name__).critical(
-        "Intentional stop withheld: %s; inspect the running process and Git fence",
-        type(error).__name__)
+        "Intentional stop withheld: %s: %s; inspect the running process and Git fence",
+        type(error).__name__, reason)
     never = asyncio.Event()
     while True:
         try:
