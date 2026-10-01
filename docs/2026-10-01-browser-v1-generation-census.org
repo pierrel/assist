@@ -1,0 +1,31 @@
+#+title: Browser V1 generation prompt census alignment
+#+date: 2026-10-01
+
+* Observed change
+
+The sandbox-generation successor changes the shared egress skill catalog
+description to explain common browser and shell grants and the new preflight
+name. A targeted isolated census capture computes prompt block transition
+chain =d05817f22da576f1f29ce19cb82bd96c5d46750e3656884f4ffc11b108c93943=.
+The new batch tool also changes construction-time ToolNode history to
+=6985ff3bb7223b0b8b0f7f058b36730ddc09ac583ac13750c63c14ee8abd391b=.
+The preceding declared hashes reject these expected changes. The historical
+P0-P2b3 values remain unchanged; the current web-main core prompt is 26,712
+characters and its provider tool schema is 18,554 characters.
+
+* Correction and verification
+
+Pin both observed current hashes and the new batch tool's source origin in
+=edd/prompt_census.py=. Keep the strict source-link and semantic-view assertions
+so a later unreviewed prompt or tool change still fails. The ToolNode failure
+now reports the observed hash, as the prompt chain assertion already does.
+The targeted history assertion passed 1/1 on the corrected source in 4.66
+seconds. This CPU-only capture does not use the production model or validate
+browser runtime or Docker bytes.
+
+* Historical supersessions
+
+This updates only the current-chain value and current core prompt length in
+the =Smallest correction= section of
+=docs/2026-10-01-browser-v1-ci-alignment.org=. That record remains accurate for
+its earlier candidate and is not rewritten.

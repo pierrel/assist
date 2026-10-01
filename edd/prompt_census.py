@@ -1697,6 +1697,7 @@ _TOOL_ORIGINS = {
     "read_url": "assist.tools",
     "remove_allowed_host": "assist.egress.tools",
     "request_egress": "assist.egress.tools",
+    "request_egress_batch": "assist.egress.tools",
     "resume_schedule": "assist.schedule.tools",
     "search_internet": "assist.tools",
     "send_email": "assist.events.email",
@@ -2124,9 +2125,9 @@ _TOOL_RESULT_METADATA = {
 }
 
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "aa148c9f2cd1a1d933047a5d6ab0451777832eb1af259f92891624b938da489f"
+    "6985ff3bb7223b0b8b0f7f058b36730ddc09ac583ac13750c63c14ee8abd391b"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "7101b22e005d9e5e96dbc3585174fa68f3c4d1150986e1c21ae327fc370a4ffd"
+    "d05817f22da576f1f29ce19cb82bd96c5d46750e3656884f4ffc11b108c93943"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
@@ -3283,8 +3284,10 @@ def _assert_semantic_views(artifact: dict[str, Any]) -> None:
             f"{node['scenario']}:tool-node:{node['index']}",
             node["candidates"],
         )
-    if _sha(nodes) != _DECLARED_TOOL_NODE_HISTORY_SHA256:
-        raise AssertionError("construction-time ToolNode history drifted")
+    node_history_sha = _sha(nodes)
+    if node_history_sha != _DECLARED_TOOL_NODE_HISTORY_SHA256:
+        raise AssertionError(
+            f"construction-time ToolNode history drifted: {node_history_sha}")
     if [node["index"] for node in nodes] != list(range(len(nodes))):
         raise AssertionError("tool node indices drifted")
     for node in nodes:
