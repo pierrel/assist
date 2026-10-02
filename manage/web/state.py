@@ -726,7 +726,7 @@ def _verify_shutdown_sandboxes() -> None:
 
 
 async def _hold_unsafe_shutdown(error: Exception) -> None:
-    """A failed proof must leave the original process alive for guarded recovery."""
+    """A failed shutdown prerequisite leaves the process alive for recovery."""
     reason = str(error)[:256]
     if reason != "sandbox generation still tracked":
         reason = "details withheld"
@@ -746,6 +746,8 @@ async def lifespan(app: FastAPI):
     RUN_GATE.reopen()
     # Ensure thread root exists at startup
     os.makedirs(ROOT, exist_ok=True)
+    # Reap old-process writers before recovery can dispatch or the listener admits work.
+    await run_in_threadpool(SandboxManager.reap_orphans, MANAGER.root_dir)
 
     # Recover threads a previous server run left busy, instead of erroring them
     # (extracted so the test pins the REAL scan, not a copy).

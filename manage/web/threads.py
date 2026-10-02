@@ -2968,14 +2968,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     else:
                         resp = chat.message(text)
             finally:
-                # One container per turn: kill it as soon as this turn's agent
-                # run finishes — success, error, or the early return above —
-                # while we still hold the queue, so the next turn always starts
-                # in a fresh sandbox and no container outlives its turn.  This,
-                # plus the >2h backstop TTL, is what makes the mid-flight reap
-                # impossible: container age == turn age, capped by the queue.
-                # cleanup() SIGKILLs (the response is already committed to the
-                # checkpoint here, and the sandbox has nothing to flush).
+                # Confirm this turn's sandbox stopped while still holding the
+                # queue. Failed confirmation retains its generation for the next
+                # turn's cleanup attempt and blocks intentional shutdown. The
+                # >2h backstop exceeds the active turn's queue hold cap.
                 _work_dir = MANAGER.thread_default_working_dir(tid)
                 SandboxManager.cleanup(_work_dir, sandbox_generation)
         MANAGER.touch(tid)
@@ -3036,8 +3032,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     except ThreadPauseRequested:
         # NON-terminal (fair scheduling): the turn yielded the slot at its quantum so a
         # waiting turn could run. Its work is durable in the checkpoint (nothing lost);
-        # the container was already reaped by the `finally` above (reap-on-pause, so no
-        # container outlives its slice). Mark it paused and hand it to the dedicated
+        # cleanup already confirmed this slice's container stopped; otherwise
+        # this pause would fail closed. Mark it paused and hand it to the dedicated
         # resume scheduler — NOT a BackgroundTask (that would park a shared-threadpool
         # worker per paused turn and stall request handling). Carry the active hold it
         # burned so the 2h cap accounts across resumes.
@@ -3084,8 +3080,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # previous turn's work didn't land.  Without this branch the
         # generic except below shows a raw exception repr to the user.
         logging.error("Sandbox lost for thread %s: %s", tid, e)
-        # The per-turn teardown (the `finally` above) already reaped this
-        # turn's container; just drop the cached domain manager so a retry
+        # The per-turn teardown confirmed this turn's container stopped before
+        # reaching this branch; drop the cached domain manager so a retry
         # re-checks cleanly instead of poking at the corpse of the old one.
         DOMAIN_MANAGERS.pop(tid, None)
         _cancelled = _cancel_this_turns_continuations(tid, _pre_turn_conts)
@@ -3120,7 +3116,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         )
     except _SupersedeCapReached:
         # Controlled unwind from the supersede-cap terminal exit: the queue is now
-        # released and the container reaped, and _terminal is already the terminal
+        # released and container cleanup confirmed, and _terminal is already terminal
         # ("awaiting_approval", …) — fall through to the common notify below (so the
         # observer fires post-release, exactly like the normal terminal exits).
         pass
@@ -3936,18 +3932,13 @@ _PROVISIONER = (
 
 
 def _recovery_prep(q: "queue.Queue") -> None:
-    """One-time worker-thread prep before draining recovery jobs (no-op cost when
-    none are queued). (a) Reap THIS deployment's orphaned sandbox containers (by
-    label + /workspace-mount scope — see ``reap_orphans``): a killed web process
-    reaps nothing, and a ``docker exec``'d tool command keeps mutating the
-    host-bind-mounted /workspace for up to the 3h TTL — a resumed turn's fresh
-    container must never share a workspace with a zombie writer. (b) Wait
-    (bounded) for the model endpoint: on a cold boot llamacpp loads for minutes
-    after assist-web is up, and erroring every recovered thread against a
-    still-loading model would defeat recovery."""
+    """Wait on the worker for a cold model before draining queued recovery jobs.
+
+    No queued recovery needs no wait. Startup already reaped this deployment's
+    orphaned sandboxes before recovery queueing and listener admission.
+    """
     if q.empty():
         return
-    SandboxManager.reap_orphans(MANAGER.root_dir)
     if not os.getenv("ASSIST_MODEL_URL"):
         return
     # _llm_reachable requires a 200 — llama-server binds its port immediately on a

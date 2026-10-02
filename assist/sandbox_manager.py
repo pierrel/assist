@@ -314,7 +314,7 @@ class SandboxManager:
         # Per-turn lifecycle: never reuse a container across turns.  The web
         # layer tears each container down at the end of its turn
         # (manage/web/threads.py), so a registry entry surviving to here means
-        # a prior turn's teardown didn't run (the worker died mid-turn).  Reap
+        # a prior turn's teardown did not complete or could not be confirmed. Reap
         # that stale container before creating a fresh one — the registry is
         # keyed by work_dir, so creating without reaping would overwrite the
         # reference and orphan it (the 3h backstop TTL would eventually catch
@@ -562,9 +562,9 @@ class SandboxManager:
         crash ``_containers`` is empty, but the containers survive — and a
         ``docker exec``'d tool command keeps running inside one, mutating the
         host-bind-mounted /workspace that a recovery resume's FRESH container
-        mounts too, for up to the 3h backstop TTL. Startup recovery calls this
-        before dispatching any resume so a zombie writer can never share a
-        workspace with a resumed turn.
+        mounts too, for up to the 3h backstop TTL. Lifespan startup calls this
+        before recovery dispatch or listener admission so a zombie writer
+        cannot share a workspace with a resumed turn.
 
         Scoped to containers whose /workspace bind-mount lives under
         ``root_dir`` (this deployment's threads root): the label alone is
@@ -594,4 +594,3 @@ class SandboxManager:
                 logger.info("Reaped orphaned sandbox %s", container.id[:12])
             except Exception as e:
                 logger.warning("orphan reap failed for %s: %s", container.id[:12], e)
-        cls._containers.clear()

@@ -1,17 +1,16 @@
-"""One container per turn: each request/response gets a fresh sandbox that is
-killed at turn end, so a container's age can never exceed its turn's age.
+"""One container per turn: each request/response gets a fresh sandbox.
+Successful cleanup confirms it stopped at turn end. Failed confirmation keeps
+the generation tracked and may leave it alive past the turn.
 
-This is what closes the mid-flight-reap caveat: because the container lives
-only for its single turn and a turn is hard-capped at the LLM-queue hold
-timeout, a wall-clock backstop set ABOVE that cap can never fire during a
-legitimate in-progress turn (TestBackstopExceedsHoldCap pins exactly that).
+The active turn is hard-capped at the LLM-queue hold timeout, so a wall-clock
+backstop set ABOVE that cap cannot fire during a legitimate in-progress turn
+(TestBackstopExceedsHoldCap pins exactly that).
 
 Covered here:
   - cleanup() confirms the captured generation stopped before registry release.
-  - get_sandbox_backend never reuses — a second call reaps the stale
-    container and creates a fresh one.
+  - get_sandbox_backend confirms a stale generation before creating a fresh one.
   - the Dockerfile backstop TTL > the queue hold cap (the safety invariant).
-  - real-Docker: a killed container is actually gone (symptom, un-mocked).
+  - real-Docker: cleanup confirms the container is gone (un-mocked).
 """
 from __future__ import annotations
 
@@ -43,8 +42,8 @@ class _SandboxStateBase(TestCase):
         SandboxManager._containers = self._saved
 
 
-class TestCleanupKills(_SandboxStateBase):
-    def test_cleanup_uses_sigkill(self):
+class TestCleanupGeneration(_SandboxStateBase):
+    def test_cleanup_requests_exact_generation_confirmation(self):
         c = _fake_container("c0")
         SandboxManager._containers["w"] = c
         with patch("assist.sandbox_manager.confirm_generation_stopped") as stopped:
@@ -73,8 +72,7 @@ class TestCleanupKills(_SandboxStateBase):
 
 
 class TestNoReuse(_SandboxStateBase):
-    """get_sandbox_backend creates a fresh container every call and reaps any
-    stale one left in the registry (the "new container per request" guarantee).
+    """get_sandbox_backend confirms stale cleanup before creating a fresh one.
     """
 
     def _patches(self):
@@ -95,7 +93,7 @@ class TestNoReuse(_SandboxStateBase):
             patch("assist.sandbox_manager.confirm_generation_stopped"),
         ]
 
-    def test_second_call_reaps_stale_and_creates_fresh(self):
+    def test_second_call_confirms_stale_and_creates_fresh(self):
         p = self._patches()
         with p[0], p[1], p[2], p[3], p[4], p[5] as stopped:
             SandboxManager.get_sandbox_backend("/ws/t")
@@ -112,10 +110,10 @@ class TestNoReuse(_SandboxStateBase):
 
 class TestBackstopExceedsHoldCap(TestCase):
     """The load-bearing safety invariant: the container's wall-clock backstop
-    TTL must exceed the LLM-queue hold cap.  Since a per-turn container's age
-    equals its turn's age and a turn can't outlive the hold cap, a backstop
-    above the cap can never reap a legitimate in-progress turn.  Guards against
-    a careless lowering of the Dockerfile sleep back toward the old 1h value.
+    TTL must exceed the LLM-queue hold cap. During an active turn, container
+    age cannot exceed the hold cap; failed cleanup may retain it afterward.
+    A backstop above the cap cannot reap a legitimate in-progress turn. This
+    guards against lowering the Dockerfile sleep back toward the old 1h value.
     """
 
     def test_dockerfile_sleep_exceeds_hold_timeout(self):
@@ -137,11 +135,10 @@ class TestBackstopExceedsHoldCap(TestCase):
 
 class TestPerTurnTeardownRealDocker(unittest.TestCase):
     """Real Docker (no skip, mirroring test_sandbox_egress_integration.py): a
-    container reaped via cleanup() (SIGKILL) is actually gone — the un-mocked
-    symptom.
+    container cleaned up through exact-ID confirmation is absent afterward.
     """
 
-    def test_kill_actually_destroys_the_container(self):
+    def test_cleanup_confirms_container_absent(self):
         import docker
         from docker.errors import NotFound
 
@@ -161,19 +158,9 @@ class TestPerTurnTeardownRealDocker(unittest.TestCase):
             SandboxManager.cleanup(work_dir)
 
             self.assertNotIn(work_dir, SandboxManager._containers)
-            # kill() is synchronous for the SIGKILL but Docker's --rm removal
-            # is async, so poll: the container must actually disappear (proving
-            # it was killed, not just dropped from the registry).
-            import time
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                try:
-                    client.containers.get(cid)
-                    time.sleep(0.1)
-                except NotFound:
-                    break
-            else:
-                self.fail("container still present 10s after kill() — not reaped")
+            # cleanup() already waited for absence; verify it through the SDK too.
+            with self.assertRaises(NotFound):
+                client.containers.get(cid)
         finally:
             SandboxManager._containers.pop(work_dir, None)
             shutil.rmtree(work_dir, ignore_errors=True)

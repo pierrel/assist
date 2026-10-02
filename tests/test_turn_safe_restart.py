@@ -3,12 +3,14 @@
 import asyncio
 import json
 import os
+import queue
 import select
 import signal
 import subprocess
 import sys
 import threading
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 import uvicorn
@@ -51,6 +53,82 @@ def test_startup_term_enters_normal_uvicorn_shutdown(monkeypatch):
 
     assert shutdown_called == [True]
     assert server.should_exit and not server.force_exit
+
+
+def test_startup_orphan_sweep_finishes_before_recovery_and_admission(
+        tmp_path, monkeypatch):
+    """A late Docker snapshot cannot erase a tracked generation or race admission."""
+    _thread_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "ROOT", str(tmp_path))
+    events = []
+    entered = threading.Event()
+    release = threading.Event()
+    tracked = object()
+    monkeypatch.setattr(state.SandboxManager, "_containers", {})
+    orphan = SimpleNamespace(
+        id="old-generation",
+        attrs={"Mounts": [{"Destination": "/workspace",
+                           "Source": str(tmp_path / "old" / "domain")}]},
+        kill=lambda: events.append("reaped"))
+
+    def snapshot(*, filters):
+        assert filters == {"label": "assist.sandbox=true"}
+        entered.set()
+        assert release.wait(5)
+        state.SandboxManager._containers["new"] = tracked
+        return [orphan]
+
+    client = SimpleNamespace(containers=SimpleNamespace(list=snapshot))
+    monkeypatch.setattr(state.SandboxManager, "_get_docker_client", lambda: client)
+    monkeypatch.setattr(state, "_recover_interrupted_threads",
+                        lambda: events.append("recovery"))
+    monkeypatch.setattr(state.MANAGER, "list", lambda: [])
+    monkeypatch.setattr(state.MANAGER, "close", lambda: None)
+    monkeypatch.setattr(state, "load_unseen_cache", lambda: None)
+    monkeypatch.setattr(state, "load_urgent_cache", lambda: None)
+    monkeypatch.setattr(state.CAPTURE_WORKER, "start", lambda: None)
+    monkeypatch.setattr(state.CAPTURE_WORKER, "stop", lambda: None)
+    monkeypatch.setattr(threads, "start_scheduler", lambda: events.append("scheduler"))
+    monkeypatch.setattr(threads, "stop_scheduler", lambda: None)
+
+    async def scenario():
+        async def startup():
+            async with state.lifespan(None):
+                events.append("admission")
+                assert state.SandboxManager._containers == {"new": tracked}
+                state.SandboxManager._containers.clear()
+
+        task = asyncio.create_task(startup())
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            assert events == []
+            release.set()
+            await asyncio.wait_for(task, 5)
+        finally:
+            release.set()
+
+    asyncio.run(scenario())
+    assert events == ["reaped", "recovery", "scheduler", "admission"]
+
+
+def test_recovery_worker_still_waits_for_cold_model(monkeypatch):
+    queued = queue.Queue()
+    queued.put(object())
+    monkeypatch.setenv("ASSIST_MODEL_URL", "http://example.invalid")
+    monkeypatch.setattr(threads.SandboxManager, "reap_orphans",
+                        lambda root: pytest.fail("orphan sweep ran after startup"))
+    probes = []
+    def reachable():
+        probes.append(True)
+        return len(probes) == 2
+    waits = []
+    monkeypatch.setattr(threads, "_llm_reachable", reachable)
+    monkeypatch.setattr(threads.time, "sleep", waits.append)
+
+    threads._recovery_prep(queued)
+
+    assert len(probes) == 2
+    assert waits == [10]
 
 
 def test_full_asgi_background_turn_blocks_shutdown_until_terminal_run(
@@ -123,6 +201,7 @@ def test_sigterm_waits_for_synthetic_generation_cleanup_and_terminal_run(
     _thread_root(tmp_path, monkeypatch)
     monkeypatch.setattr(state, "ROOT", str(tmp_path))
     monkeypatch.setattr(state, "_recover_interrupted_threads", lambda: None)
+    monkeypatch.setattr(state.SandboxManager, "reap_orphans", lambda root: None)
     monkeypatch.setattr(state.MANAGER, "list", lambda: [])
     monkeypatch.setattr(state.MANAGER, "close", lambda: None)
     monkeypatch.setattr(state.CAPTURE_WORKER, "start", lambda: None)
@@ -245,6 +324,7 @@ root = Path(sys.argv[1])
 ready_fd = int(sys.argv[2])
 (root / "turn").mkdir()
 state._recover_interrupted_threads = lambda: None
+state.SandboxManager.reap_orphans = lambda root: None
 state.MANAGER.list = lambda: []
 state.MANAGER.close = lambda: None
 state.CAPTURE_WORKER.start = lambda: None
@@ -525,6 +605,7 @@ def test_capture_deadline_after_proof_does_not_hold_shutdown(tmp_path, monkeypat
     _thread_root(tmp_path, monkeypatch)
     monkeypatch.setattr(state, "ROOT", str(tmp_path))
     monkeypatch.setattr(state, "_recover_interrupted_threads", lambda: None)
+    monkeypatch.setattr(state.SandboxManager, "reap_orphans", lambda root: None)
     monkeypatch.setattr(state.MANAGER, "list", lambda: [])
     events = []
     monkeypatch.setattr(state.MANAGER, "close", lambda: events.append("resources"))
@@ -571,6 +652,7 @@ import asyncio
 import sys
 from manage.web import app, state, threads
 state._recover_interrupted_threads = lambda: None
+state.SandboxManager.reap_orphans = lambda root: None
 state.MANAGER.list = lambda: []
 state.MANAGER.close = lambda: None
 state.load_unseen_cache = lambda: None

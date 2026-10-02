@@ -770,11 +770,8 @@ class TestSandboxManager(TestCase):
         self.assertIn("chown", msg)
 
     @patch('assist.sandbox.DockerSandboxBackend')
-    def test_get_sandbox_backend_does_not_reuse_reaps_stale(self, mock_backend_cls):
-        """Per-turn lifecycle: a container left registered from a prior turn is
-        NOT reused — it is killed (SIGKILL, via cleanup) and a fresh one is
-        created.  Reusing it would let a container outlive its turn, which is
-        the whole thing the per-turn design forbids."""
+    def test_get_sandbox_backend_confirms_stale_before_replacement(self, mock_backend_cls):
+        """A prior generation must pass stop confirmation before replacement."""
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)
 
@@ -795,7 +792,7 @@ class TestSandboxManager(TestCase):
             sandbox = SandboxManager.get_sandbox_backend(test_path)
 
         self.assertIsNotNone(sandbox)
-        # The stale container was SIGKILLed, not reused (never reload()'d).
+        # Exact stop confirmation was requested; the stale handle was not reused.
         stopped.assert_called_once_with(stale.id)
         stale.reload.assert_not_called()
         # A fresh container replaced it in the registry.
@@ -822,7 +819,7 @@ class TestSandboxManager(TestCase):
 
         self.assertIsNone(sandbox)
 
-    def test_cleanup_kills_and_removes_container(self):
+    def test_cleanup_confirms_and_removes_tracked_generation(self):
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)
 
@@ -832,8 +829,7 @@ class TestSandboxManager(TestCase):
         with patch('assist.sandbox_manager.confirm_generation_stopped') as stopped:
             SandboxManager.cleanup(test_path)
 
-        # SIGKILL, not a graceful stop: a sandbox has nothing to flush and its
-        # bare-`sleep` PID 1 ignores SIGTERM, so stop() only burns the timeout.
+        # The mocked exact-ID confirmation precedes registry removal.
         stopped.assert_called_once_with(mock_container.id)
         mock_container.stop.assert_not_called()
         self.assertNotIn(test_path, SandboxManager._containers)
