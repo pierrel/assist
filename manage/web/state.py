@@ -720,35 +720,18 @@ def _recover_interrupted_threads() -> None:
 
 
 def _verify_shutdown_sandboxes() -> None:
-    """Git cleanup_verified proves kill/wait; retained generations or fences refuse exit."""
+    """Refuse exit while this process retains an unconfirmed sandbox generation."""
     if SandboxManager._containers:
         raise RuntimeError("sandbox generation still tracked")
-    # The sibling Git transport keeps this fence on failed exact teardown.
-    for entry in os.scandir(MANAGER.root_dir):
-        if not entry.is_dir(follow_symlinks=False):
-            continue
-        path = os.path.join(entry.path, "git-sync.json")
-        try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        except FileNotFoundError:
-            continue
-        with os.fdopen(fd, "rb") as state_file:
-            raw = state_file.read(65537)
-        if len(raw) > 65536:
-            raise RuntimeError("Git flight fence is oversized")
-        state = json.loads(raw)
-        if not isinstance(state, dict) or state.get("sandbox_in_flight", False) is not False:
-            raise RuntimeError("Git sandbox flight remains unverified")
 
 
 async def _hold_unsafe_shutdown(error: Exception) -> None:
     """A failed proof must leave the original process alive for guarded recovery."""
     reason = str(error)[:256]
-    if reason not in {"sandbox generation still tracked", "Git flight fence is oversized",
-                      "Git sandbox flight remains unverified"}:
+    if reason != "sandbox generation still tracked":
         reason = "details withheld"
     logging.getLogger(__name__).critical(
-        "Intentional stop withheld: %s: %s; inspect the running process and Git fence",
+        "Intentional stop withheld: %s: %s; inspect retained sandbox state",
         type(error).__name__, reason)
     never = asyncio.Event()
     while True:
@@ -799,6 +782,7 @@ async def lifespan(app: FastAPI):
             # The scheduler and geo callbacks can still create Runs off-loop.
             await run_in_threadpool(stop_scheduler)
             await run_in_threadpool(RUN_GATE.close_when_idle)
+            await run_in_threadpool(SandboxManager.cleanup_all)
             await run_in_threadpool(_verify_shutdown_sandboxes)
         except Exception as error:
             await _hold_unsafe_shutdown(error)
@@ -807,10 +791,6 @@ async def lifespan(app: FastAPI):
                 CAPTURE_WORKER.stop, limiter=CAPTURE_THREAD_LIMITER)
         except Exception:
             logging.getLogger(__name__).warning("capture worker shutdown failed", exc_info=True)
-        try:
-            await run_in_threadpool(SandboxManager.cleanup_all)
-        except Exception:
-            logging.getLogger(__name__).warning("sandbox cleanup failed after shutdown proof", exc_info=True)
         # Close shared resources (e.g., sqlite connection) to avoid leaks
         try:
             MANAGER.close()

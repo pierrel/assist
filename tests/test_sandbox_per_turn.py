@@ -7,7 +7,7 @@ timeout, a wall-clock backstop set ABOVE that cap can never fire during a
 legitimate in-progress turn (TestBackstopExceedsHoldCap pins exactly that).
 
 Covered here:
-  - cleanup() SIGKILLs (a sandbox has nothing to flush; PID 1 ignores SIGTERM).
+  - cleanup() confirms the captured generation stopped before registry release.
   - get_sandbox_backend never reuses — a second call reaps the stale
     container and creates a fresh one.
   - the Dockerfile backstop TTL > the queue hold cap (the safety invariant).
@@ -47,8 +47,9 @@ class TestCleanupKills(_SandboxStateBase):
     def test_cleanup_uses_sigkill(self):
         c = _fake_container("c0")
         SandboxManager._containers["w"] = c
-        SandboxManager.cleanup("w")
-        c.kill.assert_called_once_with()
+        with patch("assist.sandbox_manager.confirm_generation_stopped") as stopped:
+            SandboxManager.cleanup("w")
+        stopped.assert_called_once_with("c0")
         c.stop.assert_not_called()
         self.assertNotIn("w", SandboxManager._containers)  # registry pruned
 
@@ -60,12 +61,15 @@ class TestCleanupKills(_SandboxStateBase):
         replacement = _fake_container("replacement")
         SandboxManager._containers["w"] = replacement
 
-        SandboxManager.cleanup("w", old)
+        with patch("assist.sandbox_manager.confirm_generation_stopped") as stopped:
+            SandboxManager.cleanup("w", old)
         self.assertIs(SandboxManager._containers["w"], replacement)
         replacement.kill.assert_not_called()
+        stopped.assert_called_once_with("old")
 
-        SandboxManager.cleanup("w", replacement)
-        replacement.kill.assert_called_once_with()
+        with patch("assist.sandbox_manager.confirm_generation_stopped") as stopped:
+            SandboxManager.cleanup("w", replacement)
+        stopped.assert_called_once_with("replacement")
 
 
 class TestNoReuse(_SandboxStateBase):
@@ -88,11 +92,12 @@ class TestNoReuse(_SandboxStateBase):
             # the persistent-/tmp dir is created for real; the work_dir here is a
             # fake path, so stub the mkdir like os.stat above.
             patch("assist.sandbox_manager.os.makedirs"),
+            patch("assist.sandbox_manager.confirm_generation_stopped"),
         ]
 
     def test_second_call_reaps_stale_and_creates_fresh(self):
         p = self._patches()
-        with p[0], p[1], p[2], p[3], p[4]:
+        with p[0], p[1], p[2], p[3], p[4], p[5] as stopped:
             SandboxManager.get_sandbox_backend("/ws/t")
             first = SandboxManager._containers["/ws/t"]
             # Second turn for the SAME thread: must NOT reuse `first`.
@@ -100,7 +105,7 @@ class TestNoReuse(_SandboxStateBase):
             second = SandboxManager._containers["/ws/t"]
 
         self.assertIsNot(second, first, "container was reused across turns")
-        first.kill.assert_called_once()  # stale one reaped (SIGKILL)
+        stopped.assert_called_once_with(first.id)
         # never calls reload() — there is no reuse path that would inspect it
         first.reload.assert_not_called()
 

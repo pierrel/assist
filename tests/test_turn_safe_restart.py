@@ -137,10 +137,18 @@ def test_sigterm_waits_for_synthetic_generation_cleanup_and_terminal_run(
     killed = []
 
     class Generation:
+        id = "synthetic-generation"
+
         def kill(self):
             killed.append(True)
 
     generation = Generation()
+    def confirm_synthetic_generation(container_id):
+        assert container_id == generation.id
+        generation.kill()
+    monkeypatch.setattr(
+        "assist.sandbox_manager.confirm_generation_stopped",
+        confirm_synthetic_generation)
     monkeypatch.setattr(state.SandboxManager, "_containers", {work_dir: generation})
     tearing_down = threading.Event()
     finish_teardown = threading.Event()
@@ -231,6 +239,7 @@ from starlette.responses import Response
 
 from manage.web import state, threads
 from manage.web.__main__ import TurnSafeServer
+import assist.sandbox_manager as sandbox_module
 
 root = Path(sys.argv[1])
 ready_fd = int(sys.argv[2])
@@ -249,10 +258,16 @@ work_dir = str(root / "turn" / "work")
 release = threading.Event()
 
 class Generation:
+    id = "synthetic-generation"
+
     def kill(self):
         (root / "killed").touch()
 
 generation = Generation()
+def confirm_synthetic_generation(container_id):
+    assert container_id == generation.id
+    generation.kill()
+sandbox_module.confirm_generation_stopped = confirm_synthetic_generation
 state.SandboxManager._containers = {work_dir: generation}
 actual_cleanup = state.SandboxManager.cleanup
 actual_cleanup_all = state.SandboxManager.cleanup_all
@@ -494,7 +509,7 @@ def test_geo_close_waits_through_proposal_ack_and_defers_later_delivery(
     assert len(delivered) == 1 and proposals.get(proposal.slug) is not None
 
 
-def test_shutdown_proof_retains_failed_git_fence(tmp_path, monkeypatch):
+def test_shutdown_proof_preserves_historical_git_fence(tmp_path, monkeypatch):
     _thread_root(tmp_path, monkeypatch)
     monkeypatch.setattr(state.SandboxManager, "_containers", {"work": object()})
     with pytest.raises(RuntimeError, match="generation still tracked"):
@@ -502,11 +517,8 @@ def test_shutdown_proof_retains_failed_git_fence(tmp_path, monkeypatch):
     monkeypatch.setattr(state.SandboxManager, "_containers", {})
     fence = tmp_path / "turn" / "git-sync.json"
     fence.write_text(json.dumps({"sandbox_in_flight": True}))
-    with pytest.raises(RuntimeError, match="Git sandbox flight"):
-        state._verify_shutdown_sandboxes()
+    state._verify_shutdown_sandboxes()
     assert json.loads(fence.read_text())["sandbox_in_flight"] is True
-    fence.write_text(json.dumps({"version": 1, "source": "repo"}))
-    state._verify_shutdown_sandboxes()  # Initial binding precedes any flight field.
 
 
 def test_capture_deadline_after_proof_does_not_hold_shutdown(tmp_path, monkeypatch):
@@ -514,30 +526,46 @@ def test_capture_deadline_after_proof_does_not_hold_shutdown(tmp_path, monkeypat
     monkeypatch.setattr(state, "ROOT", str(tmp_path))
     monkeypatch.setattr(state, "_recover_interrupted_threads", lambda: None)
     monkeypatch.setattr(state.MANAGER, "list", lambda: [])
-    monkeypatch.setattr(state.MANAGER, "close", lambda: None)
+    events = []
+    monkeypatch.setattr(state.MANAGER, "close", lambda: events.append("resources"))
     monkeypatch.setattr(state.CAPTURE_WORKER, "start", lambda: None)
     monkeypatch.setattr(threads, "start_scheduler", lambda: None)
-    monkeypatch.setattr(threads, "stop_scheduler", lambda: None)
-    monkeypatch.setattr(state.SandboxManager, "_containers", {})
-    cleaned = []
+    monkeypatch.setattr(threads, "stop_scheduler", lambda: events.append("scheduler"))
+    original_close = RUN_GATE.close_when_idle
+    def close_gate():
+        events.append("gate")
+        original_close()
+    monkeypatch.setattr(RUN_GATE, "close_when_idle", close_gate)
+    original_verify = state._verify_shutdown_sandboxes
+    def verify():
+        events.append("proof")
+        original_verify()
+    monkeypatch.setattr(state, "_verify_shutdown_sandboxes", verify)
+    tracked = {"work": object()}
+    monkeypatch.setattr(state.SandboxManager, "_containers", tracked)
 
     def capture_deadline():
+        events.append("capture")
         raise RuntimeError("capture worker did not stop before its bounded deadline")
 
     monkeypatch.setattr(state.CAPTURE_WORKER, "stop", capture_deadline)
-    monkeypatch.setattr(state.SandboxManager, "cleanup_all", lambda: cleaned.append(True))
+    def cleanup():
+        events.append("cleanup")
+        tracked.clear()
+    monkeypatch.setattr(state.SandboxManager, "cleanup_all", cleanup)
 
     async def scenario():
         async with state.lifespan(None):
             pass
 
     asyncio.run(asyncio.wait_for(scenario(), 5))
-    assert cleaned == [True]
+    assert events == ["scheduler", "gate", "cleanup", "proof", "capture", "resources"]
 
 
-def test_failed_shutdown_proof_keeps_lifespan_pending_without_cleanup(tmp_path):
-    """A thrown proof must not let Uvicorn finish shutdown or erase the fence."""
+def test_failed_shutdown_proof_keeps_lifespan_pending_after_cleanup(tmp_path):
+    """A failed post-cleanup proof must not let Uvicorn finish shutdown."""
     cleanup_marker = tmp_path / "cleanup-called"
+    capture_marker = tmp_path / "capture-called"
     script = r'''
 import asyncio
 import sys
@@ -548,21 +576,18 @@ state.MANAGER.close = lambda: None
 state.load_unseen_cache = lambda: None
 state.load_urgent_cache = lambda: None
 state.CAPTURE_WORKER.start = lambda: None
-state.CAPTURE_WORKER.stop = lambda: None
+state.CAPTURE_WORKER.stop = lambda: open(sys.argv[2], "w").close()
 threads.start_scheduler = lambda: None
 threads.stop_scheduler = lambda: None
+state.SandboxManager._containers = {"work": object()}
 state.SandboxManager.cleanup_all = lambda: open(sys.argv[1], "w").close()
-def failed_proof():
-    print("proof failed", flush=True)
-    raise RuntimeError("retained Git generation")
-state._verify_shutdown_sandboxes = failed_proof
 async def run():
     async with state.lifespan(app):
         pass
 asyncio.run(run())
 '''
     process = subprocess.Popen(
-        [sys.executable, "-c", script, str(cleanup_marker)],
+        [sys.executable, "-c", script, str(cleanup_marker), str(capture_marker)],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
         env={**os.environ, "ASSIST_THREADS_DIR": str(tmp_path / "threads")})
     try:
@@ -571,10 +596,11 @@ asyncio.run(run())
             assert ready, "shutdown proof did not run"
             line = process.stdout.readline()
             assert line, "child exited before shutdown proof"
-            if "proof failed" in line:
+            if "Intentional stop withheld" in line:
                 break
         assert process.poll() is None
-        assert not cleanup_marker.exists()
+        assert cleanup_marker.exists()
+        assert not capture_marker.exists()
     finally:
         process.terminate()
         process.wait(timeout=5)

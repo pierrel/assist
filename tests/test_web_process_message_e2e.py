@@ -301,15 +301,19 @@ def test_process_message_reaps_registered_container_when_creation_then_raises(
     was never returned), the registered container is reaped — no leak until the
     backstop TTL.  (Copilot review, PR #139.)
 
-    Exercised un-mocked: cleanup is NOT stubbed.  A real container handle is put
-    in the registry to stand in for "creation registered it", then creation
-    raises; we assert the turn actually removed it (SIGKILL + dropped)."""
+    The cleanup path is real, with only exact Docker stop confirmation stubbed.
+    A synthetic container stands in for creation before it raises; the turn
+    must remove its tracked generation."""
     from unittest.mock import MagicMock
     from assist.sandbox_manager import SandboxManager
 
     work_dir = str(tmp_path / "thread-e2e")  # == MANAGER.thread_default_working_dir
     registered = MagicMock()
+    registered.id = "synthetic-generation"
     SandboxManager._containers[work_dir] = registered
+    confirmed = []
+    monkeypatch.setattr("assist.sandbox_manager.confirm_generation_stopped",
+                        confirmed.append)
 
     def _register_then_boom(tid, tz=None):
         # The container is already in the registry (as get_sandbox_backend
@@ -327,7 +331,7 @@ def test_process_message_reaps_registered_container_when_creation_then_raises(
         assert r.status_code == 303, r.text
         assert _wait_for_terminal_status("thread-e2e").get("stage") == "error"
 
-        registered.kill.assert_called_once()  # reaped (SIGKILL), not leaked
+        assert confirmed == [registered.id]
         assert work_dir not in SandboxManager._containers
     finally:
         SandboxManager._containers.pop(work_dir, None)

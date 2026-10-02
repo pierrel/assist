@@ -247,7 +247,7 @@ help:
 	@echo "  make pull-eval-history - Pull eval results from deploy server"
 	@echo ""
 	@echo "Deployment:"
-	@echo "  make deploy         - Full deployment except service unit (code + restart)"
+	@echo "  make deploy         - Full code, image, dependency, model, and restart deployment (no unit install)"
 	@echo "  make deploy-code    - Deploy code only (no restart)"
 	@echo "  make deploy-service - Install/update systemd unit before restart"
 	@echo "  make install-prod   - Install dependencies on remote"
