@@ -746,7 +746,7 @@ async def lifespan(app: FastAPI):
     RUN_GATE.reopen()
     # Ensure thread root exists at startup
     os.makedirs(ROOT, exist_ok=True)
-    # Reap old-process writers before recovery can dispatch or the listener admits work.
+    # Attempt old-process orphan cleanup before recovery or listener admission.
     await run_in_threadpool(SandboxManager.reap_orphans, MANAGER.root_dir)
 
     # Recover threads a previous server run left busy, instead of erroring them

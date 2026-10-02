@@ -557,14 +557,14 @@ class SandboxManager:
 
     @classmethod
     def reap_orphans(cls, root_dir: str) -> None:
-        """Kill THIS INSTANCE's surviving sandbox containers — by docker label
+        """Attempt to kill this deployment's surviving sandboxes by docker label
         plus workspace mount, not the in-memory registry. After a web-process
         crash ``_containers`` is empty, but the containers survive — and a
         ``docker exec``'d tool command keeps running inside one, mutating the
         host-bind-mounted /workspace that a recovery resume's FRESH container
-        mounts too, for up to the 3h backstop TTL. Lifespan startup calls this
-        before recovery dispatch or listener admission so a zombie writer
-        cannot share a workspace with a resumed turn.
+        mounts too, for up to the 3h backstop TTL. Lifespan startup attempts
+        this before recovery dispatch or listener admission. A Docker list or
+        kill failure can leave an old writer alive while recovery proceeds.
 
         Scoped to containers whose /workspace bind-mount lives under
         ``root_dir`` (this deployment's threads root): the label alone is

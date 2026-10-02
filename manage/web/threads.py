@@ -3934,8 +3934,8 @@ _PROVISIONER = (
 def _recovery_prep(q: "queue.Queue") -> None:
     """Wait on the worker for a cold model before draining queued recovery jobs.
 
-    No queued recovery needs no wait. Startup already reaped this deployment's
-    orphaned sandboxes before recovery queueing and listener admission.
+    No queued recovery needs no wait. Startup already attempted this deployment's
+    orphan sweep before recovery queueing and listener admission.
     """
     if q.empty():
         return
