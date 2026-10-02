@@ -1,9 +1,10 @@
 """Unit tests for the sandbox egress allowlist plumbing.
 
-Docker is mocked — these tests assert that SandboxManager passes the
+Docker calls are mocked — these tests assert that SandboxManager passes the
 right kwargs to ``containers.run`` and that ``_ensure_egress_proxy_running``
-is idempotent.  The actual policy enforcement is exercised in the
-build-time smoke (``dockerfiles/test-sandbox-egress.sh``).
+is idempotent.  One test exercises Docker SDK argument conversion.  The actual
+policy enforcement is exercised in the build-time smoke
+(``dockerfiles/test-sandbox-egress.sh``).
 """
 import hashlib
 import os
