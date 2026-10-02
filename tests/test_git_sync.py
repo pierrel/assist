@@ -106,6 +106,18 @@ def test_web_lifecycle_shares_turn_and_merge_workspace_fence(repos):
         assert merge_lifecycle._owner.work_id is None
 
 
+def test_preflight_fence_projection_tracks_persisted_flight_flag(repos):
+    from manage.web.git_lifecycle import preflight_fence_error
+
+    _, thread, _, binding = repos
+    owner = sync.GitSync(str(binding), str(thread))
+    assert preflight_fence_error(str(binding), str(thread)) is None
+    owner.sandbox_started()
+    assert "operator verification" in preflight_fence_error(str(binding), str(thread))
+    owner.sandbox_stopped()
+    assert preflight_fence_error(str(binding), str(thread)) is None
+
+
 def test_duplicate_pack_snapshot_compacts_privately_without_losing_unreachable(repos, monkeypatch, tmp_path):
     _, thread, _, _ = repos
     (thread / "payload").write_bytes(hashlib.shake_256(b"duplicate-pack").digest(16384))
@@ -1277,13 +1289,204 @@ def test_pi_preflight_fault_terminalizes_and_exposes_reason(repos, monkeypatch, 
     else:
         (repos[1] / "dirty").write_text("preserve\n")
     run = threads._create_run("state", "probe")
+    if fault == "dirty":
+        from manage.web.state import _get_status
+        original_clean = sync.require_clean
+
+        def check_busy_identity(backend):
+            assert _get_status("state")["pending_run_id"] == run.id
+            return original_clean(backend)
+
+        original_stopped = sync.GitSync.sandbox_stopped
+
+        def check_terminal_identity(owner):
+            status = _get_status("state")
+            assert status["stage"] == "error" and status["pending_run_id"] == run.id
+            return original_stopped(owner)
+
+        monkeypatch.setattr(sync, "require_clean", check_busy_identity)
+        monkeypatch.setattr(sync.GitSync, "sandbox_stopped", check_terminal_identity)
     threads._execute_pi_run(run, user_priority=False)
     assert threads._runs().get("state", run.id).status == "error"
     assert sync.workspace(str(repos[3]), str(repos[1]))["sync_error"]
-    # An incomplete preflight cannot let suspended work bypass clean proof.
-    assert sync.read_state(str(repos[3])).get("sandbox_in_flight")
-    with pytest.raises(sync.GitSyncError, match="verification"):
-        sync.GitSync(str(repos[3]), str(repos[1]))
+    state = sync.read_state(str(repos[3]))
+    if fault == "dirty":
+        assert not state.get("sandbox_in_flight")
+        assert "uncommitted changes" in state["error"]
+        assert (repos[1] / "dirty").read_text() == "preserve\n"
+    else:
+        assert state.get("sandbox_in_flight")
+        with pytest.raises(sync.GitSyncError, match="verification"):
+            sync.GitSync(str(repos[3]), str(repos[1]))
+
+
+def test_dirty_preflight_terminalizes_each_queued_deep_run_after_verified_cleanup(
+        repos, monkeypatch):
+    from manage.web.state import _get_status
+
+    calls = []
+    threads, events, _ = web_turn(repos, monkeypatch, lambda: calls.append(True))
+    tracked = repos[1] / "tracked"
+    tracked.write_text("unfinished user edit\n")
+    before_index = (repos[1] / ".git" / "index").read_bytes()
+    before_head = git(repos[1], "rev-parse", "HEAD")
+    runs = [threads._create_run("state", f"queued {number}") for number in range(3)]
+    observed_ids = []
+    original_clean = sync.require_clean
+
+    def check_busy_identity(backend):
+        observed_ids.append(_get_status("state")["pending_run_id"])
+        return original_clean(backend)
+
+    monkeypatch.setattr(sync, "require_clean", check_busy_identity)
+
+    for run in runs:
+        threads._process_message("state", run.text, _run=run)
+        saved = threads._runs().get("state", run.id)
+        assert saved.status == "error"
+        assert "uncommitted changes" in saved.error
+        assert not sync.read_state(str(repos[3]))["sandbox_in_flight"]
+        assert _get_status("state")["stage"] == "error"
+
+    assert not calls
+    assert observed_ids == [run.id for run in runs]
+    assert [event[0] for event in events] == ["start", "exit"] * 3
+    assert tracked.read_text() == "unfinished user edit\n"
+    assert (repos[1] / ".git" / "index").read_bytes() == before_index
+    assert git(repos[1], "rev-parse", "HEAD") == before_head
+    assert git(repos[0], "for-each-ref", "--format=%(refname)") == "refs/heads/main"
+
+
+def test_dirty_preflight_cleanup_failure_retains_stronger_fence(repos, monkeypatch):
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: pytest.fail("model ran"))
+    (repos[1] / "tracked").write_text("preserve incomplete work\n")
+    run = threads._create_run("state", "probe")
+    monkeypatch.setattr(threads.SandboxManager, "cleanup_verified",
+                        lambda *_: (_ for _ in ()).throw(RuntimeError("teardown uncertain")))
+    try:
+        threads._process_message("state", "probe", _run=run)
+    finally:
+        threads.SandboxManager._containers.pop(str(repos[1]), None)
+    state = sync.read_state(str(repos[3]))
+    assert state["sandbox_in_flight"] and state["quarantine"]
+    assert "teardown" in state["error"]
+    assert threads._runs().get("state", run.id).status == "error"
+    assert (repos[1] / "tracked").read_text() == "preserve incomplete work\n"
+
+
+def test_dirty_preflight_run_store_failure_keeps_flight_fenced(repos, monkeypatch):
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: pytest.fail("model ran"))
+    (repos[1] / "tracked").write_text("preserve incomplete work\n")
+    run = threads._create_run("state", "probe")
+    monkeypatch.setattr(threads, "_terminalize_dirty_run", lambda *_: (
+        _ for _ in ()).throw(OSError("Run store unavailable")))
+
+    threads._process_message("state", "probe", _run=run)
+
+    state = sync.read_state(str(repos[3]))
+    assert state["sandbox_in_flight"]
+    assert "outcome needs operator verification" in state["error"]
+    assert threads._runs().get("state", run.id).status == "error"
+    assert (repos[1] / "tracked").read_text() == "preserve incomplete work\n"
+
+
+def test_dirty_child_preflight_finishes_exact_run_without_model_or_parent_replay(
+        repos, monkeypatch, tmp_path):
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: pytest.fail("child model ran"))
+    child_dir = tmp_path / "sub-child"
+    child_dir.mkdir()
+    monkeypatch.setattr(threads.MANAGER, "thread_dir",
+                        lambda tid: str(child_dir if tid == "sub-child" else repos[3]))
+    handoffs = []
+    monkeypatch.setattr(threads, "_complete_child_handoff", lambda run: handoffs.append(run))
+    (repos[1] / "tracked").write_text("preserve parent edit\n")
+    run = threads._create_run("sub-child", "probe", mode="child", parent_thread_id="state",
+                              parent_run_id="parent", dispatch_key="dirty-child",
+                              assistant_id="delegate-agent")
+
+    threads._execute_child_run(run)
+
+    saved = threads._runs().get("sub-child", run.id)
+    assert saved.status == "error" and "uncommitted changes" in saved.error
+    assert handoffs and handoffs[-1].id == run.id
+    assert not sync.read_state(str(repos[3]))["sandbox_in_flight"]
+    assert (repos[1] / "tracked").read_text() == "preserve parent edit\n"
+
+
+def test_dirty_readonly_verification_after_writer_teardown_is_terminal(repos, monkeypatch):
+    from manage.web import git_lifecycle
+
+    threads, events, _ = web_turn(repos, monkeypatch, lambda: pytest.fail("model ran"))
+    original_clean = sync.require_clean
+    probes = []
+
+    def clean_prepare_probe(backend):
+        probes.append(True)
+        return original_clean(backend)
+
+    def dirty_verification_probe(backend):
+        probes.append(True)
+        (repos[1] / "tracked").write_text("preserve late edit\n")
+        return original_clean(backend)
+
+    monkeypatch.setattr(sync, "require_clean", clean_prepare_probe)
+    monkeypatch.setattr(git_lifecycle, "require_clean", dirty_verification_probe)
+    run = threads._create_run("state", "probe")
+    threads._process_message("state", "probe", _run=run)
+
+    assert len(probes) == 3
+    assert [event[0] for event in events] == ["start", "exit"] * 2
+    assert threads._runs().get("state", run.id).status == "error"
+    assert not sync.read_state(str(repos[3]))["sandbox_in_flight"]
+    assert (repos[1] / "tracked").read_text() == "preserve late edit\n"
+
+
+@pytest.mark.parametrize("exit_code,truncated,dirty", [
+    (0, False, False), (42, False, True), (1, False, False),
+    (124, False, False), (42, True, False),
+])
+def test_only_complete_clean_probe_can_classify_dirty(exit_code, truncated, dirty):
+    class Backend:
+        def execute(self, command):
+            assert "python -I -c" in command
+            return SimpleNamespace(exit_code=exit_code, truncated=truncated)
+
+    if dirty:
+        with pytest.raises(sync.GitDirtyWorktreeError):
+            sync.require_clean(Backend())
+    elif exit_code or truncated:
+        with pytest.raises(sync.GitSyncError, match="verification") as failure:
+            sync.require_clean(Backend())
+        assert not isinstance(failure.value, sync.GitDirtyWorktreeError)
+    else:
+        sync.require_clean(Backend())
+
+
+def test_reconciliation_exit_42_is_not_dirty_proof(repos):
+    class Backend:
+        def execute(self, command):
+            return SimpleNamespace(exit_code=42, truncated=False)
+
+    with pytest.raises(sync.GitSyncError, match="reconciliation") as failure:
+        sync._sandbox_git(Backend(), "exit 42")
+    assert not isinstance(failure.value, sync.GitDirtyWorktreeError)
+
+
+@pytest.mark.parametrize("failing_command", ["ls-files", "status"])
+def test_dirty_bytes_followed_by_failed_git_command_are_not_positive_proof(
+        repos, monkeypatch, tmp_path, failing_command):
+    fake_git = tmp_path / "git-probe.py"
+    fake_git.write_text(
+        "import os, sys\n"
+        "name = 'ls-files' if 'ls-files' in sys.argv else 'status'\n"
+        "os.write(1, b'S tracked\\0' if name == 'ls-files' else b' M tracked\\n')\n"
+        "sys.exit(1 if name == sys.argv[1] else 0)\n")
+    monkeypatch.setattr(sync, "_WORKTREE_GIT",
+                        "python " + shlex.quote(str(fake_git)) + " "
+                        + shlex.quote(failing_command))
+    with pytest.raises(sync.GitSyncError, match="verification") as failure:
+        sync.require_clean(LocalBackend(repos[1]))
+    assert not isinstance(failure.value, sync.GitDirtyWorktreeError)
 
 
 def test_hidden_child_commits_before_parent_wake_preflight(repos, monkeypatch, tmp_path):

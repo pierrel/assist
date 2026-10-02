@@ -66,6 +66,10 @@ show the latest published commits with a may-change warning, without waiting.
 
 Dirty worktrees, divergent or rewritten history, missing legacy source bindings,
 and uncertain publication or sandbox teardown hold for explicit reconciliation.
+A positively dirty clean preflight with verified exact sandbox teardown leaves
+only the dirty-worktree hold, not a teardown-uncertainty fence. Later queued
+turns check the work independently; none replays the failed prompt. Unverified
+cleanup retains the stronger teardown fence.
 Local commit or verified teardown failure reports a turn error with the saved
 answer retained. Remote-only publication failure remains best-effort and does
 not discard a finalized local answer; pending Git error/fences remain.

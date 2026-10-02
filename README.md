@@ -924,6 +924,10 @@ changes attempt a commit inside the restricted sandbox and the server attempts p
 of only that thread branch. No-file-change turns also attempt publication; main
 and tags are not automatically pushed. Dirty, divergent, rewritten, or unavailable
 Git state holds for explicit reconciliation while preserving work and saved answers.
+When a clean preflight positively finds uncommitted work and its exact sandbox
+teardown is verified, the turn ends with a dirty-worktree hold, not a teardown
+uncertainty. Later queued turns check that work independently; none replays the
+failed prompt. Unverified cleanup retains the stronger teardown fence.
 If a hidden child yields its fair-scheduling slot, a new parent message waits
 until the child's sandbox teardown and Git workspace lock release. After safe
 teardown, it runs normally instead of failing on a transient lock.

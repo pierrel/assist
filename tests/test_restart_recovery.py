@@ -220,6 +220,35 @@ def test_recovery_dispatches_committed_pending_run_without_status_duplicate(
     assert queued["run_id"] == run.id
 
 
+@pytest.mark.parametrize("stage,fenced", [
+    ("starting_sandbox", False), ("starting_sandbox", True), ("error", True),
+])
+def test_terminal_dirty_run_restart_never_replays_and_projects_fence(wired, monkeypatch,
+                                                                     stage, fenced):
+    tid, _ = wired
+    run = threads._create_run(tid, "unfinished work")
+    threads._runs().claim(tid, run.id)
+    _set_status(tid, stage, pending_message=run.text, pending_run_id=run.id,
+                **({"error": "uncommitted changes"} if stage == "error" else {}))
+    threads._runs().transition(tid, run.id, "error", error="uncommitted changes")
+    decisions = []
+    monkeypatch.setattr(threads, "_recovery_decision",
+                        lambda *args: decisions.append(args) or "redispatch")
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *_: None)
+    if fenced:
+        monkeypatch.setattr(threads, "git_preflight_fence_error", lambda *_:
+                            "Previous Git teardown or commit finalization needs operator verification")
+
+    threads.queue_recovery_runs()
+
+    assert decisions == []
+    assert [(item.id, item.status) for item in threads._runs().list(tid)] == [
+        (run.id, "error")]
+    assert _get_status(tid)["stage"] == "error"
+    expected = "operator verification" if fenced else "uncommitted changes"
+    assert expected in _get_status(tid)["error"]
+
+
 def test_recovery_replays_persisted_first_run_initialization(wired):
     """A crash before the first clone must not execute that Run without its worktree."""
     tid, _ = wired

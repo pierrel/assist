@@ -6,7 +6,7 @@ import logging
 import os
 from contextlib import contextmanager
 
-from assist.git_sync import (GitSync, GitSyncError, ownership, read_state,
+from assist.git_sync import (GitDirtyWorktreeError, GitSync, GitSyncError, ownership, read_state,
                              require_clean)
 from assist.sandbox_manager import SandboxManager
 
@@ -22,6 +22,18 @@ def recovery_error(thread_dir: str, worktree: str) -> str | None:
         return ("Git finalization after restart is unverified; saved answer and files are preserved. "
                 "Reconcile Git before continuing.")
     return None
+
+
+def preflight_fence_error(thread_dir: str, worktree: str) -> str | None:
+    """Project a retained fence or unverified Git state before a Run's dirty error."""
+    reason = "Previous Git teardown or commit finalization needs operator verification"
+    try:
+        state = read_state(thread_dir)
+        if state is None:
+            return reason if os.path.lexists(os.path.join(worktree, ".git")) else None
+        return reason if state.get("sandbox_in_flight") or state.get("quarantine") else None
+    except (GitSyncError, OSError):
+        return reason
 
 
 def _reap(owner: GitSync, generation) -> None:
@@ -63,7 +75,8 @@ def _verify(owner: GitSync, timezone: str | None) -> None:
         _reap(owner, backend.container)
 
 
-def _prepare(owner: GitSync, work_id: str, timezone: str | None) -> None:
+def _prepare(owner: GitSync, work_id: str, timezone: str | None,
+             terminalize_dirty=None) -> None:
     """Reconcile Git before model admission using the credential-free profile."""
     try:
         backend = SandboxManager.get_pi_sandbox_backend(
@@ -79,6 +92,18 @@ def _prepare(owner: GitSync, work_id: str, timezone: str | None) -> None:
         if revision != owner.state["preflights"][work_id]["base"]:
             raise GitSyncError("Git checkout changed during preflight teardown; reconcile before the turn")
         owner.sandbox_stopped()
+    except GitDirtyWorktreeError as error:
+        try:
+            if terminalize_dirty is None:
+                raise GitSyncError("Git dirty preflight has no durable Run outcome")
+            terminalize_dirty(error)
+        except Exception as outcome_error:
+            reason = GitSyncError("Git dirty preflight outcome needs operator verification")
+            owner.failed(reason)
+            raise reason from outcome_error
+        owner.failed(error)
+        owner.sandbox_stopped()
+        raise
     except Exception as error:
         reason = error if isinstance(error, GitSyncError) else GitSyncError(
             "Git preflight failed; preserve the workspace and reconcile before retrying")
@@ -149,9 +174,9 @@ class GitLifecycle:
         if self._owner is not None and backend is None:
             raise GitSyncError("Git sync requires the restricted sandbox")
 
-    def prepare(self, timezone: str | None) -> None:
+    def prepare(self, timezone: str | None, *, terminalize_dirty=None) -> None:
         if self._owner is not None:
-            _prepare(self._owner, self._owner.work_id, timezone)
+            _prepare(self._owner, self._owner.work_id, timezone, terminalize_dirty)
 
     def resume(self) -> None:
         if self._owner is not None:

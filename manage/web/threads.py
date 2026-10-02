@@ -95,7 +95,8 @@ from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
 from edd.live_capture import CaptureStorageFull
 
 from manage.web.app import app
-from manage.web.git_lifecycle import GitLifecycle, recovery_error as git_recovery_error
+from manage.web.git_lifecycle import (GitLifecycle, preflight_fence_error as git_preflight_fence_error,
+                                      recovery_error as git_recovery_error)
 from manage.web.run_stream import PHONE_DELTA_CHUNK_BYTES, RUN_STREAMS
 from manage.web.diff import _DIFF_CSS, _render_inline_diffs
 from assist.geo.model import STATE_FAILED, STATE_IMPORTING
@@ -2167,6 +2168,15 @@ def _frequency_configurable(run: Run | None, *, sender: str | None,
     return {FREQUENCY_RUN_ID_KEY: run.work_id}
 
 
+def _terminalize_dirty_run(run: Run, error: GitSyncError) -> None:
+    """Persist the exact failed Run before releasing its verified Git flight fence."""
+    with _RUN_ADMISSION_LOCK:
+        current = _runs().get(run.thread_id, run.id)
+        if current.status != "running" or current.work_id != run.work_id:
+            raise GitSyncError("Git dirty preflight Run identity needs operator verification")
+        _runs().transition(run.thread_id, run.id, "error", error=str(error))
+
+
 def _execute_child_run(run: Run, *, resume: bool = False) -> None:
     """Execute one hidden task slice and wake its parent at terminal state."""
     parent_working_dir = None
@@ -2210,7 +2220,8 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                     if git_lifecycle.bound:
                         child_scope.callback(cleanup_child_sandbox)
                     if not (resume or run.resume or run.resume_decision is not None):
-                        git_lifecycle.prepare(None)
+                        git_lifecycle.prepare(
+                            None, terminalize_dirty=lambda error: _terminalize_dirty_run(run, error))
                     else:
                         git_lifecycle.resume()
                     try:
@@ -2581,9 +2592,17 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
                 if current.status != "pending":
                     return
                 run = _runs().claim(tid, run.id)
-            _set_status(tid, "starting_sandbox", pending_message=run.text, started_at=_now_ms())
+            _set_status(tid, "starting_sandbox", pending_message=run.text,
+                        pending_run_id=run.id, started_at=_now_ms())
             thread_dir = MANAGER.thread_dir(tid)
-            git_lifecycle.prepare((run.rider or {}).get("tz"))
+
+            def terminalize_dirty(error: GitSyncError) -> None:
+                _terminalize_dirty_run(run, error)
+                _set_status(tid, "error", error=str(error), pending_message=run.text,
+                            pending_run_id=run.id)
+
+            git_lifecycle.prepare((run.rider or {}).get("tz"),
+                                  terminalize_dirty=terminalize_dirty)
             _PI_CONVERSATIONS.append(thread_dir, run.id, "user", run.text)
             context = _PI_CONVERSATIONS.context(
                 thread_dir, max_messages=PI_HISTORY_LIMIT, exclude_run_id=run.id)
@@ -2778,6 +2797,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         text = " " + text
     _pending_msg = text if text else pending_text
     pending_kwargs = {"pending_message": _pending_msg} if _pending_msg else {}
+    if _run is not None:
+        pending_kwargs["pending_run_id"] = _run.id
     # The durable Run is authoritative for sender/rider and therefore triage privilege.
     # Mirror them into every busy status write for UI projection and legacy recovery.
     if sender:
@@ -2914,7 +2935,13 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     return
             _set_status(tid, "starting_sandbox", **pending_kwargs)
             if not resume and resume_decision is None:
-                git_lifecycle.prepare(rider.tz if rider else None)
+                def terminalize_dirty(error: GitSyncError) -> None:
+                    if _run is not None:
+                        _terminalize_dirty_run(_run, error)
+                    _set_status(tid, "error", error=str(error), **pending_kwargs)
+
+                git_lifecycle.prepare(rider.tz if rider else None,
+                                      terminalize_dirty=terminalize_dirty)
             else:
                 git_lifecycle.resume()
             sandbox = None
@@ -4268,6 +4295,23 @@ def queue_recovery_runs() -> None:
                        for run in visible_runs[tid])):
             _dispatch_pending_after(tid)
             continue
+
+        terminal_error = next(
+            (run for run in visible_runs[tid]
+             if run.id == status.get("pending_run_id") and run.status == "error"),
+            None)
+        if terminal_error is not None and status.get("stage") in BUSY_STAGES | {"error"}:
+            # The terminal Run may precede status projection or flight clearance.
+            # Never synthesize its stale prompt, and show the stronger retained
+            # fence if clearance did not become durable.
+            fence_error = git_preflight_fence_error(
+                MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid))
+            if status.get("stage") in BUSY_STAGES or fence_error:
+                _set_status(tid, "error", error=fence_error or terminal_error.error or "Turn failed",
+                            pending_message=status.get("pending_message"),
+                            pending_run_id=terminal_error.id)
+                _dispatch_pending_after(tid, terminal_error.id)
+                continue
 
         if status.get("stage") in BUSY_STAGES:
             pending = status.get("pending_message") or ""

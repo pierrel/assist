@@ -725,6 +725,10 @@ def _sandbox_git(sandbox, command: str) -> None:
         raise GitSyncError("Git worktree needs reconciliation in the restricted sandbox")
 
 
+class GitDirtyWorktreeError(GitSyncError):
+    """A complete, successful restricted Git probe found local changes."""
+
+
 def require_clean(sandbox) -> None:
     # Inspect the full index in-container. The backend truncates large stdout,
     # so only exit status crosses that boundary, never a path listing.
@@ -735,6 +739,7 @@ with subprocess.Popen(args + ["ls-files", "-v", "-z"], stdout=subprocess.PIPE,
                       stderr=subprocess.DEVNULL) as process:
     total = 0
     pending = b""
+    dirty = False
     while chunk := process.stdout.read(65536):
         total += len(chunk)
         if total > 134217728:
@@ -742,26 +747,38 @@ with subprocess.Popen(args + ["ls-files", "-v", "-z"], stdout=subprocess.PIPE,
             sys.exit(1)
         entries = (pending + chunk).split(b"\\0")
         pending = entries.pop()
-        if len(pending) > 8192 or any(not item.startswith(b"H ") for item in entries):
+        if len(pending) > 8192:
             process.kill()
             sys.exit(1)
-    if pending or process.wait():
+        dirty |= any(not item.startswith(b"H ") for item in entries)
+    code = process.wait()
+    if pending or code:
         sys.exit(1)
 with subprocess.Popen(args + ["status", "--porcelain", "--untracked-files=normal",
                               "--ignore-submodules=none"], stdout=subprocess.PIPE,
                       stderr=subprocess.DEVNULL) as process:
-    if process.stdout.read(1):
-        process.kill()
-        sys.exit(1)
+    total = 0
+    while chunk := process.stdout.read(65536):
+        total += len(chunk)
+        if total > 134217728:
+            process.kill()
+            sys.exit(1)
+        dirty = True
     if process.wait():
         sys.exit(1)
+if dirty:
+    sys.exit(42)
 '''
     if sandbox is None:
         raise GitSyncError("Git sync requires the restricted sandbox")
-    try:
-        _sandbox_git(sandbox, "python -I -c " + shlex.quote(probe) + " " + _WORKTREE_GIT)
-    except GitSyncError as error:
-        raise GitSyncError("Thread worktree has hidden or uncommitted changes; reconcile before the next turn") from error
+    result = sandbox.execute("timeout -k 2s 25s sh -c " + shlex.quote(
+        "python -I -c " + shlex.quote(probe) + " " + _WORKTREE_GIT)
+        + " >/dev/null 2>&1")
+    if not getattr(result, "truncated", False) and result.exit_code == 42:
+        raise GitDirtyWorktreeError(
+            "Thread worktree has hidden or uncommitted changes; reconcile before the next turn")
+    if result.exit_code != 0 or getattr(result, "truncated", False):
+        raise GitSyncError("Git clean verification failed in the restricted sandbox")
 
 
 class GitSync:
