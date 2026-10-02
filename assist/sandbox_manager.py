@@ -11,7 +11,7 @@ _ANY_CONTAINER = object()
 
 
 def confirm_generation_stopped(container_id: str) -> None:
-    """Prove one exact sandbox generation exited and its name is reusable."""
+    """Prove one exact sandbox generation exited and was removed."""
     try:
         subprocess.run(["docker", "kill", container_id],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
