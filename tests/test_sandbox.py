@@ -9,6 +9,8 @@ import shutil
 from unittest import TestCase, skipIf
 from unittest.mock import patch, MagicMock, PropertyMock
 
+import pytest
+
 from assist.sandbox import (
     DockerSandboxBackend,
     MAX_OUTPUT_CHARS,
@@ -35,6 +37,20 @@ def test_stop_proof_waits_for_auto_removed_name_release():
         ["docker", "kill"], ["docker", "inspect"],
         ["docker", "rm"], ["docker", "inspect"]]
     assert all("exact-generation" in call.args[0] for call in run.call_args_list)
+
+
+def test_stop_proof_refuses_running_generation_after_failed_kill():
+    from assist.sandbox_manager import confirm_generation_stopped
+
+    responses = [
+        MagicMock(returncode=1, stdout=b"", stderr=b"failed"),
+        MagicMock(returncode=0, stdout=b"true", stderr=b""),
+    ]
+    with patch("assist.sandbox_manager.subprocess.run", side_effect=responses), \
+         patch("assist.sandbox_manager.time.monotonic", side_effect=[0, 0, 6]), \
+         patch("assist.sandbox_manager.time.sleep"):
+        with pytest.raises(RuntimeError, match="teardown is unconfirmed"):
+            confirm_generation_stopped("exact-generation")
 
 
 class TestDockerSandboxBackend(TestCase):

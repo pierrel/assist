@@ -367,13 +367,17 @@ sync the template with `make deploy-code` and run `make deploy-service`
 before restarting.
 
 An intentional restart waits for in-flight turns and schedule callbacks to
-finish, including their Git finalization and sandbox teardown. Accepted Runs
-not yet executing remain durable and are requeued after restart. Install the
-updated service unit before relying on this behavior. A long turn can leave
-`systemctl restart` waiting; inspect the running stop job and service log rather
-than forcing the process down. If a live sandbox cannot be stopped and verified,
-the old process stays alive with its listener closed. A historical Git fence
-blocks only its own thread and is not cleared by restarting the service.
+finish, including owned sandbox teardown. The separate Git transport change
+supplies Git sidecar flight fencing and finalization; this branch alone does not
+provide those Git guarantees. Accepted Runs not yet executing remain durable
+and are requeued after restart. Install the updated service unit before relying
+on this behavior. A long turn can leave `systemctl restart` waiting; inspect the
+running stop job and service log rather than forcing the process down. If a live
+sandbox cannot be stopped and verified,
+the old process stays alive with its listener closed. With the Git transport
+change composed, a historical Git fence blocks only its own thread and is not
+cleared by restarting the service. If startup cannot verify removal of old
+sandboxes, the new process refuses admission until operator recovery.
 
 ### Deployment Commands
 

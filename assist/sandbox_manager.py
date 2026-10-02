@@ -557,40 +557,52 @@ class SandboxManager:
 
     @classmethod
     def reap_orphans(cls, root_dir: str) -> None:
-        """Attempt to kill this deployment's surviving sandboxes by docker label
+        """Confirm this deployment's surviving sandboxes are gone by docker label
         plus workspace mount, not the in-memory registry. After a web-process
         crash ``_containers`` is empty, but the containers survive — and a
         ``docker exec``'d tool command keeps running inside one, mutating the
         host-bind-mounted /workspace that a recovery resume's FRESH container
-        mounts too, for up to the 3h backstop TTL. Lifespan startup attempts
-        this before recovery dispatch or listener admission. A Docker list or
-        kill failure can leave an old writer alive while recovery proceeds.
+        mounts too, for up to the 3h backstop TTL. Lifespan startup completes
+        this proof before recovery dispatch or listener admission.
 
         Scoped to containers whose /workspace bind-mount lives under
         ``root_dir`` (this deployment's threads root): the label alone is
         host-global, and prod + eval/dev sandboxes share ONE docker daemon on
         this box — a bare-label reap would kill a concurrently running eval's
         LIVE containers mid-turn. The mount filter needs no new create-time
-        labeling, so it also covers orphans from pre-existing code. Best-effort:
-        docker being down must not block recovery (turns fail fast on their own
-        if it stays down)."""
+        labeling, so it also covers orphans from pre-existing code. Uncertain
+        listing, scope, or exact teardown aborts startup."""
         root = os.path.realpath(root_dir) + os.sep
         try:
             client = cls._get_docker_client()
             candidates = client.containers.list(
-                filters={"label": "assist.sandbox=true"})
-        except Exception as e:
-            logger.warning("orphan-sandbox reap skipped (docker unavailable): %s", e)
-            return
+                all=True, filters={"label": "assist.sandbox=true"})
+            if not isinstance(candidates, list):
+                raise ValueError
+        except Exception:
+            raise RuntimeError("orphan sandbox listing unconfirmed") from None
         for container in candidates:
-            mounts = (container.attrs or {}).get("Mounts", [])
-            ours = any(m.get("Destination") == "/workspace"
-                       and os.path.realpath(m.get("Source", "")).startswith(root)
-                       for m in mounts)
-            if not ours:
+            try:
+                container.reload()
+                mounts = container.attrs["Mounts"]
+                if not isinstance(mounts, list):
+                    raise ValueError
+                workspace = []
+                for mount in mounts:
+                    if not isinstance(mount, dict) or not isinstance(mount.get("Destination"), str):
+                        raise ValueError
+                    if mount["Destination"] == "/workspace":
+                        workspace.append(mount.get("Source"))
+                if (len(workspace) != 1 or not isinstance(workspace[0], str)
+                        or not os.path.isabs(workspace[0])):
+                    raise ValueError
+                in_scope = os.path.realpath(workspace[0]).startswith(root)
+            except Exception:
+                raise RuntimeError("orphan sandbox scope unconfirmed") from None
+            if not in_scope:
                 continue
             try:
-                container.kill()
+                confirm_generation_stopped(container.id)
                 logger.info("Reaped orphaned sandbox %s", container.id[:12])
-            except Exception as e:
-                logger.warning("orphan reap failed for %s: %s", container.id[:12], e)
+            except Exception:
+                raise RuntimeError("orphan sandbox teardown unconfirmed") from None

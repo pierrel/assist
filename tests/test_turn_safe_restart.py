@@ -69,14 +69,26 @@ def test_startup_orphan_sweep_finishes_before_recovery_and_admission(
         id="old-generation",
         attrs={"Mounts": [{"Destination": "/workspace",
                            "Source": str(tmp_path / "old" / "domain")}]},
-        kill=lambda: events.append("reaped"))
+        reload=lambda: None)
+    unrelated = SimpleNamespace(
+        id="eval-generation",
+        attrs={"Mounts": [{"Destination": "/workspace",
+                           "Source": str(tmp_path.parent / "eval" / "domain")}]},
+        reload=lambda: None)
 
-    def snapshot(*, filters):
+    def confirm(container_id):
+        assert container_id == orphan.id
+        events.append("reaped")
+
+    monkeypatch.setattr("assist.sandbox_manager.confirm_generation_stopped", confirm)
+
+    def snapshot(*, all, filters):
+        assert all is True
         assert filters == {"label": "assist.sandbox=true"}
         entered.set()
         assert release.wait(5)
         state.SandboxManager._containers["new"] = tracked
-        return [orphan]
+        return [unrelated, orphan]
 
     client = SimpleNamespace(containers=SimpleNamespace(list=snapshot))
     monkeypatch.setattr(state.SandboxManager, "_get_docker_client", lambda: client)
@@ -109,6 +121,59 @@ def test_startup_orphan_sweep_finishes_before_recovery_and_admission(
 
     asyncio.run(scenario())
     assert events == ["reaped", "recovery", "scheduler", "admission"]
+
+
+@pytest.mark.parametrize(("failure", "reason"), [
+    ("listing", "listing"),
+    ("inspect", "scope"),
+    ("scope", "scope"),
+    ("teardown", "teardown"),
+])
+def test_startup_orphan_uncertainty_blocks_recovery(
+        tmp_path, monkeypatch, failure, reason):
+    _thread_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(state, "ROOT", str(tmp_path))
+    reached = []
+    monkeypatch.setattr(state, "_recover_interrupted_threads",
+                        lambda: reached.append("recovery"))
+    monkeypatch.setattr(threads, "start_scheduler",
+                        lambda: reached.append("dispatch"))
+    orphan = SimpleNamespace(
+        id="old-generation",
+        attrs={"Mounts": [{"Destination": "/workspace",
+                           "Source": str(tmp_path / "turn" / "domain")}]},
+        reload=lambda: None)
+    if failure == "inspect":
+        def failed_inspect():
+            raise RuntimeError("private Docker details")
+        orphan.reload = failed_inspect
+    if failure == "scope":
+        orphan.attrs = {"Mounts": [{"Destination": "/workspace"}]}
+
+    def listing(*, all, filters):
+        assert all is True
+        assert filters == {"label": "assist.sandbox=true"}
+        if failure == "listing":
+            raise RuntimeError("private Docker details")
+        return [orphan]
+
+    client = SimpleNamespace(containers=SimpleNamespace(list=listing))
+    monkeypatch.setattr(state.SandboxManager, "_get_docker_client", lambda: client)
+    def confirm(container_id):
+        assert container_id == orphan.id
+        if failure == "teardown":
+            raise RuntimeError("private Docker details")
+        pytest.fail("stop confirmation reached for an uncertain scope")
+    monkeypatch.setattr("assist.sandbox_manager.confirm_generation_stopped", confirm)
+
+    async def startup():
+        async with state.lifespan(None):
+            reached.append("admission")
+
+    with pytest.raises(RuntimeError, match=f"orphan sandbox {reason} unconfirmed") as error:
+        asyncio.run(startup())
+    assert "private Docker details" not in str(error.value)
+    assert reached == []
 
 
 def test_recovery_worker_still_waits_for_cold_model(monkeypatch):
