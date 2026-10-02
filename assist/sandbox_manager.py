@@ -574,6 +574,7 @@ class SandboxManager:
         listing, scope, or exact teardown aborts startup."""
         root = os.path.realpath(root_dir) + os.sep
         try:
+            from docker.errors import NotFound
             client = cls._get_docker_client()
             candidates = client.containers.list(
                 all=True, filters={"label": "assist.sandbox=true"})
@@ -584,6 +585,12 @@ class SandboxManager:
         for container in candidates:
             try:
                 container.reload()
+            except NotFound:
+                # reload fetches this exact ID; it disappeared after the list.
+                continue
+            except Exception:
+                raise RuntimeError("orphan sandbox scope unconfirmed") from None
+            try:
                 mounts = container.attrs["Mounts"]
                 if not isinstance(mounts, list):
                     raise ValueError

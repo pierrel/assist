@@ -376,8 +376,9 @@ running stop job and service log rather than forcing the process down. If a live
 sandbox cannot be stopped and verified,
 the old process stays alive with its listener closed. With the Git transport
 change composed, a historical Git fence blocks only its own thread and is not
-cleared by restarting the service. If startup cannot verify removal of old
-sandboxes, the new process refuses admission until operator recovery.
+cleared by restarting the service. Startup refuses admission while old-sandbox
+removal is unverified; systemd retries the service. Persistent proof failures
+require operator recovery.
 
 ### Deployment Commands
 

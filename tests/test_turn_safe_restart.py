@@ -55,9 +55,12 @@ def test_startup_term_enters_normal_uvicorn_shutdown(monkeypatch):
     assert server.should_exit and not server.force_exit
 
 
+@pytest.mark.parametrize("gone_scope", ["own", "unrelated"])
 def test_startup_orphan_sweep_finishes_before_recovery_and_admission(
-        tmp_path, monkeypatch):
-    """A late Docker snapshot cannot erase a tracked generation or race admission."""
+        tmp_path, monkeypatch, gone_scope):
+    """A vanished exact ID is safe; live scoped work is reaped before admission."""
+    from docker.errors import NotFound
+
     _thread_root(tmp_path, monkeypatch)
     monkeypatch.setattr(state, "ROOT", str(tmp_path))
     events = []
@@ -75,6 +78,15 @@ def test_startup_orphan_sweep_finishes_before_recovery_and_admission(
         attrs={"Mounts": [{"Destination": "/workspace",
                            "Source": str(tmp_path.parent / "eval" / "domain")}]},
         reload=lambda: None)
+    gone_root = tmp_path if gone_scope == "own" else tmp_path.parent / "eval-gone"
+    def auto_removed():
+        events.append("gone")
+        raise NotFound("No such container")
+    gone = SimpleNamespace(
+        id="gone-generation",
+        attrs={"Mounts": [{"Destination": "/workspace",
+                           "Source": str(gone_root / "domain")}]},
+        reload=auto_removed)
 
     def confirm(container_id):
         assert container_id == orphan.id
@@ -88,7 +100,7 @@ def test_startup_orphan_sweep_finishes_before_recovery_and_admission(
         entered.set()
         assert release.wait(5)
         state.SandboxManager._containers["new"] = tracked
-        return [unrelated, orphan]
+        return [unrelated, gone, orphan]
 
     client = SimpleNamespace(containers=SimpleNamespace(list=snapshot))
     monkeypatch.setattr(state.SandboxManager, "_get_docker_client", lambda: client)
@@ -120,7 +132,7 @@ def test_startup_orphan_sweep_finishes_before_recovery_and_admission(
             release.set()
 
     asyncio.run(scenario())
-    assert events == ["reaped", "recovery", "scheduler", "admission"]
+    assert events == ["gone", "reaped", "recovery", "scheduler", "admission"]
 
 
 @pytest.mark.parametrize(("failure", "reason"), [
