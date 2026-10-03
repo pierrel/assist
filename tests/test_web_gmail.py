@@ -332,6 +332,7 @@ def test_reply_endpoint_cannot_consume_other_action_proposal(client,monkeypatch,
     (True,True,True,False,False,False),(True,True,False,False,False,False),
     (True,False,True,True,False,False),(True,False,True,True,True,False),
     (True,False,True,False,False,True),
+    (True,False,True,False,False,"restart"),
 ])
 def test_worker_binds_gmail_decision_to_its_dispatch_kind(client,monkeypatch,gmail_key,other_reply,gmail_pending,stale,wait,recover):
     class Chat:
@@ -362,7 +363,8 @@ def test_worker_binds_gmail_decision_to_its_dispatch_kind(client,monkeypatch,gma
     monkeypatch.setattr(threads,"_get_sandbox_backend",lambda *a,**k:None)
     monkeypatch.setattr(threads,"_get_domain_manager",lambda *a,**k:None)
     monkeypatch.setattr(threads,"gmail_action_preview",lambda _: [{"id":"abc123","body":"Complete preview"}])
-    monkeypatch.setattr(threads._RESUME_SCHEDULER,"submit",lambda *a,**k:None)
+    scheduled=[]
+    monkeypatch.setattr(threads._RESUME_SCHEDULER,"submit",lambda *a,**k:scheduled.append(a))
     proposal=threads._create_run("mail-thread","Original proposal")
     threads._runs().claim("mail-thread",proposal.id)
     threads._runs().transition("mail-thread",proposal.id,"awaiting_approval")
@@ -377,7 +379,7 @@ def test_worker_binds_gmail_decision_to_its_dispatch_kind(client,monkeypatch,gma
         _set_status("mail-thread","awaiting_approval",pending_reply="Separate unseen reply",pending_sender="+1555")
     if gmail_key and gmail_pending:
         before=_get_status("mail-thread")
-        if recover:
+        if recover is True:
             with monkeypatch.context() as failure:
                 def unavailable(*a,**k):
                     raise OSError("synthetic status write failure")
@@ -388,6 +390,12 @@ def test_worker_binds_gmail_decision_to_its_dispatch_kind(client,monkeypatch,gma
             assert replayed
         else:
             run,_=threads.gmail_decision_core("mail-thread","approve","exact-token")
+        if recover=="restart":
+            from manage.web import state
+            monkeypatch.setattr(web.MANAGER,"list",lambda:["mail-thread"])
+            state._recover_interrupted_threads()
+            assert _get_status("mail-thread")["stage"]=="paused"
+            assert (run.id,"mail-thread") in scheduled
         if stale:
             chat.ids=["def456"]
             _set_status("mail-thread","awaiting_approval",**{

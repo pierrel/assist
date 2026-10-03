@@ -2985,13 +2985,14 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # Refuse foreign/stale decisions before clearing the visible card
                 # or claiming its proposal lineage. Legacy untyped decisions cannot
                 # prove which kind of action was approved. Gmail also binds the
-                # exact admitted owner/action, or its card after a failed status write.
+                # exact admitted owner/action (including startup's paused projection),
+                # or its card after a failed status write.
                 pending_chat = MANAGER.get(tid, sandbox_backend=None)
                 pending_gmail = _pending_gmail(pending_chat)
                 decision_status = _get_status(tid)
                 matches = ((decision_kind == "gmail" and pending_gmail
                             and pending_gmail == decision_status.get("pending_gmail_action")
-                            and ((decision_status.get("stage") == "processing"
+                            and ((decision_status.get("stage") in {"processing", "paused"}
                                   and decision_status.get("pending_run_id") == _run.id)
                                  or (decision_status.get("stage") == "awaiting_approval"
                                      and decision_key == "gmail-approval:" + pending_gmail["name"] + ":"
