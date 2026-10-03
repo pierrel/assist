@@ -937,8 +937,9 @@ def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
                       else "Run is already terminal")
             return 409, {"detail": detail, "outcome": projection["status"],
                          "run": _public_run_projection(projection)}
-        selected = next(run for run in runs if run.id == projection["physical_run_id"])
-        if projection["status"] == "pending" and selected.resume_decision is not None:
+        if projection["status"] == "pending" and any(
+                run.work_id == projection["work_id"] and run.resume_decision is not None
+                for run in runs):
             return 409, {"detail": "An approval decision is already accepted", "outcome": "pending",
                          "run": _public_run_projection(projection)}
         service = threads._runs()
@@ -1154,7 +1155,7 @@ def _approval_decision(tid: str, body: _ApprovalDecision):
         raise HTTPException(status_code=409, detail="Mailbox approval is unavailable")
     if body.decision == "edit" or body.to or body.subject or body.body:
         raise HTTPException(status_code=422, detail="Mailbox decisions cannot edit messages")
-    return core(tid, body.decision, body.token)
+    return core(tid, body.decision, body.token, expected_action_kind=body.kind)
 
 
 @router.get("/threads/{tid}/approval")

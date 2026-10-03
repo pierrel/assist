@@ -140,15 +140,37 @@ def test_gmail_preview_and_reject_only_error_share_owner_contract(approval, monk
     assert proposal["action"]["args"]["message_ids"] == ["abc"]
     calls = []
 
-    def core(tid, decision, token):
-        calls.append((tid, decision, token))
+    def core(tid, decision, token, *, expected_action_kind=None):
+        calls.append((tid, decision, token, expected_action_kind))
         return type("Run", (), {"id": "resume-run", "status": "pending"})(), False
 
     monkeypatch.setattr(threads, "gmail_decision_core", core, raising=False)
     assert client.post(URL, headers=HEADERS, json={
         "kind": "gmail_delete", "token": proposal["token"], "decision": "reject"}).status_code == 200
-    assert calls == [("thread-a", "reject", "gmail-token-12345")]
+    assert calls == [("thread-a", "reject", "gmail-token-12345", "gmail_delete")]
     assert scheduled == [("resume-run", "thread-a")]
+
+
+def test_phone_binds_gmail_kind_to_owner_admission(approval, monkeypatch):
+    client, runs, scheduled = approval
+    state._set_status("thread-a", "awaiting_approval", pending_gmail_token="gmail-token-12345",
+                      pending_gmail_action={"name": "gmail_delete", "args": {"message_ids": ["abc"]}},
+                      pending_gmail_messages=[])
+    before = state._get_status("thread-a")
+
+    def core(tid, decision, token, *, expected_action_kind=None):
+        with threads._RUN_ADMISSION_LOCK:
+            if (expected_action_kind is not None
+                    and state._get_status(tid)["pending_gmail_action"]["name"] != expected_action_kind):
+                raise HTTPException(status_code=409, detail="Mailbox action changed")
+            return type("Run", (), {"id": "resume-run", "status": "pending"})(), False
+
+    monkeypatch.setattr(threads, "gmail_decision_core", core, raising=False)
+    response = client.post(URL, headers=HEADERS, json={
+        "kind": "gmail_archive", "token": "gmail-token-12345", "decision": "approve"})
+    assert response.status_code == 409
+    assert state._get_status("thread-a") == before
+    assert runs.list("thread-a") == [] and scheduled == []
 
 
 def test_approval_input_is_strict_and_bounded(approval):
@@ -283,3 +305,29 @@ def test_reviewed_email_identity_is_durable_before_dispatch(approval):
     reloaded = RunService(runs.root_dir).get("thread-a", response.json()["run_id"])
     assert reloaded.resume_decision["email_review_identity"] == [
         "Assistant <assistant@example.test>", "oversight@example.test"]
+
+
+@pytest.mark.parametrize("handle", ["original", "recovery"])
+def test_phone_cannot_cancel_recovered_accepted_approval(approval, monkeypatch, handle):
+    client, runs, _ = approval
+    original = runs.create("thread-a", "general-agent", "Email this person")
+    runs.claim("thread-a", original.id)
+    runs.transition("thread-a", original.id, "awaiting_approval")
+    status = state._get_status("thread-a")
+    status.pop("stage")
+    state._set_status("thread-a", "awaiting_approval", **status, pending_email_run_id=original.id)
+    response = client.post(URL, headers=HEADERS, json={
+        "kind": "send_email", "token": _proposal(client)["token"], "decision": "approve"})
+    assert response.status_code == 200
+    accepted = runs.claim("thread-a", response.json()["run_id"])
+    monkeypatch.setattr(threads, "_is_pi_thread", lambda tid: False)
+    monkeypatch.setattr(threads, "_recovery_decision", lambda tid, text: "resume")
+    threads._recover_run(accepted)
+    recovered = runs.list("thread-a")[-1]
+    assert recovered.resume and recovered.resume_decision is None
+    before = state._get_status("thread-a")
+    run_id = original.id if handle == "original" else recovered.id
+    response = client.delete(f"/api/v1/phone/threads/thread-a/runs/{run_id}", headers=HEADERS)
+    assert response.status_code == 409 and response.json()["outcome"] == "pending"
+    assert runs.get("thread-a", recovered.id).status == "pending"
+    assert state._get_status("thread-a") == before

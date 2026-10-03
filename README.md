@@ -452,12 +452,14 @@ Email approval resumes persist the reviewed sender and fixed Cc. If they change
 before dispatch, the checkpoint keeps its original proposal for fresh review;
 reapply any edits before approving again. The email tool checks that reviewed
 identity against its captured delivery configuration. Once a decision is accepted,
-phone Run cancellation returns HTTP 409 without cancelling it or losing its receipt.
+phone Run cancellation returns HTTP 409, including after checkpoint recovery,
+without cancelling the work or losing its receipt.
 Checkpoint recovery retains the reviewed identity from the durable work chain
 without reapplying a consumed decision. An accepted approval remains that chain's
 successor rather than being replaced by recovery of an older interrupted slice.
 The EmacsOS client offers scrollable previews, two-tap decisions and an email
-editor. Gmail archive/Trash decisions require the separately installed Gmail tools.
+editor. Gmail archive/Trash decisions bind the submitted kind as well as the token
+inside the separately installed Gmail tools' admission boundary.
 The exact request, cursor, event, failure, and repository-label contract is in
 [the phone API design note](docs/2026-09-04-phone-api.org), amended for
 [mature-thread message admission](docs/2026-09-07-phone-api-mature-thread-admission.org),
