@@ -9,6 +9,8 @@ import shutil
 from unittest import TestCase, skipIf
 from unittest.mock import patch, MagicMock, PropertyMock
 
+import pytest
+
 from assist.sandbox import (
     DockerSandboxBackend,
     MAX_OUTPUT_CHARS,
@@ -34,6 +36,21 @@ def test_stop_proof_waits_for_auto_removed_name_release():
     assert [call.args[0][:2] for call in run.call_args_list] == [
         ["docker", "kill"], ["docker", "inspect"],
         ["docker", "rm"], ["docker", "inspect"]]
+    assert all("exact-generation" in call.args[0] for call in run.call_args_list)
+
+
+def test_stop_proof_refuses_running_generation_after_failed_kill():
+    from assist.sandbox_manager import confirm_generation_stopped
+
+    responses = [
+        MagicMock(returncode=1, stdout=b"", stderr=b"failed"),
+        MagicMock(returncode=0, stdout=b"true", stderr=b""),
+    ]
+    with patch("assist.sandbox_manager.subprocess.run", side_effect=responses), \
+         patch("assist.sandbox_manager.time.monotonic", side_effect=[0, 0, 6]), \
+         patch("assist.sandbox_manager.time.sleep"):
+        with pytest.raises(RuntimeError, match="teardown is unconfirmed"):
+            confirm_generation_stopped("exact-generation")
 
 
 class TestDockerSandboxBackend(TestCase):
@@ -699,6 +716,54 @@ class TestSandboxManager(TestCase):
         with authority.fence(self.temp_dir, "managed-turn") as state:
             self.assertIsNone(state.lease)
 
+    def test_git_verified_cleanup_also_clears_managed_generation(self):
+        from assist.browser import authority
+
+        test_path = os.path.join(self.temp_dir, "git-turn", "domain")
+        os.makedirs(test_path)
+        authority.mark_new_thread(self.temp_dir, "git-turn")
+        container = MagicMock()
+        container.id = "git-generation"
+        SandboxManager._containers[test_path] = container
+        SandboxManager._generation_owners[container.id] = (
+            self.temp_dir, "git-turn", "claimed-run")
+        with authority.fence(self.temp_dir, "git-turn") as state:
+            state.begin("claimed-run", 1)
+            state.add_generation("claimed-run", container.id)
+
+        SandboxManager.cleanup_verified(test_path, container)
+
+        container.kill.assert_called_once_with()
+        container.wait.assert_called_once_with(timeout=10)
+        self.assertNotIn(test_path, SandboxManager._containers)
+        self.assertNotIn(container.id, SandboxManager._generation_owners)
+        with authority.fence(self.temp_dir, "git-turn") as state:
+            self.assertIsNone(state.lease)
+
+    def test_git_failed_stop_retains_managed_generation(self):
+        from assist.browser import authority
+
+        test_path = os.path.join(self.temp_dir, "git-turn", "domain")
+        os.makedirs(test_path)
+        authority.mark_new_thread(self.temp_dir, "git-turn")
+        container = MagicMock()
+        container.id = "git-generation"
+        container.kill.side_effect = RuntimeError("stop unconfirmed")
+        SandboxManager._containers[test_path] = container
+        SandboxManager._generation_owners[container.id] = (
+            self.temp_dir, "git-turn", "claimed-run")
+        with authority.fence(self.temp_dir, "git-turn") as state:
+            state.begin("claimed-run", 1)
+            state.add_generation("claimed-run", container.id)
+
+        with self.assertRaisesRegex(RuntimeError, "stop unconfirmed"):
+            SandboxManager.cleanup_verified(test_path, container)
+
+        self.assertIs(SandboxManager._containers[test_path], container)
+        self.assertIn(container.id, SandboxManager._generation_owners)
+        with authority.fence(self.temp_dir, "git-turn") as state:
+            self.assertEqual(state.lease["generations"], [container.id])
+
     def test_generic_workspaces_do_not_access_browser_authority(self):
         from docker.errors import DockerException
         from assist.browser import authority
@@ -952,11 +1017,8 @@ class TestSandboxManager(TestCase):
         self.assertIn("chown", msg)
 
     @patch('assist.sandbox.DockerSandboxBackend')
-    def test_get_sandbox_backend_does_not_reuse_reaps_stale(self, mock_backend_cls):
-        """Per-turn lifecycle: a container left registered from a prior turn is
-        NOT reused — it is killed (SIGKILL, via cleanup) and a fresh one is
-        created.  Reusing it would let a container outlive its turn, which is
-        the whole thing the per-turn design forbids."""
+    def test_get_sandbox_backend_confirms_stale_before_replacement(self, mock_backend_cls):
+        """A prior generation must pass stop confirmation before replacement."""
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)
 
@@ -979,7 +1041,7 @@ class TestSandboxManager(TestCase):
             sandbox = SandboxManager.get_sandbox_backend(test_path)
 
         self.assertIsNotNone(sandbox)
-        # The stale container was SIGKILLed, not reused (never reload()'d).
+        # Exact stop confirmation was requested; the stale handle was not reused.
         stopped.assert_called_once_with(stale.id)
         stale.reload.assert_not_called()
         # A fresh container replaced it in the registry.
@@ -1006,7 +1068,7 @@ class TestSandboxManager(TestCase):
 
         self.assertIsNone(sandbox)
 
-    def test_cleanup_kills_and_removes_container(self):
+    def test_cleanup_confirms_and_removes_tracked_generation(self):
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)
 
@@ -1016,8 +1078,7 @@ class TestSandboxManager(TestCase):
         with patch('assist.sandbox_manager.confirm_generation_stopped') as stopped:
             SandboxManager.cleanup(test_path)
 
-        # SIGKILL, not a graceful stop: a sandbox has nothing to flush and its
-        # bare-`sleep` PID 1 ignores SIGTERM, so stop() only burns the timeout.
+        # The mocked exact-ID confirmation precedes registry removal.
         stopped.assert_called_once_with(mock_container.id)
         mock_container.stop.assert_not_called()
         self.assertNotIn(test_path, SandboxManager._containers)
@@ -1045,6 +1106,7 @@ class TestSandboxManager(TestCase):
                    side_effect=RuntimeError("stop unconfirmed")):
             with self.assertRaisesRegex(RuntimeError, "stop unconfirmed"):
                 SandboxManager.cleanup(test_path, container)
+            SandboxManager.cleanup_all()
         self.assertIs(SandboxManager._containers[test_path], container)
 
     def test_stale_cleanup_stops_only_captured_generation(self):

@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from manage.web import app
+from manage.web import app, state
 from assist.events.thread_log import read_events
 from manage.voice import wire
 from manage.voice.session import VoiceSession
@@ -24,6 +24,7 @@ PCM = b"\0\0" * 320
 @pytest.fixture(autouse=True)
 def voice_wire(monkeypatch):
     monkeypatch.setenv("ASSIST_VOICE_SECRET", SECRET)
+    monkeypatch.setattr(state.SandboxManager, "reap_orphans", lambda root: None)
     wire.configure_call_runner(None)
     wire._release_call()
     yield

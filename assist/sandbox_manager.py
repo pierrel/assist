@@ -17,7 +17,7 @@ _ANY_CONTAINER = object()
 
 
 def confirm_generation_stopped(container_id: str) -> None:
-    """Prove one exact sandbox generation is gone and its name is reusable."""
+    """Prove one exact sandbox generation exited and was removed."""
     try:
         subprocess.run(["docker", "kill", container_id],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -619,8 +619,8 @@ class SandboxManager:
         exact thread workspace; generic callers never infer authority from a path.
         """
         # Never reuse container generations. The web layer tears each down at
-        # its phase boundary (manage/web/threads.py), so a registry entry
-        # surviving to here means teardown did not run (the worker died). Reap
+        # its phase boundary (manage/web/threads.py); a registry entry here
+        # means teardown did not complete or could not be confirmed. Reap
         # that stale container before creating a fresh one — the registry is
         # keyed by work_dir, so creating without reaping would overwrite the
         # reference and orphan it (the 3h backstop TTL would eventually catch
@@ -1019,5 +1019,64 @@ class SandboxManager:
         for path, container in list(cls._containers.items()):
             try:
                 cls.cleanup(path, container)
-            except Exception as e:
-                logger.error("Container cleanup unconfirmed for %s: %s", path, e)
+            except Exception:
+                logger.error("Sandbox cleanup unconfirmed; generation remains tracked")
+
+    @classmethod
+    def reap_orphans(cls, root_dir: str) -> None:
+        """Confirm this deployment's surviving sandboxes are gone by docker label
+        plus workspace mount, not the in-memory registry. After a web-process
+        crash ``_containers`` is empty, but the containers survive — and a
+        ``docker exec``'d tool command keeps running inside one, mutating the
+        host-bind-mounted /workspace that a recovery resume's FRESH container
+        mounts too, for up to the 3h backstop TTL. Lifespan startup completes
+        this proof before recovery dispatch or listener admission.
+
+        Scoped to containers whose /workspace bind-mount lives under
+        ``root_dir`` (this deployment's threads root): the label alone is
+        host-global, and prod + eval/dev sandboxes share ONE docker daemon on
+        this box — a bare-label reap would kill a concurrently running eval's
+        LIVE containers mid-turn. The mount filter needs no new create-time
+        labeling, so it also covers orphans from pre-existing code. Uncertain
+        listing, scope, or exact teardown aborts startup."""
+        root = os.path.realpath(root_dir) + os.sep
+        try:
+            from docker.errors import NotFound
+            client = cls._get_docker_client()
+            candidates = client.containers.list(
+                all=True, filters={"label": "assist.sandbox=true"})
+            if not isinstance(candidates, list):
+                raise ValueError
+        except Exception:
+            raise RuntimeError("orphan sandbox listing unconfirmed") from None
+        for container in candidates:
+            try:
+                container.reload()
+            except NotFound:
+                # reload fetches this exact ID; it disappeared after the list.
+                continue
+            except Exception:
+                raise RuntimeError("orphan sandbox scope unconfirmed") from None
+            try:
+                mounts = container.attrs["Mounts"]
+                if not isinstance(mounts, list):
+                    raise ValueError
+                workspace = []
+                for mount in mounts:
+                    if not isinstance(mount, dict) or not isinstance(mount.get("Destination"), str):
+                        raise ValueError
+                    if mount["Destination"] == "/workspace":
+                        workspace.append(mount.get("Source"))
+                if (len(workspace) != 1 or not isinstance(workspace[0], str)
+                        or not os.path.isabs(workspace[0])):
+                    raise ValueError
+                in_scope = os.path.realpath(workspace[0]).startswith(root)
+            except Exception:
+                raise RuntimeError("orphan sandbox scope unconfirmed") from None
+            if not in_scope:
+                continue
+            try:
+                confirm_generation_stopped(container.id)
+                logger.info("Reaped orphaned sandbox %s", container.id[:12])
+            except Exception:
+                raise RuntimeError("orphan sandbox teardown unconfirmed") from None

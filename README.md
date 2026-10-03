@@ -360,22 +360,56 @@ See [edd/eval/README.md](edd/eval/README.md) for detailed documentation on evalu
 
 ### Subsequent Deployments
 
-After initial setup, deploy with a single command:
+The old process has no turn-safe drain. For the first rollout, enforce a quiet
+window for **all** old-process Run producers: block new request admission and
+quiesce existing voice sessions, scheduled dispatches, and queued notifications.
+Keep that window in force from verification through stopping the old service.
+While it is held, verify that no active or queued turn or Git sandbox flight
+remains, then stop the old service. If this quiet window cannot be enforced,
+defer the first restart. Once the old process has stopped, sync code, install
+its updated unit, and start it.
+Substitute the host and service placeholders from `.deploy.env`:
+
+```bash
+ssh <DEPLOY_HOST> 'sudo systemctl stop <SERVICE_NAME>'
+make deploy-code
+make deploy-service
+ssh <DEPLOY_HOST> 'sudo systemctl start <SERVICE_NAME>'
+```
+
+`make deploy-service` reads the unit template from the synced code. After
+that first rollout, deploy with:
 
 ```bash
 make deploy
 ```
 
-This will:
-1. Sync code to the production server
-2. Update the systemd service configuration
-3. Restart the service
-4. Show service logs (press Ctrl+C when satisfied)
+This syncs code, rebuilds the sandbox and proxy and Pi runtime images,
+deploys SearXNG, installs dependencies and speech models, then restarts the
+service using the already installed unit and tails its logs (press Ctrl+C
+when satisfied).
+
+`make deploy` leaves the systemd unit untouched. For a later unit change,
+sync the template with `make deploy-code` and run `make deploy-service`
+before restarting.
+
+An intentional restart waits for in-flight turns and schedule callbacks to
+finish, including owned sandbox teardown. Git transport supplies sidecar flight
+fencing and finalization. Accepted Runs not yet executing remain durable
+and are requeued after restart. Install the updated service unit before relying
+on this behavior. A long turn can leave `systemctl restart` waiting; inspect the
+running stop job and service log rather than forcing the process down. If a live
+sandbox cannot be stopped and verified,
+the old process stays alive with its listener closed. A historical Git fence
+blocks only its own thread and is not
+cleared by restarting the service. Startup refuses admission while old-sandbox
+removal is unverified; systemd retries the service. Persistent proof failures
+require operator recovery.
 
 ### Deployment Commands
 
 ```bash
-make deploy         # Full deployment (code + service + restart)
+make deploy         # Code, images, dependencies, models, restart; no unit install
 make deploy-code    # Deploy code only (no restart)
 make deploy-service # Install/update systemd service
 make install-prod   # Install dependencies on remote

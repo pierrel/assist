@@ -1044,6 +1044,7 @@ def test_event_loop_stays_live_while_store_lock_is_held(wired, monkeypatch):
     monkeypatch.setattr(threads.BackgroundTasks, "add_task",
                         lambda self, fn, *a, **k: None)
     monkeypatch.setattr(st_mod, "_recover_interrupted_threads", lambda: None)
+    monkeypatch.setattr(st_mod.SandboxManager, "reap_orphans", lambda root: None)
     monkeypatch.setattr(threads, "start_scheduler", lambda: None)
     monkeypatch.setattr(threads, "stop_scheduler", lambda: None)
     monkeypatch.setattr(web.MANAGER, "close", lambda: None)

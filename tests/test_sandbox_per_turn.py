@@ -8,8 +8,8 @@ Covered here:
   - cleanup() proves the captured generation stopped before registry release.
   - get_sandbox_backend never reuses — a second call reaps the stale
     container and creates a fresh one.
-  - the Dockerfile backstop TTL > the queue hold cap (the safety invariant).
-  - real-Docker: a killed container is actually gone (symptom, un-mocked).
+  - the Dockerfile backstop TTL is configured above the normal queue hold cap.
+  - real-Docker: cleanup confirms the container is gone (un-mocked).
 """
 from __future__ import annotations
 
@@ -42,8 +42,8 @@ class _SandboxStateBase(TestCase):
         SandboxManager._containers = self._saved
 
 
-class TestCleanupKills(_SandboxStateBase):
-    def test_cleanup_requires_confirmed_stop(self):
+class TestCleanupGeneration(_SandboxStateBase):
+    def test_cleanup_requests_exact_generation_confirmation(self):
         c = _fake_container("c0")
         SandboxManager._containers["w"] = c
         with patch("assist.sandbox_manager.confirm_generation_stopped") as stopped:
@@ -63,6 +63,7 @@ class TestCleanupKills(_SandboxStateBase):
         with patch("assist.sandbox_manager.confirm_generation_stopped") as stopped:
             SandboxManager.cleanup("w", old)
         self.assertIs(SandboxManager._containers["w"], replacement)
+        replacement.kill.assert_not_called()
         stopped.assert_called_once_with("old")
 
         with patch("assist.sandbox_manager.confirm_generation_stopped") as stopped:
@@ -71,8 +72,7 @@ class TestCleanupKills(_SandboxStateBase):
 
 
 class TestNoReuse(_SandboxStateBase):
-    """get_sandbox_backend creates a fresh container every call and reaps any
-    stale one left in the registry (the "new container per request" guarantee).
+    """get_sandbox_backend confirms stale cleanup before creating a fresh one.
     """
 
     def _patches(self, work_dir):
@@ -164,19 +164,9 @@ class TestPerTurnTeardownRealDocker(unittest.TestCase):
             SandboxManager.cleanup(work_dir)
 
             self.assertNotIn(work_dir, SandboxManager._containers)
-            # kill() is synchronous for the SIGKILL but Docker's --rm removal
-            # is async, so poll: the container must actually disappear (proving
-            # it was killed, not just dropped from the registry).
-            import time
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                try:
-                    client.containers.get(cid)
-                    time.sleep(0.1)
-                except NotFound:
-                    break
-            else:
-                self.fail("container still present 10s after kill() — not reaped")
+            # cleanup() already waited for absence; verify it through the SDK too.
+            with self.assertRaises(NotFound):
+                client.containers.get(cid)
         finally:
             SandboxManager._containers.pop(work_dir, None)
             shutil.rmtree(work_dir, ignore_errors=True)

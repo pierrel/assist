@@ -8,6 +8,7 @@ sit alongside the screen they render (``threads.py``, ``review.py``,
 """
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -48,6 +49,7 @@ from assist.geo.catalog import Catalog
 from assist.geo.proposals import ProposalStore
 from assist.geo.registry import RegionRegistry
 from assist.geo.tools import geo_tools
+from manage.web.drain import RUN_GATE
 from assist.thread_manager import (
     ThreadManager, set_web_tools, set_web_triage_tools, set_web_interrupt_on,
     set_web_triage_interrupt_on)
@@ -723,10 +725,38 @@ def _recover_interrupted_threads() -> None:
     queue_recovery_runs()
 
 
+def _verify_shutdown_sandboxes() -> None:
+    """Refuse exit while this process retains a sandbox or browser session."""
+    if SandboxManager._containers:
+        raise RuntimeError("sandbox generation still tracked")
+    from assist.browser.manager import BrowserManager
+    if BrowserManager._sessions:
+        raise RuntimeError("browser session still tracked")
+
+
+async def _hold_unsafe_shutdown(error: Exception) -> None:
+    """A failed shutdown prerequisite leaves the process alive for recovery."""
+    reason = str(error)[:256]
+    if reason not in {"sandbox generation still tracked", "browser session still tracked"}:
+        reason = "details withheld"
+    logging.getLogger(__name__).critical(
+        "Intentional stop withheld: %s: %s; inspect retained sandbox and browser state",
+        type(error).__name__, reason)
+    never = asyncio.Event()
+    while True:
+        try:
+            await never.wait()
+        except asyncio.CancelledError:
+            logging.getLogger(__name__).critical("Unsafe shutdown cancellation ignored")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    RUN_GATE.reopen()
     # Ensure thread root exists at startup
     os.makedirs(ROOT, exist_ok=True)
+    # Confirm old-process sandbox removal before recovery or listener admission.
+    await run_in_threadpool(SandboxManager.reap_orphans, MANAGER.root_dir)
 
     # Recover threads a previous server run left busy, instead of erroring them
     # (extracted so the test pins the REAL scan, not a copy).
@@ -759,24 +789,21 @@ async def lifespan(app: FastAPI):
     finally:
         configure_call_runner(None)
         try:
-            stop_scheduler()
-        except Exception:
-            logging.getLogger(__name__).warning("scheduler shutdown failed", exc_info=True)
+            # Uvicorn has closed admission and awaited full ASGI BackgroundTasks.
+            # The scheduler and geo callbacks can still create Runs off-loop.
+            await run_in_threadpool(stop_scheduler)
+            await run_in_threadpool(RUN_GATE.close_when_idle)
+            from assist.browser.manager import BrowserManager
+            await run_in_threadpool(BrowserManager.cleanup_all)
+            await run_in_threadpool(SandboxManager.cleanup_all)
+            await run_in_threadpool(_verify_shutdown_sandboxes)
+        except Exception as error:
+            await _hold_unsafe_shutdown(error)
         try:
             await anyio.to_thread.run_sync(
                 CAPTURE_WORKER.stop, limiter=CAPTURE_THREAD_LIMITER)
         except Exception:
             logging.getLogger(__name__).warning("capture worker shutdown failed", exc_info=True)
-        # Clean up Docker sandbox containers
-        try:
-            from assist.browser.manager import BrowserManager
-            await anyio.to_thread.run_sync(BrowserManager.cleanup_all)
-        except Exception:
-            logging.getLogger(__name__).warning("browser shutdown cleanup failed", exc_info=True)
-        try:
-            await anyio.to_thread.run_sync(SandboxManager.cleanup_all)
-        except Exception:
-            logging.getLogger(__name__).warning("sandbox shutdown cleanup failed", exc_info=True)
         # Close shared resources (e.g., sqlite connection) to avoid leaks
         try:
             MANAGER.close()

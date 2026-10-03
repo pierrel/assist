@@ -496,6 +496,7 @@ def test_continue_deep_admission_escapes_an_exhausted_shared_worker_pool(
 
     monkeypatch.setattr(threads, "_initialize_thread", no_initialize)
     monkeypatch.setattr(state_module, "_recover_interrupted_threads", lambda: None)
+    monkeypatch.setattr(state_module.SandboxManager, "reap_orphans", lambda root: None)
     monkeypatch.setattr(threads, "start_scheduler", lambda: None)
     monkeypatch.setattr(threads, "stop_scheduler", lambda: None)
     monkeypatch.setattr(web.MANAGER, "close", lambda: None)
