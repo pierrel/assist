@@ -460,6 +460,10 @@ is still pending, then continues consumed checkpoints without reapplying it.
 Legacy pending proposals without an interrupt identity require fresh review after recovery.
 An accepted approval remains that chain's
 successor rather than being replaced by recovery of an older interrupted slice.
+An already completed approval checkpoint finalizes that receipt without creating
+another invocation. Pending continuations in an accepted approval's work chain run
+before that thread's followers until recovery finishes, even after the decision is
+consumed or the status loses its proposal token. Other work retains user-turn priority.
 The EmacsOS client offers scrollable previews, two-tap decisions and an email
 editor. Gmail archive/Trash decisions bind the submitted kind as well as the token
 inside the separately installed Gmail tools' admission boundary.

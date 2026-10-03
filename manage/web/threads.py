@@ -2694,14 +2694,11 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
 
 
 def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
-    """Queue the next pending run, user tier first and FIFO within each tier."""
+    """Queue unfinished approval chains first, then user turns and other FIFO work."""
     runs = _runs().list(tid)
     if any(run.status == "running" for run in runs):
         return
     status = _get_status(tid)
-    if (status.get("stage") == "paused"
-            and any(run.status == "interrupted" for run in runs)):
-        return
     pending_runs = [run for run in runs
                     if run.status == "pending" and run.id != run_id]
     if not pending_runs:
@@ -2709,7 +2706,15 @@ def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
     user = next((run for run in pending_runs
                  if run.mode == "turn" and run.origin is None
                  and run.text is not None), None)
-    selected = user or pending_runs[0]
+    approval_works = {run.work_id for run in runs
+                      if run.resume_decision is not None}
+    approval = next((run for run in pending_runs
+                     if run.resume_decision is not None
+                     or (run.resume and run.work_id in approval_works)), None)
+    if (approval is None and status.get("stage") == "paused"
+            and any(run.status == "interrupted" for run in runs)):
+        return
+    selected = approval or user or pending_runs[0]
     if status.get("stage") in {"initializing", "cloning"}:
         _INITIALIZATION_SCHEDULER.submit(
             selected.id, tid, status.get("domain") or None)
@@ -2760,7 +2765,9 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
             successor.id, tid, user_priority=user_priority)
         return
 
-    decision = _recovery_decision(tid, pending_text or "")
+    decision = _recovery_decision(
+        tid, pending_text or "",
+        **({"continuation": True} if run.resume or run.resume_decision is not None else {}))
     logging.info("recovery: run %s on %s -> %s", run.id, tid, decision)
     if decision == "finalize":
         git_error = git_recovery_error(
@@ -4300,7 +4307,7 @@ def _location_to_fields(location: LocationSnapshot) -> dict:
             "observed_at": location.observed_at.isoformat()}
 
 
-def _recovery_decision(tid: str, pending_message: str) -> str:
+def _recovery_decision(tid: str, pending_message: str, *, continuation: bool = False) -> str:
     """Resume-vs-redispatch for one recovered thread, decided by GRAPH STATE (not
     text equality — a re-sent duplicate text or the supersede prefix would fool a
     text compare in both directions):
@@ -4312,6 +4319,8 @@ def _recovery_decision(tid: str, pending_message: str) -> str:
       crash landed in post-invoke bookkeeping) → "finalize". Exact only:
       containment/suffix would misread a short pending found inside the
       PREVIOUS turn's message as completed and silently drop it.
+    - a continuation (including an accepted approval) with no pending checkpoint
+      work is complete even when it carries no new human message.
     - otherwise the message never reached the checkpoint → "redispatch" it fresh.
     A failed state read returns "error" (the caller surfaces the restart-error
     banner rather than guessing). Built without a sandbox and without any model
@@ -4324,6 +4333,8 @@ def _recovery_decision(tid: str, pending_message: str) -> str:
         return "error"
     if (getattr(snap, "next", None) or ()) or (getattr(snap, "interrupts", None) or ()):
         return "resume"
+    if continuation:
+        return "finalize"
     latest_human = ""
     for m in reversed((snap.values or {}).get("messages", [])):
         if isinstance(m, HumanMessage):
@@ -4347,7 +4358,7 @@ def queue_recovery_runs() -> None:
     Runs off the asyncio loop during lifespan startup. Only the latest invocation
     of a work chain owns recovery. An abandoned head is queued alone; its recovery
     queues its successor before accepted followers. Otherwise pending runs are
-    queued in durable creation order, including accepted approval decisions.
+    queued with accepted approval decisions before their fenced followers.
     """
     visible = MANAGER.list()
     # ``create_thread_with_message_core`` shows an initializing status before it
@@ -4439,10 +4450,14 @@ def queue_recovery_runs() -> None:
             _INITIALIZATION_SCHEDULER.submit(
                 cancelled_initializer.id, tid, status.get("domain") or None)
             continue
+        approval_works = {run.work_id for run in visible_runs[tid]
+                          if run.resume_decision is not None}
         if ((status.get("stage") in {"initializing", "cloning"}
              and any(run.status == "pending" for run in visible_runs[tid]))
                 or any(run.status == "pending"
-                       and run.id == status.get("pending_run_id")
+                       and (run.id == status.get("pending_run_id")
+                            or (run.work_id in approval_works
+                                and (run.resume or run.resume_decision is not None)))
                        for run in visible_runs[tid])):
             _dispatch_pending_after(tid)
             continue
