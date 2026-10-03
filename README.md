@@ -439,6 +439,34 @@ until `ASSIST_PHONE_API_TOKEN` is set in an ignored owner-only deployment
 environment file. Send that value only as `Authorization: Bearer <token>` from
 the phone; never pass it into a sandbox or commit it. The API exposes visible
 thread snapshots, durable idempotent sends, and bounded workspace snapshots.
+`GET /threads/{tid}/approval` returns a complete pending email or Gmail mailbox
+proposal. `POST` to the same path requires `kind`, `token`, and `decision` (`approve`
+or `reject`); outbound email also accepts `decision="edit"` with `to`, `subject`
+and `body`. Email tokens bind
+the fixed sender and Cc as well as the message. Browser forms use the same
+identity-bound preview token while retaining their exact content checks. Decisions
+reuse the web HITL
+resume path, run off the event loop, and cannot consume a newer proposal. Complete
+approval responses and request bodies are bounded to 512 KiB without truncation.
+Email approval resumes persist the reviewed sender and fixed Cc. If they change
+before dispatch, the checkpoint keeps its original proposal for fresh review;
+reapply any edits before approving again. The email tool checks that reviewed
+identity against its captured delivery configuration. Once a decision is accepted,
+phone Run cancellation returns HTTP 409, including after checkpoint recovery,
+without cancelling the work or losing its receipt.
+Checkpoint recovery retains the reviewed identity from the durable work chain.
+It applies an accepted email decision only while its original checkpoint interrupt
+is still pending, then continues consumed checkpoints without reapplying it.
+Legacy pending proposals without an interrupt identity require fresh review after recovery.
+An accepted approval remains that chain's
+successor rather than being replaced by recovery of an older interrupted slice.
+An already completed approval checkpoint finalizes that receipt without creating
+another invocation. Pending continuations in an accepted approval's work chain run
+before that thread's followers until recovery finishes, even after the decision is
+consumed or the status loses its proposal token. Other work retains user-turn priority.
+The EmacsOS client offers scrollable previews, two-tap decisions and an email
+editor. Gmail archive/Trash decisions bind the submitted kind as well as the token
+inside the separately installed Gmail tools' admission boundary.
 The exact request, cursor, event, failure, and repository-label contract is in
 [the phone API design note](docs/2026-09-04-phone-api.org), amended for
 [mature-thread message admission](docs/2026-09-07-phone-api-mature-thread-admission.org),

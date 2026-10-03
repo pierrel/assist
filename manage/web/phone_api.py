@@ -24,7 +24,7 @@ import threading
 import unicodedata
 import uuid
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -46,6 +46,7 @@ from manage.web.run_stream import RUN_STREAMS, encode_sse
 PHONE_API_PREFIX = "/api/v1/phone"
 PHONE_API_TOKEN_ENV = "ASSIST_PHONE_API_TOKEN"
 MAX_BODY_BYTES = 66_000
+MAX_APPROVAL_BYTES = 512 * 1024
 MAX_MESSAGE_CHARS = 64_000
 MAX_HISTORY_MESSAGES = 80
 MAX_SNAPSHOT_MESSAGE_BYTES = 32 * 1024
@@ -129,18 +130,28 @@ class _SendMessage(_StrictModel):
     message: Annotated[str, Field(min_length=1, max_length=MAX_MESSAGE_CHARS)]
 
 
-async def _validated_body(request: Request, model: type[_StrictModel]) -> _StrictModel:
+class _ApprovalDecision(_StrictModel):
+    kind: Literal["send_email", "gmail_archive", "gmail_delete"]
+    token: Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")]
+    decision: Literal["approve", "reject", "edit"]
+    to: Annotated[str, Field(max_length=320)] = ""
+    subject: Annotated[str, Field(max_length=998)] = ""
+    body: Annotated[str, Field(max_length=64 * 1024)] = ""
+
+
+async def _validated_body(request: Request, model: type[_StrictModel],
+                          max_bytes: int = MAX_BODY_BYTES) -> _StrictModel:
     """Read one bounded strict JSON request without trusting Content-Length."""
     content_length = request.headers.get("content-length")
     if content_length:
         try:
-            if int(content_length) > MAX_BODY_BYTES:
+            if int(content_length) > max_bytes:
                 raise HTTPException(status_code=413, detail="Request body too large")
         except ValueError as error:
             raise HTTPException(status_code=400, detail="Invalid Content-Length") from error
     body = bytearray()
     async for chunk in request.stream():
-        if len(body) + len(chunk) > MAX_BODY_BYTES:
+        if len(body) + len(chunk) > max_bytes:
             raise HTTPException(status_code=413, detail="Request body too large")
         body.extend(chunk)
     try:
@@ -926,6 +937,11 @@ def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
                       else "Run is already terminal")
             return 409, {"detail": detail, "outcome": projection["status"],
                          "run": _public_run_projection(projection)}
+        if projection["status"] == "pending" and any(
+                run.work_id == projection["work_id"] and run.resume_decision is not None
+                for run in runs):
+            return 409, {"detail": "An approval decision is already accepted", "outcome": "pending",
+                         "run": _public_run_projection(projection)}
         service = threads._runs()
         try:
             if projection["status"] == "pending":
@@ -1101,6 +1117,65 @@ async def get_thread(tid: str) -> dict[str, Any]:
 @router.get("/threads/{tid}/history")
 async def get_thread_history(tid: str, before: str) -> dict[str, Any]:
     return await anyio.to_thread.run_sync(_snapshot, tid, before)
+
+
+def _approval_preview(tid: str) -> dict[str, Any]:
+    """Return a complete bounded proposal, never a silently shortened approval."""
+    _thread_dir(tid)
+    with threads._RUN_ADMISSION_LOCK:
+        status = state._get_status(tid)
+        proposal = None
+        if status.get("stage") == "awaiting_approval":
+            if status.get("pending_email_token"):
+                proposal = threads.email_approval_preview(status)
+            elif status.get("pending_gmail_token"):
+                action = status["pending_gmail_action"]
+                if action["name"] in {"gmail_archive", "gmail_delete"}:
+                    proposal = {"kind": action["name"], "action": action,
+                                "token": status["pending_gmail_token"],
+                                "messages": status["pending_gmail_messages"],
+                                "error": status.get("pending_gmail_error", "")}
+        value = {"thread_id": tid, "proposal": proposal}
+        if len(json.dumps(value).encode()) > MAX_APPROVAL_BYTES:
+            raise HTTPException(status_code=413,
+                                detail="Approval preview too large; review in Assist Web")
+        return value
+
+
+def _approval_decision(tid: str, body: _ApprovalDecision):
+    _thread_dir(tid)
+    if body.decision != "edit" and (body.to or body.subject or body.body):
+        raise HTTPException(status_code=422, detail="Only edited email decisions accept content")
+    if body.kind == "send_email":
+        return threads.email_decision_core(
+            tid, body.decision, body.token, to=body.to, subject=body.subject,
+            body=body.body, phone_preview=True)
+    core = getattr(threads, "gmail_decision_core", None)
+    if core is None:
+        raise HTTPException(status_code=409, detail="Mailbox approval is unavailable")
+    if body.decision == "edit" or body.to or body.subject or body.body:
+        raise HTTPException(status_code=422, detail="Mailbox decisions cannot edit messages")
+    return core(tid, body.decision, body.token, expected_kind=body.kind)
+
+
+@router.get("/threads/{tid}/approval")
+async def get_approval(tid: str) -> dict[str, Any]:
+    return await anyio.to_thread.run_sync(_approval_preview, tid)
+
+
+@router.post("/threads/{tid}/approval")
+async def decide_approval(tid: str, request: Request) -> dict[str, Any]:
+    body = await _validated_body(request, _ApprovalDecision, MAX_APPROVAL_BYTES)
+    assert isinstance(body, _ApprovalDecision)
+    try:
+        run, replayed = await anyio.to_thread.run_sync(_approval_decision, tid, body)
+    except RunStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail="run-store-unavailable") from error
+    if not replayed or run.status == "pending":
+        await anyio.to_thread.run_sync(
+            lambda: threads._RESUME_SCHEDULER.submit(run.id, tid, user_priority=True))
+    return {"thread_id": tid, "run_id": run.id, "status": run.status,
+            "replayed": replayed}
 
 
 @router.post("/threads")
