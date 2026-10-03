@@ -69,6 +69,7 @@ from assist.events.reply import SMS_SENDER_KEY
 from assist.gmail import GMAIL_INTERRUPT_ON, GmailError, gmail_action_preview
 from assist.events.email import email_identity, valid_email_content
 from assist.schedule.scheduler import Scheduler
+from manage.web.drain import DrainClosed, RUN_GATE
 from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
 from assist.thread import Thread
@@ -1668,6 +1669,15 @@ def _initialize_thread(
     rider: ContextRider | None = None,
 ) -> None:
     """Dedicated initialization worker: clone, then execute the first durable Run."""
+    with RUN_GATE.active() as accepted:
+        if accepted:
+            _initialize_thread_active(tid, run_id, domain, rider)
+
+
+def _initialize_thread_active(
+    tid: str, run_id: str, domain: str | None,
+    rider: ContextRider | None = None,
+) -> None:
     try:
         current = _runs().get(tid, run_id)
         pending = current.text or ""
@@ -2149,17 +2159,20 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 max_pending=None, multitask_strategy="enqueue",
                 delegate_user_urls=(), location: LocationSnapshot | None = None) -> Run:
     """Commit one web turn before placing its id on a dispatch queue."""
-    return _runs().create(
-        tid, assistant_id, text, run_id=run_id, work_id=work_id, mode=mode,
-        parent_thread_id=parent_thread_id, parent_run_id=parent_run_id,
-        dispatch_key=dispatch_key, sender=sender,
-        rider=_rider_to_fields(rider) if rider is not None else None,
-        origin=origin, resume=resume, resume_decision=resume_decision,
-        pending_text=pending_text, active_ms=active_ms,
-        cancel_pending=cancel_pending, max_runs=max_runs,
-        max_pending=max_pending, multitask_strategy=multitask_strategy,
-        delegate_user_urls=delegate_user_urls,
-        location=_location_to_fields(location) if location else None)
+    with RUN_GATE.active() as accepted:
+        if not accepted:
+            raise DrainClosed("web process is stopping")
+        return _runs().create(
+            tid, assistant_id, text, run_id=run_id, work_id=work_id, mode=mode,
+            parent_thread_id=parent_thread_id, parent_run_id=parent_run_id,
+            dispatch_key=dispatch_key, sender=sender,
+            rider=_rider_to_fields(rider) if rider is not None else None,
+            origin=origin, resume=resume, resume_decision=resume_decision,
+            pending_text=pending_text, active_ms=active_ms,
+            cancel_pending=cancel_pending, max_runs=max_runs,
+            max_pending=max_pending, multitask_strategy=multitask_strategy,
+            delegate_user_urls=delegate_user_urls,
+            location=_location_to_fields(location) if location else None)
 
 
 def _publish_phone_text(tid: str, work_id: str, text: str) -> None:
@@ -2490,6 +2503,12 @@ def _complete_child_handoff(run: Run) -> Run | None:
 
 def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
     """Load and execute one durable run; dispatch queues carry ids only."""
+    with RUN_GATE.active() as accepted:
+        if accepted:
+            _execute_run_active(run_id, tid, user_priority=user_priority)
+
+
+def _execute_run_active(run_id: str, tid: str, *, user_priority: bool = False) -> None:
     try:
         run = _runs().get(tid, run_id)
     except RunNotFound:
@@ -3130,14 +3149,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     else:
                         resp = chat.message(text)
             finally:
-                # Reap the model generation as soon as this turn's agent
-                # run finishes — success, error, or the early return above —
-                # while we still hold the queue, so the next turn always starts
-                # in a fresh sandbox and no container outlives its turn.  This,
-                # plus the >2h backstop TTL, is what makes the mid-flight reap
-                # impossible: container age <= turn age, capped by the queue.
-                # cleanup() SIGKILLs (the response is already committed to the
-                # checkpoint here, and the sandbox has nothing to flush).
+                # Attempt cleanup while holding the queue. Retained generations
+                # require shutdown proof; retained Git fences block later admission.
                 if git_lifecycle.bound and sandbox_generation is not None:
                     try:
                         git_lifecycle.cleanup_model(sandbox_generation)
@@ -3245,8 +3258,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     except ThreadPauseRequested:
         # NON-terminal (fair scheduling): the turn yielded the slot at its quantum so a
         # waiting turn could run. Its work is durable in the checkpoint (nothing lost);
-        # the container was already reaped by the `finally` above (reap-on-pause, so no
-        # container outlives its slice). Mark it paused and hand it to the dedicated
+        # Mark it paused and hand it to the dedicated
         # resume scheduler — NOT a BackgroundTask (that would park a shared-threadpool
         # worker per paused turn and stall request handling). Carry the active hold it
         # burned so the 2h cap accounts across resumes.
@@ -3293,9 +3305,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # previous turn's work didn't land.  Without this branch the
         # generic except below shows a raw exception repr to the user.
         logging.error("Sandbox lost for thread %s: %s", tid, e)
-        # The per-turn teardown (the `finally` above) already reaped this
-        # turn's container; just drop the cached domain manager so a retry
-        # re-checks cleanly instead of poking at the corpse of the old one.
+        # Drop the cached domain manager so a retry re-checks sandbox and Git admission.
         DOMAIN_MANAGERS.pop(tid, None)
         _cancelled = _cancel_this_turns_continuations(tid, _pre_turn_conts)
         _rejournaled = _rejournal_claimed_interjections(tid, rider)
@@ -3351,7 +3361,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             _set_status(tid, "error", error=message, **pending_kwargs)
     except _SupersedeCapReached:
         # Controlled unwind from the supersede-cap terminal exit: the queue is now
-        # released and the container reaped, and _terminal is already the terminal
+        # released, and _terminal is already terminal
         # ("awaiting_approval", …) — fall through to the common notify below (so the
         # observer fires post-release, exactly like the normal terminal exits).
         pass
@@ -4227,18 +4237,13 @@ _PROVISIONER = (
 
 
 def _recovery_prep(q: "queue.Queue") -> None:
-    """One-time worker-thread prep before draining recovery jobs (no-op cost when
-    none are queued). (a) Reap THIS deployment's orphaned sandbox containers (by
-    label + /workspace-mount scope — see ``reap_orphans``): a killed web process
-    reaps nothing, and a ``docker exec``'d tool command keeps mutating the
-    host-bind-mounted /workspace for up to the 3h TTL — a resumed turn's fresh
-    container must never share a workspace with a zombie writer. (b) Wait
-    (bounded) for the model endpoint: on a cold boot llamacpp loads for minutes
-    after assist-web is up, and erroring every recovered thread against a
-    still-loading model would defeat recovery."""
+    """Wait on the worker for a cold model before draining queued recovery jobs.
+
+    No queued recovery needs no wait. Startup confirmed this deployment's
+    orphan teardown before recovery queueing and listener admission.
+    """
     if q.empty():
         return
-    SandboxManager.reap_orphans(MANAGER.root_dir)
     if not os.getenv("ASSIST_MODEL_URL"):
         return
     # _llm_reachable requires a 200 — llama-server binds its port immediately on a
@@ -4709,6 +4714,8 @@ _INITIALIZATION_ADMISSION_LOCK = threading.Lock()
 
 
 _GEO_DELIVER_INTERVAL_S = 120   # retry held completions (D4) roughly every 2 min
+_GEO_DELIVER_STOP = threading.Event()
+_GEO_DELIVER_THREAD: threading.Thread | None = None
 
 
 def _geo_startup() -> None:
@@ -4726,24 +4733,35 @@ def _geo_startup() -> None:
         _PROVISIONER.reconcile()        # orphaned importing → failed
     except Exception:
         logging.exception("geo: startup seed/reconcile failed")
-    while True:
+    while not _GEO_DELIVER_STOP.is_set():
         try:
             _PROVISIONER.deliver_pending()   # any completion held (restart/LLM-down) — C1/D4
         except Exception:
             logging.exception("geo: deliver_pending failed")
-        time.sleep(_GEO_DELIVER_INTERVAL_S)
+        _GEO_DELIVER_STOP.wait(_GEO_DELIVER_INTERVAL_S)
 
 
 def start_scheduler() -> None:
+    global _GEO_DELIVER_THREAD
     _SCHEDULER.start()
     _INITIALIZATION_SCHEDULER.start()
     _RESUME_SCHEDULER.start()
     if _PROVISIONER is not None and GEO_DIR is not None:
-        threading.Thread(target=_geo_startup, name="geo-startup", daemon=True).start()
+        _PROVISIONER.reopen_delivery()
+        _GEO_DELIVER_STOP.clear()
+        if _GEO_DELIVER_THREAD is None or not _GEO_DELIVER_THREAD.is_alive():
+            _GEO_DELIVER_THREAD = threading.Thread(
+                target=_geo_startup, name="geo-startup", daemon=True)
+            _GEO_DELIVER_THREAD.start()
 
 
 def stop_scheduler() -> None:
     _SCHEDULER.stop()
+    _GEO_DELIVER_STOP.set()
+    if _GEO_DELIVER_THREAD is not None:
+        _GEO_DELIVER_THREAD.join()
+    if _PROVISIONER is not None:
+        _PROVISIONER.close_delivery()
 
 
 # Private capacity for durable run admission — NOT the shared threadpool: every follow-up

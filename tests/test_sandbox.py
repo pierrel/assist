@@ -9,6 +9,8 @@ import shutil
 from unittest import TestCase, skipIf
 from unittest.mock import patch, MagicMock, PropertyMock
 
+import pytest
+
 from assist.sandbox import (
     DockerSandboxBackend,
     MAX_OUTPUT_CHARS,
@@ -18,6 +20,37 @@ from assist.domain_manager import DomainManager
 from assist.sandbox_manager import SandboxManager
 from deepagents.backends.protocol import EditResult, WriteResult
 from deepagents.backends.sandbox import BaseSandbox
+
+
+def test_stop_proof_waits_for_auto_removed_name_release():
+    from assist.sandbox_manager import confirm_generation_stopped
+
+    responses = [
+        MagicMock(returncode=0, stdout=b"", stderr=b""),
+        MagicMock(returncode=0, stdout=b"false", stderr=b""),
+        MagicMock(returncode=0, stdout=b"", stderr=b""),
+        MagicMock(returncode=1, stdout=b"", stderr=b"No such container"),
+    ]
+    with patch("assist.sandbox_manager.subprocess.run", side_effect=responses) as run:
+        confirm_generation_stopped("exact-generation")
+    assert [call.args[0][:2] for call in run.call_args_list] == [
+        ["docker", "kill"], ["docker", "inspect"],
+        ["docker", "rm"], ["docker", "inspect"]]
+    assert all("exact-generation" in call.args[0] for call in run.call_args_list)
+
+
+def test_stop_proof_refuses_running_generation_after_failed_kill():
+    from assist.sandbox_manager import confirm_generation_stopped
+
+    responses = [
+        MagicMock(returncode=1, stdout=b"", stderr=b"failed"),
+        MagicMock(returncode=0, stdout=b"true", stderr=b""),
+    ]
+    with patch("assist.sandbox_manager.subprocess.run", side_effect=responses), \
+         patch("assist.sandbox_manager.time.monotonic", side_effect=[0, 0, 6]), \
+         patch("assist.sandbox_manager.time.sleep"):
+        with pytest.raises(RuntimeError, match="teardown is unconfirmed"):
+            confirm_generation_stopped("exact-generation")
 
 
 class TestDockerSandboxBackend(TestCase):
@@ -753,11 +786,8 @@ class TestSandboxManager(TestCase):
         self.assertIn("chown", msg)
 
     @patch('assist.sandbox.DockerSandboxBackend')
-    def test_get_sandbox_backend_does_not_reuse_reaps_stale(self, mock_backend_cls):
-        """Per-turn lifecycle: a container left registered from a prior turn is
-        NOT reused — it is killed (SIGKILL, via cleanup) and a fresh one is
-        created.  Reusing it would let a container outlive its turn, which is
-        the whole thing the per-turn design forbids."""
+    def test_get_sandbox_backend_confirms_stale_before_replacement(self, mock_backend_cls):
+        """A prior generation must pass stop confirmation before replacement."""
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)
 
@@ -773,12 +803,13 @@ class TestSandboxManager(TestCase):
         fresh.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
         mock_client.containers.run.return_value = fresh
 
-        with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
+        with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client), \
+             patch('assist.sandbox_manager.confirm_generation_stopped') as stopped:
             sandbox = SandboxManager.get_sandbox_backend(test_path)
 
         self.assertIsNotNone(sandbox)
-        # The stale container was SIGKILLed, not reused (never reload()'d).
-        stale.kill.assert_called_once()
+        # Exact stop confirmation was requested; the stale handle was not reused.
+        stopped.assert_called_once_with(stale.id)
         stale.reload.assert_not_called()
         # A fresh container replaced it in the registry.
         self.assertIs(SandboxManager._containers[test_path], fresh)
@@ -804,18 +835,18 @@ class TestSandboxManager(TestCase):
 
         self.assertIsNone(sandbox)
 
-    def test_cleanup_kills_and_removes_container(self):
+    def test_cleanup_confirms_and_removes_tracked_generation(self):
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)
 
         mock_container = MagicMock()
         SandboxManager._containers[test_path] = mock_container
 
-        SandboxManager.cleanup(test_path)
+        with patch('assist.sandbox_manager.confirm_generation_stopped') as stopped:
+            SandboxManager.cleanup(test_path)
 
-        # SIGKILL, not a graceful stop: a sandbox has nothing to flush and its
-        # bare-`sleep` PID 1 ignores SIGTERM, so stop() only burns the timeout.
-        mock_container.kill.assert_called_once_with()
+        # The mocked exact-ID confirmation precedes registry removal.
+        stopped.assert_called_once_with(mock_container.id)
         mock_container.stop.assert_not_called()
         self.assertNotIn(test_path, SandboxManager._containers)
 
@@ -824,11 +855,26 @@ class TestSandboxManager(TestCase):
         mock_c2 = MagicMock()
         SandboxManager._containers = {"/path/a": mock_c1, "/path/b": mock_c2}
 
-        SandboxManager.cleanup_all()
+        with patch('assist.sandbox_manager.confirm_generation_stopped') as stopped:
+            SandboxManager.cleanup_all()
 
-        mock_c1.kill.assert_called_once()
-        mock_c2.kill.assert_called_once()
+        self.assertEqual(stopped.call_count, 2)
+        stopped.assert_any_call(mock_c1.id)
+        stopped.assert_any_call(mock_c2.id)
         self.assertEqual(len(SandboxManager._containers), 0)
+
+    def test_unconfirmed_cleanup_retains_generation(self):
+        test_path = os.path.join(self.temp_dir, "domain")
+        os.makedirs(test_path)
+        container = MagicMock()
+        container.id = "old-generation"
+        SandboxManager._containers[test_path] = container
+        with patch('assist.sandbox_manager.confirm_generation_stopped',
+                   side_effect=RuntimeError("stop unconfirmed")):
+            with self.assertRaisesRegex(RuntimeError, "stop unconfirmed"):
+                SandboxManager.cleanup(test_path, container)
+            SandboxManager.cleanup_all()
+        self.assertIs(SandboxManager._containers[test_path], container)
 
     def test_domain_manager_without_git(self):
         """Test that DomainManager works without git remote."""
