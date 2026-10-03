@@ -13,9 +13,19 @@ monkeypatch ``_probe_endpoint`` themselves.
 """
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from assist import model_manager
+
+
+@pytest.fixture(autouse=True)
+def _fresh_web_run_gate():
+    """Each test is a fresh web process, including after a lifespan shuts down."""
+    drain = sys.modules.get("manage.web.drain")
+    if drain is not None:
+        drain.RUN_GATE.reopen()
 
 
 @pytest.fixture(autouse=True)

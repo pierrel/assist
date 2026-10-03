@@ -55,8 +55,10 @@ class Scheduler:
     def stop(self) -> None:
         self._stop.set()
         if self._thread:
-            self._thread.join(timeout=5)
-        self._executor.shutdown(wait=False)
+            self._thread.join()
+        # _fire may have advanced a schedule just before the poller stopped.
+        # Join it before closing the executor, then wait for its dispatch.
+        self._executor.shutdown(wait=True)
 
     def _run(self) -> None:
         # Reconcile then poll, both on THIS thread (never the async lifespan body): the
