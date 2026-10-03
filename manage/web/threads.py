@@ -3089,7 +3089,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                             # inline: this is INSIDE the
                             # THREAD_QUEUE.acquire scope, and a synchronous observer would then
                             # run while holding the global single-flight slot, stalling every
-                            # turn. Unwind instead (reaping the container via the finally,
+                            # turn. Unwind instead (attempting container cleanup via the finally,
                             # releasing the queue) to the common notify at the function end.
                             _terminal = ("awaiting_approval", _pending_text)
                             raise _SupersedeCapReached
