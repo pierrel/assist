@@ -557,3 +557,106 @@ def test_gmail_decision_requires_the_shown_checkpoint_identity(client):
         threads.gmail_decision_core("mail-thread","approve","exact-token")
     assert missing.value.status_code==409
     assert _get_status("mail-thread")==before and threads._runs().list("mail-thread")==[]
+
+
+@pytest.mark.parametrize("kind", ["gmail_archive", "gmail_delete"])
+@pytest.mark.parametrize("new_gate", [False, True])
+@pytest.mark.parametrize("preview_error", [False, True])
+def test_upgrade_repreviews_legacy_card_at_actual_checkpoint(client, tmp_path, monkeypatch,
+                                                           kind, new_gate, preview_error):
+    import sqlite3
+    from langchain_core.messages import HumanMessage, AIMessage
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.graph import MessagesState, StateGraph, START, END
+    from langgraph.types import Command, interrupt
+    from assist.thread import Thread
+    from manage.web import state
+    from assist.gmail import GmailError
+
+    tid = "mail-thread"
+    action = {"name": kind, "args": {"message_ids": ["abc123"]}}
+    decisions = []
+    def gate(snapshot):
+        decisions.append(interrupt({"action_requests": [action]}))
+        return {"messages": [AIMessage("Synthetic gate completed")]}
+    def later(snapshot):
+        if new_gate:
+            decisions.append(interrupt({"action_requests": [action]}))
+        return {"messages": [AIMessage("Synthetic work completed")]}
+    def build(connection):
+        graph = StateGraph(MessagesState)
+        graph.add_node("gate", gate); graph.add_node("later", later)
+        graph.add_edge(START, "gate"); graph.add_edge("gate", "later"); graph.add_edge("later", END)
+        return graph.compile(checkpointer=SqliteSaver(connection))
+    config = {"configurable": {"thread_id": tid}}
+    connection = sqlite3.connect(tmp_path / "legacy.db", check_same_thread=False)
+    graph = build(connection)
+    graph.invoke({"messages": [HumanMessage("Please organize this message")]}, config, durability="sync")
+    old_id = graph.get_state(config).interrupts[0].id
+    if new_gate:
+        graph.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config, durability="sync")
+        assert graph.get_state(config).interrupts[0].id != old_id
+    connection.close()
+    connection = sqlite3.connect(tmp_path / "legacy.db", check_same_thread=False)
+    graph = build(connection)
+    def get_chat(*args, **kwargs):
+        chat = Thread.__new__(Thread)
+        chat.thread_id = tid; chat.agent = graph; chat.runconfig = config
+        # The companion-owned helper reads this actual checkpoint identity.
+        def identity(name, args=None):
+            assert name == kind and args == action["args"]
+            return graph.get_state(config).interrupts[0].id
+        chat.pending_action_interrupt_id = identity
+        return chat
+    monkeypatch.setattr(web.MANAGER, "get", get_chat)
+    monkeypatch.setattr(web.MANAGER, "list", lambda: [tid])
+    jobs = []
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit", lambda *a, **k: jobs.append(a))
+    def forbidden(*args, **kwargs):
+        pytest.fail("Legacy card migration must not invoke the agent or sandbox")
+    monkeypatch.setattr(threads, "_process_message", forbidden)
+    monkeypatch.setattr(threads, "_get_sandbox_backend", forbidden)
+    reads = []
+    def preview(current):
+        reads.append(current)
+        if preview_error:
+            raise GmailError("Synthetic preview unavailable")
+        return [{"id": "abc123", "body": "Fresh complete preview"}]
+    monkeypatch.setattr(threads, "gmail_action_preview", preview)
+    proposal = threads._create_run(tid, "Please organize this message")
+    threads._runs().claim(tid, proposal.id)
+    threads._runs().transition(tid, proposal.id, "awaiting_approval")
+    # Exact deployed494 card shape: no interrupt identity or preview-pending flag.
+    _set_status(tid, "awaiting_approval", pending_gmail_run_id=proposal.id,
+                pending_gmail_action=action, pending_gmail_token="old-token",
+                pending_gmail_messages=[{"id": "abc123", "body": "Old complete preview"}],
+                pending_gmail_error="")
+    try:
+        for decision in ("approve", "reject"):
+            with pytest.raises(HTTPException) as stale:
+                threads.gmail_decision_core(tid, decision, "old-token")
+            assert stale.value.status_code == 409
+        state._recover_interrupted_threads()
+        status = _get_status(tid)
+        assert status["pending_gmail_token"] != "old-token"
+        assert status["pending_gmail_interrupt_id"] == graph.get_state(config).interrupts[0].id
+        assert status["pending_gmail_preview_pending"] and status["pending_gmail_messages"] == []
+        assert jobs.count((proposal.id, tid)) == 1
+        with threads.THREAD_QUEUE.acquire("other-thread"):
+            threads._execute_run(proposal.id, tid)
+        status = _get_status(tid)
+        assert reads == [action] and not status["pending_gmail_preview_pending"]
+        for decision in ("approve", "reject"):
+            with pytest.raises(HTTPException) as stale:
+                threads.gmail_decision_core(tid, decision, "old-token")
+            assert stale.value.status_code == 409
+        if preview_error:
+            with pytest.raises(HTTPException):
+                threads.gmail_decision_core(tid, "approve", status["pending_gmail_token"])
+        admitted, replayed = threads.gmail_decision_core(
+            tid, "reject" if preview_error else "approve", status["pending_gmail_token"])
+        assert not replayed and admitted.work_id == proposal.work_id
+        assert admitted.resume_decision["approval_interrupt_id"] == graph.get_state(config).interrupts[0].id
+        assert len(decisions) == int(new_gate)  # No checkpoint consumption during migration.
+    finally:
+        connection.close()

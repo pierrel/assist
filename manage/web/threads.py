@@ -4440,7 +4440,9 @@ def queue_recovery_runs() -> None:
     Runs off the asyncio loop during lifespan startup. An abandoned head is queued
     alone; its recovery queues its successor before accepted followers. Otherwise all
     pending runs are queued in durable creation order. Incomplete Gmail previews
-    requeue their original proposal for reading without resuming the agent.
+    requeue their original proposal for reading without resuming the agent. Legacy
+    Gmail cards with a pending checkpoint action receive a fresh token and
+    a new preview attempt.
     """
     visible = MANAGER.list()
     # ``create_thread_with_message_core`` shows an initializing status before it
@@ -4521,7 +4523,23 @@ def queue_recovery_runs() -> None:
         # A Run is the acceptance truth. A crash after that commit but before
         # claim leaves the old busy status projection behind; dispatch the
         # persisted ticket instead of synthesizing a duplicate from status.json.
-        status = _get_status(tid)
+        with _RUN_ADMISSION_LOCK:
+            status = _get_status(tid)
+            if (status.get("stage") == "awaiting_approval"
+                    and status.get("pending_gmail_action")
+                    and not status.get("pending_gmail_interrupt_id")):
+                chat = MANAGER.get(tid, sandbox_backend=None)
+                action = _pending_gmail(chat)
+                if action is not None:
+                    _set_status(tid, "awaiting_approval", **{
+                        **{key:value for key,value in status.items() if key != "stage"},
+                        "pending_gmail_action":action,
+                        "pending_gmail_interrupt_id":chat.pending_action_interrupt_id(action["name"], action["args"]),
+                        "pending_gmail_token":secrets.token_urlsafe(24),
+                        "pending_gmail_messages":[],
+                        "pending_gmail_error":"Preparing complete Gmail preview.",
+                        "pending_gmail_preview_pending":True})
+                    status = _get_status(tid)
         if status.get("pending_gmail_preview_pending"):
             _RESUME_SCHEDULER.submit(status["pending_gmail_run_id"], tid)
         cancelled_initializer = next(
