@@ -92,7 +92,7 @@ def test_concurrent_decisions_create_only_one_resume(approval):
     def decide():
         barrier.wait()
         try:
-            return threads.email_decision_core("thread-a", "approve", token, preview_token=True)
+            return threads.email_decision_core("thread-a", "approve", token, phone_preview=True)
         except HTTPException as error:
             return error.status_code
 

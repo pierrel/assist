@@ -1148,7 +1148,7 @@ def _approval_decision(tid: str, body: _ApprovalDecision):
     if body.kind == "send_email":
         return threads.email_decision_core(
             tid, body.decision, body.token, to=body.to, subject=body.subject,
-            body=body.body, preview_token=True)
+            body=body.body, phone_preview=True)
     core = getattr(threads, "gmail_decision_core", None)
     if core is None:
         raise HTTPException(status_code=409, detail="Mailbox approval is unavailable")

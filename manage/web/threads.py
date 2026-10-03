@@ -1036,12 +1036,11 @@ def render_thread(
         label = "Couldn't process your message:" if had_prior_turn else "Setup failed:"
         status_banner = f'<div class="error-msg"><strong>{label}</strong> {err}</div>'
     elif stage == "awaiting_approval" and status.get("pending_email_token"):
-        identity = email_identity()
-        sender, cc = identity if identity else ("Email sender is not configured", "")
-        to = status.get("pending_email_to", "")
-        subject = status.get("pending_email_subject", "")
-        body = status.get("pending_email_body", "")
-        token = status["pending_email_token"]
+        proposal = email_approval_preview(status)
+        sender, cc = proposal["from"], proposal["cc"]
+        args = proposal["action"]["args"]
+        to, subject, body = args["to"], args["subject"], args["body"]
+        token = proposal["token"]
         status_banner = f"""
         <div class="approval-banner">
           <div><strong>Email awaiting your approval</strong></div>
@@ -2713,9 +2712,9 @@ def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
 def _recover_run(run: Run, *, user_priority: bool = False) -> None:
     """Recover one invocation abandoned in running/interrupted state.
 
-    A protocol invocation is never restarted in place. Recovery finalizes it or creates
-    one successor on the same thread/work, then queues accepted followers behind that
-    successor by construction.
+    A protocol invocation is never restarted in place. Recovery finalizes it, creates
+    or reuses one successor on the same thread/work, then queues accepted followers
+    behind that successor. An accepted approval is already such a successor.
     """
     tid = run.thread_id
     # Pi has no LangGraph checkpoint or resumable session. Classify before
@@ -2741,7 +2740,7 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
         successor = next((candidate for candidate in _runs().list(tid)
                           if candidate.status in {"pending", "running"}
                           and candidate.work_id == run.work_id
-                          and candidate.resume), None)
+                          and (candidate.resume or candidate.resume_decision is not None)), None)
         if successor is None:
             successor = _create_run(
                 tid, None, rider=_rider_from_fields(run.rider), sender=run.sender,
@@ -2810,7 +2809,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # failure path, and recovery fidelity — persisted in every busy status write below.
     # `resume_decision` (set when deciding a pending HITL action) resumes the
     # paused graph instead of starting a new turn — reusing this path's sandbox/queue/sync.
-    # `resume=True` (set only by the fair-scheduling resume scheduler after a quantum pause)
+    # `resume=True` (set for checkpoint continuation after a quantum pause or restart)
     # continues this thread's in-flight turn from its durable checkpoint (input=None) rather
     # than starting a new message; `accumulated_active_ms` carries the active hold it already
     # burned so the 2h cap can't be dodged by pausing.
@@ -3021,8 +3020,16 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         _cfg[SMS_SENDER_KEY] = sender
                     elif _run is not None and _run.mode == "turn" and assistant_id == "general-agent":
                         _cfg["web_run_id"] = _run.id
-                    if _run is not None and _run.resume_decision is not None:
-                        _cfg[EMAIL_REVIEW_IDENTITY_KEY] = _run.resume_decision.get(EMAIL_REVIEW_IDENTITY_KEY)
+                    if _run is not None:
+                        # A checkpoint continuation keeps the latest approved identity
+                        # in its durable work chain without reapplying that decision.
+                        reviewed = next((candidate.resume_decision[EMAIL_REVIEW_IDENTITY_KEY]
+                                         for candidate in reversed(_runs().list(tid))
+                                         if candidate.work_id == _run.work_id
+                                         and candidate.resume_decision is not None
+                                         and EMAIL_REVIEW_IDENTITY_KEY in candidate.resume_decision), None)
+                        if reviewed is not None:
+                            _cfg[EMAIL_REVIEW_IDENTITY_KEY] = reviewed
                     _cfg.update(_frequency_configurable(
                         _run, sender=sender, assistant_id=assistant_id) or {})
                     # A triage turn (sender set) gets the reduced, HITL-gated tool surface.
@@ -3043,7 +3050,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         lambda delta: _publish_phone_text(tid, _run.work_id, delta),
                         lambda _attempt: RUN_STREAMS.reset_attempt(tid, _run.work_id))
                 elif resume:
-                    # Fair-scheduling resume: continue the in-flight turn from its
+                    # Checkpoint continuation: continue the in-flight turn from its
                     # durable checkpoint (input=None). No new message, no supersede.
                     resp = chat.resume()
                 elif resume_decision is not None:
@@ -3976,11 +3983,12 @@ def email_approval_preview(status: dict) -> dict:
 def email_decision_core(tid: str, decision: str, token: str, *,
                         to: str = "", subject: str = "", body: str = "",
                         seen_to: str = "", seen_subject: str = "", seen_body: str = "",
-                        preview_token: bool = False) -> tuple[Run, bool]:
+                        phone_preview: bool = False) -> tuple[Run, bool]:
     """Atomically accept one exact email decision for browser or phone callers.
 
-    Phone tokens bind the fixed From/Cc preview, which remains durable in the
-    resume's host-only identity metadata and is enforced at delivery. The dispatch key
+    Browser and phone tokens bind the fixed From/Cc preview. The reviewed identity
+    stays durable in the resume's host-only metadata and is enforced at delivery.
+    The dispatch key
     prevents duplicate resumes if status publication fails after Run creation.
     The resume retains the awaiting Run's logical work identity, so its accepted
     phone handle follows the decision through completion. Legacy non-Run proposals
@@ -3998,8 +4006,7 @@ def email_decision_core(tid: str, decision: str, token: str, *,
         if status.get("stage") != "awaiting_approval" or not isinstance(expected_token, str):
             raise HTTPException(status_code=409, detail="This thread has no email awaiting approval.")
         proposal = email_approval_preview(status)
-        if preview_token:
-            expected_token = proposal["token"]
+        expected_token = proposal["token"]
         if not token.isascii() or not hmac.compare_digest(token, expected_token):
             raise HTTPException(status_code=409, detail="This email was updated; reload and review it.")
         if decision == "approve":
@@ -4008,7 +4015,7 @@ def email_decision_core(tid: str, decision: str, token: str, *,
             current = (pending[0], pending[1], pending[2].replace("\r\n", "\n"))
             seen = (seen_to, seen_subject, seen_body.replace("\r\n", "\n"))
             submitted = (to, subject, body.replace("\r\n", "\n"))
-            if not preview_token and (seen != current or submitted != current):
+            if not phone_preview and (seen != current or submitted != current):
                 raise HTTPException(status_code=409,
                                     detail="This email was updated — reload and review it.")
         if decision == "edit" and not valid_email_content(to, subject, body):
@@ -4300,9 +4307,10 @@ def _recovery_decision(tid: str, pending_message: str) -> str:
 def queue_recovery_runs() -> None:
     """Import the legacy journal once, then queue durable runs in dependency order.
 
-    Runs off the asyncio loop during lifespan startup. An abandoned head is queued
-    alone; its recovery queues its successor before accepted followers. Otherwise all
-    pending runs are queued in durable creation order.
+    Runs off the asyncio loop during lifespan startup. Only the latest invocation
+    of a work chain owns recovery. An abandoned head is queued alone; its recovery
+    queues its successor before accepted followers. Otherwise pending runs are
+    queued in durable creation order, including accepted approval decisions.
     """
     visible = MANAGER.list()
     # ``create_thread_with_message_core`` shows an initializing status before it
@@ -4340,7 +4348,7 @@ def queue_recovery_runs() -> None:
                 break
             if candidate.status == "interrupted" and not any(
                     later.work_id == candidate.work_id
-                    and later.status in {"success", "error", "timeout", "cancelled"}
+                    and later.status != "interrupted"
                     for later in runs[index + 1:]):
                 abandoned = candidate
                 break

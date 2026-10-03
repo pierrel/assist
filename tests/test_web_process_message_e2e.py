@@ -777,7 +777,7 @@ def test_email_proposal_is_published_before_the_queue_slot_is_released(client, m
         status = _get_status(tid)
         assert status["pending_email_token"]
         assert threads._runs().get(tid, run.id).status == "awaiting_approval"
-        resumed, _ = threads.email_decision_core(tid, "reject", status["pending_email_token"])
+        resumed, _ = threads.email_decision_core(tid, "reject", threads.email_approval_preview(status)["token"])
         assert resumed.work_id == run.work_id
         threads._TURN_INTERJECTION[tid] = successor_context
 

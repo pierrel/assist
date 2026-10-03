@@ -958,3 +958,144 @@ def test_event_loop_stays_live_while_store_lock_is_held(wired, monkeypatch):
         finally:
             threads._runs()._lock.release()
         assert post_done.wait(5.0), "POST must complete once the lock is released"
+
+
+def test_restart_keeps_the_accepted_email_successor_and_original_receipt(wired, monkeypatch):
+    """A paused slice cannot create a new head after its email was accepted."""
+    tid, _ = wired
+    monkeypatch.setattr(web.MANAGER, "list", lambda: [tid])
+    monkeypatch.setenv("EMAIL_FROM_ADDRESS", "assistant@example.test")
+    monkeypatch.setenv("EMAIL_FROM_NAME", "Assistant")
+    monkeypatch.setenv("EMAIL_ALWAYS_CC", "oversight@example.test")
+    first = threads._create_run(tid, "Email this person")
+    threads._runs().claim(tid, first.id)
+    threads._runs().transition(tid, first.id, "interrupted")
+    proposal = threads._create_run(tid, None, resume=True, work_id=first.work_id)
+    threads._runs().claim(tid, proposal.id)
+    threads._runs().transition(tid, proposal.id, "awaiting_approval")
+    args = {"to": "recipient@example.test", "subject": "Subject", "body": "Body"}
+    _set_status(tid, "awaiting_approval", pending_email_token="stored-token",
+                pending_email_run_id=proposal.id,
+                **{"pending_email_" + key: value for key, value in args.items()})
+    accepted, _ = threads.email_decision_core(
+        tid, "approve", threads.email_approval_preview(_get_status(tid))["token"],
+        phone_preview=True)
+    calls = []
+
+    class EmailChat(_Chat):
+        pending = True
+
+        def get_raw_messages(self):
+            return []
+
+        def pending_email(self):
+            return args if self.pending else None
+
+        def pending_actions(self):
+            return [{"name": "send_email", "args": args}]
+
+        def resume_actions(self, decisions):
+            assert decisions == [{"type": "approve"}]
+            calls.append(("approve",))
+            self.pending = False
+            return "done"
+
+    chat = EmailChat(tid, calls)
+    monkeypatch.setattr(web.MANAGER, "get", lambda *a, **k: chat)
+    threads.queue_recovery_runs()
+    _drain_worker_queue(tid)
+
+    assert len(threads._runs().list(tid)) == 3
+    assert calls == [("approve",)]
+    assert threads._runs().get(tid, accepted.id).status == "success"
+    with threads._RUN_ADMISSION_LOCK:
+        projected = phone_api._logical_status_locked(tid, first.id)
+    assert projected["physical_run_id"] == accepted.id
+    assert projected["status"] == "success"
+
+
+def test_recovery_after_consumed_email_approval_keeps_delivery_identity(wired, monkeypatch):
+    """Reopen a real checkpoint after approval consumption but before the tool."""
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.graph import MessagesState, StateGraph, START, END
+    from langgraph.prebuilt import ToolNode
+    from langgraph.types import Command, interrupt
+    from assist.events import email
+    from assist.thread import Thread
+
+    tid, root = wired
+    key = root / "email-key"
+    key.write_text("re_abcdefghijklmnop")
+    key.chmod(0o600)
+    monkeypatch.setenv("EMAIL_RESEND_API_KEY_FILE", str(key))
+    monkeypatch.setenv("EMAIL_FROM_ADDRESS", "assistant@example.test")
+    monkeypatch.setenv("EMAIL_FROM_NAME", "Assistant")
+    monkeypatch.setenv("EMAIL_ALWAYS_CC", "oversight@example.test")
+    sent, approvals = [], []
+
+    class Response:
+        status_code = 200
+        def iter_content(self, size):
+            yield b'{"id":"synthetic-delivery"}'
+        def close(self):
+            pass
+
+    monkeypatch.setattr(email.requests, "post", lambda _url, **kw: sent.append(kw["json"]) or Response())
+    args = {"to": "recipient@example.test", "subject": "Subject", "body": "Body"}
+
+    def gate(state):
+        decision = interrupt({"action_requests": [{"name": "send_email", "args": args}]})
+        approvals.append(decision)
+        return {"messages": [AIMessage(content="", tool_calls=[
+            {"name": "send_email", "args": args, "id": "email-restart"}])]}
+
+    def build(connection):
+        graph = StateGraph(MessagesState)
+        graph.add_node("gate", gate)
+        graph.add_node("tools", ToolNode([email.send_email]))
+        graph.add_edge(START, "gate")
+        graph.add_edge("gate", "tools")
+        graph.add_edge("tools", END)
+        return graph.compile(checkpointer=SqliteSaver(connection), interrupt_before=["tools"])
+
+    config = {"configurable": {"thread_id": tid}}
+    connection = sqlite3.connect(root / "approved-email.db", check_same_thread=False)
+    graph = build(connection)
+    graph.invoke({"messages": [HumanMessage("Email this person")]}, config, durability="sync")
+    proposal = threads._create_run(tid, "Email this person")
+    threads._runs().claim(tid, proposal.id)
+    threads._runs().transition(tid, proposal.id, "awaiting_approval")
+    _set_status(tid, "awaiting_approval", pending_email_token="stored-token",
+                pending_email_run_id=proposal.id,
+                **{"pending_email_" + name: value for name, value in args.items()})
+    accepted, _ = threads.email_decision_core(
+        tid, "approve", threads.email_approval_preview(_get_status(tid))["token"],
+        phone_preview=True)
+    threads._runs().claim(tid, accepted.id)
+    graph.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config, durability="sync")
+    assert graph.get_state(config).next == ("tools",)
+    assert not sent
+    connection.close()
+
+    connection = sqlite3.connect(root / "approved-email.db", check_same_thread=False)
+    graph = build(connection)
+    try:
+        def get(_tid, configurable=None, **kwargs):
+            chat = Thread.__new__(Thread)
+            chat.thread_id, chat.agent = tid, graph
+            chat.runconfig = {"configurable": {"thread_id": tid, **(configurable or {})}}
+            chat._run = lambda value: graph.invoke(value, chat.runconfig, durability="sync")["messages"][-1].content
+            return chat
+        monkeypatch.setattr(web.MANAGER, "get", get)
+        threads._execute_run(accepted.id, tid)
+        _drain_worker_queue(tid)
+        successor = threads._runs().list(tid)[-1]
+        assert successor.resume and successor.resume_decision is None
+        assert successor.status == "success"
+        assert approvals == [{"decisions": [{"type": "approve"}]}]
+        assert len(sent) == 1
+        assert sent[0]["from"] == "Assistant <assistant@example.test>"
+        assert sent[0]["cc"] == ["oversight@example.test"]
+    finally:
+        connection.close()
