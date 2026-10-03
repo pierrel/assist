@@ -129,14 +129,14 @@ def test_full_valid_email_handles_json_escaping_without_truncation(approval):
     assert runs.get("thread-a", response.json()["run_id"]).resume_decision["edited_action"]["args"]["body"] == body
 
 
-def test_gmail_preview_and_reject_only_error_share_owner_contract(approval, monkeypatch):
+def test_email_mailbox_preview_and_reject_only_error_share_owner_contract(approval, monkeypatch):
     client, _, scheduled = approval
     state._set_status("thread-a", "awaiting_approval", pending_gmail_token="gmail-token-12345",
-                      pending_gmail_action={"name": "gmail_delete", "args": {"message_ids": ["abc"]}},
+                      pending_gmail_action={"name": "email_delete", "args": {"message_ids": ["abc"]}},
                       pending_gmail_messages=[], pending_gmail_error="Complete body unavailable")
     proposal = _proposal(client)
     assert proposal["error"] == "Complete body unavailable"
-    assert proposal["kind"] == "gmail_delete"
+    assert proposal["kind"] == "email_delete"
     assert proposal["action"]["args"]["message_ids"] == ["abc"]
     calls = []
 
@@ -146,15 +146,15 @@ def test_gmail_preview_and_reject_only_error_share_owner_contract(approval, monk
 
     monkeypatch.setattr(threads, "gmail_decision_core", core, raising=False)
     assert client.post(URL, headers=HEADERS, json={
-        "kind": "gmail_delete", "token": proposal["token"], "decision": "reject"}).status_code == 200
-    assert calls == [("thread-a", "reject", "gmail-token-12345", "gmail_delete")]
+        "kind": "email_delete", "token": proposal["token"], "decision": "reject"}).status_code == 200
+    assert calls == [("thread-a", "reject", "gmail-token-12345", "email_delete")]
     assert scheduled == [("resume-run", "thread-a")]
 
 
-def test_phone_binds_gmail_kind_to_owner_admission(approval, monkeypatch):
+def test_phone_binds_email_mailbox_kind_to_owner_admission(approval, monkeypatch):
     client, runs, scheduled = approval
     state._set_status("thread-a", "awaiting_approval", pending_gmail_token="gmail-token-12345",
-                      pending_gmail_action={"name": "gmail_delete", "args": {"message_ids": ["abc"]}},
+                      pending_gmail_action={"name": "email_delete", "args": {"message_ids": ["abc"]}},
                       pending_gmail_messages=[])
     before = state._get_status("thread-a")
 
@@ -167,7 +167,7 @@ def test_phone_binds_gmail_kind_to_owner_admission(approval, monkeypatch):
 
     monkeypatch.setattr(threads, "gmail_decision_core", core, raising=False)
     response = client.post(URL, headers=HEADERS, json={
-        "kind": "gmail_archive", "token": "gmail-token-12345", "decision": "approve"})
+        "kind": "email_archive", "token": "gmail-token-12345", "decision": "approve"})
     assert response.status_code == 409
     assert state._get_status("thread-a") == before
     assert runs.list("thread-a") == [] and scheduled == []

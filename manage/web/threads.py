@@ -3074,7 +3074,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                             action_name = "send_email"
                         elif dispatch_key.startswith("gmail-approval:"):
                             kind = dispatch_key.split(":", 2)[1]
-                            if kind in {"gmail_archive", "gmail_delete"}:
+                            if kind in {"gmail_archive", "gmail_delete",
+                                        "email_archive", "email_delete"}:
                                 action_name = kind
                     read_interrupt = getattr(chat, "pending_action_interrupt_id", None)
                     if (action_name is not None and read_interrupt is not None

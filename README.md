@@ -439,8 +439,8 @@ until `ASSIST_PHONE_API_TOKEN` is set in an ignored owner-only deployment
 environment file. Send that value only as `Authorization: Bearer <token>` from
 the phone; never pass it into a sandbox or commit it. The API exposes visible
 thread snapshots, durable idempotent sends, and bounded workspace snapshots.
-`GET /threads/{tid}/approval` returns a complete pending email or Gmail mailbox
-proposal. `POST` to the same path requires `kind`, `token`, and `decision` (`approve`
+`GET /threads/{tid}/approval` returns a complete pending proposal to send, archive
+or move email to Trash. `POST` to the same path requires `kind`, `token`, and `decision` (`approve`
 or `reject`); outbound email also accepts `decision="edit"` with `to`, `subject`
 and `body`. Email tokens bind
 the fixed sender and Cc as well as the message. Browser forms use the same
@@ -465,8 +465,9 @@ another invocation. Pending continuations in an accepted approval's work chain r
 before that thread's followers until recovery finishes, even after the decision is
 consumed or the status loses its proposal token. Other work retains user-turn priority.
 The EmacsOS client offers scrollable previews, two-tap decisions and an email
-editor. Gmail archive/Trash decisions bind the submitted kind as well as the token
-inside the separately installed Gmail tools' admission boundary.
+editor. Email archive/Trash decisions bind the submitted kind as well as the token
+inside the separately installed email tools' admission boundary. Their kinds are
+`email_archive` and `email_delete`; deletion moves messages to recoverable Trash.
 The exact request, cursor, event, failure, and repository-label contract is in
 [the phone API design note](docs/2026-09-04-phone-api.org), amended for
 [mature-thread message admission](docs/2026-09-07-phone-api-mature-thread-admission.org),

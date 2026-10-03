@@ -131,7 +131,7 @@ class _SendMessage(_StrictModel):
 
 
 class _ApprovalDecision(_StrictModel):
-    kind: Literal["send_email", "gmail_archive", "gmail_delete"]
+    kind: Literal["send_email", "email_archive", "email_delete"]
     token: Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")]
     decision: Literal["approve", "reject", "edit"]
     to: Annotated[str, Field(max_length=320)] = ""
@@ -1130,7 +1130,7 @@ def _approval_preview(tid: str) -> dict[str, Any]:
                 proposal = threads.email_approval_preview(status)
             elif status.get("pending_gmail_token"):
                 action = status["pending_gmail_action"]
-                if action["name"] in {"gmail_archive", "gmail_delete"}:
+                if action["name"] in {"email_archive", "email_delete"}:
                     proposal = {"kind": action["name"], "action": action,
                                 "token": status["pending_gmail_token"],
                                 "messages": status["pending_gmail_messages"],
