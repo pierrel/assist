@@ -1,0 +1,102 @@
+#+title: Direct committed thread Git sync
+#+date: 2026-09-26
+
+* Scope and authority
+Phone Git is a full ordinary client, with separately provisioned Git credentials.
+There is no Assist-web Git proxy. The phone fetches its selected thread branch
+and compares it with explicitly labelled fetched remote/main. While the server
+turn is busy it can show latest remote commits with a may-change warning. Local
+life repositories use the existing approved WireGuard/SSH exact-repo endpoint;
+the phone mapping is private provisioning, not inferred from an API URL.
+
+Only the server's committed non-main thread branch is published. Neither main
+nor tags is automatically pushed. The initializer privately authorizes the
+actual branch, without imposing an assist/ prefix. Model checkout changes cannot
+retarget host publication. User phone commits are fetched before the next fresh
+visible Deep or Pi model turn. Clean descendants fast-forward; dirty, divergent,
+deleted, rewritten or failed-fetch state holds before model admission.
+
+* Boundaries
+- A private =git-sync.json= beside, not inside, the sandbox workspace binds the
+  configured source, authorized branch, publication floor, pending preflight
+  head and exact remote expectation, publication intent and sandbox-flight state.
+- A nonblocking workspace file lock covers visible/hidden writers and survives
+  queue force-release. An existing user-gated main-merge request takes the same
+  fence, without changing that path's Git algorithm or adding publication.
+- Host Git runs only in a fresh private bare store. Anchored no-follow regular
+  object reads omit mutable config/hooks/includes/alternates/replaces/grafts.
+  =git fsck --strict= authenticates object hashes before using their ancestry;
+  filenames alone cannot justify a force-with-lease operation.
+- New server-local clones disable hardlinks so sandbox object writes cannot
+  modify the original repository's shared inodes.
+- Host Git/SSH global configuration and credentials remain operator-trusted.
+  Those host home/config paths are not sandbox mounts. No workspace Git config
+  is allowed into host execution. Restricted preparation/commit profiles have
+  no generic Assist environment, private agent mount or host Git credentials.
+- Each host Git command has a process-group wall timeout, CPU/address-space/
+  file-size limits and bounded output. Object reads have byte, entry and time
+  caps. No auto maintenance or tags. Failures never silently truncate a repo.
+- Worktree fast-forward and add/commit run in restricted Docker generations.
+  Verified cleanup kills and waits the exact generation before host object
+  copying. Failed cleanup or crash while a sandbox may still be alive persists
+  a recovery hold. There is no unsafe host add/commit fallback.
+
+* Publication and failure
+Preflight pins remote E and post-reconciliation local H. After saved answer and
+verified model teardown, a fresh restricted generation commits changes, exits,
+and the host takes immutable desired D. Both E and H must be ancestors of D.
+Publication uses only D:refs/heads/B with an exact expected-E lease, including
+an absent-ref lease for a never-published branch. This is semantic FF-only:
+the flag is not permission to rewrite. Concurrent remote movement rejects.
+
+Intent is durable before push. Verified rejection permits a later retry,
+including a no-file-change turn. Timeout/crash ambiguity retains intent. Recovery
+accepts it only if D is reachable from the remote branch; otherwise explicit
+operator reconciliation is required. A confirmed exact remote D advances the
+published floor and nullable latest-published pair. Saved answers remain
+available when publication fails; ready does not prove remote publication.
+
+Phone workspace metadata exposes the existing 20-character repository key,
+basename-only label, actual safe branch/revision, nullable =published_branch=
+and =published_revision=, and optional bounded =sync_error=. There is no dirty
+probe, source URL or credential. Missing/corrupt binding is visibly unavailable,
+never inferred from mutable origin or silently classified as a usable Git repo.
+
+* Recovery notes
+An operator must verify a legacy repository's configured source and non-main
+branch, ensure no sandbox writer remains, then bind it with the host-only
+=assist.git_sync.bind= and =authorize_branch= functions. Do not mass-infer origins.
+
+When phone and unpublished server commits diverge, preserve both commit identities
+and the server worktree. Explicitly bring both commits into a restricted worktree
+and merge preserving both ancestries, then retry a fresh turn. There is no
+automatic rebase, overwrite or unrestricted host-shell recovery endpoint.
+Before clearing a sandbox-flight/quarantine hold, independently prove the exact
+workspace's previous containers exited. Do not clear it merely because time passed.
+
+* Evidence and remaining gates
+Owner design v3 was accepted by two independent read-only Sol/high reviewers
+covering the seven affected design lenses after three rounds. Real two-clone Git
+tests cover first no-op, changed/staged work, phone FF, concurrent phone movement,
+retry, crash intent, deleted/rewritten remote, source/config injection, malformed
+objects, object bounds, wrong branches and missing sandbox/binding.
+The installed image passed disposable network-none Docker preparation, changed
+and no-op commit/publication, verified teardown, and unchanged remote main.
+These are development results, not deployment or phone integration acceptance.
+
+* Concrete separate follow-up
+The existing =DomainManager.merge_to_main=/=merge_and_push= path still reads
+mutable workspace Git configuration on the host and rebases its local thread
+checkout before squash/rebranch. Rendering/review paths, including older /diff,
+also invoke host Git with workspace configuration. This candidate does not
+call those paths for per-turn publication and does not claim them safe.
+Their security and ancestry repair needs a separate bounded review and repro;
+an old main-merge rebranch needs explicit new branch binding in this version.
+The older git-sync model skill's rebase guidance likewise needs measured
+ancestry-preserving merge guidance before claiming that model capability fixed.
+
+* Historical supersessions
+This document directly replaces the held September 25 published-branch merge
+successor's atomic latest-at-landing requirement and retired-branch handoff
+sections: those guarantees were excluded by the current bounded direct-Git scope.
+It does not claim the earlier no-op CAS design or main merge repair was deployed.

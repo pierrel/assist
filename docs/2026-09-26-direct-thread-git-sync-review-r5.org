@@ -1,0 +1,43 @@
+#+title: Direct thread Git sync independent mounts and post-exit clean proof
+#+date: 2026-09-26
+
+* Independent legacy storage
+Authorization verifies every regular inode in the writable workspace, scratch
+and private-agent roots, not just recognized Git object filenames. Anchored
+no-follow metadata walks have entry/depth/time caps and never read or export
+file contents. A renamed source-linked pack under .keep, untracked data or a
+separate writable mount cannot bypass authorization. Any multiplylinked inode
+requires explicit migration to independent storage before binding; preserve
+dirty files, commit identities and private state, with no automatic migration.
+The operator must first prove all legacy writers stopped. New local clones
+already disable hardlinks. Inert bitmap/keep files remain excluded from object import.
+
+* Stable post-generation verification
+After a mutable preparation or commit generation has been proved exited, a
+fresh credential-free verification generation mounts only the workspace, read
+only. Scratch is ephemeral and no private-agent data is mounted. It runs the
+bounded full-index/status predicate with optional index locking disabled, then
+is itself proved exited. Configured filters or background processes cannot
+mutate the verified workspace because the kernel denies writes to that mount.
+This closes the late hook/filter write gap after a mutable clean probe.
+
+Only afterward does preparation authenticate its expected checkout and admit
+the model, or finalization authenticate the local floor, persist its receipt
+and clear the flight/finalization fence before bounded remote publication.
+Failed clean proof preserves work and result but cannot claim a successful
+child completion. Read-only verification is not a new transport or host Git
+invocation against workspace configuration. No live manager acceptance is
+claimed from mocked lifecycle tests or disposable network-none probes.
+
+* Historical supersessions
+This document directly strengthens =Legacy recovery condition= in
+=2026-09-26-direct-thread-git-sync-review-r2.org= to cover all writable mounted
+roots and relocated source aliases, not just object paths. It directly replaces
+=Commit-to-receipt crash boundary= clean-check assumptions in
+=2026-09-26-direct-thread-git-sync-review-r4.org=: clean proof runs on a kernel-
+read-only generation after the mutable writer is dead, before receipt/success.
+* Recovered initialization
+An already-authorized branch proves the clone completed. Initialization retries
+must not delete that workspace or reset its private ancestry/preflight records.
+Only an unbound first clone is rebuilt. A deterministic recovery cut preserves
+dirty work and the exact existing binding before ordinary turn preflight.

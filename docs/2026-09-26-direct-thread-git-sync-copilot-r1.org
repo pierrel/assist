@@ -1,0 +1,39 @@
+#+title: Direct thread Git sync: original PR bridge round 1
+#+date: 2026-09-26
+
+* Verified findings and smallest corrections
+PR 269 review 5326703996 at source 4000d906 raised six comments.
+Deep and Pi discarded a false local-finalization result. They now report a
+turn error, preserving the durable reply/result, work and Git flight fence.
+Remote-only publication failures retain the existing best-effort behavior:
+local child completion is authenticated by its receipt/floor, not by a remote
+push. Dropping its terminal preflight does not remove an unknown intent or
+parent preflight; a later fresh no-op turn retries a verified rejection.
+
+Cross-branch authorization is rejected before metadata mutation. This is not
+automatic rebranch migration, reset or a repair of the excluded main merge.
+Malformed non-string or over-256-character sidecar error metadata is rejected
+as unavailable before the phone response is assembled.
+
+The initializer mismatch comment is disproved: initialization compares binding
+source with the worker argument, not the old status projection. Its exact
+cancellation/clone ownership regression passes unchanged.
+
+* Deterministic checks
+The new visible-turn check submits =probe= to the actual Deep/Pi workflow with a
+stub model that writes a file/returns a saved answer, then fails restricted Git
+commit. It asserts error, retained Run result and conversation reply, files,
+flight fence and unchanged remote main/refs. No model request occurs.
+The rebranch check preserves publication metadata and optional pending intent/
+preflight while changing only the checkout, then proves authorization rejection
+leaves state untouched. Error-field checks exercise oversized/string and invalid
+types. Remote-only rejection/unknown-outcome checks prove authenticated local
+receipt, retained parent/floor/intent, explicit unknown hold or fresh no-op retry.
+Existing teardown regression now expects error rather than ready, with the same
+answer/quarantine assertions. No model evals, GPU or live Docker checks were run.
+
+* Historical supersessions
+=docs/2026-09-26-direct-thread-git-sync.org=, Publication and failure: ready
+remains insufficient proof of remote publication, but failed local commit or
+teardown is now explicitly an error, not ready. Its remote-only best-effort
+contract and all unrelated exclusions remain unchanged.

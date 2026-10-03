@@ -220,6 +220,35 @@ def test_recovery_dispatches_committed_pending_run_without_status_duplicate(
     assert queued["run_id"] == run.id
 
 
+@pytest.mark.parametrize("stage,fenced", [
+    ("starting_sandbox", False), ("starting_sandbox", True), ("error", True),
+])
+def test_terminal_dirty_run_restart_never_replays_and_projects_fence(wired, monkeypatch,
+                                                                     stage, fenced):
+    tid, _ = wired
+    run = threads._create_run(tid, "unfinished work")
+    threads._runs().claim(tid, run.id)
+    _set_status(tid, stage, pending_message=run.text, pending_run_id=run.id,
+                **({"error": "uncommitted changes"} if stage == "error" else {}))
+    threads._runs().transition(tid, run.id, "error", error="uncommitted changes")
+    decisions = []
+    monkeypatch.setattr(threads, "_recovery_decision",
+                        lambda *args: decisions.append(args) or "redispatch")
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *_: None)
+    if fenced:
+        monkeypatch.setattr(threads, "git_preflight_fence_error", lambda *_:
+                            "Previous Git teardown or commit finalization needs operator verification")
+
+    threads.queue_recovery_runs()
+
+    assert decisions == []
+    assert [(item.id, item.status) for item in threads._runs().list(tid)] == [
+        (run.id, "error")]
+    assert _get_status(tid)["stage"] == "error"
+    expected = "operator verification" if fenced else "uncommitted changes"
+    assert expected in _get_status(tid)["error"]
+
+
 def test_recovery_replays_persisted_first_run_initialization(wired):
     """A crash before the first clone must not execute that Run without its worktree."""
     tid, _ = wired
@@ -298,6 +327,11 @@ def test_cancelled_initializer_finishes_its_owned_setup_before_releasing_a_follo
     started, release = threading.Event(), threading.Event()
     executed, dispatched = [], []
 
+    from assist.git_sync import bind
+    bind(str(tmp_path / tid), "https://example.invalid/repo.git")
+    # This test doubles the slow clone; real branch authorization has separate Git probes.
+    monkeypatch.setattr(threads, "authorize_branch", lambda *_args: None)
+
     class BlockingDomain:
         def __init__(self, *_args, **_kwargs):
             started.set()
@@ -312,7 +346,7 @@ def test_cancelled_initializer_finishes_its_owned_setup_before_releasing_a_follo
     monkeypatch.setattr(threads._INITIALIZATION_SCHEDULER, "complete", lambda *_args: None)
 
     worker = threading.Thread(
-        target=threads._initialize_thread, args=(tid, head.id, "repo://example"))
+        target=threads._initialize_thread, args=(tid, head.id, "https://example.invalid/repo.git"))
     worker.start()
     assert started.wait(1)
 
@@ -667,6 +701,19 @@ def test_recover_finalizes_completed_turn(wired, monkeypatch):
 
     assert calls == []                               # nothing re-run
     assert _get_status(tid)["stage"] == "ready"
+
+
+def test_legacy_git_completed_projection_is_not_ready_after_restart(wired, monkeypatch):
+    tid, root = wired
+    from assist.git_sync import bind, read_state
+    bind(str(root / tid), "https://example.invalid/repo.git")
+    before = read_state(str(root / tid))
+    monkeypatch.setattr(threads, "_recovery_decision", lambda *_: "finalize")
+    _set_status(tid, "processing", pending_message="saved checkpoint answer")
+    threads.queue_recovery_runs()
+    assert _get_status(tid)["stage"] == "error"
+    assert "unverified" in _get_status(tid)["error"]
+    assert read_state(str(root / tid)) == before
 
 
 def test_recover_unrecoverable_errors_with_message_surfaced(wired, monkeypatch):
