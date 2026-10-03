@@ -3090,8 +3090,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     else:
                         resp = chat.message(text)
             finally:
-                # Confirm this generation stopped while holding the queue;
-                # failed confirmation retains its Git fence or registry entry.
+                # Attempt cleanup while holding the queue. Retained generations
+                # require shutdown proof; retained Git fences block later admission.
                 if git_lifecycle.bound and sandbox_generation is not None:
                     try:
                         git_lifecycle.cleanup_model(sandbox_generation)
@@ -3160,8 +3160,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     except ThreadPauseRequested:
         # NON-terminal (fair scheduling): the turn yielded the slot at its quantum so a
         # waiting turn could run. Its work is durable in the checkpoint (nothing lost);
-        # cleanup already confirmed this slice's container stopped; otherwise
-        # this pause would fail closed. Mark it paused and hand it to the dedicated
+        # Mark it paused and hand it to the dedicated
         # resume scheduler — NOT a BackgroundTask (that would park a shared-threadpool
         # worker per paused turn and stall request handling). Carry the active hold it
         # burned so the 2h cap accounts across resumes.
@@ -3208,9 +3207,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # previous turn's work didn't land.  Without this branch the
         # generic except below shows a raw exception repr to the user.
         logging.error("Sandbox lost for thread %s: %s", tid, e)
-        # The per-turn teardown confirmed this turn's container stopped before
-        # reaching this branch; drop the cached domain manager so a retry
-        # re-checks cleanly instead of poking at the corpse of the old one.
+        # Drop the cached domain manager so a retry re-checks sandbox and Git admission.
         DOMAIN_MANAGERS.pop(tid, None)
         _cancelled = _cancel_this_turns_continuations(tid, _pre_turn_conts)
         _rejournaled = _rejournal_claimed_interjections(tid, rider)
@@ -3266,7 +3263,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             _set_status(tid, "error", error=message, **pending_kwargs)
     except _SupersedeCapReached:
         # Controlled unwind from the supersede-cap terminal exit: the queue is now
-        # released and container cleanup confirmed, and _terminal is already terminal
+        # released, and _terminal is already terminal
         # ("awaiting_approval", …) — fall through to the common notify below (so the
         # observer fires post-release, exactly like the normal terminal exits).
         pass
