@@ -22,8 +22,14 @@ def client(tmp_path,monkeypatch):
     return TestClient(web.app)
 
 
-def _pending(error=""):
+def _pending(error="", *, proposal=False):
+    proposal_run = None
+    if proposal:
+        proposal_run = threads._create_run("mail-thread", "Original Gmail request")
+        threads._runs().claim("mail-thread", proposal_run.id)
+        proposal_run = threads._runs().transition("mail-thread", proposal_run.id, "awaiting_approval")
     _set_status("mail-thread","awaiting_approval",pending_gmail_token="exact-token",
+                pending_gmail_run_id=proposal_run.id if proposal_run else None,
                 pending_gmail_action={"name":"gmail_delete","args":{"message_ids":["abc123"]}},
                 pending_gmail_interrupt_id="gmail-interrupt",
                 pending_gmail_messages=[{"id":"abc123","from":"Sender <sender@example.test>",
@@ -31,6 +37,7 @@ def _pending(error=""):
                                          "body":"Full <script>alert(1)</script>\nbody",
                                          "url":"https://mail.google.com/mail/u/0/#all/abc123"}],
                 pending_gmail_error=error)
+    return proposal_run
 
 
 def test_full_web_preview_escaped_and_exact_token(client):
@@ -45,7 +52,7 @@ def test_full_web_preview_escaped_and_exact_token(client):
 
 
 def test_one_resume_for_concurrent_web_phone_and_replay(client):
-    _pending()
+    _pending(proposal=True)
     def decide(_):
         return threads.gmail_decision_core("mail-thread","approve","exact-token")
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -53,14 +60,14 @@ def test_one_resume_for_concurrent_web_phone_and_replay(client):
     assert replies[0][0].id == replies[1][0].id
     assert sorted(replayed for _,replayed in replies)==[False,True]
     runs=threads._runs().list("mail-thread")
-    assert len(runs)==1 and runs[0].resume_decision=={"type":"approve","approval_interrupt_id":"gmail-interrupt"}
-    assert runs[0].dispatch_key=="gmail-approval:gmail_delete:exact-token"
+    assert len(runs)==2 and runs[-1].resume_decision=={"type":"approve","approval_interrupt_id":"gmail-interrupt"}
+    assert runs[-1].dispatch_key=="gmail-approval:gmail_delete:exact-token"
     assert not _get_status("mail-thread").get("pending_gmail_token")
     with pytest.raises(HTTPException) as failure:
         threads.gmail_decision_core("mail-thread","reject","exact-token")
     assert failure.value.status_code==409
     # An old approval replay cannot consume a new proposal.
-    _pending()
+    _pending(proposal=True)
     _set_status("mail-thread","awaiting_approval",**{
         **{k:v for k,v in _get_status("mail-thread").items() if k!="stage"},
         "pending_gmail_token":"successor-token"})
@@ -69,7 +76,7 @@ def test_one_resume_for_concurrent_web_phone_and_replay(client):
 
 
 def test_incomplete_preview_can_only_reject(client,monkeypatch):
-    _pending(error="Complete preview unavailable")
+    _pending(error="Complete preview unavailable",proposal=True)
     executed=[]
     monkeypatch.setattr(threads,"_execute_run",lambda *a:executed.append(a))
     page=client.get("/thread/mail-thread").text
@@ -77,7 +84,7 @@ def test_incomplete_preview_can_only_reject(client,monkeypatch):
     assert client.post("/thread/mail-thread/gmail/approve",data={"token":"exact-token"}).status_code==409
     result=client.post("/thread/mail-thread/gmail/reject",data={"token":"exact-token"},follow_redirects=False)
     assert result.status_code==303 and len(executed)==1
-    assert threads._runs().list("mail-thread")[0].resume_decision=={"type":"reject","approval_interrupt_id":"gmail-interrupt"}
+    assert threads._runs().list("mail-thread")[-1].resume_decision=={"type":"reject","approval_interrupt_id":"gmail-interrupt"}
 
 
 def test_new_message_refused_before_durable_admission_and_stale_decisions(client):
@@ -192,7 +199,7 @@ def test_contended_approval_admission_does_not_block_event_loop(client,monkeypat
     import asyncio
     import threading
     import httpx
-    _pending()
+    _pending(proposal=True)
     started=threading.Event()
     original=threads.gmail_decision_core
     def core(*args):
@@ -215,7 +222,7 @@ def test_contended_approval_admission_does_not_block_event_loop(client,monkeypat
 
 
 def test_resume_admission_survives_status_write_failure(client,monkeypatch):
-    _pending()
+    _pending(proposal=True)
     original=threads._set_status
     fail=True
     def set_status(*args,**kwargs):
@@ -231,7 +238,7 @@ def test_resume_admission_survives_status_write_failure(client,monkeypatch):
     monkeypatch.setattr(threads,"_execute_run",lambda *a:calls.append(a))
     response=client.post("/thread/mail-thread/gmail/approve",data={"token":"exact-token"},follow_redirects=False)
     assert response.status_code==303 and len(calls)==1
-    assert len(threads._runs().list("mail-thread"))==1
+    assert len(threads._runs().list("mail-thread"))==2
 
 
 def test_reject_during_preview_preserves_successor_status_and_context(client,monkeypatch):
@@ -495,19 +502,19 @@ def test_reply_run_cannot_fall_through_to_email_approval(client,monkeypatch,send
 
 @pytest.mark.parametrize("decision",["approve","reject"])
 def test_gmail_core_binds_requested_kind_before_admission_and_on_replay(client,decision):
-    _pending()
+    proposal = _pending(proposal=True)
     before=_get_status("mail-thread")
     with pytest.raises(HTTPException) as mismatch:
         threads.gmail_decision_core("mail-thread",decision,"exact-token",expected_kind="gmail_archive")
     assert mismatch.value.status_code==409
-    assert _get_status("mail-thread")==before and threads._runs().list("mail-thread")==[]
+    assert _get_status("mail-thread")==before and threads._runs().list("mail-thread")==[proposal]
     run,replayed=threads.gmail_decision_core("mail-thread",decision,"exact-token",expected_kind="gmail_delete")
     assert not replayed
     assert threads.gmail_decision_core("mail-thread",decision,"exact-token",expected_kind="gmail_delete")== (run,True)
     with pytest.raises(HTTPException) as replay_mismatch:
         threads.gmail_decision_core("mail-thread",decision,"exact-token",expected_kind="gmail_archive")
     assert replay_mismatch.value.status_code==409
-    assert threads._runs().list("mail-thread")==[run]
+    assert threads._runs().list("mail-thread")==[proposal,run]
 
 
 @pytest.mark.parametrize("proposal_state",["running","awaiting_approval"])
@@ -660,3 +667,29 @@ def test_upgrade_repreviews_legacy_card_at_actual_checkpoint(client, tmp_path, m
         assert len(decisions) == int(new_gate)  # No checkpoint consumption during migration.
     finally:
         connection.close()
+
+
+@pytest.mark.parametrize("proposal_state", ["missing", "unknown", "pending", "running", "success"])
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+def test_gmail_admission_requires_durable_awaiting_proposal(client, proposal_state, decision):
+    _pending()
+    if proposal_state != "missing":
+        if proposal_state == "unknown":
+            proposal_id = "missing-run"
+        else:
+            proposal = threads._create_run("mail-thread", "Original request")
+            if proposal_state in {"running", "success"}:
+                threads._runs().claim("mail-thread", proposal.id)
+            if proposal_state == "success":
+                threads._runs().transition("mail-thread", proposal.id, "success")
+            proposal_id = proposal.id
+        _set_status("mail-thread", "awaiting_approval", **{
+            **{k:v for k,v in _get_status("mail-thread").items() if k != "stage"},
+            "pending_gmail_run_id":proposal_id})
+    before_status = _get_status("mail-thread")
+    before_runs = threads._runs().list("mail-thread")
+    with pytest.raises(HTTPException) as refused:
+        threads.gmail_decision_core("mail-thread", decision, "exact-token")
+    assert refused.value.status_code == 409
+    assert _get_status("mail-thread") == before_status
+    assert threads._runs().list("mail-thread") == before_runs

@@ -117,7 +117,7 @@ def test_credentials_fail_closed(configured, monkeypatch, mode):
     assert gmail.gmail_read("abc123").startswith("Gmail read failed:")
 
 
-@pytest.mark.parametrize("message_id", ["../send", "abc/modify", "abc?alt=media", "a\nAuthorization:bad"])
+@pytest.mark.parametrize("message_id", ["../send", "abc/modify", "abc\\modify", "a\nAuthorization:bad", ".", "..", "x" * 513, "\ud800"])
 def test_ids_cannot_select_other_endpoints(configured, monkeypatch, message_id):
     calls = []
     monkeypatch.setattr(gmail.requests, "request", lambda *a, **k: calls.append(a) or _Response({"access_token":"a"}))
@@ -309,3 +309,24 @@ def test_null_provider_body_is_a_gmail_error(monkeypatch):
     monkeypatch.setattr(client,"request",lambda *a,**k:{"payload":{"mimeType":"text/plain","body":None}})
     with pytest.raises(gmail.GmailError,match="structure/encoding"):
         client.read("abc123")
+
+
+def test_opaque_message_id_read_mutations_and_link_are_encoded(monkeypatch):
+    from urllib.parse import quote
+    message_id = "opaque:Q_?#%" + "Z" * 40 + "é"
+    calls = []
+    client = object.__new__(gmail.GmailClient)
+    def request(method, suffix, **kwargs):
+        calls.append((method, suffix, kwargs))
+        return {"payload":{"mimeType":"text/plain","body":{"data":""}}}
+    monkeypatch.setattr(client, "request", request)
+    monkeypatch.setattr(gmail, "GmailClient", lambda: client)
+    value = client.read(message_id)
+    assert value["id"] == message_id
+    assert value["url"] == "https://mail.google.com/mail/u/0/#all/" + quote(message_id, safe="")
+    assert json.loads(gmail.gmail_archive([message_id]))["completed"] == [message_id]
+    assert json.loads(gmail.gmail_delete([message_id]))["completed"] == [message_id]
+    segment = "/messages/" + quote(message_id, safe="")
+    assert calls == [("GET", segment, {"params":{"format":"full"}}),
+                     ("POST", segment + "/modify", {"json":{"removeLabelIds":["INBOX"]}}),
+                     ("POST", segment + "/trash", {"json":{}})]

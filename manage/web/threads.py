@@ -4150,9 +4150,16 @@ def gmail_decision_core(tid: str, decision: str, token: str, *,
                                       or not status.get("pending_gmail_messages")):
             raise HTTPException(status_code=409, detail="A complete Gmail preview is required.")
         proposal_id = status.get("pending_gmail_run_id")
-        proposal = _runs().get(tid, proposal_id) if proposal_id else None
+        if not proposal_id:
+            raise HTTPException(status_code=409, detail="Gmail proposal Run is unavailable.")
+        try:
+            proposal = _runs().get(tid, proposal_id)
+        except RunNotFound:
+            raise HTTPException(status_code=409, detail="Gmail proposal Run is unavailable.") from None
+        if proposal.status != "awaiting_approval":
+            raise HTTPException(status_code=409, detail="Gmail proposal Run is not awaiting approval.")
         run = _create_run(tid, None, resume_decision={"type": decision, "approval_interrupt_id":interrupt_id}, dispatch_key=key,
-                          work_id=proposal.work_id if proposal else None)
+                          work_id=proposal.work_id)
         _set_status(tid, "processing", pending_run_id=run.id,
                     pending_gmail_action=status["pending_gmail_action"],
                     started_at=status.get("started_at"))
