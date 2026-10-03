@@ -2136,7 +2136,7 @@ _TOOL_RESULT_METADATA = {
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "011af416c9ce7136a455c146aaf130882caf31270b5ed334ecd0cfbe2b0b603b"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "938264b2257a527089fd95a671e1716174b302c918906306fccdf537833fc9a3"
+    "e8daa7be954aec4c12f32516ec726008355de5d6eee89fecedefeb290bac2605"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:

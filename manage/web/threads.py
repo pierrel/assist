@@ -3162,7 +3162,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     git_lifecycle.cleanup_model(sandbox_generation)
             pending_gmail = _pending_gmail(chat)
             if pending_gmail:
-                MANAGER.touch(tid)
+                try:
+                    MANAGER.touch(tid)
+                except OSError:
+                    logging.warning("Thread timestamp update failed for %s", tid, exc_info=True)
                 gmail_token = secrets.token_urlsafe(16)
                 gmail_terminal = ("awaiting_approval", "Gmail action awaiting approval")
                 _terminal = gmail_terminal

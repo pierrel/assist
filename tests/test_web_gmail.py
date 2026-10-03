@@ -121,7 +121,10 @@ def test_worker_gmail_proposal_and_approval_resume(client,monkeypatch):
             return [{"role":"user","content":"Archive this"},{"role":"assistant","content":"Approval required"}]
     chat=Chat()
     monkeypatch.setattr(web.MANAGER,"get",lambda *a,**k:chat)
-    monkeypatch.setattr(web.MANAGER,"touch",lambda *a:None)
+    def touch(*args):
+        if chat.pending:
+            raise OSError("synthetic timestamp write failure")
+    monkeypatch.setattr(web.MANAGER,"touch",touch)
     monkeypatch.setattr(threads,"_get_sandbox_backend",lambda *a,**k:None)
     monkeypatch.setattr(threads,"_get_domain_manager",lambda *a,**k:None)
     scheduled=[]

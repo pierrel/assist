@@ -1,6 +1,6 @@
 ---
 name: gmail
-description: "Find, read, show, organize or unsubscribe from messages in the user's Gmail mailbox. Use for email searches by date, sender, subject or body and for archive/delete requests. Gmail sending and replying are unavailable."
+description: "Find, read, show, organize or unsubscribe from messages in the user's Gmail mailbox. Use for mailbox questions and correspondence such as receipts, confirmations and newsletters, with searches by date, sender, subject or body. Gmail sending and replying are unavailable."
 allowed-tools: gmail_search gmail_read gmail_archive gmail_delete
 ---
 

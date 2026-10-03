@@ -1296,7 +1296,7 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(historical_p0_prompt) == 31_279
     # Current web main includes the additive Gmail catalog entry. Historical
     # rows below deliberately retain their original P0-P2b3 values.
-    assert len(current_prompt) == 26_800
+    assert len(current_prompt) == 26_853
     assert len(schemas) == 18_735
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 37
