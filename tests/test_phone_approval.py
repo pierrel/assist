@@ -212,3 +212,37 @@ def test_real_hitl_resumes_only_the_displayed_email(decision):
                 [decision["edited_action"]["args"] if decision["type"] == "edit" else first])
     assert sent == expected
     assert chat.pending_actions() == []
+
+
+def test_original_phone_handle_follows_approval_resume(approval):
+    client, runs, _ = approval
+    original = runs.create("thread-a", "general-agent", "Email this person")
+    runs.claim("thread-a", original.id)
+    runs.transition("thread-a", original.id, "awaiting_approval")
+    status = state._get_status("thread-a")
+    status.pop("stage")
+    state._set_status("thread-a", "awaiting_approval", **status, pending_email_run_id=original.id)
+    response = client.post(URL, headers=HEADERS, json={
+        "kind": "send_email", "token": _proposal(client)["token"], "decision": "approve"})
+    assert response.status_code == 200
+    resumed = runs.get("thread-a", response.json()["run_id"])
+    assert resumed.id != original.id and resumed.work_id == original.work_id
+    projection = phone_api._logical_status("thread-a", original.id)
+    assert (projection["status"], projection["physical_run_id"]) == ("pending", resumed.id)
+    runs.claim("thread-a", resumed.id)
+    runs.transition("thread-a", resumed.id, "success")
+    state._set_status("thread-a", "ready")
+    projection = phone_api._logical_status("thread-a", original.id)
+    assert (projection["status"], projection["physical_run_id"]) == ("success", resumed.id)
+
+
+def test_legacy_non_run_proposal_does_not_inherit_an_old_awaiting_work(approval):
+    client, runs, _ = approval
+    old = runs.create("thread-a", "general-agent", "Older email")
+    runs.claim("thread-a", old.id)
+    runs.transition("thread-a", old.id, "awaiting_approval")
+    response = client.post(URL, headers=HEADERS, json={
+        "kind": "send_email", "token": _proposal(client)["token"], "decision": "reject"})
+    assert response.status_code == 200
+    resumed = runs.get("thread-a", response.json()["run_id"])
+    assert resumed.work_id != old.work_id

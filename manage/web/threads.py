@@ -3106,6 +3106,25 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 except GitSyncError:
                     _terminal = ("error", resp)
                     raise
+            # Second interjection claim site (terminal): claim anything injected
+            # after the last before_model boundary, then END fate-sharing coverage
+            # — the answer is committed, so a later bookkeeping error must not
+            # re-journal an already-answered interjection.
+            _claim_seen_interjections(tid, chat)
+            _TURN_INTERJECTION.pop(tid, None)
+            pending = chat.pending_reply()
+            pending_email = _pending_email(chat)
+            if pending_email and not pending:
+                with _RUN_ADMISSION_LOCK:
+                    _set_status(tid, "awaiting_approval",
+                                pending_email_to=pending_email.get("to", ""),
+                                pending_email_subject=pending_email.get("subject", ""),
+                                pending_email_body=pending_email.get("body", ""),
+                                pending_email_token=secrets.token_urlsafe(16),
+                                pending_email_run_id=_run.id if _run else None,
+                                started_at=started_at)
+                    if _run is not None:
+                        _runs().transition(tid, _run.id, "awaiting_approval")
         MANAGER.touch(tid)
 
         # Generate description if there is none
@@ -3127,14 +3146,6 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                            (_now_ms() - started_at) / 1000.0)
         except Exception as e:
             logging.warning("turn-timing record failed for %s: %s", tid, e)
-        # Second interjection claim site (terminal): claim anything injected
-        # after the last before_model boundary, then END fate-sharing coverage
-        # — the answer is committed, so a later bookkeeping error must not
-        # re-journal an already-answered interjection.
-        _claim_seen_interjections(tid, chat)
-        _TURN_INTERJECTION.pop(tid, None)
-        pending = chat.pending_reply()
-        pending_email = _pending_email(chat)
         if pending:
             # Preserve started_at so the HITL approve/reject resume reuses the original
             # submit time — the approved reply's badge then shows human→final-reply, not
@@ -3144,12 +3155,6 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         started_at=started_at)
             _terminal = ("awaiting_approval", pending.get("text", ""))
         elif pending_email:
-            _set_status(tid, "awaiting_approval",
-                        pending_email_to=pending_email.get("to", ""),
-                        pending_email_subject=pending_email.get("subject", ""),
-                        pending_email_body=pending_email.get("body", ""),
-                        pending_email_token=secrets.token_urlsafe(16),
-                        started_at=started_at)
             _terminal = ("awaiting_approval", pending_email.get("body", ""))
         else:
             _set_status(tid, "ready", mark_unseen=not _quiet_ready(_run))
@@ -3953,8 +3958,11 @@ def email_decision_core(tid: str, decision: str, token: str, *,
 
     Phone tokens also bind the fixed From/Cc preview. The durable dispatch key
     prevents duplicate resumes if status publication fails after Run creation.
-    Callers schedule new or still-pending Runs, including a replay after a failed
-    status write. The executor's claim gate handles duplicate dispatch safely.
+    The resume retains the awaiting Run's logical work identity, so its accepted
+    phone handle follows the decision through completion. Legacy non-Run proposals
+    start a new work identity. Callers schedule new or still-pending Runs, including
+    a replay after a failed status write. The executor's claim gate handles duplicate
+    dispatch safely.
     """
     _existing_thread_dir(tid)
     _require_deep_thread(tid)
@@ -3982,11 +3990,14 @@ def email_decision_core(tid: str, decision: str, token: str, *,
             raise HTTPException(status_code=400, detail="The edited email is invalid.")
         resume_decision = _EMAIL_DECISIONS[decision](to, subject, body)
         dispatch_key = "email-approval:" + status["pending_email_token"]
-        replay = next((run for run in _runs().list(tid)
-                       if run.dispatch_key == dispatch_key), None)
+        runs = _runs().list(tid)
+        replay = next((run for run in runs if run.dispatch_key == dispatch_key), None)
+        proposal_run_id = status.get("pending_email_run_id")
+        awaiting = _runs().get(tid, proposal_run_id) if proposal_run_id else None
         if replay is not None and replay.resume_decision != resume_decision:
             raise HTTPException(status_code=409, detail="This email already has a decision.")
         run = replay or _create_run(tid, None, dispatch_key=dispatch_key,
+                                    work_id=awaiting.work_id if awaiting else None,
                                     resume_decision=resume_decision)
         queued_status = {key: value for key, value in status.items() if key != "stage"}
         queued_status["pending_run_id"] = run.id
