@@ -1069,7 +1069,7 @@ def render_thread(
         </div>"""
     elif stage == "awaiting_approval" and status.get("pending_gmail_token"):
         action = status.get("pending_gmail_action", {}).get("name", "")
-        label = "Archive" if action == "gmail_archive" else "Move to Trash"
+        label = "Archive" if action == "email_archive" else "Move to Trash"
         token = html.escape(status["pending_gmail_token"])
         previews = []
         for mail in status.get("pending_gmail_messages", []):
@@ -1077,7 +1077,7 @@ def render_thread(
                                 ("id", "from", "to", "subject", "date"))
             previews.append('<pre>' + html.escape(headers + "\n\n" + mail.get("body", ""))
                             + '</pre><a href="' + html.escape(mail.get("url", ""))
-                            + '" rel="noreferrer">Open in Gmail</a>')
+                            + '" rel="noreferrer">Open email</a>')
         error = status.get("pending_gmail_error", "")
         approve = (f'<button class="btn merge-btn" formaction="/thread/{tid}/gmail/approve" '
                    f'type="submit">Approve {label.lower()}</button>' if not error else "")
@@ -1996,7 +1996,7 @@ def _pending_email(chat) -> dict | None:
 
 
 def _pending_gmail(chat) -> dict | None:
-    """Read an exact Gmail mutation request from the durable HITL checkpoint."""
+    """Read an exact Email mutation request from the durable HITL checkpoint."""
     pending = getattr(chat, "pending_action", None)
     if pending is None:
         return None
@@ -2033,11 +2033,11 @@ def _refresh_gmail_preview(tid: str, token: str, action: dict) -> None:
                     "pending_gmail_preview_pending":False})
             except OSError:
                 # Preserve the durable card for rejection or startup preview recovery.
-                logging.warning("Could not publish Gmail preview for %s", tid, exc_info=True)
+                logging.warning("Could not publish Email preview for %s", tid, exc_info=True)
 
 
 def _resume_gmail(chat, decision: dict) -> str:
-    """Resume only the previewed Gmail request; reject all other unseen actions."""
+    """Resume only the previewed Email request; reject all other unseen actions."""
     decision = {key:value for key,value in decision.items() if key != "approval_interrupt_id"}
     pending = _pending_gmail(chat)
     requests = chat.pending_actions()
@@ -2765,7 +2765,7 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
 
 
 def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
-    """Resume a decided Gmail action before fresh user/FIFO pending turns."""
+    """Resume a decided Email action before fresh user/FIFO pending turns."""
     runs = _runs().list(tid)
     if any(run.status == "running" for run in runs):
         return
@@ -2889,7 +2889,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # `origin` ("continuation", "task-completion", or None) keys
     # the render surfaces (agent-note bubble, "Following up" banner), the origin-aware
     # failure path, and recovery fidelity — persisted in every busy status write below.
-    # `resume_decision` resumes a reply, email or Gmail approval only through an
+    # `resume_decision` resumes a reply, outbound-send or mailbox approval only through an
     # admitted Run with the matching approval dispatch key and checkpoint action.
     # `resume=True` (set only by the fair-scheduling resume scheduler after a quantum pause)
     # continues this thread's in-flight turn from its durable checkpoint (input=None) rather
@@ -3028,7 +3028,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             if resume_decision is not None:
                 # Refuse foreign/stale decisions before clearing the visible card
                 # or claiming its proposal lineage. Legacy untyped decisions cannot
-                # prove which kind of action was approved. Gmail also binds the
+                # prove which kind of action was approved. Mailbox approval also binds the
                 # exact admitted owner/action (including startup's paused projection),
                 # or its card after a failed status write.
                 pending_chat = MANAGER.get(tid, sandbox_backend=None)
@@ -3245,7 +3245,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 except OSError:
                     logging.warning("Thread timestamp update failed for %s", tid, exc_info=True)
                 gmail_token = secrets.token_urlsafe(16)
-                gmail_terminal = ("awaiting_approval", "Gmail action awaiting approval")
+                gmail_terminal = ("awaiting_approval", "Email action awaiting approval")
                 _terminal = gmail_terminal
                 with _RUN_ADMISSION_LOCK:
                     _set_status(tid, "awaiting_approval",
@@ -3253,7 +3253,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                 pending_gmail_interrupt_id=chat.pending_action_interrupt_id(
                                     pending_gmail["name"], pending_gmail["args"]),
                                 pending_gmail_messages=[],
-                                pending_gmail_error="Preparing complete Gmail preview.",
+                                pending_gmail_error="Preparing complete Email preview.",
                                 pending_gmail_preview_pending=True,
                                 pending_gmail_token=gmail_token,
                                 pending_gmail_run_id=_run.id if _run else None,
@@ -3467,7 +3467,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         + (_REJOURNAL_NOTE if _rejournaled else ""),
                         **pending_kwargs)
     finally:
-        # Discard this completed slice's hold on terminal exit. A Gmail proposal
+        # Discard this completed slice's hold on terminal exit. A mailbox proposal
         # drained before preview I/O; a pause already consumed its own carry.
         if queue_handle is not None and not hold_drained:
             THREAD_QUEUE.pop_hold(queue_handle)
@@ -3819,7 +3819,7 @@ _RUN_ADMISSION_LOCK = threading.Lock()
 
 
 class _EmailApprovalPending(Exception):
-    """A web submission tried to bypass a displayed email or Gmail approval."""
+    """A web submission tried to bypass a displayed outbound-send or mailbox approval."""
 
 
 def _accept_message_run_locked(tid: str, text: str, rider=None,
@@ -4127,14 +4127,14 @@ def gmail_decision_core(tid: str, decision: str, token: str, *,
     if decision not in {"approve", "reject"}:
         raise HTTPException(status_code=400, detail="decision must be approve or reject")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", token):
-        raise HTTPException(status_code=409, detail="Gmail approval is unavailable or stale.")
+        raise HTTPException(status_code=409, detail="Email approval is unavailable or stale.")
     with _RUN_ADMISSION_LOCK:
         keys = {name: "gmail-approval:" + name + ":" + token for name in GMAIL_INTERRUPT_ON}
         # A replay identifies its original resume Run, never the current successor.
         previous = next((run for run in _runs().list(tid) if run.dispatch_key in keys.values()), None)
         if previous is not None:
             if expected_kind is not None and previous.dispatch_key != keys.get(expected_kind):
-                raise HTTPException(status_code=409, detail="Gmail action kind does not match this approval.")
+                raise HTTPException(status_code=409, detail="Email action kind does not match this approval.")
             if previous.resume_decision.get("type") != decision:
                 raise HTTPException(status_code=409, detail="This approval was already decided.")
             return previous, True
@@ -4145,23 +4145,23 @@ def gmail_decision_core(tid: str, decision: str, token: str, *,
                 or not hmac.compare_digest(expected, token)
                 or not isinstance(interrupt_id, str) or not interrupt_id
                 or status.get("pending_gmail_action", {}).get("name") not in GMAIL_INTERRUPT_ON):
-            raise HTTPException(status_code=409, detail="Gmail approval is unavailable or stale.")
+            raise HTTPException(status_code=409, detail="Email approval is unavailable or stale.")
         action_kind = status["pending_gmail_action"]["name"]
         if expected_kind is not None and expected_kind != action_kind:
-            raise HTTPException(status_code=409, detail="Gmail action kind does not match this approval.")
+            raise HTTPException(status_code=409, detail="Email action kind does not match this approval.")
         key = keys[action_kind]
         if decision == "approve" and (status.get("pending_gmail_error")
                                       or not status.get("pending_gmail_messages")):
-            raise HTTPException(status_code=409, detail="A complete Gmail preview is required.")
+            raise HTTPException(status_code=409, detail="A complete Email preview is required.")
         proposal_id = status.get("pending_gmail_run_id")
         if not proposal_id:
-            raise HTTPException(status_code=409, detail="Gmail proposal Run is unavailable.")
+            raise HTTPException(status_code=409, detail="Email proposal Run is unavailable.")
         try:
             proposal = _runs().get(tid, proposal_id)
         except RunNotFound:
-            raise HTTPException(status_code=409, detail="Gmail proposal Run is unavailable.") from None
+            raise HTTPException(status_code=409, detail="Email proposal Run is unavailable.") from None
         if proposal.status != "awaiting_approval":
-            raise HTTPException(status_code=409, detail="Gmail proposal Run is not awaiting approval.")
+            raise HTTPException(status_code=409, detail="Email proposal Run is not awaiting approval.")
         run = _create_run(tid, None, resume_decision={"type": decision, "approval_interrupt_id":interrupt_id}, dispatch_key=key,
                           work_id=proposal.work_id)
         _set_status(tid, "processing", pending_run_id=run.id,
@@ -4173,7 +4173,7 @@ def gmail_decision_core(tid: str, decision: str, token: str, *,
 @app.post("/thread/{tid}/gmail/{decision}")
 def gmail_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
                    token: str = Form(default="")):
-    """Approve/reject a Gmail action off the event loop, without executing mail inline."""
+    """Approve/reject an Email action off the event loop, without executing mail inline."""
     run, replayed = gmail_decision_core(tid, decision, token)
     if not replayed or run.status == "pending":
         background_tasks.add_task(_execute_run, run.id, tid)
@@ -4450,9 +4450,9 @@ def queue_recovery_runs() -> None:
 
     Runs off the asyncio loop during lifespan startup. An abandoned head is queued
     alone; its recovery queues its successor before accepted followers. Otherwise all
-    pending runs are queued in durable creation order. Incomplete Gmail previews
+    pending runs are queued in durable creation order. Incomplete Email previews
     requeue their original proposal for reading without resuming the agent. Legacy
-    Gmail cards with a pending checkpoint action receive a fresh token and
+    Email cards with a pending checkpoint action receive a fresh token and
     a new preview attempt.
     """
     visible = MANAGER.list()
@@ -4548,7 +4548,7 @@ def queue_recovery_runs() -> None:
                         "pending_gmail_interrupt_id":chat.pending_action_interrupt_id(action["name"], action["args"]),
                         "pending_gmail_token":secrets.token_urlsafe(24),
                         "pending_gmail_messages":[],
-                        "pending_gmail_error":"Preparing complete Gmail preview.",
+                        "pending_gmail_error":"Preparing complete Email preview.",
                         "pending_gmail_preview_pending":True})
                     status = _get_status(tid)
         if status.get("pending_gmail_preview_pending"):

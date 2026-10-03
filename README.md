@@ -472,17 +472,19 @@ and a link to the thread. These values intentionally do not use an `ASSIST_` pre
 they are not passed into sandboxes. If the recipient is absent, Assist logs the missing
 configuration and keeps the in-app urgent behavior without sending SMS.
 
-### Gmail mailbox
+### Email mailbox
 
-The ordinary Deep Agents web assistant can search/read Gmail and propose archive
-or recoverable Trash actions. Load the Gmail skill through a natural mail request.
-Searches support Gmail queries plus local regex filters for sender, subject, body
-and date, scanning at most 50 candidates per page with explicit coverage/cursors.
+The ordinary Deep Agents web assistant can search/read email and propose archive
+or recoverable Trash actions. Load the Email skill through a natural mail request.
+The current provider is Gmail. Searches support its queries plus local regex
+filters for sender, subject, body and date, scanning at most 50 candidates per
+page with explicit coverage/cursors.
 Reads return plain bodies and links without remote images/scripts. Date headers
 represent the sender's date; received timestamps are UTC. Gmail native date bounds
 follow [Gmail query semantics](https://developers.google.com/workspace/gmail/api/guides/filtering).
 Archive/Trash requires approval of complete message previews; oversized previews
-remain rejectable. No Gmail send/reply, permanent delete or attachment download.
+remain rejectable. These mailbox tools offer no send/reply, permanent delete or
+attachment download.
 Pi, delegates and inbound SMS triage do not receive these tools.
 
 An operator connects the account once, outside an agent turn:

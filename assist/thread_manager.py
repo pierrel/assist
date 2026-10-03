@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 # The web app's main agent gets web-only skills: ``render`` emits a workspace-file
 # block for the web view (parsed by manage/web/threads.py); ``send-email`` and
-# ``gmail`` use the web host's approval transport.  Scoped here BY DESIGN: ThreadManager is the
+# ``email`` use the web host's approval transport.  Scoped here BY DESIGN: ThreadManager is the
 # web app's agent builder (emacsos builds its own Thread/spec; the eval harness uses
 # create_agent directly), so these web-only skills never reach surfaces with no web
 # view.  The eval harness may mount the route explicitly for render coverage.  The

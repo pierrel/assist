@@ -1706,10 +1706,10 @@ _TOOL_ORIGINS = {
     "resume_schedule": "assist.schedule.tools",
     "search_internet": "assist.tools",
     "send_email": "assist.events.email",
-    "gmail_search": "assist.gmail",
-    "gmail_read": "assist.gmail",
-    "gmail_archive": "assist.gmail",
-    "gmail_delete": "assist.gmail",
+    "email_search": "assist.gmail",
+    "email_read": "assist.gmail",
+    "email_archive": "assist.gmail",
+    "email_delete": "assist.gmail",
     "start_async_task": "assist.async_subagents",
     "task": "deepagents.middleware.subagents",
     "travel": "assist.tools",
@@ -2135,9 +2135,9 @@ _TOOL_RESULT_METADATA = {
 }
 
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "011af416c9ce7136a455c146aaf130882caf31270b5ed334ecd0cfbe2b0b603b"
+    "e0900ef5753a28b196509ea1d8cc9336e9eb5ad5c13f52d81c1dc20577462e49"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "e8daa7be954aec4c12f32516ec726008355de5d6eee89fecedefeb290bac2605"
+    "3609ffcb79c436bed132dc3accfae6a7d5ec72a13b7cb513524cd72f1bee877e"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:

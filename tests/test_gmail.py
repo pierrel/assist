@@ -89,7 +89,7 @@ def test_client_fixed_endpoints_and_auth_never_enter_results(configured, monkeyp
         calls.append((method, url, kwargs))
         return responses[len(calls)-1]
     monkeypatch.setattr(gmail.requests, "request", request)
-    result = gmail.gmail_read("abc123")
+    result = gmail.email_read("abc123")
     assert "ZX-42" in result and "private-access" not in result and "private-refresh" not in result
     assert calls[0][1] == gmail._TOKEN_URL
     assert calls[1][1] == gmail._API + "/messages/abc123"
@@ -114,14 +114,14 @@ def test_credentials_fail_closed(configured, monkeypatch, mode):
         value["scopes" if mode == "wrong_scope" else "token_uri"] = ["gmail.send"] if mode == "wrong_scope" else "https://evil.test/token"
         configured.write_text(json.dumps(value))
     monkeypatch.setattr(gmail.requests, "request", lambda *a, **k: pytest.fail("unsafe credential used"))
-    assert gmail.gmail_read("abc123").startswith("Gmail read failed:")
+    assert gmail.email_read("abc123").startswith("Email read failed:")
 
 
 @pytest.mark.parametrize("message_id", ["../send", "abc/modify", "abc\\modify", "a\nAuthorization:bad", ".", "..", "x" * 513, "\ud800"])
 def test_ids_cannot_select_other_endpoints(configured, monkeypatch, message_id):
     calls = []
     monkeypatch.setattr(gmail.requests, "request", lambda *a, **k: calls.append(a) or _Response({"access_token":"a"}))
-    assert gmail.gmail_read(message_id).startswith("Gmail read failed:")
+    assert gmail.email_read(message_id).startswith("Email read failed:")
     assert len(calls) == 1  # OAuth only; no attacker-controlled API path.
 
 
@@ -149,7 +149,7 @@ def test_search_and_filters_date_native_narrowing_and_pagination(monkeypatch):
         def read(self, message_id):
             return first if message_id == "abc123" else second
     monkeypatch.setattr(gmail,"GmailClient",Client)
-    result = json.loads(gmail.gmail_search(query="in:inbox", sender_regex=r"desk@example\.test",
+    result = json.loads(gmail.email_search(query="in:inbox", sender_regex=r"desk@example\.test",
                                          subject_regex="receipt",body_regex=r"ZX-\d+",
                                          date_regex="2026",after="2026-09-01",before="2026-11-01",
                                          page_token="previous",scan_limit=2))
@@ -164,14 +164,14 @@ def test_search_and_filters_date_native_narrowing_and_pagination(monkeypatch):
                                    {"after":"2026-02-30"},{"after":"foo is:sent"}])
 def test_invalid_search_never_calls_provider(monkeypatch, kwargs):
     monkeypatch.setattr(gmail,"GmailClient",lambda:pytest.fail("invalid search called provider"))
-    assert gmail.gmail_search(**kwargs).startswith("Gmail search failed:")
+    assert gmail.email_search(**kwargs).startswith("Email search failed:")
 
 
 def test_pathological_regex_is_time_bounded(monkeypatch):
     message = _decoded("a"*100000 + "!")
     monkeypatch.setattr(gmail,"GmailClient",lambda:SimpleNamespace(
         request=lambda *a,**k:{"messages":[{"id":"abc123"}]}, read=lambda _:message))
-    result=json.loads(gmail.gmail_search(body_regex="(a+)+$"))
+    result=json.loads(gmail.email_search(body_regex="(a+)+$"))
     assert result["complete"] is False and "timed out" in result["skipped"][0]["error"]
 
 
@@ -179,10 +179,10 @@ def test_truncated_body_search_never_claims_complete(monkeypatch):
     message = _decoded("x"*(gmail._MAX_BODY+1))
     monkeypatch.setattr(gmail,"GmailClient",lambda:SimpleNamespace(
         request=lambda *a,**k:{"messages":[{"id":"abc123"}]}, read=lambda _:message))
-    result=json.loads(gmail.gmail_search(body_regex="not-there"))
+    result=json.loads(gmail.email_search(body_regex="not-there"))
     assert result["complete"] is False and result["incomplete_bodies"] == 1
     with pytest.raises(gmail.GmailError,match="complete approval"):
-        gmail.gmail_action_preview({"name":"gmail_delete","args":{"message_ids":["abc123"]}})
+        gmail.gmail_action_preview({"name":"email_delete","args":{"message_ids":["abc123"]}})
 
 
 def test_archive_and_trash_only_exact_ids_with_partial_failure(monkeypatch):
@@ -193,8 +193,8 @@ def test_archive_and_trash_only_exact_ids_with_partial_failure(monkeypatch):
             raise gmail.GmailError("HTTP 503; outcome unknown")
         return {}
     monkeypatch.setattr(gmail,"GmailClient",lambda:SimpleNamespace(request=request))
-    assert json.loads(gmail.gmail_archive(["abc123"]))["completed"] == ["abc123"]
-    result=json.loads(gmail.gmail_delete(["abc123","def456"]))
+    assert json.loads(gmail.email_archive(["abc123"]))["completed"] == ["abc123"]
+    result=json.loads(gmail.email_delete(["abc123","def456"]))
     assert result["completed"] == ["abc123"] and "error" in result
     assert calls[0] == ("POST","/messages/abc123/modify",{"json":{"removeLabelIds":["INBOX"]}})
     assert calls[1] == ("POST","/messages/abc123/trash",{"json":{}})
@@ -215,9 +215,9 @@ def test_real_framework_interrupt_before_mutation_and_rejection(monkeypatch):
     monkeypatch.setattr(gmail,"_mutate",lambda ids,action:mutations.append((ids,action)) or "done")
     for decision in ("approve","reject"):
         model=Model(responses=[AIMessage(content="",tool_calls=[{
-            "name":"gmail_delete","args":{"message_ids":["abc123"]},"id":"call-1","type":"tool_call"}]),
+            "name":"email_delete","args":{"message_ids":["abc123"]},"id":"call-1","type":"tool_call"}]),
             AIMessage(content="Done")])
-        agent=create_agent(model,tools=[gmail.gmail_delete],
+        agent=create_agent(model,tools=[gmail.email_delete],
                            middleware=[HumanInTheLoopMiddleware(interrupt_on=gmail.GMAIL_INTERRUPT_ON)],
                            checkpointer=InMemorySaver())
         config={"configurable":{"thread_id":decision}}
@@ -241,9 +241,9 @@ def test_parallel_requests_only_execute_the_one_displayed(monkeypatch,tmp_path):
     calls=[]
     monkeypatch.setattr(gmail,"_mutate",lambda ids,action:calls.append((ids,action)) or "done")
     agent=create_agent(Model(responses=[AIMessage(content="",tool_calls=[
-        {"name":"gmail_delete","args":{"message_ids":["abc123"]},"id":"call-1","type":"tool_call"},
-        {"name":"gmail_archive","args":{"message_ids":["def456"]},"id":"call-2","type":"tool_call"}]),
-        AIMessage(content="Done")]),tools=[gmail.gmail_delete,gmail.gmail_archive],
+        {"name":"email_delete","args":{"message_ids":["abc123"]},"id":"call-1","type":"tool_call"},
+        {"name":"email_archive","args":{"message_ids":["def456"]},"id":"call-2","type":"tool_call"}]),
+        AIMessage(content="Done")]),tools=[gmail.email_delete,gmail.email_archive],
         middleware=[HumanInTheLoopMiddleware(interrupt_on=gmail.GMAIL_INTERRUPT_ON)],
         checkpointer=InMemorySaver())
     chat=Thread(str(tmp_path),thread_id="parallel",agent=agent,
@@ -252,7 +252,7 @@ def test_parallel_requests_only_execute_the_one_displayed(monkeypatch,tmp_path):
     proposal=_pending_gmail(chat)
     assert calls==[]
     _resume_gmail(chat,{"type":"approve"})
-    expected_action="archive" if proposal["name"]=="gmail_archive" else "trash"
+    expected_action="archive" if proposal["name"]=="email_archive" else "trash"
     assert calls==[(proposal["args"]["message_ids"],expected_action)]
     assert not chat.pending_actions()
 
@@ -267,7 +267,7 @@ def test_large_attachment_reference_does_not_block_small_message_body(configured
         calls.append(url)
         return _Response({"access_token":"a"} if url==gmail._TOKEN_URL else {"payload":payload})
     monkeypatch.setattr(gmail.requests,"request",request)
-    value=json.loads(gmail.gmail_read("abc123"))
+    value=json.loads(gmail.email_read("abc123"))
     assert value["body"]=="Small body evidence"
     assert len(calls)==2 and not any("attachments" in url for url in calls)
 
@@ -279,7 +279,7 @@ def test_unreadable_message_preserves_other_matches_and_next_page(monkeypatch):
         return _decoded()
     monkeypatch.setattr(gmail,"GmailClient",lambda:SimpleNamespace(
         request=lambda *a,**k:{"messages":[{"id":"def456"},{"id":"abc123"}],"nextPageToken":"next"},read=read))
-    value=json.loads(gmail.gmail_search())
+    value=json.loads(gmail.email_search())
     assert [message["id"] for message in value["messages"]]==["abc123"]
     assert value["next_page_token"]=="next" and value["complete"] is False
     assert value["skipped"]==[{"id":"def456","error":"Message exceeds size limit"}]
@@ -298,7 +298,7 @@ def test_one_regex_timeout_preserves_prior_matches_and_cursor(monkeypatch):
     monkeypatch.setattr(gmail,"GmailClient",lambda:SimpleNamespace(
         request=lambda *a,**k:{"messages":[{"id":"abc123"},{"id":"def456"}],"nextPageToken":"next"},
         read=lambda key:messages[key]))
-    result=json.loads(gmail.gmail_search(body_regex="(a+)+$"))
+    result=json.loads(gmail.email_search(body_regex="(a+)+$"))
     assert [message["id"] for message in result["messages"]]==["abc123"]
     assert result["next_page_token"]=="next" and result["complete"] is False
     assert result["skipped"][0]["id"]=="def456"
@@ -324,8 +324,8 @@ def test_opaque_message_id_read_mutations_and_link_are_encoded(monkeypatch):
     value = client.read(message_id)
     assert value["id"] == message_id
     assert value["url"] == "https://mail.google.com/mail/u/0/#all/" + quote(message_id, safe="")
-    assert json.loads(gmail.gmail_archive([message_id]))["completed"] == [message_id]
-    assert json.loads(gmail.gmail_delete([message_id]))["completed"] == [message_id]
+    assert json.loads(gmail.email_archive([message_id]))["completed"] == [message_id]
+    assert json.loads(gmail.email_delete([message_id]))["completed"] == [message_id]
     segment = "/messages/" + quote(message_id, safe="")
     assert calls == [("GET", segment, {"params":{"format":"full"}}),
                      ("POST", segment + "/modify", {"json":{"removeLabelIds":["INBOX"]}}),

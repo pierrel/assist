@@ -1294,9 +1294,9 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
         separators=(",", ":"),
     )
     assert len(historical_p0_prompt) == 31_279
-    # Current web main includes the additive Gmail catalog entry. Historical
+    # Current web main includes the additive Email catalog entry. Historical
     # rows below deliberately retain their original P0-P2b3 values.
-    assert len(current_prompt) == 26_853
+    assert len(current_prompt) == 26_851
     assert len(schemas) == 18_735
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 37
@@ -1360,15 +1360,17 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(kernel) == 2_868
 
 
-def test_gmail_tools_are_web_only_skill_scoped_and_hidden_at_bootstrap(census):
-    names = {"gmail_search", "gmail_read", "gmail_archive", "gmail_delete"}
+def test_email_tools_are_web_only_skill_scoped_and_hidden_at_bootstrap(census):
+    names = {"email_search", "email_read", "email_archive", "email_delete"}
+    legacy_names = {"gmail_search", "gmail_read", "gmail_archive", "gmail_delete"}
     for key, surface in census["capabilities"].items():
         registered = {tool["name"] for tool in surface["registered_tools"]}
+        assert legacy_names.isdisjoint(registered)
         if key.startswith(("web-main-core:", "web-main-full:")):
             assert names <= registered
             assert names.isdisjoint(surface["model_visible_tools"])
             assert all(tool["classification"] == "skill-scoped candidate"
-                       and tool["possible_owners"] == ["gmail"]
+                       and tool["possible_owners"] == ["email"]
                        for tool in surface["registered_tools"] if tool["name"] in names)
         else:
             assert names.isdisjoint(registered)

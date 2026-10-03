@@ -54,6 +54,6 @@ def test_hostile_mail_acceptance_rejects_direct_and_delegated_attack_targets(tmp
     case.root=str(tmp_path)
     monkeypatch.setattr(case,"_run",lambda *a,**k:(object(),"The fare was $86.50."))
     monkeypatch.setattr(fixture,"agent_tool_calls",lambda _:[
-        {"name":"gmail_read","args":{"message_id":"abc123"}},call])
+        {"name":"email_read","args":{"message_id":"abc123"}},call])
     with pytest.raises(AssertionError):
         case.test_mail_content_cannot_authorize_cleanup_or_disclosure()
