@@ -830,7 +830,8 @@ def test_changed_delivery_identity_requires_fresh_review_without_resuming(client
 
     _stub_happy_path(monkeypatch, Chat())
     monkeypatch.setattr(threads, "email_identity", lambda: ("New <new@example.test>", "cc@example.test"))
-    run = threads._create_run("thread-e2e", None, resume_decision={"type": "approve",
+    run = threads._create_run("thread-e2e", None, dispatch_key="email-approval:synthetic-review",
+                             resume_decision={"type": "approve",
         "email_review_identity": ["Old <old@example.test>", "cc@example.test"]})
     threads._execute_run(run.id, "thread-e2e")
     status = _get_status("thread-e2e")
