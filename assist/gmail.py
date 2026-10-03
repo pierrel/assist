@@ -118,7 +118,7 @@ class GmailClient:
             raise GmailError("Invalid Gmail message response.")
         try:
             message = _payload_message(payload)
-        except (ValueError, TypeError, KeyError) as error:
+        except (ValueError, TypeError, KeyError, AttributeError) as error:
             raise GmailError("Invalid Gmail message structure/encoding.") from error
         return _decode_message(message_id, message, value)
 

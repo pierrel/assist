@@ -105,6 +105,7 @@ class _Handle:
     __slots__ = (
         "thread_id", "expired", "acquired_at", "pause_requested",
         "accumulated_active_ms", "quantum_s", "hold_timeout_s", "timer",
+        "completed_hold_ms",
     )
 
     def __init__(
@@ -119,6 +120,7 @@ class _Handle:
         # seeded with what it already burned, so the 2h cap can't be dodged by
         # pausing).  Never counts paused/queued wall-time.
         self.accumulated_active_ms = accumulated_active_ms
+        self.completed_hold_ms = 0.0
         self.quantum_s = quantum_s
         self.hold_timeout_s = hold_timeout_s
         self.timer: threading.Timer | None = None
@@ -151,12 +153,6 @@ class ThreadAffinityQueue:
         self._default_hold_timeout = hold_timeout_s
         self._default_wait_timeout = wait_timeout_s
         self._default_quantum = quantum_s
-        # Cumulative ACTIVE hold per thread_id, persisted across a pause so a
-        # resumed turn carries what it already burned toward the 2h cap.  Written
-        # in ``acquire``'s finally; drained by ``pop_hold`` on every exit (a pause
-        # carries the value to the resume; a terminal exit discards it).  Touched
-        # only under ``self._cond``, only off the event loop.
-        self._active_hold_ms: dict[str, tuple[_Handle, float]] = {}
 
     @contextmanager
     def acquire(
@@ -281,15 +277,12 @@ class ThreadAffinityQueue:
                 # `_holder is not handle` and no-op).
                 if handle.timer is not None:
                     handle.timer.cancel()
-                # Persist ONLY while still the holder.  If the tick already
-                # force-released this handle (cap kill), a new same-thread_id turn
-                # may hold the slot now — persisting a stale hold under thread_id
-                # would clobber that turn's accounting.  ``pop_hold`` drains it: a
-                # pause reads it for the resume seed, a terminal exit discards it.
+                # Save on this handle so another same-thread slice cannot
+                # overwrite its carry before the paused worker reads it.
+                # A force-released terminal slice has no resumable carry.
                 if self._holder is handle:
                     slice_ms = (time.time() - handle.acquired_at) * 1000.0
-                    self._active_hold_ms[thread_id] = (
-                        handle, handle.accumulated_active_ms + slice_ms)
+                    handle.completed_hold_ms = handle.accumulated_active_ms + slice_ms
                 self._release_if_holder(handle)
 
     def _release_if_holder(self, handle: _Handle) -> bool:
@@ -370,22 +363,18 @@ class ThreadAffinityQueue:
         remaining_to_cap = handle.hold_timeout_s - cumulative_s
         return max(0.0, min(handle.quantum_s, remaining_to_cap))
 
-    def pop_hold(self, thread_id: str, *, handle: _Handle | None = None) -> float:
-        """Remove and return the thread's persisted cumulative-active-hold (ms).
+    def pop_hold(self, handle: _Handle) -> float:
+        """Consume this completed slice's cumulative active hold once.
 
-        Called on EVERY exit of a turn's ``acquire`` block by the run path: a pause
-        passes the value to the resume's ``accumulated_active_ms`` seed (so the 2h
-        cap can't be dodged by pausing); a terminal exit discards it (a fresh turn
-        starts at 0). An exact handle prevents a delayed terminal worker from
-        draining a newer same-thread slice. Draining on every exit keeps this
-        map from growing.
+        A paused worker seeds its resume with this value; a terminal worker
+        discards it. The owning handle retains the value even if a later slice
+        for the same thread completes before it is consumed. Unconsumed values
+        disappear with their handles, without a queue-wide bookkeeping map.
         """
         with self._cond:
-            saved = self._active_hold_ms.get(thread_id)
-            if saved is None or (handle is not None and saved[0] is not handle):
-                return 0.0
-            del self._active_hold_ms[thread_id]
-            return saved[1]
+            saved = handle.completed_hold_ms
+            handle.completed_hold_ms = 0.0
+            return saved
 
     def _next_waiter(self) -> _Waiter | None:
         """Return the next waiter. Caller must hold ``self._cond``."""

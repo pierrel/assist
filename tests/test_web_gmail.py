@@ -275,7 +275,7 @@ def test_reject_during_preview_preserves_successor_status_and_context(client,mon
             assert _get_status("mail-thread")["stage"]=="ready"
             threads._TURN_INTERJECTION["mail-thread"]=context
             # Persist a new same-thread slice as a paused successor would.
-            with threads.THREAD_QUEUE.acquire("mail-thread",accumulated_active_ms=2000):
+            with threads.THREAD_QUEUE.acquire("mail-thread",accumulated_active_ms=2000) as later_handle:
                 pass
         finally:
             release.set()
@@ -283,7 +283,7 @@ def test_reject_during_preview_preserves_successor_status_and_context(client,mon
     try:
         assert _get_status("mail-thread")["stage"]=="ready"
         assert threads._TURN_INTERJECTION["mail-thread"] is context
-        assert threads.THREAD_QUEUE.pop_hold("mail-thread") >= 2000
+        assert threads.THREAD_QUEUE.pop_hold(later_handle) >= 2000
         assert threads._runs().get("mail-thread",proposal.id).status=="awaiting_approval"
         assert threads._runs().get("mail-thread",successor.id).status=="success"
     finally:
@@ -293,10 +293,19 @@ def test_reject_during_preview_preserves_successor_status_and_context(client,mon
 def test_delayed_queue_owner_cannot_drain_a_newer_same_thread_hold():
     from assist.thread_queue import ThreadAffinityQueue
     queue=ThreadAffinityQueue()
-    with queue.acquire("same-thread") as old:
+    with queue.acquire("same-thread",accumulated_active_ms=1000) as old:
         pass
     with queue.acquire("same-thread",accumulated_active_ms=2000) as successor:
         pass
-    assert queue.pop_hold("same-thread",handle=old)==0
-    assert queue.pop_hold("same-thread",handle=successor)>=2000
-    assert queue.pop_hold("same-thread")==0
+    assert queue.pop_hold(old)>=1000
+    assert queue.pop_hold(successor)>=2000
+    assert queue.pop_hold(old)==0
+    assert queue.pop_hold(successor)==0
+
+
+def test_unicode_approval_token_is_stale_without_consuming_proposal(client):
+    _pending()
+    response=client.post("/thread/mail-thread/gmail/approve",data={"token":"é"})
+    assert response.status_code==409
+    assert threads._runs().list("mail-thread")==[]
+    assert _get_status("mail-thread")["pending_gmail_token"]=="exact-token"

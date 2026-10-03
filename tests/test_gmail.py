@@ -302,3 +302,10 @@ def test_one_regex_timeout_preserves_prior_matches_and_cursor(monkeypatch):
     assert [message["id"] for message in result["messages"]]==["abc123"]
     assert result["next_page_token"]=="next" and result["complete"] is False
     assert result["skipped"][0]["id"]=="def456"
+
+
+def test_null_provider_body_is_a_gmail_error(monkeypatch):
+    client=object.__new__(gmail.GmailClient)
+    monkeypatch.setattr(client,"request",lambda *a,**k:{"payload":{"mimeType":"text/plain","body":None}})
+    with pytest.raises(gmail.GmailError,match="structure/encoding"):
+        client.read("abc123")

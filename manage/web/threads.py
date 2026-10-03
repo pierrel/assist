@@ -2246,6 +2246,7 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
     duplicate = False
     git_scope = ExitStack()
     git_lifecycle = None
+    queue_handle = None
 
     def cleanup_child_sandbox() -> None:
         if parent_working_dir is not None:
@@ -2260,7 +2261,7 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
 
     try:
         with ExitStack() as child_scope:
-            child_scope.enter_context(THREAD_QUEUE.acquire(
+            queue_handle = child_scope.enter_context(THREAD_QUEUE.acquire(
                 run.thread_id, accumulated_active_ms=run.active_ms))
             child_scope.callback(git_scope.close)
             with _RUN_ADMISSION_LOCK:
@@ -2322,7 +2323,7 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                     if waits_for_egress and run.parent_thread_id is not None:
                         _resume_egress_waiters(run.parent_thread_id)
     except ThreadPauseRequested:
-        carry = THREAD_QUEUE.pop_hold(run.thread_id)
+        carry = THREAD_QUEUE.pop_hold(queue_handle)
         with _RUN_ADMISSION_LOCK:
             controls = [candidate for candidate in _runs().list(run.thread_id)
                         if candidate.status == "pending"
@@ -2364,7 +2365,8 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
     finally:
         if git_lifecycle is None or not git_lifecycle.bound:
             cleanup_child_sandbox()
-    THREAD_QUEUE.pop_hold(run.thread_id)
+    if queue_handle is not None:
+        THREAD_QUEUE.pop_hold(queue_handle)
     if duplicate:
         return
     _complete_child_handoff(run)
@@ -3205,7 +3207,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             _claim_seen_interjections(tid, chat)
             _TURN_INTERJECTION.pop(tid, None)
         if gmail_terminal is not None:
-            THREAD_QUEUE.pop_hold(tid, handle=queue_handle)
+            THREAD_QUEUE.pop_hold(queue_handle)
             hold_drained = True
             # The per-thread approval fence remains visible while provider I/O runs
             # outside the global queue. Reject may resume meanwhile; only the exact
@@ -3266,7 +3268,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # resume scheduler — NOT a BackgroundTask (that would park a shared-threadpool
         # worker per paused turn and stall request handling). Carry the active hold it
         # burned so the 2h cap accounts across resumes.
-        carry = THREAD_QUEUE.pop_hold(tid, handle=queue_handle)
+        carry = THREAD_QUEUE.pop_hold(queue_handle)
         logging.info("fair-sched: %s paused (active hold %.0fs carried); queuing resume", tid,
                      carry / 1000.0)
         DOMAIN_MANAGERS.pop(tid, None)  # fresh container on resume; drop the cached backend
@@ -3399,11 +3401,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         + (_REJOURNAL_NOTE if _rejournaled else ""),
                         **pending_kwargs)
     finally:
-        # Drain this turn's persisted active-hold on any TERMINAL exit (success/error)
-        # so it can't leak. A Gmail proposal drained before preview I/O; a pause
-        # already popped its own handle to carry. Never consume a newer slice.
+        # Discard this completed slice's hold on terminal exit. A Gmail proposal
+        # drained before preview I/O; a pause already consumed its own carry.
         if queue_handle is not None and not hold_drained:
-            THREAD_QUEUE.pop_hold(tid, handle=queue_handle)
+            THREAD_QUEUE.pop_hold(queue_handle)
 
     # Turn-completion observers (§7.1), fired ONCE after the terminal status is
     # durable AND the queue is released. Terminal exits reach here: ready/awaiting set
@@ -4055,7 +4056,7 @@ def gmail_decision_core(tid: str, decision: str, token: str) -> tuple[Run, bool]
     _require_deep_thread(tid)
     if decision not in {"approve", "reject"}:
         raise HTTPException(status_code=400, detail="decision must be approve or reject")
-    if not token or len(token) > 128:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", token):
         raise HTTPException(status_code=409, detail="Gmail approval is unavailable or stale.")
     key = "gmail-approval:" + token
     with _RUN_ADMISSION_LOCK:

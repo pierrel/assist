@@ -68,7 +68,7 @@ def test_cap_measures_cumulative_active_and_ignores_paused_time():
     with q.acquire("A") as h1:
         time.sleep(0.15)
         assert h1.expired is False, "cap fired too early on slice 1"
-    carried = q.pop_hold("A")
+    carried = q.pop_hold(h1)
     assert 0.12 < carried / 1000.0 < 0.25, f"carried active ms off: {carried}"
 
     # paused wall-time that must be excluded from the cap
@@ -117,10 +117,10 @@ def test_peek_holder_stays_lock_free_while_slot_held_and_contended():
 def test_pop_hold_drains_so_a_fresh_turn_is_not_charged_prior_active():
     # A terminal (non-resume) turn's hold is drained; the NEXT fresh turn seeds 0.
     q = ThreadAffinityQueue(quantum_s=100, hold_timeout_s=100)
-    with q.acquire("A"):
+    with q.acquire("A") as handle:
         time.sleep(0.05)
-    assert q.pop_hold("A") > 0          # the finally persisted this slice
-    assert q.pop_hold("A") == 0.0       # ...and it's drained (no double-charge)
+    assert q.pop_hold(handle) > 0          # the finally persisted this slice
+    assert q.pop_hold(handle) == 0.0       # ...and it's drained (no double-charge)
 
 
 def test_tick_fires_while_a_reentrant_acquire_holds_the_turn():
