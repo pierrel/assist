@@ -106,19 +106,19 @@ def test_fifo_among_waiters():
 def test_user_priority_overtakes_background_but_not_active_holder():
     q = ThreadAffinityQueue()
     release = threading.Event()
+    active_acquired = threading.Event()
     acquired = []
 
     def run(tid, *, user=False):
         with q.acquire(tid, user_priority=user):
             acquired.append(tid)
             if tid == "active":
+                active_acquired.set()
                 release.wait(timeout=5)
 
     active = threading.Thread(target=run, args=("active",))
     active.start()
-    deadline = time.time() + 2
-    while q.peek_holder() != "active" and time.time() < deadline:
-        time.sleep(0.01)
+    assert active_acquired.wait(timeout=2)
     background = threading.Thread(target=run, args=("background",))
     user = threading.Thread(target=run, args=("user",), kwargs={"user": True})
     background.start()
