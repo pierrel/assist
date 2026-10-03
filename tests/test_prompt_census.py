@@ -1294,9 +1294,9 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
         separators=(",", ":"),
     )
     assert len(historical_p0_prompt) == 31_279
-    # The rewrite moves the stock base ahead of the compact Assist core. The
-    # historical rows below deliberately retain their original P0-P2b3 values.
-    assert len(current_prompt) == 26_569
+    # The composed current prompt includes V1 browser/egress wording plus the
+    # landed Git and quiet guidance. Historical P0-P2b3 rows remain unchanged.
+    assert len(current_prompt) == 27_121
     assert len(schemas) == 18_735
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 37

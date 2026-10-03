@@ -1,12 +1,14 @@
 """The agent's egress management tools — request, inspect, reduce.
 
-Three tools (Pierre's PR #200 review: the agent manages its thread's
+Four tools (Pierre's PR #200 review: the agent manages its thread's
 grants, not just requests new ones), all THREAD-scoped via the run config's
 thread id and all returning corrective strings, never raising into the
 agent loop:
 
 - ``request_egress(host, port, task)`` — records a proposal for the user to
   approve in this thread. Records only; nothing opens on the agent's say-so.
+- ``request_egress_batch(targets, task)`` — records up to three selected
+  host/port proposals before one child checkpoint, using the same cards.
 - ``list_allowed_hosts()`` — what this thread can reach: the operator-owned
   base allowlist plus this thread's live grants (Pierre: enumeration is
   yes — it enables voluntary reduction).
@@ -81,10 +83,14 @@ def _parse_host_port(host, port):
     raw = str(host or "").strip().lower()
     default_port = 443
     if "//" in raw:
-        u = urlsplit(raw if "://" in raw else f"//{raw}")
-        raw = u.hostname or ""
-        if port in (None, "", 0) and u.port:
-            port = u.port
+        try:
+            u = urlsplit(raw if "://" in raw else f"//{raw}")
+            raw = u.hostname or ""
+            parsed_port = u.port
+        except ValueError:
+            return None, None, "The URL has an invalid host or port."
+        if port in (None, "", 0) and parsed_port:
+            port = parsed_port
         if u.scheme == "http":
             # an http:// URL's implied port is 80 — a :443 grant would not
             # match the command the agent retries
@@ -122,7 +128,7 @@ def _parse_host_port(host, port):
 
 def egress_tools(store: EgressStore, base_hosts: frozenset[str],
                  thread_dir=None) -> list:
-    """Build the three tools over the store + the committed base allowlist.
+    """Build the four tools over the store + the committed base allowlist.
     ``thread_dir(tid) -> path`` (optional, the notify_tools factory shape)
     enables the event trail (egress_requested / egress_revoked); absent —
     CLI/evals — events are skipped."""
@@ -141,10 +147,11 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
 
         ``task`` must be a complete instruction for an ordinary agent's
         follow-up turn after approval. An async child instead checkpoints here
-        and the exact child resumes after the decision. If you already know
-        you need several hosts, request them ALL before ending your turn — an
-        ordinary follow-up runs once after the user resolves every pending
-        request. After calling this, tell the user approval is waiting in this
+        and the exact child resumes after the decision. For two or three known
+        needed hosts, use request_egress_batch so a child records every card
+        before its one checkpoint. An ordinary follow-up runs once after the
+        user resolves every pending request. After calling this, tell the user
+        approval is waiting in this
         thread and do NOT retry the blocked command until approved.
         """
         h, p, err = _parse_host_port(host, port)
@@ -235,6 +242,69 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
                 "approval in this thread. Finish your answer, tell the user "
                 "approval is needed, and do NOT retry until approved.")
 
+    def request_egress_batch(targets: list[dict], task: str) -> str:
+        """Ask for at most three observed host/port pairs in one ordinary
+        approval batch. Each destination keeps its own approval card and
+        duration; page observations are hints, never authorization. An async
+        child waits once after all its pending cards and waiters are recorded.
+        """
+        if not isinstance(targets, list) or not 1 <= len(targets) <= 3:
+            return "Select one to three exact host and port targets."
+        selected = []
+        for target in targets:
+            if not isinstance(target, dict) or set(target) != {"host", "port"}:
+                return "Each target needs only a host and port."
+            h, p, err = _parse_host_port(target["host"], target["port"])
+            if err:
+                return err
+            if (h, p) not in selected:
+                selected.append((h, p))
+        tid = _origin_thread_id()
+        if not tid:
+            return "Couldn't record the requests: no active thread."
+        waiter = _child_waiter()
+        brief = " ".join(str(task or "").split())[:500]
+        results = []
+        pending_keys = []
+        for h, p in selected:
+            key = request_key(tid, h, p)
+            if h in base_hosts:
+                results.append((h, p, "already on the base allowlist"))
+                continue
+            current = {r.key: r for r in store.for_thread(tid)}.get(key)
+            if current is None:
+                store.discard_expired(key)
+                refused = store.add_pending(EgressRequest(
+                    host=h, port=p, task=brief, origin_tid=tid,
+                    dispatch_main=waiter is None,
+                    main_task=brief if waiter is None else "",
+                    created_at=datetime.now(timezone.utc).isoformat()))
+                if refused in {"thread-cap", "global-cap"}:
+                    results.append((h, p, f"not recorded ({refused})"))
+                    continue
+                if refused is None:
+                    _event(tid, "egress_requested", host=h, port=p)
+                current = store.get(key)
+            if current is None:
+                results.append((h, p, "not recorded (state changed)"))
+                continue
+            if current.state == "pending":
+                current = (store.wait_for_resolution(key, waiter) if waiter
+                           else store.enable_main_dispatch(key, brief))
+                if current is not None and current.state == "pending":
+                    pending_keys.append(key)
+                    results.append((h, p, "awaiting individual approval"))
+                    continue
+            results.append((h, p, "declined" if current is not None
+                            and current.state == "declined" else "already approved"))
+        if waiter is not None and pending_keys:
+            interrupt({"egress_requests": pending_keys})
+            results = [(h, p, "declined" if (rec := store.get(request_key(tid, h, p)))
+                        is not None and rec.state == "declined" else
+                        "approved" if rec is not None and rec.state == "approved" else status)
+                       for h, p, status in results]
+        return "\n".join(f"- {h}:{p}: {status}" for h, p, status in results)
+
     def list_allowed_hosts() -> str:
         """List every host this thread can currently reach: the operator's
         base allowlist (any port; managed only via the committed config) and
@@ -269,4 +339,5 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
             return f"Removed this thread's access to {h}:{p}."
         return f"This thread has no grant for {h}:{p} — nothing to remove."
 
-    return [request_egress, list_allowed_hosts, remove_allowed_host]
+    return [request_egress, list_allowed_hosts, remove_allowed_host,
+            request_egress_batch]

@@ -410,7 +410,8 @@ class PiRuntimeManager:
             should_yield: Callable[[], bool] | None = None,
             trace_dir: str | None = None, trace_run_id: str | None = None,
             sandbox_cleanup: Callable[[object], None] | None = None,
-            sandbox_starting: Callable[[], None] | None = None) -> PiRuntimeResult:
+            sandbox_starting: Callable[[], None] | None = None,
+            thread_scope: tuple[str, str] | None = None) -> PiRuntimeResult:
         """Run one fresh Pi worker and tear down every authority it used.
 
         Git owners can record the exact pre-create flight fence and substitute
@@ -445,7 +446,8 @@ class PiRuntimeManager:
             result_capability = secrets.token_urlsafe(32)
             result_sink = PiResultSink(control_dir, result_capability)
             sandbox = self._sandbox_manager.get_pi_sandbox_backend(
-                work_dir, timezone,
+                work_dir, timezone, thread_scope=thread_scope,
+                owner_run_id=skill_run_id,
                 **({"before_start": sandbox_starting} if sandbox_starting is not None else {}))
             if sandbox is None:
                 raise PiRuntimeError("Pi workspace sandbox is unavailable")

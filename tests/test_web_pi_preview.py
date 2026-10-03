@@ -111,6 +111,7 @@ def test_pi_run_passes_the_host_rendered_prompt_to_the_runtime(
 
     assert received["system_prompt"] == render_pi_web_main_prompt().text
     assert received["prompt"] == "Inspect this workspace"
+    assert received["thread_scope"] == (threads.MANAGER.root_dir, "pi-source")
     assert received["history"] == []
     assert threads._PI_CONVERSATIONS.get_messages(threads.MANAGER.thread_dir("pi-source")) == [
         PiMessage(run.id, "user", "Inspect this workspace"), PiMessage(run.id, "assistant", "Done"),

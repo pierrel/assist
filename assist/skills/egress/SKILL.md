@@ -1,31 +1,38 @@
 ---
 name: egress
-description: "Sandbox network access is restricted to an approved host allowlist — commands that reach a blocked host fail with a proxy 403. EXAMPLES — a curl/pip/git command failed with '403' and 'proxy' or 'tunnel' in the output; you need to fetch a page or API the sandbox can't reach; auditing or reducing which hosts this thread can access. MUST load when a network command is denied or before requesting new network access."
-allowed-tools: request_egress list_allowed_hosts remove_allowed_host
+description: "Sandbox commands and the turn browser share exact-host egress approvals. EXAMPLES — curl/pip/git gets a proxy 403; browser_preflight reports host_not_approved; auditing or reducing this thread's grants. MUST load before requesting new network access."
+allowed-tools: request_egress request_egress_batch list_allowed_hosts remove_allowed_host
 ---
 
 # Egress — restricted network access and the approval workflow
 
 ## The situation
 
-The sandbox's only route to the network is a proxy that enforces an exact
-allowlist of hosts. A command that touches any other host fails with an HTTP
-403 from the proxy ("CONNECT tunnel failed", "Tunnel connection failed",
-"Proxy tunneling failed"). This is a POLICY denial, not an outage — the
-internet is fine; that host just isn't approved.
+Sandbox commands and browser pages reach the network through an exact-host proxy.
+A denied host commonly produces a proxy HTTP 403 ("CONNECT tunnel failed",
+"Tunnel connection failed", "Proxy tunneling failed"). The turn browser
+uses the same target decision behind a separate, exact-generation listener.
+An HTTP 403 alone does not mean a host is approvable. For browser failures,
+request a grant only when `browser_preflight` reports `host_not_approved` for
+the exact origin. Preflight does not contact the site or grant access.
 
 ## When a command is denied
 
 1. Decide whether the host is genuinely required for the user's task. Many
    denials are incidental (telemetry, analytics, CDN extras) — if the work
    can proceed without the host, proceed without it and don't request it.
-2. If it IS required: call `request_egress(host, port, task)`.
+2. If it IS required and the denial is `host_not_approved` (or an ordinary
+   shell proxy denial): call `request_egress(host, port, task)` for one host,
+   or `request_egress_batch([{"host": host, "port": port}, ...], task)` for
+   two or three selected hosts. A batch creates separate ordinary approval
+   cards and never grants access by itself.
    - `host` is the exact DNS hostname (from the failed command's URL).
    - `task` must be a complete instruction for an ordinary agent's future
      follow-up. An async child instead parks here and that exact child resumes
      after the user decides.
-   - If you already know you need several hosts, request them ALL now: the
-     follow-up runs once, after the user resolves every request.
+   - A page's observed dependency list may be incomplete or incidental.
+     Select at most three hosts needed for the task, not every observed host.
+     The follow-up runs once after the user resolves the selected requests.
 3. An ordinary agent tells the user which host and why, then finishes its
    answer. An async child pauses at the request and has no user-facing reply;
    the visible parent thread owns the approval card. Neither retries the
@@ -35,8 +42,8 @@ internet is fine; that host just isn't approved.
 
 ## Managing this thread's access
 
-- `list_allowed_hosts()` — everything this thread can currently reach: the
-  operator's base allowlist plus this thread's own time-limited grants.
+- `list_allowed_hosts()` — the operator's base allowlist plus this thread's
+  approved grants. Resolved-address checks still apply to non-base hosts.
 - `remove_allowed_host(host, port)` — drop one of this thread's grants once
   you're done with it. Good practice: when a granted host has served its
   purpose, remove it.

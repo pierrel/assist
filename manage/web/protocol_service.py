@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import threading
-from contextlib import nullcontext
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from functools import wraps
 from fastapi import HTTPException
@@ -13,6 +13,7 @@ from assist.run_service import (
     NONTERMINAL_STATUSES,
     TERMINAL_STATUSES,
 )
+from assist.browser import authority as browser_authority
 from assist.middleware.url_provenance import (
     normalize_url,
     url_userinfo,
@@ -21,6 +22,7 @@ from assist.middleware.url_provenance import (
 from manage.web.state import BUSY_STAGES, MANAGER, _get_status
 from manage.web.drain import RUN_GATE
 from manage.web.threads import (
+    BrowserManager,
     _RESUME_SCHEDULER,
     _RUN_ADMISSION_LOCK,
     _create_run,
@@ -96,8 +98,7 @@ class WebAgentProtocolService:
     @_while_admitted
     def create_thread(self, thread_id: str | None = None,
                       metadata: dict | None = None) -> dict:
-        with self._admission_lock, (
-                _RUN_ADMISSION_LOCK if metadata is not None else nullcontext()):
+        with self._admission_lock:
             hidden = metadata is not None
             if not hidden and len(MANAGER.list()) >= self.MAX_THREADS:
                 raise HTTPException(status_code=429, detail="Thread limit reached")
@@ -105,63 +106,105 @@ class WebAgentProtocolService:
                 required = {"parent_thread_id", "parent_run_id", "dispatch_key"}
                 if set(metadata or {}) != required:
                     raise HTTPException(status_code=422, detail="Invalid task metadata")
-                _require_deep_thread(metadata["parent_thread_id"])
-                if not os.path.isdir(MANAGER.thread_dir(metadata["parent_thread_id"])):
-                    raise FileNotFoundError(metadata["parent_thread_id"])
-                existing = thread_id and os.path.isdir(MANAGER.thread_dir(thread_id))
-                child_runs = _runs().scan_children()
-                latest_by_task = {}
-                for child in child_runs:
-                    if child.parent_thread_id == metadata["parent_thread_id"]:
-                        latest_by_task[child.thread_id] = child
-                active_count = sum(
-                    child.status in NONTERMINAL_STATUSES
-                    or child.status in {"interrupted", "awaiting_approval"}
-                    for child in latest_by_task.values())
-                if (not existing
-                        and active_count >= self.MAX_ACTIVE_TASKS_PER_PARENT):
-                    raise HTTPException(
-                        status_code=429, detail="Active task limit reached")
-                if not existing and len(latest_by_task) >= self.MAX_RETAINED_TASKS_PER_PARENT:
-                    parent_runs = _runs().list(metadata["parent_thread_id"])
+                with _RUN_ADMISSION_LOCK:
+                    _require_deep_thread(metadata["parent_thread_id"])
+                    if not os.path.isdir(MANAGER.thread_dir(metadata["parent_thread_id"])):
+                        raise FileNotFoundError(metadata["parent_thread_id"])
+                    existing = thread_id and os.path.isdir(MANAGER.thread_dir(thread_id))
+                    latest_by_task = {
+                        child.thread_id: child for child in _runs().scan_children()
+                        if child.parent_thread_id == metadata["parent_thread_id"]
+                    }
+                    if (not existing and sum(
+                            child.status in NONTERMINAL_STATUSES
+                            or child.status in {"interrupted", "awaiting_approval"}
+                            for child in latest_by_task.values())
+                            >= self.MAX_ACTIVE_TASKS_PER_PARENT):
+                        raise HTTPException(status_code=429, detail="Active task limit reached")
+                    terminal = []
+                    if (not existing
+                            and len(latest_by_task) >= self.MAX_RETAINED_TASKS_PER_PARENT):
+                        parent_runs = _runs().list(metadata["parent_thread_id"])
 
-                    def wake_consumed(child) -> bool:
-                        key = f"task-completion:{child.id}"
-                        start = next((index for index, candidate in enumerate(parent_runs)
-                                      if candidate.dispatch_key == key), None)
-                        if start is None:
-                            return False
-                        wake_work_id = parent_runs[start].work_id
-                        end = next((index for index in range(start + 1, len(parent_runs))
-                                    if (parent_runs[index].dispatch_key or "").startswith(
-                                        "task-completion:")), len(parent_runs))
-                        return any(candidate.work_id == wake_work_id
-                                   and candidate.status == "success"
-                                   for candidate in parent_runs[start:end])
+                        def wake_consumed(child) -> bool:
+                            key = f"task-completion:{child.id}"
+                            start = next((index for index, candidate in enumerate(parent_runs)
+                                          if candidate.dispatch_key == key), None)
+                            if start is None:
+                                return False
+                            wake_work_id = parent_runs[start].work_id
+                            end = next((index for index in range(start + 1, len(parent_runs))
+                                        if (parent_runs[index].dispatch_key or "").startswith(
+                                            "task-completion:")), len(parent_runs))
+                            return any(candidate.work_id == wake_work_id
+                                       and candidate.status == "success"
+                                       for candidate in parent_runs[start:end])
 
-                    terminal = sorted(
-                        (child for child in latest_by_task.values()
-                         if (child.status == "cancelled"
-                             or (child.status in {"success", "error", "timeout"}
-                                 and wake_consumed(child)))),
-                        key=lambda child: child.created_at)
-                    for child in terminal[:
-                            len(latest_by_task) - self.MAX_RETAINED_TASKS_PER_PARENT + 1]:
-                        MANAGER.hard_delete(child.thread_id)
-                hidden_count = sum(
-                    os.path.isfile(os.path.join(MANAGER.root_dir, name, ".subagent"))
-                    for name in os.listdir(MANAGER.root_dir))
-                if not existing and hidden_count >= self.MAX_HIDDEN_THREADS:
-                    raise HTTPException(status_code=429, detail="Task limit reached")
-            now = datetime.now(UTC).isoformat()
-            try:
-                reserved = MANAGER.reserve(
-                    thread_id, hidden=(metadata if hidden else None))
-            except (FileNotFoundError, ValueError) as exc:
-                raise HTTPException(
-                    status_code=409, detail="Task metadata conflict") from exc
-            return {"thread_id": reserved, "created_at": now,
-                    "updated_at": now, "status": "idle"}
+                        terminal = sorted(
+                            (child for child in latest_by_task.values()
+                             if (child.status == "cancelled"
+                                 or (child.status in {"success", "error", "timeout"}
+                                     and wake_consumed(child)))),
+                            key=lambda child: child.created_at)[:
+                                len(latest_by_task) - self.MAX_RETAINED_TASKS_PER_PARENT + 1]
+                for child in terminal:
+                    with (BrowserManager.bounded_thread_gate(child.thread_id),
+                          ExitStack() as generation_guard):
+                        if os.path.isdir(MANAGER.thread_dir(child.thread_id)):
+                            generation_guard.enter_context(
+                                browser_authority.generation_fence(
+                                    MANAGER.root_dir, child.thread_id))
+                        with _RUN_ADMISSION_LOCK:
+                            current = _runs().list(child.thread_id)
+                            if (not current or current[-1].id != child.id
+                                    or current[-1].status != child.status):
+                                continue
+                        if os.path.isdir(MANAGER.thread_dir(child.thread_id)):
+                            BrowserManager.cleanup(child.thread_id)
+                            BrowserManager.confirm_owner_stopped(
+                                MANAGER.root_dir, child.thread_id, None)
+                        with _RUN_ADMISSION_LOCK:
+                            current = _runs().list(child.thread_id)
+                            if (current and current[-1].id == child.id
+                                    and current[-1].status == child.status):
+                                MANAGER._hard_delete_after_browser_stop(child.thread_id)
+                with _RUN_ADMISSION_LOCK:
+                    if not os.path.isdir(MANAGER.thread_dir(metadata["parent_thread_id"])):
+                        raise FileNotFoundError(metadata["parent_thread_id"])
+                    _require_deep_thread(metadata["parent_thread_id"])
+                    if not any(run.id == metadata["parent_run_id"]
+                               for run in _runs().list(metadata["parent_thread_id"])):
+                        raise HTTPException(status_code=409, detail="Parent Run changed")
+                    existing = thread_id and os.path.isdir(MANAGER.thread_dir(thread_id))
+                    latest_by_task = {
+                        child.thread_id: child for child in _runs().scan_children()
+                        if child.parent_thread_id == metadata["parent_thread_id"]
+                    }
+                    if (not existing and sum(
+                            child.status in NONTERMINAL_STATUSES
+                            or child.status in {"interrupted", "awaiting_approval"}
+                            for child in latest_by_task.values())
+                            >= self.MAX_ACTIVE_TASKS_PER_PARENT):
+                        raise HTTPException(status_code=429, detail="Active task limit reached")
+                    hidden_count = sum(
+                        os.path.isfile(os.path.join(MANAGER.root_dir, name, ".subagent"))
+                        for name in os.listdir(MANAGER.root_dir))
+                    if not existing and hidden_count >= self.MAX_HIDDEN_THREADS:
+                        raise HTTPException(status_code=429, detail="Task limit reached")
+                    return self._reserve_thread(thread_id, metadata)
+            return self._reserve_thread(thread_id, None)
+
+    @staticmethod
+    def _reserve_thread(thread_id: str | None, metadata: dict | None) -> dict:
+        """Publish the already admitted protocol thread."""
+        now = datetime.now(UTC).isoformat()
+        try:
+            reserved = MANAGER.reserve(thread_id, hidden=metadata)
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(
+                status_code=409, detail="Task metadata conflict") from exc
+        return {"thread_id": reserved, "created_at": now,
+                "updated_at": now, "status": "idle"}
 
     def get_thread(self, thread_id: str) -> dict:
         tdir = MANAGER.thread_dir(thread_id)

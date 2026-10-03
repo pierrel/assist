@@ -1,0 +1,39 @@
+#+title: Browser-held phone Run cancellation amendment
+#+date: <2026-09-24>
+
+* Decision
+
+A phone DELETE may cancel a direct-user Run while it is durably
+=revocation_pending= for browser teardown. The short browser publication
+fence and Run journal lock serialize cancellation with held-event promotion.
+The cancellation transaction changes the held Run to =cancelled= and records
+both =cancel_cleanup: pending= and a browser-reset obligation on the accepted
+handle. Neither the reset worker nor a restart may lose that obligation just
+because the Run is no longer =revocation_pending=.
+
+DELETE returns =202= with =outcome: cancelling= while exact old-owner
+sidecar/attribution teardown is unconfirmed. GET projects =cancelling= during
+that interval; it reaches =cancelled= only after proof, stream cleanup and
+the receipt are durable. Follower dispatch follows that receipt; a failed
+volatile notification is retried from the pending Run. A repeated
+DELETE can requeue the reset. A failed scan or kill leaves the receipt
+pending and blocks follower dispatch; the bounded reset worker retries.
+Ordinary pending-Run DELETE behavior and its =200/cancelled= receipt are
+unchanged.
+
+The existing EmacsOS phone client recognizes only =200/cancelled= as a
+confirmed DELETE. It conservatively treats =202/cancelling= as unconfirmed;
+that is safe, though a later client change could display the pending reset
+explicitly. This Assist amendment does not change EmacsOS.
+
+* Historical supersessions
+
+- [[file:2026-09-24-headless-browser-v12.org][Browser lifecycle v12]], =Bounded
+  reset work and one first-open deadline=: held Runs remain the durable reset
+  queue source of truth, but a phone-cancelled held Run retains its reset
+  obligation under a cancelled receipt and completes that receipt instead
+  of promoting to pending.
+- [[file:2026-09-09-phone-run-cancellation-receipt-amendment.org][Phone Run cancellation receipt amendment]], =Correction=: its
+  pending-only cancellation and immediate cleanup path now has the narrow
+  browser-held exception above. Its ordinary pending-Run receipt semantics
+  remain unchanged.

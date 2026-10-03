@@ -701,6 +701,8 @@ def test_capture_deadline_after_proof_does_not_hold_shutdown(tmp_path, monkeypat
     monkeypatch.setattr(state, "_verify_shutdown_sandboxes", verify)
     tracked = {"work": object()}
     monkeypatch.setattr(state.SandboxManager, "_containers", tracked)
+    from assist.browser.manager import BrowserManager
+    monkeypatch.setattr(BrowserManager, "cleanup_all", lambda: events.append("browser"))
 
     def capture_deadline():
         events.append("capture")
@@ -717,7 +719,7 @@ def test_capture_deadline_after_proof_does_not_hold_shutdown(tmp_path, monkeypat
             pass
 
     asyncio.run(asyncio.wait_for(scenario(), 5))
-    assert events == ["scheduler", "gate", "cleanup", "proof", "capture", "resources"]
+    assert events == ["scheduler", "gate", "browser", "cleanup", "proof", "capture", "resources"]
 
 
 def test_failed_shutdown_proof_keeps_lifespan_pending_after_cleanup(tmp_path):

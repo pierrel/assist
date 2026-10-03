@@ -1,0 +1,44 @@
+#+title: Browser V1 census and interjection fixture alignment
+#+date: 2026-10-01
+
+* Observed failures
+
+PR267 run36791287910 on =da615324= rejected the prompt-census transition
+chain. V1 changed the shared egress skill's catalog description from
+"the isolated browser also enforces" to "the turn browser uses". Twelve
+final provider prompts changed; their initial prompt hashes did not.
+A synthetic capture reproduces the CI hash. Restoring only that parsed
+description in memory restores the preceding declared hash, establishing
+the cause without changing product files or invoking a model endpoint.
+
+The held-SMS interjection test still mocked the global orphan sweep.
+V1's held-event drain instead calls exact-owner stop proof. Its old failure
+and success mocks therefore did not control the boundary under test.
+
+* Smallest correction
+
+The census keeps its strict declared-chain gate and pins the observed
+=7101b22e005d9e5e96dbc3585174fa68f3c4d1150986e1c21ae327fc370a4ffd=.
+The current core prompt length becomes 26,751, thirteen characters shorter;
+the historical P0-P2b3 rows remain unchanged.
+
+The interjection fixture makes exact-owner stop proof fail, then marks the
+same thread covered when that proof succeeds. It checks the exact root,
+thread and owner arguments. The original held-event, pending SMS, sender
+delivery and final consumption assertions remain. Runtime admission,
+teardown, skill and browser image bytes are unchanged.
+
+* Verification boundary
+
+Affected deterministic census and interjection/lifecycle tests substantiate
+this successor. Independent retained correctness/security/lifecycle and
+separate docstring/simplicity review cover the delta. Existing model and
+isolated Docker proof apply only to their unchanged inputs. A synthetic
+census capture is CPU-only; it does not use the production model endpoint.
+No full CI success or deployment is implied by these local checks. Root
+owns exact successor composition and deployment.
+
+* Historical supersessions
+
+None. This records newly observed CI contract drift and does not revise the
+dated prompt-census reports or the preceding V1 design and scope records.

@@ -1,0 +1,57 @@
+#+title: Headless browser design v13 — nonblocking client-map pruning
+#+date: <2026-09-24>
+#+status: design successor; no product code
+
+* Decision
+
+Keep v12's short per-thread direct-journal/client-map publication fence,
+durable browser lease, scoped readiness, bounded reset pool, deadline and
+page-release contracts. Client-map pruning must not make that short fence
+wait indirectly on Docker through the map's interprocess file lock.
+
+* Snapshot, scan, compare-delete
+
+Pruning uses three phases:
+
+1. Under the client-map file lock, read and validate a snapshot of browser
+   entries keyed by IP, including each exact record and container generation;
+   release the lock.
+2. Enumerate live browser generations through bounded Docker transport
+   *outside* the map lock, per-thread publication fence, global admission
+   lock and any other lock needed by user admission. A timeout, failed
+   enumeration or malformed result makes no map mutation and reports a
+   retryable reconciliation failure. It is not evidence that all browsers
+   are absent.
+3. Reacquire the map lock, reread the current projection, and delete only
+   snapshot entries whose generation is absent from the successful scan
+   *and* whose current IP record still exactly equals the snapshot record.
+   Write atomically, then release the lock.
+
+An IP reused or record published after the snapshot cannot be deleted by
+the old scan. A generation absent from the successful scan cannot later
+become live under the same immutable Docker ID, while a newly created
+generation was not in the snapshot. No Docker callback runs inside the
+client-map lock; its critical sections perform only bounded local
+read/compare/atomic-write work. The short publication fence may acquire
+that lock for an exact record write, but never waits behind a Docker scan.
+Failed pruning leaves existing attribution unchanged and keeps any
+recovery-dependent user event held until a later successful reconciliation.
+
+* Verification delta
+
+Pause Docker =ps= after the snapshot. While it is stalled, submit a direct
+user event B and publish a new browser client record, including a recycled
+IP case. B's journal commit and the new publication must complete without
+waiting for the scan. After releasing it, pruning removes only the old
+snapshot IP+record whose generation was absent; the new record survives.
+Repeat with Docker scan failure or timeout: no entries are removed and
+held-message recovery remains visibly pending. Retain v12's late-startup
+attribution fence and failed-orphan-scan tests.
+
+* Historical supersessions
+
+This document directly supersedes
+=docs/2026-09-24-headless-browser-v12.org='s short-fence paragraph and
+affected verification text only where they left client-map pruning free to
+hold its file lock across a Docker scan. The other v12 decisions and older
+dated designs remain unchanged.

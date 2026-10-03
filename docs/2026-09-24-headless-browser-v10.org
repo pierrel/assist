@@ -1,0 +1,64 @@
+#+title: Headless browser design v10 — uncertain shared Docker mutation
+#+date: <2026-09-24>
+#+status: design successor; no product code
+
+* Decision
+
+Keep v9's held-event browser command fence, bounded transport, truthful
+notice, per-Run sidecar and existing proxy/approval boundary. A cancelled
+client call is not proof that the Docker daemon cancelled a submitted
+mutation. One clean proxy/network inspection after timeout cannot make a
+shared generation safe for new shell or browser admissions.
+
+* Retire the exact target before dispatch
+
+Before dispatching a mutating Docker operation against an existing shared
+egress proxy container or Docker network, durably record the operation and
+its exact immutable container/network ID and mark that generation retired
+for admission. Never issue a potentially late destructive mutation by a
+mutable service name. A newly created generation carries a distinct label
+or request token and is ineligible for admission until its identity and
+policy fingerprint are verified. The record survives web-process restart.
+
+If the bounded, killable client returns a conclusively terminal success or
+failure, reconcile the exact target and actual state before admitting any
+generation. If the call times out or its outcome is otherwise uncertain,
+the target remains retired even when =inspect= shows it running with the
+expected configuration. A later caller may proceed only after terminal
+completion of the exact operation is established, or after a distinct-ID
+successor proxy/network is verified with the required isolated network,
+allowlist, client-map and proxy fingerprint. Every old in-flight mutation
+must target only its retired ID, so late daemon completion cannot remove
+or alter an admitted successor. If no safe successor can be established,
+fail closed with a visible retry reason; do not broaden egress or silently
+reuse the uncertain generation. Generation-safe cleanup and orphan recovery
+may retire/remove old IDs, never a verified active successor.
+
+For the concrete startup path that tries =existing.remove(force=True)= on a
+temporarily nonrunning proxy, target its immutable container ID and retire
+that ID *before* dispatch. If the client times out, do not re-admit the
+same container merely because it appears running on a subsequent inspect.
+Wait for conclusive terminal removal or create and verify a different-ID
+proxy once its name/attachment is available. The same rule covers network
+mutations; a shared network ID with an uncertain late delete or disconnect
+cannot be reused for a new browser or shell start.
+
+* Verification delta
+
+Hold Docker's remove of proxy ID A past client timeout, then inspect A as
+running and apparently correct. A new ordinary sandbox/browser start must
+not admit A. Complete the old daemon removal *after* that clean inspect;
+only a verified distinct proxy ID B may serve subsequent admissions. Repeat
+with a network mutation, a late completion after a web-process restart, and
+a terminal acknowledged operation. Verify durable retirement survives the
+restart, old-ID cleanup cannot affect B, and an impossible replacement
+returns a visible fail-closed reason. Keep v9's command-fence, startup-lock,
+notice and no-egress-expansion tests.
+
+* Historical supersessions
+
+This document directly supersedes only
+=docs/2026-09-24-headless-browser-v9.org='s post-cancel reinspection
+paragraph in “Bounded shared-lock startup,” where one later clean snapshot
+was treated as sufficient despite a daemon mutation still in flight. V9's
+other decisions remain in force; earlier dated designs stay unchanged.

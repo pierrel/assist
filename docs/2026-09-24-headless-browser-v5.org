@@ -1,0 +1,66 @@
+#+title: Headless browser design v5 — request-scoped internal authorization
+#+date: <2026-09-24>
+#+status: design candidate; no product code
+
+* Decision
+
+Keep the v4 architecture and all unaffected constraints: the main agent
+controls a per-Run, stateful, bounded Chromium sidecar; its dedicated isolated
+Docker network reaches only the existing proxy; the proxy enforces every
+destination and the existing exact-host allowlist/approval boundary; the
+generation-aware map has an interprocess writer lock. This successor makes two
+authorization and target-selection contracts exact. It does not add hosts,
+general code execution, a delegated browser agent or product code.
+
+* Active-request internal authorization
+
+The host may select internal mode only when an immutable real user-origin
+event in the *active request lineage* explicitly asks to visit that exact
+already-allowlisted internal host, or the user explicitly confirms that exact
+host for that lineage. Record the event ID, request-lineage ID, exact host and
+confirmation provenance outside model-editable messages. At browser admission,
+the host checks that provenance against the current Run's lineage; it does
+not scan arbitrary prior thread history or infer authorization from the most
+recent =HumanMessage= or task text. A later unrelated public-page request
+cannot borrow an older genuine internal-host request, even if a hostile page
+injects the same URL. Model-supplied mode metadata, copied =main_task= text,
+page content, tool results, and synthetic/system/approval follow-up text are
+never user authorization. An approved egress follow-up may continue the same
+request lineage for safe browser reopening, but does not add internal-host
+authorization or broaden the host set. Switching internal→public still closes
+the internal sidecar/context and drops its state; switching public→internal
+requires the scoped user provenance and a fresh internal-only sidecar/context.
+
+* Ambiguity-safe link action
+
+Every click carries the observed page ID and either a snapshot/page-scoped
+opaque target reference or an exact href from that observation. An exact href
+is usable only if it resolves to *exactly one observed link* on that page at
+action time. Two visible anchors may share an href yet have different click
+handlers or targets, so duplicate hrefs fail deterministically and require
+the opaque reference. A stale snapshot, closed page, changed target, or
+multiple role/name matches also fails; the helper never clicks a first match
+by guess. The tool returns a fresh observation and actual active URL after a
+successful action, including popup state.
+
+* Verification delta
+
+Add an authorization regression with a genuine internal-host request in one
+lineage, followed by an unrelated public request whose page instructs the
+agent to revisit that internal URL: the new Run remains public-only and the
+proxy denies the attempted internal destination. Repeat through an egress
+approval follow-up that copies model-supplied task text; that follow-up does
+not create internal authorization. Confirm a real user-origin request or
+explicit confirmation *in the active lineage* does permit only its exact
+internal host. Add a page with two anchors sharing an href but different
+handlers: href-only action fails, a current opaque target ref chooses the
+observed anchor, and stale refs fail. Keep v4's network, resource, lifecycle,
+approval, natural behavioral and adjacent-regression gates unchanged.
+
+* Historical supersessions
+
+This document directly supersedes =docs/2026-09-24-headless-browser-v4.org=
+where its internal-mode paragraph could be read as accepting any old real
+user event in the thread, and where exact href was treated as sufficient
+disambiguation without a uniqueness check. V4 and the earlier v3 record are
+left unchanged; their unaffected design and evidence still apply.

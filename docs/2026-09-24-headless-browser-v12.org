@@ -1,0 +1,126 @@
+#+title: Headless browser design v12 — admission and lifecycle proofs
+#+date: <2026-09-24>
+#+status: design successor; no product code
+
+* Decision
+
+Keep v11's main-agent browser, proxy, exact-host approval, bounded sidecar,
+held direct-user event and natural internal-host confirmation contracts.
+This successor makes the attribution and no-browser admission proofs exact,
+binds the first-open deadline durably, and lets the agent release popup
+pages while retaining the five-concurrent-page limit. No product code or
+egress expansion is authorized by this document.
+
+* Short commit/publication fence
+
+One short per-thread fence serializes (a) every direct-owner Run journal
+commit, whether held or ordinary, and (b) the final durable latest-user-
+sequence check *together with* client-map publication of a browser
+generation. The second operation rejects a returned old startup result if
+a newer direct event was committed, then kills that exact generation
+without attribution. No Docker create, inspect, exec, kill or long browser
+gate wait occurs under this fence. Use one documented lock order for the
+short fence, Run persistence and client-map file lock; no inverse path may
+hold a global admission lock while waiting on the fence. An old startup
+precheck outside the fence is advisory only. A held event committed between
+that precheck and map write wins: there is no stale grant or CONNECT.
+
+Admission conservatively holds an overlapping direct-owner message and
+any B arriving behind an earlier held A, then lets the reset job promote
+them in durable sequence. An apparently idle ordinary commit must use the
+same short fence and recheck the durable conditions there. This ordering
+does not require journaling on the long Docker-held browser gate or
+blocking user admission on teardown.
+
+* Durable browser lease and scoped readiness
+
+Before a browser sidecar can launch, persist a host-owned per-thread
+browser lease naming its owner Run and current direct-event sequence.
+The existing durable Run journal/state may hold this lease if it provides
+the same atomic and recovery guarantees; a separate file is not required
+merely for the name. Clear the lease only after all its grant-capable
+sidecars are confirmed stopped and client attribution is removed. The
+lease covers a sidecar whose map entry was removed just before a failed
+kill, so map absence alone is not a safety proof. Labels and client-map
+records supply exact container generations; duplicating a startup token
+or generation in each held Run is unnecessary. A held Run records the
+owner Run ID and admission sequence, then recovery resolves generations
+from the lease, map and immutable Docker labels.
+
+Startup reconciliation must succeed before *browser tool* admission.
+For ordinary text, a failed global Docker orphan scan does not hold a
+thread with a valid proof that it never had a grant-capable browser:
+an intact lease-tracking record/coverage marker with no active lease and
+no browser client-map record. A thread with an active lease, a held event,
+unreadable or malformed coverage, or a relevant map record remains held
+until successful exact-generation reconciliation. Pre-lease threads need
+one successful migration reconciliation before absence is trusted;
+threads created under lease tracking can carry a clean marker from birth.
+This preserves ordinary non-browser chat during Docker failure without
+treating an empty process-local session registry as proof. A late sidecar
+created after a crashed owner's scan cannot gain a map record because
+the dead parent cannot publish it; the sidecar is proxy-denied and exits
+at the fixed PID 1 deadline. A live late startup result must pass the
+short sequence/publication fence or be killed without attribution.
+
+* Bounded reset work and one first-open deadline
+
+Held Runs are the durable reset queue source of truth. Admission returns
+their visible queued state immediately; an in-memory fair, coalesced
+queue feeds a small fixed-size worker pool across all threads. No
+unbounded thread-per-held-Run fanout and no admission wait for pool
+capacity. Each job takes the long per-thread gate, performs bounded
+scan/kill/reconciliation, and promotes held events in sequence. A
+completion signal plus one retry/backstop handles timeout; startup
+re-enqueues durable held work after crash. Failed scan, map read or kill
+leaves the message held and visibly undelivered with a reason.
+
+At the first =browser_open=, atomically persist on the owning Run the
+host boot ID and one absolute =CLOCK_BOOTTIME= deadline exactly 240
+seconds later, *before* any sidecar startup. Every replacement and
+recovered Run reads that pair; none mints a fresh deadline. Host and
+sidecar PID 1 compare the same absolute instant after a verified common
+clock/time namespace. A delayed Docker create after expiry exits
+immediately. On boot-ID mismatch after reboot, browser capability for
+that Run expires rather than silently granting another 240 seconds.
+
+* Explicit page release
+
+Keep =browser_open(url, reuse_page_id=None)= for observed-page reuse and
+add one typed =browser_close(page_id)= for an observed live page or popup.
+Close invalidates that page's snapshot/target refs and returns the
+remaining page IDs, actual URLs and current active page. An unknown,
+closed or stale ID fails; closing never silently retargets another
+action. The limit is five *concurrently live* pages, not five total
+visits or popups. Six sequential popup open/inspect/close cycles must
+succeed, while a sixth simultaneous page remains rejected.
+
+* Verification delta
+
+Force a held journal commit between an old startup precheck and its
+client-map write: publication fails and the stale generation has no
+CONNECT permission. Force a crash after held commit but before exact
+generation discovery, including map-removal-before-kill, failed Docker
+scan and a daemon-late create. The lease keeps relevant messages held
+until grant-capable generations are stopped; late unregistered ones
+remain proxy-denied. During failed global recovery, a marked never-
+browser thread still answers ordinary text but browser tools fail
+closed. Verify pre-lease migration and corrupt-lease negatives, A-held/
+B-arrival order, and a bounded fair reset pool under many threads.
+Delay first startup, replace a sidecar and recover a Run: the persisted
+boot/deadline pair never extends; reboot expires capability. Test page
+reuse and six sequential popups with explicit close. Retain v11's
+natural exact-host consent, v10's retired shared-generation and v9's
+held-event command-fence regressions.
+
+* Historical supersessions
+
+This document directly supersedes
+=docs/2026-09-24-headless-browser-v11.org='s “Direct-user admission
+without a session-sample race,” “Recovery, late creation and worker
+availability,” “One deadline and bounded page reuse,” and affected
+verification paragraphs where the short publication race, overbroad
+global readiness, undurable deadline, cumulative popup limit and
+unbounded reset-worker interpretation remained open. Its trusted
+internal-host language and unaffected decisions remain in force;
+earlier dated records are unchanged.

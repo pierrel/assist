@@ -291,7 +291,9 @@ def _get_domain_manager(tid: str, domain: str | None = None) -> DomainManager | 
 
 
 def _get_sandbox_backend(tid: str, tz: str | None = None, *,
-                         include_agent: bool = True, before_start=None):
+                         include_agent: bool = True,
+                         browser_capable: bool = False,
+                         owner_run_id: str | None = None, before_start=None):
     """Get sandbox backend for a thread, or None if Docker is unavailable.
 
     ``tz`` is the per-turn context-rider timezone, so this turn's sandbox ``date``
@@ -308,6 +310,8 @@ def _get_sandbox_backend(tid: str, tz: str | None = None, *,
     return SandboxManager.get_sandbox_backend(
         work_dir, tz=tz,
         agent_dir=(MANAGER.thread_agent_dir(tid) if include_agent else None),
+        browser_capable=browser_capable, thread_scope=(MANAGER.root_dir, tid),
+        owner_run_id=owner_run_id,
         **({"before_start": before_start} if before_start is not None else {}))
 
 
@@ -722,18 +726,21 @@ def _recover_interrupted_threads() -> None:
 
 
 def _verify_shutdown_sandboxes() -> None:
-    """Refuse exit while this process retains an unconfirmed sandbox generation."""
+    """Refuse exit while this process retains a sandbox or browser session."""
     if SandboxManager._containers:
         raise RuntimeError("sandbox generation still tracked")
+    from assist.browser.manager import BrowserManager
+    if BrowserManager._sessions:
+        raise RuntimeError("browser session still tracked")
 
 
 async def _hold_unsafe_shutdown(error: Exception) -> None:
     """A failed shutdown prerequisite leaves the process alive for recovery."""
     reason = str(error)[:256]
-    if reason != "sandbox generation still tracked":
+    if reason not in {"sandbox generation still tracked", "browser session still tracked"}:
         reason = "details withheld"
     logging.getLogger(__name__).critical(
-        "Intentional stop withheld: %s: %s; inspect retained sandbox state",
+        "Intentional stop withheld: %s: %s; inspect retained sandbox and browser state",
         type(error).__name__, reason)
     never = asyncio.Event()
     while True:
@@ -786,6 +793,8 @@ async def lifespan(app: FastAPI):
             # The scheduler and geo callbacks can still create Runs off-loop.
             await run_in_threadpool(stop_scheduler)
             await run_in_threadpool(RUN_GATE.close_when_idle)
+            from assist.browser.manager import BrowserManager
+            await run_in_threadpool(BrowserManager.cleanup_all)
             await run_in_threadpool(SandboxManager.cleanup_all)
             await run_in_threadpool(_verify_shutdown_sandboxes)
         except Exception as error:
