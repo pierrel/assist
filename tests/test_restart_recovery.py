@@ -1014,8 +1014,13 @@ def test_restart_keeps_the_accepted_email_successor_and_original_receipt(wired, 
     assert projected["status"] == "success"
 
 
-def test_recovery_after_consumed_email_approval_keeps_delivery_identity(wired, monkeypatch):
-    """Reopen a real checkpoint after approval consumption but before the tool."""
+@pytest.mark.parametrize(("decision", "crash_window"), [
+    ("approve", "before"), ("edit", "before"), ("reject", "before"),
+    ("approve", "interrupted"), ("edit", "interrupted"), ("reject", "interrupted"),
+    ("approve", "after"),
+])
+def test_recovery_email_approval_consumption(wired, monkeypatch, decision, crash_window):
+    """Recover an exact decision before consumption, never repeat it afterward."""
     from langchain_core.messages import AIMessage, HumanMessage
     from langgraph.checkpoint.sqlite import SqliteSaver
     from langgraph.graph import MessagesState, StateGraph, START, END
@@ -1047,17 +1052,22 @@ def test_recovery_after_consumed_email_approval_keeps_delivery_identity(wired, m
     def gate(state):
         decision = interrupt({"action_requests": [{"name": "send_email", "args": args}]})
         approvals.append(decision)
+        choice = decision["decisions"][0]
+        if choice["type"] == "reject":
+            return {"messages": [AIMessage(content="Rejected")]}
+        selected = choice.get("edited_action", {}).get("args", args)
         return {"messages": [AIMessage(content="", tool_calls=[
-            {"name": "send_email", "args": args, "id": "email-restart"}])]}
+            {"name": "send_email", "args": selected, "id": "email-restart"}])]}
 
     def build(connection):
         graph = StateGraph(MessagesState)
         graph.add_node("gate", gate)
         graph.add_node("tools", ToolNode([email.send_email]))
         graph.add_edge(START, "gate")
-        graph.add_edge("gate", "tools")
+        graph.add_conditional_edges("gate", lambda state: "tools" if state["messages"][-1].tool_calls else END)
         graph.add_edge("tools", END)
-        return graph.compile(checkpointer=SqliteSaver(connection), interrupt_before=["tools"])
+        return graph.compile(checkpointer=SqliteSaver(connection),
+                             interrupt_before=["tools"] if crash_window == "after" else [])
 
     config = {"configurable": {"thread_id": tid}}
     connection = sqlite3.connect(root / "approved-email.db", check_same_thread=False)
@@ -1068,13 +1078,19 @@ def test_recovery_after_consumed_email_approval_keeps_delivery_identity(wired, m
     threads._runs().transition(tid, proposal.id, "awaiting_approval")
     _set_status(tid, "awaiting_approval", pending_email_token="stored-token",
                 pending_email_run_id=proposal.id,
+                pending_email_interrupt_id=graph.get_state(config).interrupts[0].id,
                 **{"pending_email_" + name: value for name, value in args.items()})
     accepted, _ = threads.email_decision_core(
-        tid, "approve", threads.email_approval_preview(_get_status(tid))["token"],
+        tid, decision, threads.email_approval_preview(_get_status(tid))["token"],
+        to="edited@example.test", subject="Edited subject", body="Edited body",
         phone_preview=True)
     threads._runs().claim(tid, accepted.id)
-    graph.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config, durability="sync")
-    assert graph.get_state(config).next == ("tools",)
+    if crash_window == "after":
+        graph.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config, durability="sync")
+        assert graph.get_state(config).next == ("tools",)
+    if crash_window == "interrupted":
+        threads._runs().transition(tid, accepted.id, "interrupted")
+    assert bool(graph.get_state(config).interrupts) == (crash_window != "after")
     assert not sent
     connection.close()
 
@@ -1093,9 +1109,86 @@ def test_recovery_after_consumed_email_approval_keeps_delivery_identity(wired, m
         successor = threads._runs().list(tid)[-1]
         assert successor.resume and successor.resume_decision is None
         assert successor.status == "success"
-        assert approvals == [{"decisions": [{"type": "approve"}]}]
-        assert len(sent) == 1
-        assert sent[0]["from"] == "Assistant <assistant@example.test>"
-        assert sent[0]["cc"] == ["oversight@example.test"]
+        framework_decision = {key: value for key, value in accepted.resume_decision.items()
+                              if key not in {threads.EMAIL_REVIEW_IDENTITY_KEY, threads.APPROVAL_INTERRUPT_ID_KEY}}
+        assert approvals == [{"decisions": [framework_decision]}]
+        assert len(sent) == (0 if decision == "reject" else 1)
+        if sent:
+            assert sent[0]["from"] == "Assistant <assistant@example.test>"
+            assert sent[0]["cc"] == ["oversight@example.test"]
+            assert sent[0]["to"] == (["edited@example.test"] if decision == "edit" else [args["to"]])
+            assert sent[0]["subject"] == ("Edited subject" if decision == "edit" else args["subject"])
+            assert sent[0]["text"] == ("Edited body" if decision == "edit" else args["body"])
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_recovered_email_does_not_guess_an_interrupt_identity(wired, monkeypatch, legacy):
+    """A later identical proposal or an unbound legacy proposal needs review."""
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.graph import MessagesState, StateGraph, START, END
+    from langgraph.types import Command, interrupt
+    from assist.thread import Thread
+
+    tid, root = wired
+    monkeypatch.setenv("EMAIL_FROM_ADDRESS", "assistant@example.test")
+    monkeypatch.setenv("EMAIL_FROM_NAME", "Assistant")
+    monkeypatch.setenv("EMAIL_ALWAYS_CC", "oversight@example.test")
+    args = {"to": "recipient@example.test", "subject": "Subject", "body": "Body"}
+    approvals = []
+
+    def gate(state):
+        choice = interrupt({"action_requests": [{"name": "send_email", "args": args}]})
+        approvals.append(choice)
+        return {"messages": [AIMessage("Consumed")]}
+
+    def build(connection):
+        graph = StateGraph(MessagesState)
+        graph.add_node("first", gate)
+        graph.add_node("second", gate)
+        graph.add_edge(START, "first")
+        graph.add_edge("first", "second")
+        graph.add_edge("second", END)
+        return graph.compile(checkpointer=SqliteSaver(connection))
+
+    config = {"configurable": {"thread_id": tid}}
+    connection = sqlite3.connect(root / "distinct-email.db", check_same_thread=False)
+    graph = build(connection)
+    graph.invoke({"messages": [HumanMessage("Email this person")]}, config, durability="sync")
+    original_id = graph.get_state(config).interrupts[0].id
+    proposal = threads._create_run(tid, "Email this person")
+    threads._runs().claim(tid, proposal.id)
+    threads._runs().transition(tid, proposal.id, "awaiting_approval")
+    _set_status(tid, "awaiting_approval", pending_email_token="stored-token",
+                pending_email_run_id=proposal.id,
+                pending_email_interrupt_id=None if legacy else original_id,
+                **{"pending_email_" + name: value for name, value in args.items()})
+    accepted, _ = threads.email_decision_core(
+        tid, "approve", threads.email_approval_preview(_get_status(tid))["token"],
+        phone_preview=True)
+    threads._runs().claim(tid, accepted.id)
+    if not legacy:
+        graph.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config, durability="sync")
+        assert graph.get_state(config).interrupts[0].id != original_id
+    connection.close()
+
+    connection = sqlite3.connect(root / "distinct-email.db", check_same_thread=False)
+    graph = build(connection)
+    try:
+        def get(_tid, configurable=None, **kwargs):
+            chat = Thread.__new__(Thread)
+            chat.thread_id, chat.agent = tid, graph
+            chat.runconfig = {"configurable": {"thread_id": tid, **(configurable or {})}}
+            chat._run = lambda value: graph.invoke(value, chat.runconfig, durability="sync")["messages"][-1].content
+            return chat
+        monkeypatch.setattr(web.MANAGER, "get", get)
+        threads._execute_run(accepted.id, tid)
+        _drain_worker_queue(tid)
+        assert approvals == ([] if legacy else [{"decisions": [{"type": "approve"}]}])
+        assert _get_status(tid)["stage"] == "awaiting_approval"
+        assert _get_status(tid)["pending_email_interrupt_id"] == graph.get_state(config).interrupts[0].id
+        assert threads._runs().list(tid)[-1].status == "awaiting_approval"
     finally:
         connection.close()

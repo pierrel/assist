@@ -293,6 +293,14 @@ class Thread:
         return next((dict(action["args"]) for action in self.pending_actions()
                      if action.get("name") == name), None)
 
+    def pending_action_interrupt_id(self, name: str, args: dict | None = None) -> str | None:
+        """Return the exact checkpoint interrupt containing the named action."""
+        snap = self.agent.get_state(self.runconfig)
+        return next((intr.id for intr in (getattr(snap, "interrupts", None) or ())
+                     if any(action.get("name") == name
+                            and (args is None or action.get("args") == args)
+                            for action in (intr.value or {}).get("action_requests", []))), None)
+
     def resume_actions(self, decisions: list[dict]) -> str:
         """Resume ordered HITL actions with one framework decision per request."""
         return self._run(Command(resume={"decisions": decisions}))

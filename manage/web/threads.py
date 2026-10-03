@@ -1972,6 +1972,15 @@ def _pending_email(chat) -> dict | None:
     return pending() if pending is not None else None
 
 
+APPROVAL_INTERRUPT_ID_KEY = "approval_interrupt_id"
+
+
+def _email_interrupt_id(chat) -> str | None:
+    """Read the email interrupt identity when the Thread exposes it."""
+    read = getattr(chat, "pending_action_interrupt_id", None)
+    return read("send_email") if read is not None else None
+
+
 def _resume_email(chat, decision: dict) -> str:
     """Resume the displayed email and reject other unseen gated requests."""
     pending = _pending_email(chat)
@@ -1979,7 +1988,7 @@ def _resume_email(chat, decision: dict) -> str:
     selected = next(index for index, action in enumerate(requests)
                     if action.get("name") == "send_email" and action.get("args") == pending)
     action_decision = {key: value for key, value in decision.items()
-                       if key != EMAIL_REVIEW_IDENTITY_KEY}
+                       if key not in {EMAIL_REVIEW_IDENTITY_KEY, APPROVAL_INTERRUPT_ID_KEY}}
     return chat.resume_actions([
         action_decision if index == selected else {
             "type": "reject", "message": "This action was not displayed for approval. Propose it separately."}
@@ -3043,6 +3052,28 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 except FileNotFoundError:
                     return
                 _set_status(tid, "processing", **pending_kwargs)
+                if resume and _run is not None:
+                    # Only the original, still-unconsumed interrupt can use an
+                    # accepted decision from an earlier slice of this work.
+                    accepted = next((candidate
+                                     for candidate in reversed(_runs().list(tid))
+                                     if candidate.work_id == _run.work_id
+                                     and candidate.resume_decision is not None
+                                     and candidate.resume_decision.get(APPROVAL_INTERRUPT_ID_KEY)), None)
+                    action_name = None
+                    if accepted is not None:
+                        dispatch_key = accepted.dispatch_key or ""
+                        if dispatch_key.startswith("email-approval:"):
+                            action_name = "send_email"
+                        elif dispatch_key.startswith("gmail-approval:"):
+                            kind = dispatch_key.split(":", 2)[1]
+                            if kind in {"gmail_archive", "gmail_delete"}:
+                                action_name = kind
+                    read_interrupt = getattr(chat, "pending_action_interrupt_id", None)
+                    if (action_name is not None and read_interrupt is not None
+                            and accepted.resume_decision[APPROVAL_INTERRUPT_ID_KEY]
+                            == read_interrupt(action_name)):
+                        resume, resume_decision = False, accepted.resume_decision
                 observed = (_run is not None
                             and RUN_STREAMS.read(tid, _run.work_id) is not None)
                 if resume and observed:
@@ -3061,7 +3092,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     if chat.pending_reply():
                         resp = chat.resume_reply(resume_decision)
                     elif _pending_email(chat):
-                        if (resume_decision.get("type") != "reject"
+                        if (resume_decision.get(APPROVAL_INTERRUPT_ID_KEY) is not None
+                                and resume_decision[APPROVAL_INTERRUPT_ID_KEY] != _email_interrupt_id(chat)):
+                            resp = ""
+                        elif (resume_decision.get("type") != "reject"
                                 and resume_decision.get(EMAIL_REVIEW_IDENTITY_KEY)
                                 != list(email_identity() or ("", ""))):
                             # Keep the checkpoint interrupted and publish a fresh proposal.
@@ -3151,6 +3185,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                 pending_email_subject=pending_email.get("subject", ""),
                                 pending_email_body=pending_email.get("body", ""),
                                 pending_email_token=secrets.token_urlsafe(16),
+                                pending_email_interrupt_id=_email_interrupt_id(chat),
                                 pending_email_run_id=_run.id if _run else None,
                                 started_at=started_at)
                     if _run is not None:
@@ -4021,6 +4056,8 @@ def email_decision_core(tid: str, decision: str, token: str, *,
         if decision == "edit" and not valid_email_content(to, subject, body):
             raise HTTPException(status_code=400, detail="The edited email is invalid.")
         resume_decision = _EMAIL_DECISIONS[decision](to, subject, body)
+        if status.get("pending_email_interrupt_id"):
+            resume_decision[APPROVAL_INTERRUPT_ID_KEY] = status["pending_email_interrupt_id"]
         if decision != "reject":
             resume_decision[EMAIL_REVIEW_IDENTITY_KEY] = [proposal["from"], proposal["cc"]]
         dispatch_key = "email-approval:" + status["pending_email_token"]

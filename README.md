@@ -454,8 +454,11 @@ reapply any edits before approving again. The email tool checks that reviewed
 identity against its captured delivery configuration. Once a decision is accepted,
 phone Run cancellation returns HTTP 409, including after checkpoint recovery,
 without cancelling the work or losing its receipt.
-Checkpoint recovery retains the reviewed identity from the durable work chain
-without reapplying a consumed decision. An accepted approval remains that chain's
+Checkpoint recovery retains the reviewed identity from the durable work chain.
+It applies an accepted email decision only while its original checkpoint interrupt
+is still pending, then continues consumed checkpoints without reapplying it.
+Legacy pending proposals without an interrupt identity require fresh review after recovery.
+An accepted approval remains that chain's
 successor rather than being replaced by recovery of an older interrupted slice.
 The EmacsOS client offers scrollable previews, two-tap decisions and an email
 editor. Gmail archive/Trash decisions bind the submitted kind as well as the token
