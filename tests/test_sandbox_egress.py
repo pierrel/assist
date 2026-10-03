@@ -1,7 +1,7 @@
 """Unit tests for the sandbox egress allowlist plumbing.
 
 Docker is mocked: proxy tests cover the low-level create request and
-idempotent setup; shell tests cover ``containers.run`` and map admission.
+idempotent setup and SDK mount conversion; shell tests cover ``containers.run`` and map admission.
 The actual policy enforcement is exercised in the
 build-time smoke (``dockerfiles/test-sandbox-egress.sh``).
 """
@@ -13,7 +13,9 @@ from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
 from assist.sandbox_manager import (
+    BROWSER_NETWORK,
     EGRESS_NETWORK,
+    EGRESS_PROXY_IMAGE,
     EGRESS_PROXY_NAME,
     EGRESS_PROXY_PORT,
     SandboxManager,
@@ -199,6 +201,53 @@ class TestEnsureEgressProxy(TestCase):
                 SandboxManager._ensure_egress_proxy_running(client)
         client.api.create_container.assert_not_called()
 
+    def test_same_source_mounts_survive_docker_sdk_conversion(self):
+        from docker.models.containers import _create_container_args
+        from assist.sandbox_manager import _egress_proxy_mounts
+
+        with tempfile.TemporaryDirectory() as source:
+            args = _create_container_args({
+                "image": EGRESS_PROXY_IMAGE,
+                "version": "1.45",
+                "mounts": _egress_proxy_mounts(source, source),
+            })
+
+        self.assertEqual(args["host_config"]["Mounts"], [
+            {"Target": "/approvals", "Source": source,
+             "Type": "bind", "ReadOnly": True},
+            {"Target": "/client-map", "Source": source,
+             "Type": "bind", "ReadOnly": True},
+        ])
+
+    def test_proxy_uses_read_only_mounts_for_approvals(self):
+        client = self._make_client()
+        ordinary = client.networks.get.return_value
+        isolated = MagicMock()
+        isolated.attrs = {
+            "Id": "browser-network-id", "Driver": "bridge", "Internal": True,
+            "EnableIPv6": False,
+            "Options": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
+            "IPAM": {"Config": [{"Subnet": "172.31.0.0/16"}]},
+        }
+        client.networks.get.side_effect = lambda name: (
+            isolated if name == BROWSER_NETWORK else ordinary)
+        client.test_proxy.attrs["NetworkSettings"]["Networks"][BROWSER_NETWORK] = {
+            "NetworkID": "browser-network-id"}
+        with tempfile.TemporaryDirectory() as egress_dir:
+            with patch.dict(os.environ, {"ASSIST_EGRESS_APPROVALS_DIR": egress_dir}):
+                SandboxManager._ensure_egress_proxy_running(client)
+
+            kwargs = client.api.create_container.call_args.kwargs
+            self.assertNotIn("volumes", kwargs)
+            self.assertEqual(kwargs["host_config"]["Mounts"], [
+                {"Target": "/approvals",
+                 "Source": os.path.join(egress_dir, "approvals"),
+                  "Type": "bind", "ReadOnly": True},
+                {"Target": "/client-map",
+                 "Source": os.path.join(egress_dir, "approvals"),
+                 "Type": "bind", "ReadOnly": True},
+            ])
+
     def test_skips_recreate_when_hash_matches_and_running(self):
         running_proxy = MagicMock()
         running_proxy.status = "running"
@@ -223,14 +272,11 @@ class TestEnsureEgressProxy(TestCase):
         stale_proxy.remove.assert_called_once_with(force=True)
         client.api.create_container.assert_called_once()
 
-    def test_recreates_when_proxy_policy_schema_changes(self):
-        """An older image cannot stay alive behind a matching allowlist.
-
-        Host throttling lives inside the proxy image, so its schema marker is
-        part of the label contract that forces a replacement after deployment.
-        """
+    def test_recreates_when_proxy_mount_schema_changes(self):
+        """The old volume-mount proxy is replaced after deployment."""
         old_hash = hashlib.sha256(
-            (",".join(_load_egress_allowlist()) + "|v2-approvals:").encode()
+            (",".join(_load_egress_allowlist())
+             + "|v4-host-throttle-guidance-approvals:").encode()
         ).hexdigest()[:16]
         stale_proxy = MagicMock()
         stale_proxy.id = "old-policy"

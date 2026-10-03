@@ -89,6 +89,9 @@ def test_final_provider_tools_are_the_visible_tools(census):
         assert len(names) == len(set(names))
 
     main = _call(census, "web-main-core")
+    assert "quiet" in main["visible_tools"]
+    assert "quiet" in _call(census, "web-main-full")["visible_tools"]
+    assert "quiet" not in _call(census, "web-delegate")["visible_tools"]
     assert "general-purpose" not in _system_prompt(main).split(
         "Available subagent types:")[-1]
     assert "task" not in main["visible_tools"]
@@ -167,8 +170,10 @@ def test_classified_kernel_matches_each_final_skills_enabled_request(census):
         "start_async_task", "get_async_task_status", "get_async_task_result", "update_async_task",
         "cancel_async_task", "list_async_tasks"]
     expected = {
-        "web-main-core": [*executable, "load_skill", *async_lifecycle],
-        "web-main-full": [*executable, "load_skill", *async_lifecycle],
+        "web-main-core": [*executable, "load_skill", *async_lifecycle,
+                          "quiet"],
+        "web-main-full": [*executable, "load_skill", *async_lifecycle,
+                          "quiet"],
         "web-delegate": [*executable, "task", "load_skill"],
         "legacy-main": [*filesystem, "task", "load_skill"],
         "skill-precedence-built-in": [
@@ -1289,10 +1294,10 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
         separators=(",", ":"),
     )
     assert len(historical_p0_prompt) == 31_279
-    # V1's current browser and egress catalog descriptions replace the old
-    # policy wording. Historical rows retain their original P0-P2b3 values.
-    assert len(current_prompt) == 26_712
-    assert len(schemas) == 18_554
+    # The composed current prompt includes V1 browser/egress wording plus the
+    # landed Git and quiet guidance. Historical P0-P2b3 rows remain unchanged.
+    assert len(current_prompt) == 27_121
+    assert len(schemas) == 18_735
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 37
     assert len(census["findings"]) == 20

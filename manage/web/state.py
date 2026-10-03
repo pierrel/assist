@@ -26,12 +26,14 @@ from starlette.concurrency import run_in_threadpool
 import anyio
 
 from assist.domain_manager import DomainManager
+from assist.git_sync import source_label
 from assist.env import load_dev_env
 from assist.sandbox_manager import SandboxManager
 from assist.schedule.store import ScheduleStore
 from assist.schedule.tools import schedule_tools
 from assist.events.store import SubscriptionStore
 from assist.events.tools import subscription_tools
+from assist.events.quiet import quiet_tools
 from assist.events.reply import reply_tools, REPLY_INTERRUPT_ON
 from assist.events.email import email_tools, EMAIL_INTERRUPT_ON
 from assist.events.notify import notify_tools
@@ -197,8 +199,15 @@ _egress_tools = (egress_tools(EGRESS_STORE, EGRESS_BASE_HOSTS,
                               thread_dir=MANAGER.thread_dir)
                  if EGRESS_STORE else [])
 
+
+def _request_quiet(tid: str, run_id: str) -> bool:
+    from manage.web.threads import _runs
+    return _runs().request_quiet(tid, run_id)
+
+
 set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE)
               + notify_tools(lambda tid: _mark_urgent(tid))
+              + quiet_tools(_request_quiet)
               + _geo_tools + email_tools() + [get_location]
               + frequency_tools(FREQUENCY_STORE))
 set_execution_egress_tools(_egress_tools)
@@ -224,7 +233,7 @@ MERGE_LOCK = threading.Lock()
 
 def _domain_label(url: str) -> str:
     """'user@host:/path/to/life.git' -> 'life'"""
-    return url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+    return source_label(url)
 
 
 def _domain_selector_html() -> str:
@@ -282,7 +291,7 @@ def _get_domain_manager(tid: str, domain: str | None = None) -> DomainManager | 
 def _get_sandbox_backend(tid: str, tz: str | None = None, *,
                          include_agent: bool = True,
                          browser_capable: bool = False,
-                         owner_run_id: str | None = None):
+                         owner_run_id: str | None = None, before_start=None):
     """Get sandbox backend for a thread, or None if Docker is unavailable.
 
     ``tz`` is the per-turn context-rider timezone, so this turn's sandbox ``date``
@@ -291,22 +300,17 @@ def _get_sandbox_backend(tid: str, tz: str | None = None, *,
     ``include_agent`` mounts the visible thread's private main-agent directory.
     Hidden child runs pass ``False`` and receive self-contained task briefs instead.
 
-    Runs off the event loop (from ``_process_message``'s background task), so the
-    turn-start origin pre-fetch is safe here: the host refreshes ``origin/main`` in the
-    clone (it has git + origin access) so the agent can rebase onto a current local
-    ``origin/main`` — the agent cannot fetch from inside the sandbox itself."""
+    Git reconciliation is owned by the queued writer, not sandbox construction;
+    resumed slices must not fast-forward their in-flight worktree. ``before_start``
+    records the Git flight fence immediately before the possibly ambiguous create.
+    """
     work_dir = MANAGER.thread_default_working_dir(tid)
-    dm = _get_domain_manager(tid)
-    if dm is not None:
-        try:
-            dm.fetch_origin()
-        except Exception as e:
-            logging.getLogger(__name__).warning("origin pre-fetch failed for %s: %s", tid, e)
     return SandboxManager.get_sandbox_backend(
         work_dir, tz=tz,
         agent_dir=(MANAGER.thread_agent_dir(tid) if include_agent else None),
         browser_capable=browser_capable, thread_scope=(MANAGER.root_dir, tid),
-        owner_run_id=owner_run_id)
+        owner_run_id=owner_run_id,
+        **({"before_start": before_start} if before_start is not None else {}))
 
 
 def _has_unmerged_changes(tid: str) -> bool:
@@ -460,14 +464,11 @@ def _get_status(tid: str) -> dict:
         return {"stage": "ready"}
 
 
-def _set_status(tid: str, stage: str, **kwargs) -> None:
+def _set_status(tid: str, stage: str, *, mark_unseen: bool = True, **kwargs) -> None:
     _atomic_write(_status_path(tid), json.dumps({"stage": stage, **kwargs}))
-    # Single choke point for the "unseen AI response" badge: `ready` and
-    # `awaiting_approval` are set ONLY at _process_message's three response-success
-    # exits (incl. the supersede early-return), and nowhere else — so marking here
-    # catches every response/draft the user should see, and can't miss an exit.
-    # Errors don't mark (the "error" badge, above "new" in precedence, covers them).
-    if stage in ("ready", "awaiting_approval"):
+    # A quiet ready result skips only its own new marker. Existing unread
+    # attention remains until the page is opened. Approvals always mark new.
+    if stage == "awaiting_approval" or (stage == "ready" and mark_unseen):
         _mark_unseen_response(tid)
 
 
@@ -514,8 +515,9 @@ def _append_timing(tid: str, ordinal: int, seconds: float) -> None:
 
 
 # --- "unseen AI response" badge state -------------------------------------
-# A thread carries an "unseen" AI response from when a turn produces a
-# response/draft until the user OPENS that thread's page.  Two representations of
+# A completed turn normally marks its response/draft unseen until the user
+# OPENS that thread's page. A quiet ready result skips adding this marker but
+# leaves any earlier marker intact. Two representations of
 # the one bit, kept in sync (see docs/2026-07-03-unread-badge.org):
 #   - a marker file per thread (durable — survives restart),
 #   - the _UNSEEN set (the badge READ PATH — render_index tests membership per row,

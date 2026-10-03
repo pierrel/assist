@@ -127,7 +127,7 @@ def _egress_proxy_config_hash(allowlist_csv: str, approvals_dir: str | None,
     destination policy recreate once and gain the current behavior. The
     service UID/GID binds proxy read access to host-only map mounts."""
     return hashlib.sha256(
-        (allowlist_csv + "|v9-shared-browser-policy:"
+        (allowlist_csv + "|v10-read-only-proxy-mounts:"
          + f"{os.getuid()}:{os.getgid()}|" + (approvals_dir or "")
          + "|" + (map_dir or "") + "|" + network_ref).encode()
     ).hexdigest()[:16]
@@ -180,6 +180,18 @@ def _bounded_egress_worker(argv: list[str], timeout: float = 20):
             timeout=timeout, check=False)
     except subprocess.TimeoutExpired as error:
         raise RuntimeError("egress Docker setup timed out; generation retired") from error
+
+
+def _egress_proxy_mounts(approvals_dir: str | None, map_dir: str | None = None):
+    """Keep both read-only targets when approvals and map share one source."""
+    from docker.types import Mount
+
+    return [
+        Mount(target, source, type="bind", read_only=True)
+        for target, source in (("/approvals", approvals_dir),
+                               ("/client-map", map_dir))
+        if source
+    ]
 
 
 class SandboxManager:
@@ -464,11 +476,6 @@ class SandboxManager:
                 clear_clients(map_dir)
 
             from assist.egress.guidance import EGRESS_DENY_BODY, EGRESS_THROTTLE_BODY
-            volumes = {}
-            if approvals_dir:
-                volumes[approvals_dir] = {"bind": "/approvals", "mode": "ro"}
-            if map_dir:
-                volumes[map_dir] = {"bind": "/client-map", "mode": "ro"}
             token = uuid4().hex
             from docker.models.containers import _create_container_args
             create_kwargs = _create_container_args({
@@ -489,7 +496,7 @@ class SandboxManager:
                     "assist.egress-generation": token,
                 },
                 "user": f"{os.getuid()}:{os.getgid()}",
-                **({"volumes": volumes} if volumes else {}),
+                "mounts": _egress_proxy_mounts(approvals_dir, map_dir),
             })
             runtime_state.begin_creation("proxy", EGRESS_PROXY_NAME, token)
             try:
@@ -562,14 +569,17 @@ class SandboxManager:
     def _get_sandbox_backend(cls, work_dir: str, tz: str | None,
                              agent_dir: str | None, include_assist_env: bool,
                              include_egress_approvals: bool,
+                             before_start=None, readonly_workspace=False,
                              browser_capable: bool = False,
                              thread_scope: tuple[str, str] | None = None,
                              owner_run_id: str | None = None):
         if thread_scope is None:
             return cls._create_sandbox_backend(
                 work_dir, tz, agent_dir, include_assist_env,
-                include_egress_approvals, browser_capable,
-                thread_scope, owner_run_id)
+                include_egress_approvals, before_start=before_start,
+                readonly_workspace=readonly_workspace,
+                browser_capable=browser_capable, thread_scope=thread_scope,
+                owner_run_id=owner_run_id)
         from assist.browser import authority
         from assist.browser.manager import BrowserManager
         threads_root, thread_id = thread_scope
@@ -582,13 +592,16 @@ class SandboxManager:
         with authority.generation_fence(threads_root, thread_id):
             return cls._create_sandbox_backend(
                 work_dir, tz, agent_dir, include_assist_env,
-                include_egress_approvals, browser_capable,
-                thread_scope, owner_run_id)
+                include_egress_approvals, before_start=before_start,
+                readonly_workspace=readonly_workspace,
+                browser_capable=browser_capable, thread_scope=thread_scope,
+                owner_run_id=owner_run_id)
 
     @classmethod
     def _create_sandbox_backend(cls, work_dir: str, tz: str | None,
                                 agent_dir: str | None, include_assist_env: bool,
                                 include_egress_approvals: bool,
+                                before_start=None, readonly_workspace=False,
                                 browser_capable: bool = False,
                                 thread_scope: tuple[str, str] | None = None,
                                 owner_run_id: str | None = None):
@@ -597,13 +610,17 @@ class SandboxManager:
         ``include_assist_env`` is the line between ordinary Deep Agents work and
         Pi preview work.  A Pi sandbox retains Docker's workspace and egress
         containment but receives no generic application environment or private
-        agent mount. ``thread_scope`` binds managed web/Pi callers to their
+        agent mount. ``before_start`` records a Git recovery fence immediately
+        before Docker create; earlier policy/setup failures create no new fence.
+        A preceding Git generation's retained fence is cleared only after verification.
+        Read-only Git verification omits persistent scratch/private mounts, so
+        configured filters cannot mutate the checked worktree through an alias.
+        ``thread_scope`` binds managed web/Pi callers to their
         exact thread workspace; generic callers never infer authority from a path.
         """
-        # Per-turn lifecycle: never reuse a container across turns.  The web
-        # layer tears each container down at the end of its turn
-        # (manage/web/threads.py), so a registry entry surviving to here means
-        # a prior turn's teardown didn't run (the worker died mid-turn).  Reap
+        # Never reuse container generations. The web layer tears each down at
+        # its phase boundary (manage/web/threads.py), so a registry entry
+        # surviving to here means teardown did not run (the worker died). Reap
         # that stale container before creating a fresh one — the registry is
         # keyed by work_dir, so creating without reaping would overwrite the
         # reference and orphan it (the 3h backstop TTL would eventually catch
@@ -729,7 +746,7 @@ class SandboxManager:
             # uid can write it even if the web process's own uid differs from work_dir's
             # owner (best-effort chown: a no-op when they already match, the common case).
             tmp_dir = os.path.join(os.path.dirname(work_dir), "tmp")
-            if not os.path.isdir(tmp_dir):
+            if not readonly_workspace and not os.path.isdir(tmp_dir):
                 os.makedirs(tmp_dir, exist_ok=True)
                 try:
                     os.chown(tmp_dir, st.st_uid, st.st_gid)
@@ -737,8 +754,10 @@ class SandboxManager:
                     pass  # not permitted (web non-root, uids differ) — mount still
                           # works when web uid == work_dir owner (the deployment case)
 
-            volumes = {work_dir: {"bind": "/workspace", "mode": "rw"},
-                       tmp_dir: {"bind": "/tmp", "mode": "rw"}}
+            volumes = {work_dir: {"bind": "/workspace",
+                                  "mode": "ro" if readonly_workspace else "rw"}}
+            if not readonly_workspace:
+                volumes[tmp_dir] = {"bind": "/tmp", "mode": "rw"}
             if agent_dir is not None:
                 os.makedirs(agent_dir, exist_ok=True)
                 try:
@@ -766,6 +785,16 @@ class SandboxManager:
                                 if run.user_event_id == run.id), default=0)
                 with authority.fence(threads_root, thread_id) as state:
                     state.begin(owner, sequence)
+            try:
+                if before_start is not None:
+                    before_start()
+            except Exception:
+                # No Docker generation exists yet. Do not strand a browser
+                # authority lease when the Git pre-create fence refuses.
+                if thread_scope is not None:
+                    with authority.fence(threads_root, thread_id) as state:
+                        state.clear(owner)
+                raise
             container = client.containers.run(
                 SANDBOX_IMAGE,
                 detach=True,
@@ -806,24 +835,36 @@ class SandboxManager:
     @classmethod
     def get_sandbox_backend(cls, work_dir: str, tz: str | None = None,
                             agent_dir: str | None = None,
-                            browser_capable: bool = False,
+                            before_start=None, browser_capable: bool = False,
                             thread_scope: tuple[str, str] | None = None,
                             owner_run_id: str | None = None):
         """Return the ordinary sandbox; managed callers bind its thread authority."""
         return cls._get_sandbox_backend(
             work_dir, tz, agent_dir, include_assist_env=True,
-            include_egress_approvals=True, browser_capable=browser_capable,
+            include_egress_approvals=True, before_start=before_start,
+            browser_capable=browser_capable,
             thread_scope=thread_scope, owner_run_id=owner_run_id)
 
     @classmethod
     def get_pi_sandbox_backend(cls, work_dir: str, tz: str | None = None, *,
+                               before_start=None,
                                thread_scope: tuple[str, str] | None = None,
                                owner_run_id: str | None = None):
         """Return Pi's workspace-only Docker sandbox, without app secrets or `/agent`."""
         return cls._get_sandbox_backend(
             work_dir, tz, None, include_assist_env=False,
-            include_egress_approvals=False, thread_scope=thread_scope,
+            include_egress_approvals=False, before_start=before_start,
+            thread_scope=thread_scope,
             owner_run_id=owner_run_id)
+
+    @classmethod
+    def get_git_verification_backend(cls, work_dir: str, tz: str | None = None,
+                                     before_start=None):
+        """Credential-free read-only worktree, with ephemeral scratch and no `/agent`."""
+        return cls._get_sandbox_backend(
+            work_dir, tz, None, include_assist_env=False,
+            include_egress_approvals=False, before_start=before_start,
+            readonly_workspace=True)
 
     # work_dir -> (map directory, egress-network IP, container generation)
     # for shell attribution or an explicit Pi no-grant marker.
@@ -911,6 +952,38 @@ class SandboxManager:
     def current_container(cls, work_dir: str):
         """Return the registered container generation, if any."""
         return cls._containers.get(work_dir)
+
+    @classmethod
+    def cleanup_verified(cls, work_dir: str, expected_container) -> None:
+        """Confirm this generation exited before allowing host Git object reads.
+
+        Failed teardown retains the registry entry. The Git owner also persists
+        a quarantine so a process restart cannot silently permit another writer.
+        """
+        from docker.errors import NotFound
+        if expected_container is None or cls._containers.get(work_dir) is not expected_container:
+            raise RuntimeError("Git sandbox generation is unavailable")
+        try:
+            expected_container.kill()
+            expected_container.wait(timeout=10)
+        except NotFound:
+            pass  # Auto-removal is also proof that this exact generation exited.
+        if cls._containers.get(work_dir) is not expected_container:
+            raise RuntimeError("Git sandbox generation changed during teardown")
+        scoped_owner = cls._generation_owners.get(expected_container.id)
+        if scoped_owner is not None:
+            from assist.browser import authority
+            threads_root, thread_id, owner = scoped_owner
+            if os.path.isdir(os.path.join(threads_root, thread_id)):
+                with authority.fence(threads_root, thread_id) as state:
+                    if (state.lease is not None
+                            and state.lease["owner_run_id"] == owner):
+                        state.remove_generation(owner, expected_container.id)
+                        state.clear(owner)
+        cls._containers.pop(work_dir)
+        cls._forget_egress_client(work_dir)
+        cls._generation_owners.pop(expected_container.id, None)
+
 
     @classmethod
     def cleanup(cls, work_dir: str, expected_container=_ANY_CONTAINER) -> None:

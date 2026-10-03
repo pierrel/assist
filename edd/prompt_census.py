@@ -1241,6 +1241,7 @@ def _write_skill(root: Path, name: str, description: str, marker: str,
 def _web_toolset(root: Path, *, full: bool) -> list:
     from assist.events.email import email_tools
     from assist.events.notify import notify_tools
+    from assist.events.quiet import quiet_tools
     from assist.events.store import SubscriptionStore
     from assist.events.tools import subscription_tools
     from assist.frequency import FrequencyDecisionStore, frequency_tools
@@ -1253,6 +1254,7 @@ def _web_toolset(root: Path, *, full: bool) -> list:
         schedule_tools(ScheduleStore(str(root)))
         + subscription_tools(SubscriptionStore(str(root)))
         + notify_tools(lambda _tid: None)
+        + quiet_tools(lambda _tid, _run_id: False)
         + email_tools()
         + [get_location]
         + frequency_tools(FrequencyDecisionStore(str(root)))
@@ -1693,6 +1695,7 @@ _TOOL_ORIGINS = {
     "open_thread": "assist.receptionist",
     "pause_schedule": "assist.schedule.tools",
     "propose_region_download": "assist.geo.tools",
+    "quiet": "assist.events.quiet",
     "read_file": "deepagents.middleware.filesystem",
     "read_url": "assist.tools",
     "remove_allowed_host": "assist.egress.tools",
@@ -1711,7 +1714,10 @@ _TOOL_ORIGINS = {
 
 _DECLARED_TEMPLATE_RENDER_HASHES = {
     "assist/templates/deepagents/assist_core.md.j2": {
+        "b1c0d98c75c412efb574a32146abc3f06c78e60b1344bff5d589350423bf9285",
+        "a225e7ff34ceea8981ffacfa40fc6424d94739bcb8bfcbd231245e7036a1975a",
         "c2bf45bb658da376155de7bcd91a6f36dea61a6dd73999721513cd4b62c91527",
+        "995fceed6c9786dc6a48e1d44a4fd2b4db7aadc82bb1297c0d7298f2394dcd7b",
         "18d57020fae23ba1cc93aed0b0cca265a89891e66708619f9f28adfefb257adb",
         "d0bf608e2e7b8c0b5bad52e2dd87fe17b91f357d06bb449742406f08230eb32d",
         "cbc483e291b07adf34e6be71a409f486bee4de7a6f520f0c15994ede69dbf30c",
@@ -1981,6 +1987,7 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "open_thread": {"d9d2c013e8759960c87b9114d1cbac06e9f606b18cc956d7b9b25acfd49c9722"},
     "pause_schedule": {"f4650ba6d1e6b58948b8a09821a1cf1dbfcfb8820a3ae5e63b64dc5841eb2265"},
     "propose_region_download": {"638cb587cde24979bcd6ee36a7169d8b61bec09afd2ab7adf2afecb3f1695d58"},
+    "quiet": {"37edd06eeaad498ac37a8509d6dfe30bb094bed2aa71e858f45b4990445bb715"},
     "read_file": {"2e139ac315b65f5b6614591642b26defae959ab6878fff990f26f0b997feb5af"},
     "read_url": {"a4e5eae871d9956ee0227f48f8e86eb1c96b1740cb73a7e1a1e57a8cfae18716"},
     "remove_allowed_host": {"4bc5319afb9de4381fdd059f5bb35034caccacee5eb52b7443a6af2c27ed0498"},
@@ -2125,9 +2132,9 @@ _TOOL_RESULT_METADATA = {
 }
 
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "6985ff3bb7223b0b8b0f7f058b36730ddc09ac583ac13750c63c14ee8abd391b"
+    "7c135fc095215f4027cfe3a706f05e57be626e239cf43b701b0910aff76accde"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "d05817f22da576f1f29ce19cb82bd96c5d46750e3656884f4ffc11b108c93943"
+    "3736b71fcee552a027b30d8b8b91d22b98bfafc4701e2aeeebfb0972a4399104"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
@@ -3068,7 +3075,7 @@ def _tool_classification(path: str, name: str, origin: str) -> str:
         return "fixed-role tool"
     if origin.startswith("deepagents") or name == "load_skill" \
             or origin.startswith("langchain.agents.middleware") \
-            or origin == "assist.async_subagents":
+            or origin == "assist.async_subagents" or name == "quiet":
         return "framework-kernel candidate"
     return "skill-scoped candidate"
 

@@ -1,0 +1,51 @@
+#+title: Bounded duplicate-pack runtime compatibility
+#+date: 2026-09-27
+
+* State
+Implementation and affected review in progress. This addendum addresses a fresh
+turn failure after verified source enrollment, not a phone action cancellation.
+Root owns compatible integration/deployment; no production repository is modified
+by the private snapshot correction.
+
+* Observed failure and verified construction
+The reported clean clone's pack file was 110,659,884 bytes, exceeding the remaining
+109,861,951-byte raw allowance. A read-only reproduction fails at that exact pack,
+not packed-refs. An authenticated private copy contained 136,137,581 raw bytes;
+private-only compaction retained unreachable objects and reduced it to 111,246,812
+bytes, below the existing 134,217,728-byte limit. Production branch identity was
+unchanged. Object-ID overlap was supporting evidence, not a substitute for fsck.
+
+* Bounds and preservation
+- Individual imported files and final authenticated object snapshots remain capped
+  at 128 MiB. Raw staging has an explicit separate fixed 256 MiB bound; this is not
+  a claim that the prior raw aggregate limit is unchanged.
+- Existing 10,000 scanned-entry, no-follow, independent-inode and time bounds remain.
+  Private Git subprocess memory/CPU/file-size/output/timeout limits remain enforced.
+- Full private fsck precedes any deduplication. Only oversized raw staging invokes
+  private repack with keep-unreachable, without expiration. Final bytes/entry bounds
+  and a second fsck must pass. Genuine oversized unique data still rejects.
+- All repacking/deletion is inside the disposable private store. Thread files,
+  index, refs, object packs and unreachable history are not repacked or pruned.
+
+* Preventing repeated import
+A fixed workspace origin/main tracking hint is not authority over a source or
+thread branch. Only a commit present in the fully verified private snapshot can
+seed its private known-main ref. Fetch still uses the trusted binding and exact
+remote selectors. Bundles exclude verified local thread/known-main ancestry;
+zero novel commits skip transfer/import while preserving tracking updates,
+FF-only reconciliation and clean-worktree verification. Phone-pushed commits
+remain available before the next fresh visible turn.
+
+* Scope
+No main-merge algorithm, persisted-source validation, phone, browser or quiet
+change. Prior external helper/source concerns remain separately deferred, not
+fixed or disproved by this compatibility correction. Root alone deploys and
+performs any actual user-facing proof; saved failed Runs are not replayed.
+
+* Historical supersessions
+No prior dated document is invalidated: the earlier compatibility addendum's
+Pack snapshots section concerns metadata omission and fsck, which remain unchanged.
+The former README.org snapshot paragraph at revision =c2eee517= described only a
+128 MiB cap. Current README wording distinguishes bounded raw staging from the
+unchanged per-file/final authenticated-object limit. Enrollment and main-merge
+scope conclusions in the earlier dated record are unchanged.

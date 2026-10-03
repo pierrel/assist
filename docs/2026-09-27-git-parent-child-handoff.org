@@ -1,0 +1,70 @@
+#+title: Git child fair-yield workspace handoff
+#+date: 2026-09-27
+
+* Observed failure and boundary
+
+A hidden child uses its parent's checkout. Before this correction, at a
+fair-scheduling pause the child's global =THREAD_QUEUE.acquire(child_id)= block
+exited before the outer =finally= reaped the sandbox and closed
+=git_ownership(parent)=. The queue could therefore admit a waiting parent
+message while the child still owned the parent's =git-sync.lock=. The parent's
+nonblocking flock reported a
+terminal error even though the child released it moments later. The reported
+2026-09-27 Run/child timeline demonstrates this exact ordering; it is not a
+stale lock or a dirty-worktree diagnosis.
+
+* Contract
+
+1. One child holds the parent's Git workspace fence while its model slice and
+   exact sandbox teardown run. A queued parent cannot enter its turn until that
+   fence is released, including on =ThreadPauseRequested=.
+2. Preserve the existing fair queue order and cumulative active-hold accounting.
+   A pause remains durable and resumes once; a queued parent message executes
+   once after safe handoff. No lock deletion, retry/sleep, prompt replay or
+   queue-wide redesign.
+3. Keep terminal child commit/publication/receipt and saved Run results on their
+   existing paths. Failure to reap the exact generation still quarantines Git
+   work; it is not converted to success or silently admitted.
+4. No new model-facing behavior, endpoints, credentials, host-workspace Git
+   execution, main merge change or phone/client work.
+
+* Numbered construction
+
+1. In =manage/web/threads.py::_execute_child_run=, put queue acquisition and
+   child Git cleanup in the same exit stack. Because exit-stack callbacks are
+   last-in-first-out, register =git_scope.close= first and exact-generation
+   sandbox cleanup immediately after acquiring a Git owner. They then run as
+   cleanup, flock release, global queue release for a Git child. Non-Git child
+   cleanup stays in its original post-queue =finally= path. Preserve the outer
+   pause/error handlers,
+   =pop_hold= after queue release, Run transitions, scheduler submission and
+   terminal handoff. A queue-acquire failure has no workspace owner to release.
+2. Exercise the actual contention in =tests/test_git_sync.py=: run a hidden
+   child on the parent's checkout; make its model raise =ThreadPauseRequested=;
+   pause exact-generation cleanup behind a test event while a parent turn queues
+   for the global slot. Assert the parent neither enters the Git workspace nor
+   errors while cleanup is held, then releases exactly once after cleanup and
+   flock release. Confirm the child has one interrupted Run and one durable
+   resume successor, the parent has one terminal result, and no stale flock.
+   Also retain adjacent child success/failure/receipt and parent preflight tests.
+3. Update the current README Git-sync account only to clarify this user-visible
+   queued-message behavior; leave dated historical docs untouched. Run bounded
+   affected Python checks, syntax/checkers and focused independent concurrency,
+   security and comment-alignment review. Offer an exact sealed successor to
+   root; root alone composes/deploys and verifies the reported live flow.
+
+* Risk and lock order
+
+The existing order remains global queue, then parent Git workspace flock.
+Cleanup and =git_scope.close= do not acquire =THREAD_QUEUE= or submit a new
+model turn. The pause handler submits its successor only after stack exit, so
+neither the resumed child nor queued parent waits on a queue holder that is
+waiting for them. Teardown may delay queue release by its existing bounded
+generation wait; it cannot expose the checkout concurrently. The unrelated
+2-hour force-release path is not redesigned here; its Git ownership fence
+still fails closed if another waiter arrives while its old holder unwinds.
+
+* Historical supersessions
+
+None. The prior direct-Git design remains the contract; this document records
+one newly observed implementation ordering defect in its hidden-child flow.

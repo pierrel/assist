@@ -409,8 +409,14 @@ class PiRuntimeManager:
             admitted: Callable[[], bool] | None = None,
             should_yield: Callable[[], bool] | None = None,
             trace_dir: str | None = None, trace_run_id: str | None = None,
+            sandbox_cleanup: Callable[[object], None] | None = None,
+            sandbox_starting: Callable[[], None] | None = None,
             thread_scope: tuple[str, str] | None = None) -> PiRuntimeResult:
-        """Run one fresh Pi worker and tear down every authority it used."""
+        """Run one fresh Pi worker and tear down every authority it used.
+
+        Git owners can record the exact pre-create flight fence and substitute
+        verified generation teardown with ``sandbox_starting``/``sandbox_cleanup``.
+        """
         if (not isinstance(prompt, str) or not isinstance(system_prompt, str)
                 or not system_prompt.strip() or not isinstance(max_turns, int)
                 or isinstance(max_turns, bool) or not 1 <= max_turns <= _MAX_TURNS):
@@ -441,7 +447,8 @@ class PiRuntimeManager:
             result_sink = PiResultSink(control_dir, result_capability)
             sandbox = self._sandbox_manager.get_pi_sandbox_backend(
                 work_dir, timezone, thread_scope=thread_scope,
-                owner_run_id=skill_run_id)
+                owner_run_id=skill_run_id,
+                **({"before_start": sandbox_starting} if sandbox_starting is not None else {}))
             if sandbox is None:
                 raise PiRuntimeError("Pi workspace sandbox is unavailable")
             if isinstance(sandbox, DockerSandboxBackend):
@@ -591,8 +598,9 @@ class PiRuntimeManager:
                     teardown_errors.append(error)
             if worker_reaped:
                 if sandbox is not None:
-                    self._attempt(teardown_errors, lambda: self._sandbox_manager.cleanup(
-                        work_dir, expected_container=sandbox.container))
+                    self._attempt(teardown_errors, lambda: sandbox_cleanup(sandbox.container)
+                                  if sandbox_cleanup is not None else self._sandbox_manager.cleanup(
+                                      work_dir, expected_container=sandbox.container))
                 if broker is not None:
                     self._attempt(teardown_errors, broker.close)
                 if relay is not None:

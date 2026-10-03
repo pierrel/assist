@@ -1,0 +1,100 @@
+#+title: Git lifecycle boundary for web turns
+#+date: 2026-09-29
+
+State: Design accepted; implementation in review
+
+* Problem and scope
+
+Before this change, the web turn orchestrator called =git_ownership= and the private
+=_git_prepare=, =_git_admit=, =_git_cleanup= and =_git_finish= helpers directly.
+Deep (=manage/web/threads.py::_process_message=), Pi (=_execute_pi_run=), hidden
+children (=_execute_child_run= / =_recover_child_run=), restart recovery and
+the user-gated merge route each knew pieces of the Git protocol. This scattered
+the order of preflight, sandbox flight fencing, exact-generation teardown,
+read-only verification, local commit receipt and best-effort branch publication.
+Pierre requested one narrow lifecycle boundary, not a new Git algorithm.
+
+The observable contract remains unchanged: one workspace writer under the
+existing queue and nonblocking flock; fresh visible Deep/Pi work reconciles a
+clean remote descendant before the model, while resumes use the retained
+preflight without fetching; hidden child work shares the parent checkout;
+verified teardown precedes local completion and any branch publication; a
+failed local commit retains the saved answer/result as error, and remote-only
+publication failure retains it as success with pending sync metadata. Restart
+does not infer Git finalization from a saved reply. Merge remains explicitly
+user-gated with the established main-merge algorithm and its recorded host
+mutable-config/hooks debt. Dirty, unknown, divergent or unbound work holds.
+
+No =assist/git_sync.py= algorithm rewrite, generic sandbox rewrite, new retry,
+lock deletion, phone/proxy/credential change, main-merge repair, model prompt or
+Run schema change is authorized. Root alone composes/deploys and decides merge.
+
+* Numbered construction
+
+1. Add a small =manage/web/git_lifecycle.py= resource-access boundary. Its
+   =GitLifecycle.acquire(thread_dir, worktree, work_id=None)= opens the existing
+   =assist.git_sync.ownership= context and selects the durable work identity
+   immediately for turns. It yields a non-Git lifecycle whose prepare,
+   resume and finish methods are successful no-ops, but whose Deep/child
+   model-cleanup method still delegates to ordinary =SandboxManager.cleanup=.
+   Pi receives =None= for both optional Git sandbox callbacks so its runtime
+   performs its existing ordinary cleanup. A bound checkout never falls back
+   after binding failure. The optional work
+   identity is omitted only by the user-gated merge route, which needs the
+   shared fence but does not perform a turn preflight.
+2. Move the existing =_git_reap=, =_git_cleanup=, =_git_admit=, =_git_verify=,
+   =_git_prepare= and =_git_finish= mechanics unchanged into that boundary.
+   Present the small intent API =prepare(timezone)= for fresh work,
+   =resume()= for retained work, =model_starting= / =cleanup_model(generation)=
+   for exact sandbox fencing and teardown, =require_sandbox(backend)= to fail
+   closed, =finish_visible(message, timezone)=, =finish_child(message,
+   child_dir)=, =recover_child(message, child_dir)= and =child_terminal()=.
+   The child receipt is written only from the existing local-commit callback;
+   its retained preflight is forgotten only after the Run reaches success.
+   =recovery_error(thread_dir, worktree)= owns the existing saved-reply Git
+   classification, including an unbound but present =.git= checkout.
+3. Replace direct =git_owner= protocol calls in Deep, Pi and child paths with
+   that lifecycle. Keep the queue, Run admissions/transitions, chat/Pi calls,
+   approval handling, notification and terminal projection where they are.
+   In the child fair-yield path preserve callback registration and LIFO unwind:
+   exact sandbox cleanup, Git flock release, then global queue release; non-Git
+   child cleanup retains its existing post-queue order. Pi's runtime receives
+   the same optional start/cleanup callbacks, never a new sandbox profile.
+4. Use =GitLifecycle.acquire= for recovered-child finalization and for the
+   existing merge route's workspace fence. Route both visible restart paths
+   through =recovery_error=; do not replay a saved Deep/Pi answer or alter
+   the merge body/error mapping. Keep initializer binding and branch
+   authorization outside this turn-lifecycle boundary.
+5. Update current README descriptions only where they identify a code owner;
+   retain prior dated records as historical. Add focused tests of API
+   sequencing plus existing Deep/Pi/child/restart/merge scenarios; run the
+   affected deterministic Git/queue/web panel. Review security/concurrency,
+   correctness/error paths, simplicity and dedicated doc alignment on exact
+   diff before sealing. No model eval is required for a code-only refactor.
+
+* Safety and liveness checks
+
+- The boundary calls no new host-worktree Git commands; preparation/commit
+  stay inside the existing restricted sandbox, and source/ancestry checks stay
+  in the private object store. Attacker-controlled message text is still
+  bounded by the existing commit helper and never becomes a shell program.
+- =acquire= remains inside the existing synchronous threadpool work, not an
+  asyncio route. The queue is acquired before the workspace flock for all
+  turns; the merge route retains its separate merge lock. No lock waits or
+  backoff are added.
+- If model sandbox creation registers a generation and then raises, Deep and
+  child retain their existing =current_container= fallback for exact cleanup.
+  Pi's runtime currently has no such fallback if its factory raises before
+  returning a backend; its pre-create flight fence remains and later Git
+  admission fails closed. This refactor neither claims Pi teardown in that
+  case nor broadens the Pi runtime. Failure to reap leaves quarantine/flight
+  and errors, not a successful turn. A partial preflight/finalization keeps
+  work and the saved reply.
+- Preserve the current child fair-yield test's real queue/flock interleaving,
+  Pi verified-teardown tests, Deep late-writer/commit receipt checks, restart
+  no-replay and merge 409 behavior. The surrounding Run/approval code is not
+  moved into the Git boundary.
+
+* Historical supersessions
+
+None. This changes code ownership, not the accepted Git sync or merge behavior.
