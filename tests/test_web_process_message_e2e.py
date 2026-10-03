@@ -19,14 +19,16 @@ What this test runs FOR REAL (catches regressions in):
   - The `THREAD_QUEUE.acquire(...)` block (catches missing-import
     and contextvar-handling regressions)
   - The post-acquire status sequence
+  - Browser generation readiness and ThreadManager skill/tool composition
+    in the full-ID binding regression
 
 What is STUBBED (NOT exercised here — would need an integration test
 with real Docker + a real LLM):
   - `_get_sandbox_backend` — stubbed at the external Docker boundary,
     usually to None (Docker unavailable), or to raise after registration
     in the creation-failure regression
-  - `MANAGER.get` — returns a `_FakeChat` (Thread / agent / LLM stack
-    is not exercised)
+  - The model/graph construction — usually `MANAGER.get` returns a fake
+    chat; the full-ID regression runs it and stubs the Thread constructor
   - The domain-manager sync and description-generation paths
 """
 import os
@@ -199,6 +201,83 @@ def _spy_cleanup(monkeypatch):
         classmethod(lambda cls, work_dir, expected=None: calls.append(work_dir)),
     )
     return calls
+
+
+@pytest.mark.parametrize("matching_generation", [True, False])
+def test_browser_binding_uses_full_sandbox_generation(
+    client, monkeypatch, tmp_path, matching_generation,
+):
+    """Real web admission and skill composition use the journal's full ID."""
+    from types import SimpleNamespace
+    from assist.browser import authority, manager as browser
+    from assist.sandbox import DockerSandboxBackend
+    from assist.thread_manager import ThreadManager
+
+    tid = "thread-e2e"
+    generation = "a" * 64
+    sandbox = DockerSandboxBackend(SimpleNamespace(id=generation))
+    captured = {}
+
+    class _Chat:
+        def message(self, text):
+            session = browser.BrowserManager._sessions.get(tid)
+            captured["session"] = session
+            if session is not None:
+                session._fence_command()
+            return "ok"
+
+        def pending_reply(self):
+            return None
+
+        def get_messages(self):
+            return []
+
+        def get_raw_messages(self):
+            return []
+
+    chat = _Chat()
+    _stub_happy_path(monkeypatch, chat)
+    _spy_cleanup(monkeypatch)
+    monkeypatch.setattr(web.MANAGER, "_model", object())
+    monkeypatch.setattr(
+        web.MANAGER, "get",
+        lambda thread_id, **kwargs: ThreadManager.get(web.MANAGER, thread_id, **kwargs),
+    )
+
+    def construct_thread(*_args, **kwargs):
+        captured["spec"] = kwargs["spec"]
+        return chat
+
+    monkeypatch.setattr("assist.thread_manager.Thread", construct_thread)
+    monkeypatch.setattr(browser.BrowserManager, "_sessions", {})
+    monkeypatch.setattr(browser.BrowserManager, "_reconciled_roots", {str(tmp_path)})
+    monkeypatch.setattr(browser, "configured_directory", lambda: str(tmp_path))
+    monkeypatch.setattr(browser, "browser_records", lambda *_args: {})
+
+    def create_sandbox(_tid, *, owner_run_id, browser_capable, **_kwargs):
+        assert browser_capable
+        run = threads._runs().get(tid, owner_run_id)
+        with authority.fence(str(tmp_path), tid) as state:
+            state.begin(owner_run_id, run.admission_sequence)
+            state.add_generation(owner_run_id, generation if matching_generation else "b" * 64)
+        return sandbox
+
+    monkeypatch.setattr(threads, "_get_sandbox_backend", create_sandbox)
+    response = client.post(f"/thread/{tid}/message", data={"text": "Use the browser"},
+                           follow_redirects=False)
+    assert response.status_code == 303
+    assert _wait_for_terminal_status(tid).get("stage") == "ready"
+    assert sandbox.id == generation[:12]
+    tool_names = {getattr(tool, "name", getattr(tool, "__name__", ""))
+                  for tool in captured["spec"].tools}
+    assert ("browser_open" in tool_names) is matching_generation
+    assert ("/browser-skill/" in captured["spec"].skill_sources) is matching_generation
+    if matching_generation:
+        assert captured["session"].sandbox_generation == generation
+        assert captured["session"].closed
+    else:
+        assert captured["session"] is None
+    assert not browser.BrowserManager._sessions
 
 
 def test_process_message_kills_container_at_turn_end_on_success(client, monkeypatch):

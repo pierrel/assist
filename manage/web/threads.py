@@ -3103,12 +3103,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     extra_browser_tools = ()
                     if (sandbox is not None and browser_capable
                             and BrowserManager.ready_for_browser(
-                                MANAGER.root_dir, tid, _run.id, sandbox.id)):
+                                MANAGER.root_dir, tid, _run.id, sandbox_generation.id)):
                         browser_session = BrowserSession(
                             tid, _run.id if _run is not None else event_id or "legacy",
                             MANAGER.thread_default_working_dir(tid), MANAGER.root_dir,
                             user_request, work_id=_run.work_id if _run else None,
-                            sandbox_generation=sandbox.id,
+                            sandbox_generation=sandbox_generation.id,
                             run_service=_runs())
                         BrowserManager.register(browser_session)
                         extra_browser_tools = tuple(browser_tools(browser_session))
