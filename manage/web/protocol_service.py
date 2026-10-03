@@ -5,6 +5,7 @@ import os
 import threading
 from contextlib import nullcontext
 from datetime import UTC, datetime
+from functools import wraps
 from fastapi import HTTPException
 
 from assist.run_service import (
@@ -18,6 +19,7 @@ from assist.middleware.url_provenance import (
     urls_in_text,
 )
 from manage.web.state import BUSY_STAGES, MANAGER, _get_status
+from manage.web.drain import RUN_GATE
 from manage.web.threads import (
     _RESUME_SCHEDULER,
     _RUN_ADMISSION_LOCK,
@@ -28,6 +30,17 @@ from manage.web.threads import (
     _runs,
 )
 from assist.thread_queue import THREAD_QUEUE
+
+
+def _while_admitted(method):
+    """Keep private protocol mutations inside the worker-side Run boundary."""
+    @wraps(method)
+    def guarded(*args, **kwargs):
+        with RUN_GATE.active() as accepted:
+            if not accepted:
+                raise HTTPException(status_code=503, detail="Web process is stopping")
+            return method(*args, **kwargs)
+    return guarded
 
 
 class WebAgentProtocolService:
@@ -80,6 +93,7 @@ class WebAgentProtocolService:
             "updated_at": latest.updated_at,
         }
 
+    @_while_admitted
     def create_thread(self, thread_id: str | None = None,
                       metadata: dict | None = None) -> dict:
         with self._admission_lock, (
@@ -189,6 +203,7 @@ class WebAgentProtocolService:
             "values": values,
         }
 
+    @_while_admitted
     def create_run(self, thread_id: str, assistant_id: str, text: str,
                    *, multitask_strategy: str | None = None,
                    metadata: dict | None = None):
@@ -263,6 +278,7 @@ class WebAgentProtocolService:
     def get_run(self, thread_id: str, run_id: str):
         return _runs().get(thread_id, run_id)
 
+    @_while_admitted
     def cancel_run(self, thread_id: str, run_id: str):
         with _RUN_ADMISSION_LOCK:
             run = _runs().get(thread_id, run_id)

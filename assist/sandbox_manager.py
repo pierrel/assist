@@ -2,11 +2,45 @@ import hashlib
 import logging
 import os
 import re
+import subprocess
 import threading
 import time
 
 logger = logging.getLogger(__name__)
 _ANY_CONTAINER = object()
+
+
+def confirm_generation_stopped(container_id: str) -> None:
+    """Prove one exact sandbox generation exited and was removed."""
+    try:
+        subprocess.run(["docker", "kill", container_id],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError("sandbox generation teardown is unconfirmed") from error
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            inspected = subprocess.run(
+                ["docker", "inspect", "--format", "{{.State.Running}}", container_id],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2,
+                check=False)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError("sandbox generation teardown is unconfirmed") from error
+        if inspected.returncode == 0 and inspected.stdout.strip() == b"false":
+            try:
+                subprocess.run(["docker", "rm", "-f", container_id],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=2,
+                               check=False)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise RuntimeError("sandbox generation removal is unconfirmed") from error
+        if (inspected.returncode != 0 and
+                (b"no such object" in inspected.stderr.lower()
+                 or b"no such container" in inspected.stderr.lower())):
+            return
+        time.sleep(0.05)
+    raise RuntimeError("sandbox generation teardown is unconfirmed")
 
 
 def _rewrite_localhost(value: str) -> str:
@@ -293,8 +327,8 @@ class SandboxManager:
         configured filters cannot mutate the checked worktree through an alias.
         """
         # Never reuse container generations. The web layer tears each down at
-        # its phase boundary (manage/web/threads.py), so a registry entry
-        # surviving to here means teardown did not run (the worker died). Reap
+        # its phase boundary (manage/web/threads.py); a registry entry here
+        # means teardown did not complete or could not be confirmed. Reap
         # that stale container before creating a fresh one — the registry is
         # keyed by work_dir, so creating without reaping would overwrite the
         # reference and orphan it (the 3h backstop TTL would eventually catch
@@ -544,86 +578,85 @@ class SandboxManager:
 
     @classmethod
     def cleanup(cls, work_dir: str, expected_container=_ANY_CONTAINER) -> None:
-        """Tear down the container for a work_dir. Removal is automatic (--rm).
+        """Confirm the captured generation stopped before releasing its identity.
 
-        With an ``expected_container``, cleanup is generation-safe: a stale turn
-        cannot remove a replacement registered for the same workspace.
-
-        SIGKILL, not a graceful ``stop()``.  A sandbox has nothing to shut
-        down gracefully — it is ``--rm`` and all durable work is already
-        flushed to the host bind mount — and its PID 1 is a bare ``sleep``
-        with no SIGTERM handler (PID 1 gets no default handlers), so a
-        ``stop()`` would just block the full 5s timeout before the daemon
-        SIGKILLs anyway.  Killing keeps the per-turn teardown off that 5s
-        path (and the same applies to thread-delete and shutdown).
+        A stale caller may stop its own captured container, but cannot remove a
+        replacement registered for the same workspace.
         """
-        container = cls._containers.get(work_dir)
-        if (expected_container is not _ANY_CONTAINER
-                and container is not expected_container):
+        container = (cls._containers.get(work_dir)
+                     if expected_container is _ANY_CONTAINER else expected_container)
+        if container is None:
             return
-        container = cls._containers.pop(work_dir, None)
-        cls._forget_egress_client(work_dir)
-        if container:
-            try:
-                container.kill()
-                logger.info("Cleaned up container for %s", work_dir)
-            except Exception as e:
-                logger.warning("Container cleanup failed: %s", e)
+        confirm_generation_stopped(container.id)
+        if cls._containers.get(work_dir) is container:
+            cls._forget_egress_client(work_dir)
+            cls._containers.pop(work_dir, None)
+        logger.info("Cleaned up container %s for %s", container.id[:12], work_dir)
 
     @classmethod
     def cleanup_all(cls) -> None:
-        """Kill all tracked sandbox containers. Removal is automatic (--rm).
-
-        SIGKILL for the same reason as ``cleanup`` (nothing to flush; PID 1
-        ignores SIGTERM) — and at lifespan shutdown a fast teardown is
-        strictly better than burning 5s per container on the event loop.
-        """
+        """Confirm tracked generations stopped; retain failed obligations."""
         for path, container in list(cls._containers.items()):
-            cls._forget_egress_client(path)
             try:
-                container.kill()
-                logger.info("Cleaned up container for %s", path)
-            except Exception as e:
-                logger.warning("Container cleanup failed for %s: %s", path, e)
-        cls._containers.clear()
+                cls.cleanup(path, container)
+            except Exception:
+                logger.error("Sandbox cleanup unconfirmed; generation remains tracked")
 
     @classmethod
     def reap_orphans(cls, root_dir: str) -> None:
-        """Kill THIS INSTANCE's surviving sandbox containers — by docker label
+        """Confirm this deployment's surviving sandboxes are gone by docker label
         plus workspace mount, not the in-memory registry. After a web-process
         crash ``_containers`` is empty, but the containers survive — and a
         ``docker exec``'d tool command keeps running inside one, mutating the
         host-bind-mounted /workspace that a recovery resume's FRESH container
-        mounts too, for up to the 3h backstop TTL. Startup recovery calls this
-        before dispatching any resume so a zombie writer can never share a
-        workspace with a resumed turn.
+        mounts too, for up to the 3h backstop TTL. Lifespan startup completes
+        this proof before recovery dispatch or listener admission.
 
         Scoped to containers whose /workspace bind-mount lives under
         ``root_dir`` (this deployment's threads root): the label alone is
         host-global, and prod + eval/dev sandboxes share ONE docker daemon on
         this box — a bare-label reap would kill a concurrently running eval's
         LIVE containers mid-turn. The mount filter needs no new create-time
-        labeling, so it also covers orphans from pre-existing code. Best-effort:
-        docker being down must not block recovery (turns fail fast on their own
-        if it stays down)."""
+        labeling, so it also covers orphans from pre-existing code. Uncertain
+        listing, scope, or exact teardown aborts startup."""
         root = os.path.realpath(root_dir) + os.sep
         try:
+            from docker.errors import NotFound
             client = cls._get_docker_client()
             candidates = client.containers.list(
-                filters={"label": "assist.sandbox=true"})
-        except Exception as e:
-            logger.warning("orphan-sandbox reap skipped (docker unavailable): %s", e)
-            return
+                all=True, filters={"label": "assist.sandbox=true"})
+            if not isinstance(candidates, list):
+                raise ValueError
+        except Exception:
+            raise RuntimeError("orphan sandbox listing unconfirmed") from None
         for container in candidates:
-            mounts = (container.attrs or {}).get("Mounts", [])
-            ours = any(m.get("Destination") == "/workspace"
-                       and os.path.realpath(m.get("Source", "")).startswith(root)
-                       for m in mounts)
-            if not ours:
+            try:
+                container.reload()
+            except NotFound:
+                # reload fetches this exact ID; it disappeared after the list.
+                continue
+            except Exception:
+                raise RuntimeError("orphan sandbox scope unconfirmed") from None
+            try:
+                mounts = container.attrs["Mounts"]
+                if not isinstance(mounts, list):
+                    raise ValueError
+                workspace = []
+                for mount in mounts:
+                    if not isinstance(mount, dict) or not isinstance(mount.get("Destination"), str):
+                        raise ValueError
+                    if mount["Destination"] == "/workspace":
+                        workspace.append(mount.get("Source"))
+                if (len(workspace) != 1 or not isinstance(workspace[0], str)
+                        or not os.path.isabs(workspace[0])):
+                    raise ValueError
+                in_scope = os.path.realpath(workspace[0]).startswith(root)
+            except Exception:
+                raise RuntimeError("orphan sandbox scope unconfirmed") from None
+            if not in_scope:
                 continue
             try:
-                container.kill()
+                confirm_generation_stopped(container.id)
                 logger.info("Reaped orphaned sandbox %s", container.id[:12])
-            except Exception as e:
-                logger.warning("orphan reap failed for %s: %s", container.id[:12], e)
-        cls._containers.clear()
+            except Exception:
+                raise RuntimeError("orphan sandbox teardown unconfirmed") from None

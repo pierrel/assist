@@ -13,6 +13,8 @@ Environment="ASSIST_THREADS_DIR={{ASSIST_THREADS_DIR}}"
 ExecStart={{DEPLOY_PATH}}/.venv/bin/python -m manage.web
 Restart=always
 RestartSec=10
+KillMode=mixed
+TimeoutStopSec=infinity
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=assist-web
