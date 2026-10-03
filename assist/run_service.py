@@ -95,6 +95,7 @@ class Run:
     # A cancellation receipt belongs to the immutable accepted handle, not a
     # successor slice.  Its absence keeps historical records unchanged.
     cancel_cleanup: CancelCleanup | None = None
+    quiet_requested: bool = False
 
     _MAX_OPAQUE_ID_CHARS = 256
 
@@ -139,6 +140,8 @@ class Run:
             value.pop("location")
         if self.cancel_cleanup is None:
             value.pop("cancel_cleanup")
+        if not self.quiet_requested:
+            value.pop("quiet_requested")
         return value
 
     @staticmethod
@@ -152,6 +155,9 @@ class Run:
         cancel_cleanup = value.get("cancel_cleanup")
         if cancel_cleanup not in {None, "pending", "complete"}:
             raise ValueError(f"invalid cancellation cleanup: {cancel_cleanup!r}")
+        quiet_requested = value.get("quiet_requested", False)
+        if not isinstance(quiet_requested, bool):
+            raise ValueError("invalid quiet request")
         delegate_user_urls = value.get("delegate_user_urls") or ()
         if (not isinstance(delegate_user_urls, list | tuple)
                 or any(not isinstance(url, str) or len(url) > 4096
@@ -195,6 +201,7 @@ class Run:
             delegate_user_urls=tuple(delegate_user_urls),
             location=Run._optional_mapping(value.get("location"), "location"),
             cancel_cleanup=cancel_cleanup,
+            quiet_requested=quiet_requested,
         )
 
 
@@ -513,6 +520,30 @@ class RunService(PerThreadJsonStore[Run]):
     def claim(self, thread_id: str, run_id: str) -> Run:
         """Atomically claim pending work for execution; repeated claims are safe."""
         return self.transition(thread_id, run_id, "running")
+
+    def request_quiet(self, thread_id: str, run_id: str) -> bool:
+        """Record quiet only for the running normal visible turn named by the host."""
+        with self._lock:
+            runs = self._read(thread_id)
+            try:
+                current = self._find(runs, run_id)
+            except RunNotFound:
+                return False
+            if (current.status != "running" or current.mode != "turn"
+                    or current.assistant_id != "general-agent" or current.sender
+                    or current.resume_decision is not None):
+                return False
+            if not current.quiet_requested:
+                runs[runs.index(current)] = replace(
+                    current, quiet_requested=True, updated_at=_now())
+                self._write(thread_id, runs)
+            return True
+
+    def work_is_quiet(self, thread_id: str, work_id: str) -> bool:
+        """Read a quiet choice made in any slice of this logical turn."""
+        with self._lock:
+            return any(run.mode == "turn" and run.work_id == work_id
+                       and run.quiet_requested for run in self._read(thread_id))
 
     def cancel(self, thread_id: str, run_id: str) -> Run:
         """Move any transition-eligible run to cancelled; repeats are idempotent."""

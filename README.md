@@ -435,6 +435,13 @@ and a link to the thread. These values intentionally do not use an `ASSIST_` pre
 they are not passed into sandboxes. If the recipient is absent, Assist logs the missing
 configuration and keeps the in-app urgent behavior without sending SMS.
 
+### Quiet routine results
+
+The visible Deep web agent can call `quiet()` during a routine check with no
+change or action needed. Its reply remains in the thread, but that turn does
+not add an ordinary "new" badge. Quiet does not clear an earlier unread reply
+or suppress an approval, error, or urgent alert. SMS handling is unchanged.
+
 ---
 
 ## Architecture

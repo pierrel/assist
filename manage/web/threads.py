@@ -2657,6 +2657,18 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
     _RESUME_SCHEDULER.submit(successor.id, tid, user_priority=user_priority)
 
 
+def _quiet_ready(run: Run | None) -> bool:
+    """Return a durable quiet choice for this work, failing toward new."""
+    if run is None:
+        return False
+    try:
+        return _runs().work_is_quiet(run.thread_id, run.work_id)
+    except Exception:
+        logging.error("could not read quiet choice for %s", run.thread_id,
+                      exc_info=True)
+        return False
+
+
 def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
                      sender: str | None = None, resume_decision: dict | None = None,
                      resume: bool = False, accumulated_active_ms: float = 0.0,
@@ -2865,6 +2877,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         _cfg[LOCATION_CONTEXT_KEY] = location
                     if sender:
                         _cfg[SMS_SENDER_KEY] = sender
+                    elif _run is not None and _run.mode == "turn" and assistant_id == "general-agent":
+                        _cfg["web_run_id"] = _run.id
                     _cfg.update(_frequency_configurable(
                         _run, sender=sender, assistant_id=assistant_id) or {})
                     # A triage turn (sender set) gets the reduced, HITL-gated tool surface.
@@ -3009,7 +3023,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         started_at=started_at)
             _terminal = ("awaiting_approval", pending_email.get("body", ""))
         else:
-            _set_status(tid, "ready")
+            _set_status(tid, "ready", mark_unseen=not _quiet_ready(_run))
             _terminal = ("ready", resp)
             if origin == "continuation":
                 append_event(MANAGER.thread_dir(tid), "continuation_completed",
