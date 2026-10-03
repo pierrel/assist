@@ -12,6 +12,7 @@ import ast
 import contextvars
 import ctypes
 import errno
+import faulthandler
 import hashlib
 import inspect
 import json
@@ -3863,6 +3864,9 @@ def _main() -> int:
     if args.stdout_census:
         if args.label or args.stdout_observer:
             parser.error("isolated census mode does not accept a label")
+        # Keep the one-shot diagnostic armed through child teardown, before the
+        # parent's 120-second bound.
+        faulthandler.dump_traceback_later(60, file=sys.stderr)
         sys.stdout.buffer.write(artifact_bytes(_capture_census()))
         return 0
     if args.stdout_observer:

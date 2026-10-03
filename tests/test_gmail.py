@@ -330,3 +330,17 @@ def test_opaque_message_id_read_mutations_and_link_are_encoded(monkeypatch):
     assert calls == [("GET", segment, {"params":{"format":"full"}}),
                      ("POST", segment + "/modify", {"json":{"removeLabelIds":["INBOX"]}}),
                      ("POST", segment + "/trash", {"json":{}})]
+
+
+@pytest.mark.parametrize("disposition", [None, "inline"])
+def test_filename_text_attachment_cannot_replace_real_body(monkeypatch, disposition):
+    attachment = {"mimeType": "text/plain", "filename": "notes.txt", "body": {"data": base64.urlsafe_b64encode(b"Attachment content").decode()}}
+    if disposition:
+        attachment["headers"] = [{"name": "Content-Disposition", "value": disposition}]
+    payload = {"mimeType": "multipart/alternative", "parts": [attachment, {
+        "mimeType": "text/html", "body": {"data": base64.urlsafe_b64encode(b"<p>Actual booking body</p>").decode()}}]}
+    client = gmail.GmailClient.__new__(gmail.GmailClient)
+    monkeypatch.setattr(client, "request", lambda *a, **k: {"payload": payload})
+    result = client.read("abc123")
+    assert result["body"].strip() == "Actual booking body"
+    assert not result["body_truncated"]

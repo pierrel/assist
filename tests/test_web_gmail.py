@@ -96,7 +96,8 @@ def test_new_message_refused_before_durable_admission_and_stale_decisions(client
     assert _get_status("mail-thread")["pending_gmail_token"]=="exact-token"
 
 
-def test_worker_gmail_proposal_and_approval_resume(client,monkeypatch):
+@pytest.mark.parametrize("preview_write_recovery", [None, "reject", "restart"])
+def test_worker_gmail_proposal_and_approval_resume(client,monkeypatch,preview_write_recovery):
     class Chat:
         agent=None
         on_queue_state=None
@@ -147,6 +148,15 @@ def test_worker_gmail_proposal_and_approval_resume(client,monkeypatch):
         assert release_preview.wait(2)
         return [{"id":"abc123","body":"Full booking", "subject":"Receipt"}]
     monkeypatch.setattr(threads,"gmail_action_preview",preview)
+    original_set_status = threads._set_status
+    fail_publication = preview_write_recovery is not None
+    def publish(tid, stage, **fields):
+        nonlocal fail_publication
+        if fail_publication and fields.get("pending_gmail_preview_pending") is False:
+            fail_publication = False
+            raise OSError("Synthetic atomic preview publication failure")
+        return original_set_status(tid, stage, **fields)
+    monkeypatch.setattr(threads, "_set_status", publish)
     with ThreadPoolExecutor(max_workers=2) as pool:
         request=pool.submit(client.post,"/thread/mail-thread/message",
                             data={"text":"Archive this"},follow_redirects=False)
@@ -168,11 +178,31 @@ def test_worker_gmail_proposal_and_approval_resume(client,monkeypatch):
     status=_get_status("mail-thread")
     assert status["stage"]=="awaiting_approval"
     assert status["pending_gmail_action"]["name"]=="gmail_archive"
+    if preview_write_recovery:
+        assert status["pending_gmail_preview_pending"] and status["pending_gmail_messages"] == []
+        assert status["pending_gmail_token"] == loading["pending_gmail_token"]
+        assert status["pending_gmail_interrupt_id"] == "gmail-interrupt"
+        assert threads._runs().get("mail-thread", status["pending_gmail_run_id"]).status == "awaiting_approval"
+        with pytest.raises(HTTPException):
+            threads.gmail_decision_core("mail-thread", "approve", status["pending_gmail_token"])
+    if preview_write_recovery == "restart":
+        from manage.web import state
+        monkeypatch.setattr(web.MANAGER, "list", lambda: ["mail-thread"])
+        state._recover_interrupted_threads()
+        assert (status["pending_gmail_run_id"], "mail-thread") in scheduled
+        with threads.THREAD_QUEUE.acquire("other-thread"):
+            threads._execute_run(status["pending_gmail_run_id"], "mail-thread")
+        recovered = _get_status("mail-thread")
+        assert recovered["pending_gmail_token"] == status["pending_gmail_token"]
+        assert recovered["pending_gmail_messages"][0]["body"] == "Full booking"
+        assert not recovered["pending_gmail_preview_pending"]
+        status = recovered
     # A system continuation stays pending rather than entering the interrupted graph.
     assert threads._runs().get("mail-thread",queued.id).status=="pending"
     # Avoid executing that artificial continuation after the tested approval resumes.
     threads._runs().transition("mail-thread",queued.id,"cancelled")
-    successor,replayed=threads.gmail_decision_core("mail-thread","approve",status["pending_gmail_token"])
+    choice = "reject" if preview_write_recovery == "reject" else "approve"
+    successor,replayed=threads.gmail_decision_core("mail-thread",choice,status["pending_gmail_token"])
     assert not replayed
     # A previously admitted user Run cannot enter the paused graph after token consumption.
     threads._execute_run(chat.follower.id,"mail-thread")
@@ -181,7 +211,7 @@ def test_worker_gmail_proposal_and_approval_resume(client,monkeypatch):
     threads._dispatch_pending_after("mail-thread")
     assert scheduled[-1]==(successor.id,"mail-thread")
     threads._execute_run(successor.id,"mail-thread")
-    assert chat.decisions==[{"type":"approve"}]
+    assert chat.decisions==[{"type":choice}]
     proposal=threads._runs().get("mail-thread",status["pending_gmail_run_id"])
     successor=threads._runs().get("mail-thread",successor.id)
     assert successor.work_id==proposal.work_id and successor.status=="success"

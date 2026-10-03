@@ -136,6 +136,9 @@ def _payload_message(payload: dict, depth: int = 0) -> EmailMessage:
     if not message.get("Content-Type"):
         message["Content-Type"] = mime_type
     if payload.get("filename") or message.get_content_disposition() == "attachment":
+        if "Content-Disposition" in message:
+            del message["Content-Disposition"]
+        message["Content-Disposition"] = "attachment"
         message.set_payload("")
         return message
     parts = payload.get("parts", [])

@@ -2025,11 +2025,15 @@ def _refresh_gmail_preview(tid: str, token: str, action: dict) -> None:
         status = _get_status(tid)
         if (status.get("stage") == "awaiting_approval"
                 and status.get("pending_gmail_token") == token):
-            _set_status(tid, "awaiting_approval", **{
-                **{key:value for key,value in status.items() if key != "stage"},
-                "pending_gmail_messages":messages,
-                "pending_gmail_error":error,
-                "pending_gmail_preview_pending":False})
+            try:
+                _set_status(tid, "awaiting_approval", **{
+                    **{key:value for key,value in status.items() if key != "stage"},
+                    "pending_gmail_messages":messages,
+                    "pending_gmail_error":error,
+                    "pending_gmail_preview_pending":False})
+            except OSError:
+                # Preserve the durable card for rejection or startup preview recovery.
+                logging.warning("Could not publish Gmail preview for %s", tid, exc_info=True)
 
 
 def _resume_gmail(chat, decision: dict) -> str:

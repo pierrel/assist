@@ -497,7 +497,8 @@ An operator connects the account once, outside an agent turn:
    and approve the account. For a remote host, forward port 8765 with SSH and
    add `--no-browser`; keep that tunnel open for the five-minute consent window.
 4. Set `ASSIST_GMAIL_TOKEN_FILE` to the saved private file in the service's ignored
-   environment and restart through the normal deployment owner. The runtime
+   `.deploy.env`. Have the normal deployment owner regenerate and install the
+   systemd environment with `make deploy-service`, then restart the service. The runtime
    refuses credential files under the thread directory, symlinks, non-owner
    files and permissions other than `0600`.
 
