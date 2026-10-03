@@ -1,0 +1,69 @@
+#+TITLE: Gmail-first integration
+#+DATE: 2026-10-02
+
+* Outcome and scope
+A Gmail mailbox skill supports bounded searches with local regular expressions
+on sender, subject, date and decoded body; reading and showing message bodies;
+archive and reversible deletion; and following links/unsubscribe guidance.
+No Gmail send/reply, permanent delete, automatic mail ingestion, Fastmail,
+attachment download, new browser engine or real-mail mutation testing.
+Root owns OAuth enrollment, live deployment, merge and shared-model admission.
+
+* Design
+Use one host-side Gmail REST access module and progressively disclosed tools.
+The agent never receives or mounts the OAuth refresh-token file. Fixed Google
+OAuth/API endpoints, owner-only regular credential files outside thread mounts,
+response/body limits, bounded page scans and regexp timeouts contain the boundary.
+Desktop OAuth setup uses the maintained Google oauthlib library as an optional
+setup dependency, with a loopback callback and private token file. Runtime uses
+existing requests and the already pinned regex package.
+
+Search first narrows Gmail candidates by native query/date bounds, then evaluates
+case-insensitive regexes locally against decoded MIME text. AND combines supplied
+fields. Search returns exact IDs, headers, previews, scan count and a next-page
+cursor; it never claims mailbox completeness after a capped scan. Read returns
+plain text and extracted HTTP(S) links, without fetching remote images or scripts.
+HTML-only mail converts to text and explicit links. Attachments are omitted.
+Dates include the message Date header and received ISO date for regexp matching.
+
+Mutations use only exact message IDs, capped at a small batch. gmail_archive
+removes INBOX; gmail_delete moves to Trash. Both are standard HITL actions with
+approve/reject only. Resolve complete bounded header/body previews before exposing
+the approval, refuse oversized/unavailable previews, and freeze the action/preview
+under a random token. The shared web decision core validates and consumes that
+token under the existing run-admission lock, then admits one resume Run. Phone
+HITL consumes the same status/decision contract in its separate effort/PR.
+Untrusted messages may supply evidence and links, never authority to mutate mail,
+send messages, unsubscribe, disclose other mail or change configuration.
+
+The Gmail skill owns search/read/action procedure. Existing render/browser skills
+own displaying artifacts and browser execution. Ordinary Gmail responses show
+plain bodies/links directly; browser navigation/unsubscribe only follows the user
+request and the existing egress/approval boundaries. List-Unsubscribe mailto links
+are reported for manual use, never sent. No automatic URL request from a message.
+
+* Checks and independent review
+Synthetic MIME/REST fixtures cover field matching, pagination, bounded responses,
+malformed mail, HTML links, regex timeout, private credentials, fixed paths,
+archive/Trash payloads, partial failures and no send endpoint. Real framework HITL
+checks prove proposals pause before provider mutation and resume only on approval.
+Web checks cover escaped full previews, exact token binding, replay/racing decisions,
+queued-message preservation and event-loop response under the admission lock.
+Natural behavioral evals cover finding/showing mail and requesting archive plus
+malicious message content, alongside existing render/send discovery coverage.
+Local model work requires bounded Root-coordinated admission. No real mail probes.
+
+* Phone interface
+Status fields: pending_gmail_action = {name, args: {message_ids: [...]}};
+pending_gmail_messages = [{id, from, to, date, subject, body, labels, url}];
+pending_gmail_token = random exact-proposal token. Mutation previews are complete,
+not silently truncated. POST /thread/{tid}/gmail/{approve|reject} uses token.
+The phone owner will call the shared decision core, avoiding parallel semantics.
+
+* Deferred observations
+Canonical target currently lacks the separately shipped browser implementation;
+Root reconciles that target before composition. Reuse its browser skill contract
+without reimplementing or stacking its source in this feature branch.
+
+* Historical supersessions
+None. This records a new effort.

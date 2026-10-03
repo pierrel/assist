@@ -44,8 +44,8 @@ from assist.agent import create_context_agent, create_research_agent
 logger = logging.getLogger(__name__)
 
 # The web app's main agent gets web-only skills: ``render`` emits a workspace-file
-# block for the web view (parsed by manage/web/threads.py), and ``send-email`` uses
-# the web host's approval transport.  Scoped here BY DESIGN: ThreadManager is the
+# block for the web view (parsed by manage/web/threads.py); ``send-email`` and
+# ``gmail`` use the web host's approval transport.  Scoped here BY DESIGN: ThreadManager is the
 # web app's agent builder (emacsos builds its own Thread/spec; the eval harness uses
 # create_agent directly), so these web-only skills never reach surfaces with no web
 # view.  The eval harness may mount the route explicitly for render coverage.  The
@@ -59,8 +59,8 @@ _triage_skill_sources_cache = None
 def web_main_skill_sources() -> dict:
     """Route -> backend for the web AgentSpec's web-only skills.
 
-    The route keeps its historical ``render-skill`` name although it serves both
-    the render and send-email skills.  Build it lazily so bundled-backend
+    The route keeps its historical ``render-skill`` name while serving all
+    web-only skills.  Build it lazily so bundled-backend
     construction and deepagents' transitive imports stay off module load (same
     pattern as emacsos-server's ``_skill_sources``).
     """
@@ -321,7 +321,7 @@ class ThreadManager:
             working_dir = self.make_default_working_dir(tdir)
 
         # A triage turn (untrusted inbound message) gets the reduced reply-only tool set +
-        # its distinct reply HITL gate; normal turns get the full web tools and email HITL.
+        # its distinct reply HITL gate; normal turns get the full web tools and mail HITL.
         tools = _web_triage_tools if triage else _web_tools
         interrupt_on = _web_triage_interrupt_on if triage else _web_interrupt_on
         specialized = None
