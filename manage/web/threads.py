@@ -2845,8 +2845,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # `origin` ("continuation", "task-completion", or None) keys
     # the render surfaces (agent-note bubble, "Following up" banner), the origin-aware
     # failure path, and recovery fidelity — persisted in every busy status write below.
-    # `resume_decision` carries a reply, email or Gmail approval decision and resumes the
-    # paused graph instead of starting a new turn — reusing this path's sandbox/queue/sync.
+    # `resume_decision` resumes a reply, email or Gmail approval only through an
+    # admitted Run with the matching approval dispatch key and checkpoint action.
     # `resume=True` (set only by the fair-scheduling resume scheduler after a quantum pause)
     # continues this thread's in-flight turn from its durable checkpoint (input=None) rather
     # than starting a new message; `accumulated_active_ms` carries the active hold it already
@@ -2915,6 +2915,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     gmail_terminal = None
     queue_handle = None
     hold_drained = False
+    decision_key = (_run.dispatch_key or "") if _run is not None else ""
+    decision_kind = next((kind for kind in ("gmail", "email", "reply")
+                          if decision_key.startswith(kind + "-approval:")), None)
 
     def on_queue_wait(stage: str) -> None:
         # `ThreadAffinityQueue.acquire` fires the callback with "queued"
@@ -2936,7 +2939,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # _mark_pending uses. (Residual: a direct-dispatch waiter behind a
         # same-tid turn that is ITSELF queued behind another thread still
         # writes — rare double-nesting, dissolved by Step 2.)
-        if (stage == "queued" and not resume
+        # Approval waiters preserve the admitted proposal projection until the
+        # owner/action check below; writing here could overwrite a newer card.
+        if (stage == "queued" and not resume and resume_decision is None
                 and THREAD_QUEUE.peek_holder() != tid):
             _set_status(tid, "queued", **pending_kwargs)
 
@@ -2975,6 +2980,33 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 if current_run.status != "pending":
                     logging.info("run %s on %s reached %s before slot claim; skipping",
                                  _run.id, tid, current_run.status)
+                    return
+            if resume_decision is not None:
+                # Refuse foreign/stale decisions before clearing the visible card
+                # or claiming its proposal lineage. Legacy untyped decisions cannot
+                # prove which kind of action was approved. Gmail also binds the
+                # exact admitted owner/action, or its card after a failed status write.
+                pending_chat = MANAGER.get(tid, sandbox_backend=None)
+                pending_gmail = _pending_gmail(pending_chat)
+                decision_status = _get_status(tid)
+                matches = ((decision_kind == "gmail" and pending_gmail
+                            and pending_gmail == decision_status.get("pending_gmail_action")
+                            and ((decision_status.get("stage") == "processing"
+                                  and decision_status.get("pending_run_id") == _run.id)
+                                 or (decision_status.get("stage") == "awaiting_approval"
+                                     and decision_key == "gmail-approval:" + pending_gmail["name"] + ":"
+                                     + decision_status.get("pending_gmail_token", "")))
+                            and decision_key.startswith("gmail-approval:" + pending_gmail["name"] + ":"))
+                           or (not pending_gmail and decision_kind == "reply"
+                               and pending_chat.pending_reply())
+                           or (not pending_gmail and decision_kind == "email"
+                               and _pending_email(pending_chat)))
+                if not matches:
+                    if _run is not None:
+                        with _RUN_ADMISSION_LOCK:
+                            _runs().transition(tid, _run.id, "cancelled",
+                                               error="Decision does not match the pending approval.")
+                        _dispatch_pending_after(tid, _run.id)
                     return
             # Snapshot pre-existing continuation entries: ones THIS turn journals
             # (the delta) have no dispatcher until the ready exit, so an error
@@ -3090,18 +3122,14 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     # durable checkpoint (input=None). No new message, no supersede.
                     resp = chat.resume()
                 elif resume_decision is not None:
-                    # Resume an approve/edit/reject. If the pending reply was already
-                    # resolved (a double-click, or a superseding text got there first),
-                    # there's nothing to resume — resuming a non-interrupted graph would
-                    # raise. Treat it as a no-op.
-                    if chat.pending_reply():
-                        resp = chat.resume_reply(resume_decision)
-                    elif _pending_gmail(chat):
+                    # The admission key binds a decision to its action kind;
+                    # checkpoint matching was checked before any status mutation.
+                    if decision_kind == "gmail":
                         resp = _resume_gmail(chat, resume_decision)
-                    elif _pending_email(chat):
+                    elif decision_kind == "reply":
+                        resp = chat.resume_reply(resume_decision)
+                    elif decision_kind == "email":
                         resp = chat.resume_action(resume_decision)
-                    else:
-                        resp = ""
                 else:
                     # A NEW message while a reply is still awaiting approval supersedes that
                     # draft: reject it to unblock the paused graph, then run this message so
@@ -3998,7 +4026,8 @@ def reply_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
     if decision not in _REPLY_DECISIONS:
         raise HTTPException(status_code=400, detail="decision must be approve, reject or edit")
     status = _get_status(tid)
-    if status.get("stage") != "awaiting_approval":
+    if (status.get("stage") != "awaiting_approval" or not status.get("pending_reply")
+            or status.get("pending_gmail_token") or status.get("pending_email_token")):
         raise HTTPException(status_code=409, detail="This thread has no reply awaiting approval.")
     # Approve sends the CURRENT pending draft as-is; if a newer message superseded it since
     # the page was rendered, the draft the user saw (`seen`) no longer matches — refuse so
@@ -4012,7 +4041,8 @@ def reply_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
                             detail="This reply was updated by a newer message — reload and review it.")
     sender = status.get("pending_sender") or ""
     run = _create_run(tid, None, sender=sender,
-                      resume_decision=_REPLY_DECISIONS[decision](text))
+                      resume_decision=_REPLY_DECISIONS[decision](text),
+                      dispatch_key="reply-approval:" + secrets.token_urlsafe(16))
     background_tasks.add_task(_execute_run, run.id, tid)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
@@ -4045,24 +4075,28 @@ def email_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
     if decision == "edit" and not valid_email_content(to, subject, body):
         raise HTTPException(status_code=400, detail="The edited email is invalid.")
     run = _create_run(tid, None,
-                      resume_decision=_EMAIL_DECISIONS[decision](to, subject, body))
+                      resume_decision=_EMAIL_DECISIONS[decision](to, subject, body),
+                      dispatch_key="email-approval:" + token)
     background_tasks.add_task(_execute_run, run.id, tid)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
-def gmail_decision_core(tid: str, decision: str, token: str) -> tuple[Run, bool]:
-    """Consume an exact Gmail approval once; shared by synchronous web/phone handlers."""
+def gmail_decision_core(tid: str, decision: str, token: str, *,
+                        expected_kind: str | None = None) -> tuple[Run, bool]:
+    """Consume a token once, checking a phone-supplied action kind in the same lock."""
     _existing_thread_dir(tid)
     _require_deep_thread(tid)
     if decision not in {"approve", "reject"}:
         raise HTTPException(status_code=400, detail="decision must be approve or reject")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", token):
         raise HTTPException(status_code=409, detail="Gmail approval is unavailable or stale.")
-    key = "gmail-approval:" + token
     with _RUN_ADMISSION_LOCK:
+        keys = {name: "gmail-approval:" + name + ":" + token for name in GMAIL_INTERRUPT_ON}
         # A replay identifies its original resume Run, never the current successor.
-        previous = next((run for run in _runs().list(tid) if run.dispatch_key == key), None)
+        previous = next((run for run in _runs().list(tid) if run.dispatch_key in keys.values()), None)
         if previous is not None:
+            if expected_kind is not None and previous.dispatch_key != keys.get(expected_kind):
+                raise HTTPException(status_code=409, detail="Gmail action kind does not match this approval.")
             if previous.resume_decision != {"type": decision}:
                 raise HTTPException(status_code=409, detail="This approval was already decided.")
             return previous, True
@@ -4072,6 +4106,10 @@ def gmail_decision_core(tid: str, decision: str, token: str) -> tuple[Run, bool]
                 or not hmac.compare_digest(expected, token)
                 or status.get("pending_gmail_action", {}).get("name") not in GMAIL_INTERRUPT_ON):
             raise HTTPException(status_code=409, detail="Gmail approval is unavailable or stale.")
+        action_kind = status["pending_gmail_action"]["name"]
+        if expected_kind is not None and expected_kind != action_kind:
+            raise HTTPException(status_code=409, detail="Gmail action kind does not match this approval.")
+        key = keys[action_kind]
         if decision == "approve" and (status.get("pending_gmail_error")
                                       or not status.get("pending_gmail_messages")):
             raise HTTPException(status_code=409, detail="A complete Gmail preview is required.")
@@ -4080,6 +4118,7 @@ def gmail_decision_core(tid: str, decision: str, token: str) -> tuple[Run, bool]
         run = _create_run(tid, None, resume_decision={"type": decision}, dispatch_key=key,
                           work_id=proposal.work_id if proposal else None)
         _set_status(tid, "processing", pending_run_id=run.id,
+                    pending_gmail_action=status["pending_gmail_action"],
                     started_at=status.get("started_at"))
         return run, False
 

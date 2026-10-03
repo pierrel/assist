@@ -53,7 +53,7 @@ def test_one_resume_for_concurrent_web_phone_and_replay(client):
     assert sorted(replayed for _,replayed in replies)==[False,True]
     runs=threads._runs().list("mail-thread")
     assert len(runs)==1 and runs[0].resume_decision=={"type":"approve"}
-    assert runs[0].dispatch_key=="gmail-approval:exact-token"
+    assert runs[0].dispatch_key=="gmail-approval:gmail_delete:exact-token"
     assert not _get_status("mail-thread").get("pending_gmail_token")
     with pytest.raises(HTTPException) as failure:
         threads.gmail_decision_core("mail-thread","reject","exact-token")
@@ -309,3 +309,182 @@ def test_unicode_approval_token_is_stale_without_consuming_proposal(client):
     assert response.status_code==409
     assert threads._runs().list("mail-thread")==[]
     assert _get_status("mail-thread")["pending_gmail_token"]=="exact-token"
+
+
+@pytest.mark.parametrize("decision",["approve","reject","edit"])
+@pytest.mark.parametrize("card",["gmail","email"])
+def test_reply_endpoint_cannot_consume_other_action_proposal(client,monkeypatch,decision,card):
+    if card=="gmail":
+        _pending(error="Preparing complete message preview; approve only after it loads.")
+    else:
+        _set_status("mail-thread","awaiting_approval",pending_email_token="exact-token",
+                    pending_email_to="reader@example.test",pending_email_subject="Receipt",pending_email_body="Full body")
+    executed=[]
+    monkeypatch.setattr(threads,"_execute_run",lambda *a:executed.append(a))
+    response=client.post(f"/thread/mail-thread/reply/{decision}",follow_redirects=False)
+    assert response.status_code==409
+    assert executed==[] and threads._runs().list("mail-thread")==[]
+    assert _get_status("mail-thread")[f"pending_{card}_token"]=="exact-token"
+
+
+@pytest.mark.parametrize("gmail_key,other_reply,gmail_pending,stale,wait,recover",[
+    (False,False,True,False,False,False),(False,True,True,False,False,False),
+    (True,True,True,False,False,False),(True,True,False,False,False,False),
+    (True,False,True,True,False,False),(True,False,True,True,True,False),
+    (True,False,True,False,False,True),
+])
+def test_worker_binds_gmail_decision_to_its_dispatch_kind(client,monkeypatch,gmail_key,other_reply,gmail_pending,stale,wait,recover):
+    class Chat:
+        agent=None
+        pending=True
+        ids=["abc123"]
+        decisions=[]
+        def pending_reply(self):
+            return {"text":"Separate unseen reply"} if self.pending and other_reply else None
+        def pending_action(self,name):
+            return {"message_ids":self.ids} if self.pending and gmail_pending and name=="gmail_archive" else None
+        def pending_actions(self):
+            return ([{"name":"gmail_archive","args":{"message_ids":self.ids}}]
+                    + ([{"name":"send_reply","args":{"text":"Separate unseen reply"}}]
+                       if other_reply else []))
+        def resume_reply(self,decision):
+            pytest.fail("Gmail approval cannot authorize a different reply")
+        def resume_actions(self,decisions):
+            self.decisions=decisions
+            self.pending=False
+            return "Archived"
+        def get_messages(self):
+            return []
+        def get_raw_messages(self):
+            return []
+    chat=Chat()
+    monkeypatch.setattr(web.MANAGER,"get",lambda *a,**k:chat)
+    monkeypatch.setattr(threads,"_get_sandbox_backend",lambda *a,**k:None)
+    monkeypatch.setattr(threads,"_get_domain_manager",lambda *a,**k:None)
+    monkeypatch.setattr(threads,"gmail_action_preview",lambda _: [{"id":"abc123","body":"Complete preview"}])
+    monkeypatch.setattr(threads._RESUME_SCHEDULER,"submit",lambda *a,**k:None)
+    proposal=threads._create_run("mail-thread","Original proposal")
+    threads._runs().claim("mail-thread",proposal.id)
+    threads._runs().transition("mail-thread",proposal.id,"awaiting_approval")
+    if gmail_pending:
+        _pending()
+        status=_get_status("mail-thread")
+        _set_status("mail-thread","awaiting_approval",**{
+            **{k:v for k,v in status.items() if k!="stage"},
+            "pending_gmail_action":{"name":"gmail_archive","args":{"message_ids":["abc123"]}},
+            "pending_gmail_run_id":proposal.id})
+    else:
+        _set_status("mail-thread","awaiting_approval",pending_reply="Separate unseen reply",pending_sender="+1555")
+    if gmail_key and gmail_pending:
+        before=_get_status("mail-thread")
+        if recover:
+            with monkeypatch.context() as failure:
+                def unavailable(*a,**k):
+                    raise OSError("synthetic status write failure")
+                failure.setattr(threads,"_set_status",unavailable)
+                with pytest.raises(OSError):
+                    threads.gmail_decision_core("mail-thread","approve","exact-token")
+            run,replayed=threads.gmail_decision_core("mail-thread","approve","exact-token")
+            assert replayed
+        else:
+            run,_=threads.gmail_decision_core("mail-thread","approve","exact-token")
+        if stale:
+            chat.ids=["def456"]
+            _set_status("mail-thread","awaiting_approval",**{
+                **{k:v for k,v in before.items() if k!="stage"},
+                "pending_gmail_token":"successor-token",
+                "pending_gmail_action":{"name":"gmail_archive","args":{"message_ids":chat.ids}}})
+    else:
+        run=threads._create_run("mail-thread",None,resume_decision={"type":"approve"},
+                            dispatch_key="gmail-approval:gmail_archive:exact-token" if gmail_key else None,
+                            work_id=proposal.work_id if gmail_key and gmail_pending else None)
+    before=_get_status("mail-thread")
+    if wait:
+        import threading
+        queued=threading.Event()
+        acquire=threads.THREAD_QUEUE.acquire
+        def waiting_acquire(tid,**kwargs):
+            callback=kwargs.get("on_state_change")
+            if callback:
+                def observed(stage):
+                    callback(stage)
+                    if stage=="queued":
+                        queued.set()
+                kwargs["on_state_change"]=observed
+            return acquire(tid,**kwargs)
+        monkeypatch.setattr(threads.THREAD_QUEUE,"acquire",waiting_acquire)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with acquire("another-thread"):
+                future=pool.submit(threads._execute_run,run.id,"mail-thread")
+                assert queued.wait(2)
+                assert _get_status("mail-thread")==before
+            future.result(2)
+    else:
+        threads._execute_run(run.id,"mail-thread")
+    if gmail_key and gmail_pending and not stale:
+        assert chat.decisions[0]=={"type":"approve"}
+        if other_reply:
+            assert chat.decisions[1]["type"]=="reject"
+        else:
+            assert len(chat.decisions)==1
+    else:
+        assert chat.decisions==[] and chat.pending
+        assert _get_status("mail-thread")==before
+        assert threads._runs().get("mail-thread",run.id).status=="cancelled"
+        assert threads._runs().get("mail-thread",proposal.id).status=="awaiting_approval"
+
+
+
+@pytest.mark.parametrize("sender,key",[("",None),(None,"email-approval:exact-token")])
+def test_reply_run_cannot_fall_through_to_email_approval(client,monkeypatch,sender,key):
+    class Chat:
+        agent=None
+        pending=True
+        decisions=[]
+        def pending_reply(self):
+            return None
+        def pending_action(self,name):
+            return None
+        def pending_email(self):
+            return {"to":"reader@example.test","subject":"Receipt","body":"Complete body"} if self.pending else None
+        def resume_action(self,decision):
+            self.decisions.append(decision)
+            self.pending=False
+            return "Sent"
+        def get_messages(self):
+            return []
+        def get_raw_messages(self):
+            return []
+    chat=Chat()
+    monkeypatch.setattr(web.MANAGER,"get",lambda *a,**k:chat)
+    monkeypatch.setattr(threads,"_get_sandbox_backend",lambda *a,**k:None)
+    monkeypatch.setattr(threads,"_get_domain_manager",lambda *a,**k:None)
+    monkeypatch.setattr(threads._RESUME_SCHEDULER,"submit",lambda *a,**k:None)
+    _set_status("mail-thread","awaiting_approval",pending_email_token="exact-token",
+                pending_email_to="reader@example.test",pending_email_subject="Receipt",pending_email_body="Complete body")
+    before=_get_status("mail-thread")
+    # Empty legacy senders normalize to None in persisted Runs; only the key binds kind.
+    run=threads._create_run("mail-thread",None,sender=sender,dispatch_key=key,
+                            resume_decision={"type":"approve"})
+    threads._execute_run(run.id,"mail-thread")
+    assert chat.decisions==([] if key is None else [{"type":"approve"}])
+    if key is None:
+        assert _get_status("mail-thread")==before
+        assert threads._runs().get("mail-thread",run.id).status=="cancelled"
+
+
+@pytest.mark.parametrize("decision",["approve","reject"])
+def test_gmail_core_binds_requested_kind_before_admission_and_on_replay(client,decision):
+    _pending()
+    before=_get_status("mail-thread")
+    with pytest.raises(HTTPException) as mismatch:
+        threads.gmail_decision_core("mail-thread",decision,"exact-token",expected_kind="gmail_archive")
+    assert mismatch.value.status_code==409
+    assert _get_status("mail-thread")==before and threads._runs().list("mail-thread")==[]
+    run,replayed=threads.gmail_decision_core("mail-thread",decision,"exact-token",expected_kind="gmail_delete")
+    assert not replayed
+    assert threads.gmail_decision_core("mail-thread",decision,"exact-token",expected_kind="gmail_delete")== (run,True)
+    with pytest.raises(HTTPException) as replay_mismatch:
+        threads.gmail_decision_core("mail-thread",decision,"exact-token",expected_kind="gmail_archive")
+    assert replay_mismatch.value.status_code==409
+    assert threads._runs().list("mail-thread")==[run]
