@@ -300,8 +300,13 @@ def gmail_search(query: str = "", sender_regex: str = "", subject_regex: str = "
             scanned += 1
             incomplete_bodies += bool(message["body_truncated"])
             values = {**message, "date": message["date"] + "\n" + message["received"]}
-            if all(pattern.search(values[field], timeout=0.05) is not None
-                   for field, pattern in filters.items()):
+            try:
+                matched = all(pattern.search(values[field], timeout=0.05) is not None
+                              for field, pattern in filters.items())
+            except TimeoutError:
+                skipped.append({"id": message_id, "error": "Regular expression timed out on this message."})
+                continue
+            if matched:
                 matches.append({key: message[key] for key in
                                 ("id", "from", "to", "subject", "date", "received", "labels", "url")}
                                | {"preview": message["body"][:240]})

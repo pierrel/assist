@@ -171,7 +171,8 @@ def test_pathological_regex_is_time_bounded(monkeypatch):
     message = _decoded("a"*100000 + "!")
     monkeypatch.setattr(gmail,"GmailClient",lambda:SimpleNamespace(
         request=lambda *a,**k:{"messages":[{"id":"abc123"}]}, read=lambda _:message))
-    assert "timed-out" in gmail.gmail_search(body_regex="(a+)+$")
+    result=json.loads(gmail.gmail_search(body_regex="(a+)+$"))
+    assert result["complete"] is False and "timed out" in result["skipped"][0]["error"]
 
 
 def test_truncated_body_search_never_claims_complete(monkeypatch):
@@ -290,3 +291,14 @@ def test_full_payload_preserves_unicode_and_declared_legacy_charset():
                  "body":{"data":base64.urlsafe_b64encode(body.encode(charset)).decode()}}
         value=gmail._decode_message("abc123",gmail._payload_message(payload),{})
         assert value["body"]==body
+
+
+def test_one_regex_timeout_preserves_prior_matches_and_cursor(monkeypatch):
+    messages={"abc123":_decoded("aaa"),"def456":_decoded("a"*100000+"!")}
+    monkeypatch.setattr(gmail,"GmailClient",lambda:SimpleNamespace(
+        request=lambda *a,**k:{"messages":[{"id":"abc123"},{"id":"def456"}],"nextPageToken":"next"},
+        read=lambda key:messages[key]))
+    result=json.loads(gmail.gmail_search(body_regex="(a+)+$"))
+    assert [message["id"] for message in result["messages"]]==["abc123"]
+    assert result["next_page_token"]=="next" and result["complete"] is False
+    assert result["skipped"][0]["id"]=="def456"
