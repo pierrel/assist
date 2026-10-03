@@ -148,6 +148,7 @@ def test_worker_gmail_proposal_and_approval_resume(client,monkeypatch):
             continuation.result(2)
             assert threads._runs().get("mail-thread",queued.id).status=="pending"
             loading=_get_status("mail-thread")
+            assert loading["pending_gmail_preview_pending"]
             with pytest.raises(HTTPException):
                 threads.gmail_decision_core("mail-thread","approve",loading["pending_gmail_token"])
         finally:
@@ -496,3 +497,40 @@ def test_gmail_core_binds_requested_kind_before_admission_and_on_replay(client,d
         threads.gmail_decision_core("mail-thread",decision,"exact-token",expected_kind="gmail_archive")
     assert replay_mismatch.value.status_code==409
     assert threads._runs().list("mail-thread")==[run]
+
+
+@pytest.mark.parametrize("proposal_state",["running","awaiting_approval"])
+def test_startup_requeues_interrupted_gmail_preview_without_resuming_agent(client,monkeypatch,proposal_state):
+    from manage.web import state
+    proposal=threads._create_run("mail-thread","Archive this")
+    threads._runs().claim("mail-thread",proposal.id)
+    if proposal_state=="awaiting_approval":
+        threads._runs().transition("mail-thread",proposal.id,"awaiting_approval")
+    action={"name":"gmail_archive","args":{"message_ids":["abc123"]}}
+    _set_status("mail-thread","awaiting_approval",pending_gmail_run_id=proposal.id,
+                pending_gmail_action=action,pending_gmail_token="exact-token",
+                pending_gmail_messages=[],pending_gmail_preview_pending=True,
+                pending_gmail_error="Preparing complete Gmail preview.")
+    scheduled=[]
+    monkeypatch.setattr(threads._RESUME_SCHEDULER,"submit",lambda *a,**k:scheduled.append(a))
+    monkeypatch.setattr(web.MANAGER,"list",lambda:["mail-thread"])
+    def forbidden(*a,**k):
+        pytest.fail("Preview recovery must not invoke the agent or sandbox")
+    monkeypatch.setattr(threads,"_process_message",forbidden)
+    monkeypatch.setattr(threads,"_get_sandbox_backend",forbidden)
+    reads=[]
+    def preview(shown):
+        reads.append(shown)
+        return [{"id":"abc123","body":"Recovered complete preview"}]
+    monkeypatch.setattr(threads,"gmail_action_preview",preview)
+    state._recover_interrupted_threads()
+    assert (proposal.id,"mail-thread") in scheduled
+    with threads.THREAD_QUEUE.acquire("another-thread"):
+        threads._execute_run(proposal.id,"mail-thread")
+    status=_get_status("mail-thread")
+    assert status["stage"]=="awaiting_approval" and status["pending_gmail_token"]=="exact-token"
+    assert status["pending_gmail_messages"][0]["body"]=="Recovered complete preview"
+    assert not status["pending_gmail_preview_pending"] and not status["pending_gmail_error"]
+    assert threads._runs().get("mail-thread",proposal.id).status=="awaiting_approval"
+    threads._execute_run(proposal.id,"mail-thread")
+    assert reads==[action]

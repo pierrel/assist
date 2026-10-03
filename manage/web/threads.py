@@ -2007,6 +2007,31 @@ def _pending_gmail(chat) -> dict | None:
     return None
 
 
+def _refresh_gmail_preview(tid: str, token: str, action: dict) -> None:
+    """Complete a still-pending card's preview outside the model queue."""
+    with _RUN_ADMISSION_LOCK:
+        status = _get_status(tid)
+        if (status.get("stage") != "awaiting_approval"
+                or status.get("pending_gmail_token") != token
+                or not status.get("pending_gmail_preview_pending")):
+            return
+    try:
+        messages = gmail_action_preview(action)
+        error = ""
+    except GmailError as failure:
+        messages = []
+        error = str(failure)
+    with _RUN_ADMISSION_LOCK:
+        status = _get_status(tid)
+        if (status.get("stage") == "awaiting_approval"
+                and status.get("pending_gmail_token") == token):
+            _set_status(tid, "awaiting_approval", **{
+                **{key:value for key,value in status.items() if key != "stage"},
+                "pending_gmail_messages":messages,
+                "pending_gmail_error":error,
+                "pending_gmail_preview_pending":False})
+
+
 def _resume_gmail(chat, decision: dict) -> str:
     """Resume only the previewed Gmail request; reject all other unseen actions."""
     pending = _pending_gmail(chat)
@@ -2549,6 +2574,20 @@ def _execute_run_active(run_id: str, tid: str, *, user_priority: bool = False) -
             _recover_interrupted_child(run)
         elif run.status in {"success", "error", "timeout"}:
             _complete_child_handoff(run)
+        return
+    with _RUN_ADMISSION_LOCK:
+        status = _get_status(tid)
+        preview_pending = (status.get("stage") == "awaiting_approval"
+                           and status.get("pending_gmail_run_id") == run.id
+                           and status.get("pending_gmail_preview_pending"))
+        if preview_pending:
+            # The loading card can precede the Run transition at process exit.
+            run = _runs().get(tid, run.id)
+            if run.status == "running":
+                run = _runs().transition(tid, run.id, "awaiting_approval")
+            preview_pending = run.status == "awaiting_approval"
+    if preview_pending:
+        _refresh_gmail_preview(tid, status["pending_gmail_token"], status["pending_gmail_action"])
         return
     if run.status in {"running", "interrupted"}:
         _recover_run(run, user_priority=user_priority)
@@ -3205,6 +3244,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                 pending_gmail_action=pending_gmail,
                                 pending_gmail_messages=[],
                                 pending_gmail_error="Preparing complete Gmail preview.",
+                                pending_gmail_preview_pending=True,
                                 pending_gmail_token=gmail_token,
                                 pending_gmail_run_id=_run.id if _run else None,
                                 started_at=started_at)
@@ -3241,20 +3281,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             # The per-thread approval fence remains visible while provider I/O runs
             # outside the global queue. Reject may resume meanwhile; only the exact
             # still-pending card can receive the completed preview.
-            try:
-                gmail_messages = gmail_action_preview(pending_gmail)
-                gmail_error = ""
-            except GmailError as error:
-                gmail_messages = []
-                gmail_error = str(error)
-            with _RUN_ADMISSION_LOCK:
-                status = _get_status(tid)
-                if (status.get("stage") == "awaiting_approval"
-                        and status.get("pending_gmail_token") == gmail_token):
-                    _set_status(tid, "awaiting_approval", **{
-                        **{key:value for key,value in status.items() if key != "stage"},
-                        "pending_gmail_messages":gmail_messages,
-                        "pending_gmail_error":gmail_error})
+            _refresh_gmail_preview(tid, gmail_token, pending_gmail)
         else:
             MANAGER.touch(tid)
 
@@ -4404,7 +4431,8 @@ def queue_recovery_runs() -> None:
 
     Runs off the asyncio loop during lifespan startup. An abandoned head is queued
     alone; its recovery queues its successor before accepted followers. Otherwise all
-    pending runs are queued in durable creation order.
+    pending runs are queued in durable creation order. Incomplete Gmail previews
+    requeue their original proposal for reading without resuming the agent.
     """
     visible = MANAGER.list()
     # ``create_thread_with_message_core`` shows an initializing status before it
@@ -4486,6 +4514,8 @@ def queue_recovery_runs() -> None:
         # claim leaves the old busy status projection behind; dispatch the
         # persisted ticket instead of synthesizing a duplicate from status.json.
         status = _get_status(tid)
+        if status.get("pending_gmail_preview_pending"):
+            _RESUME_SCHEDULER.submit(status["pending_gmail_run_id"], tid)
         cancelled_initializer = next(
             (run for run in visible_runs[tid]
              if (run.id == status.get("pending_run_id") and run.status == "cancelled"
