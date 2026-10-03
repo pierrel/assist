@@ -81,8 +81,19 @@ def _egress_proxy_config_hash(allowlist_csv: str, approvals_dir: str | None) -> 
     marker makes containers with an earlier approval or throttle policy
     recreate once and gain the current behavior."""
     return hashlib.sha256(
-        (allowlist_csv + "|v4-host-throttle-guidance-approvals:" + (approvals_dir or "")).encode()
+        (allowlist_csv + "|v5-read-only-mounts:" + (approvals_dir or "")).encode()
     ).hexdigest()[:16]
+
+
+def _egress_proxy_mounts(approvals_dir: str | None, map_dir: str | None = None):
+    from docker.types import Mount
+
+    return [
+        Mount(target, source, type="bind", read_only=True)
+        for target, source in (("/approvals", approvals_dir),
+                               ("/client-map", map_dir))
+        if source
+    ]
 
 
 class SandboxManager:
@@ -224,8 +235,7 @@ class SandboxManager:
                     "assist.egress-proxy": "true",
                     "assist.egress-allowlist-hash": allowlist_hash,
                 },
-                **({"volumes": {approvals_dir: {"bind": "/approvals",
-                                                "mode": "ro"}}}
+                **({"mounts": _egress_proxy_mounts(approvals_dir)}
                    if approvals_dir else {}),
             )
             try:
