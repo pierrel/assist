@@ -25,6 +25,7 @@ def client(tmp_path,monkeypatch):
 def _pending(error=""):
     _set_status("mail-thread","awaiting_approval",pending_gmail_token="exact-token",
                 pending_gmail_action={"name":"gmail_delete","args":{"message_ids":["abc123"]}},
+                pending_gmail_interrupt_id="gmail-interrupt",
                 pending_gmail_messages=[{"id":"abc123","from":"Sender <sender@example.test>",
                                          "to":"reader@example.test","subject":"Receipt", "date":"2026-10-01",
                                          "body":"Full <script>alert(1)</script>\nbody",
@@ -52,7 +53,7 @@ def test_one_resume_for_concurrent_web_phone_and_replay(client):
     assert replies[0][0].id == replies[1][0].id
     assert sorted(replayed for _,replayed in replies)==[False,True]
     runs=threads._runs().list("mail-thread")
-    assert len(runs)==1 and runs[0].resume_decision=={"type":"approve"}
+    assert len(runs)==1 and runs[0].resume_decision=={"type":"approve","approval_interrupt_id":"gmail-interrupt"}
     assert runs[0].dispatch_key=="gmail-approval:gmail_delete:exact-token"
     assert not _get_status("mail-thread").get("pending_gmail_token")
     with pytest.raises(HTTPException) as failure:
@@ -76,7 +77,7 @@ def test_incomplete_preview_can_only_reject(client,monkeypatch):
     assert client.post("/thread/mail-thread/gmail/approve",data={"token":"exact-token"}).status_code==409
     result=client.post("/thread/mail-thread/gmail/reject",data={"token":"exact-token"},follow_redirects=False)
     assert result.status_code==303 and len(executed)==1
-    assert threads._runs().list("mail-thread")[0].resume_decision=={"type":"reject"}
+    assert threads._runs().list("mail-thread")[0].resume_decision=={"type":"reject","approval_interrupt_id":"gmail-interrupt"}
 
 
 def test_new_message_refused_before_durable_admission_and_stale_decisions(client):
@@ -110,6 +111,8 @@ def test_worker_gmail_proposal_and_approval_resume(client,monkeypatch):
             if self.pending and name=="gmail_archive":
                 return {"message_ids":["abc123"]}
             return None
+        def pending_action_interrupt_id(self,name,args=None):
+            return "gmail-interrupt" if self.pending_action(name) is not None else None
         def pending_actions(self):
             args=self.pending_action("gmail_archive")
             return [{"name":"gmail_archive","args":args}] if args else []
@@ -245,6 +248,8 @@ def test_reject_during_preview_preserves_successor_status_and_context(client,mon
             return None
         def pending_action(self,name):
             return {"message_ids":["abc123"]} if self.pending and name=="gmail_delete" else None
+        def pending_action_interrupt_id(self,name,args=None):
+            return "gmail-interrupt" if self.pending_action(name) is not None else None
         def pending_actions(self):
             return [{"name":"gmail_delete","args":{"message_ids":["abc123"]}}] if self.pending else []
         def resume_actions(self,decisions):
@@ -334,17 +339,21 @@ def test_reply_endpoint_cannot_consume_other_action_proposal(client,monkeypatch,
     (True,False,True,True,False,False),(True,False,True,True,True,False),
     (True,False,True,False,False,True),
     (True,False,True,False,False,"restart"),
+    (True,False,True,False,False,"changed-interrupt"),
 ])
 def test_worker_binds_gmail_decision_to_its_dispatch_kind(client,monkeypatch,gmail_key,other_reply,gmail_pending,stale,wait,recover):
     class Chat:
         agent=None
         pending=True
         ids=["abc123"]
+        interrupt_id="gmail-interrupt"
         decisions=[]
         def pending_reply(self):
             return {"text":"Separate unseen reply"} if self.pending and other_reply else None
         def pending_action(self,name):
             return {"message_ids":self.ids} if self.pending and gmail_pending and name=="gmail_archive" else None
+        def pending_action_interrupt_id(self,name,args=None):
+            return self.interrupt_id if self.pending_action(name) is not None else None
         def pending_actions(self):
             return ([{"name":"gmail_archive","args":{"message_ids":self.ids}}]
                     + ([{"name":"send_reply","args":{"text":"Separate unseen reply"}}]
@@ -397,6 +406,8 @@ def test_worker_binds_gmail_decision_to_its_dispatch_kind(client,monkeypatch,gma
             state._recover_interrupted_threads()
             assert _get_status("mail-thread")["stage"]=="paused"
             assert (run.id,"mail-thread") in scheduled
+        if recover=="changed-interrupt":
+            chat.interrupt_id="successor-interrupt"
         if stale:
             chat.ids=["def456"]
             _set_status("mail-thread","awaiting_approval",**{
@@ -430,7 +441,7 @@ def test_worker_binds_gmail_decision_to_its_dispatch_kind(client,monkeypatch,gma
             future.result(2)
     else:
         threads._execute_run(run.id,"mail-thread")
-    if gmail_key and gmail_pending and not stale:
+    if gmail_key and gmail_pending and not stale and recover!="changed-interrupt":
         assert chat.decisions[0]=={"type":"approve"}
         if other_reply:
             assert chat.decisions[1]["type"]=="reject"
@@ -534,3 +545,15 @@ def test_startup_requeues_interrupted_gmail_preview_without_resuming_agent(clien
     assert threads._runs().get("mail-thread",proposal.id).status=="awaiting_approval"
     threads._execute_run(proposal.id,"mail-thread")
     assert reads==[action]
+
+
+def test_gmail_decision_requires_the_shown_checkpoint_identity(client):
+    _pending()
+    status=_get_status("mail-thread")
+    status.pop("pending_gmail_interrupt_id")
+    _set_status("mail-thread","awaiting_approval",**{k:v for k,v in status.items() if k!="stage"})
+    before=_get_status("mail-thread")
+    with pytest.raises(HTTPException) as missing:
+        threads.gmail_decision_core("mail-thread","approve","exact-token")
+    assert missing.value.status_code==409
+    assert _get_status("mail-thread")==before and threads._runs().list("mail-thread")==[]

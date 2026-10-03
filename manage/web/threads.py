@@ -2034,6 +2034,7 @@ def _refresh_gmail_preview(tid: str, token: str, action: dict) -> None:
 
 def _resume_gmail(chat, decision: dict) -> str:
     """Resume only the previewed Gmail request; reject all other unseen actions."""
+    decision = {key:value for key,value in decision.items() if key != "approval_interrupt_id"}
     pending = _pending_gmail(chat)
     requests = chat.pending_actions()
     selected = next(index for index, action in enumerate(requests)
@@ -3031,6 +3032,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 decision_status = _get_status(tid)
                 matches = ((decision_kind == "gmail" and pending_gmail
                             and pending_gmail == decision_status.get("pending_gmail_action")
+                            and resume_decision.get("approval_interrupt_id") is not None
+                            and resume_decision["approval_interrupt_id"] == pending_chat.pending_action_interrupt_id(
+                                pending_gmail["name"], pending_gmail["args"])
                             and ((decision_status.get("stage") in {"processing", "paused"}
                                   and decision_status.get("pending_run_id") == _run.id)
                                  or (decision_status.get("stage") == "awaiting_approval"
@@ -3242,6 +3246,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 with _RUN_ADMISSION_LOCK:
                     _set_status(tid, "awaiting_approval",
                                 pending_gmail_action=pending_gmail,
+                                pending_gmail_interrupt_id=chat.pending_action_interrupt_id(
+                                    pending_gmail["name"], pending_gmail["args"]),
                                 pending_gmail_messages=[],
                                 pending_gmail_error="Preparing complete Gmail preview.",
                                 pending_gmail_preview_pending=True,
@@ -4125,13 +4131,15 @@ def gmail_decision_core(tid: str, decision: str, token: str, *,
         if previous is not None:
             if expected_kind is not None and previous.dispatch_key != keys.get(expected_kind):
                 raise HTTPException(status_code=409, detail="Gmail action kind does not match this approval.")
-            if previous.resume_decision != {"type": decision}:
+            if previous.resume_decision.get("type") != decision:
                 raise HTTPException(status_code=409, detail="This approval was already decided.")
             return previous, True
         status = _get_status(tid)
         expected = status.get("pending_gmail_token")
+        interrupt_id = status.get("pending_gmail_interrupt_id")
         if (status.get("stage") != "awaiting_approval" or not isinstance(expected, str)
                 or not hmac.compare_digest(expected, token)
+                or not isinstance(interrupt_id, str) or not interrupt_id
                 or status.get("pending_gmail_action", {}).get("name") not in GMAIL_INTERRUPT_ON):
             raise HTTPException(status_code=409, detail="Gmail approval is unavailable or stale.")
         action_kind = status["pending_gmail_action"]["name"]
@@ -4143,7 +4151,7 @@ def gmail_decision_core(tid: str, decision: str, token: str, *,
             raise HTTPException(status_code=409, detail="A complete Gmail preview is required.")
         proposal_id = status.get("pending_gmail_run_id")
         proposal = _runs().get(tid, proposal_id) if proposal_id else None
-        run = _create_run(tid, None, resume_decision={"type": decision}, dispatch_key=key,
+        run = _create_run(tid, None, resume_decision={"type": decision, "approval_interrupt_id":interrupt_id}, dispatch_key=key,
                           work_id=proposal.work_id if proposal else None)
         _set_status(tid, "processing", pending_run_id=run.id,
                     pending_gmail_action=status["pending_gmail_action"],
