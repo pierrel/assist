@@ -31,6 +31,14 @@ another tool call in that wake turn.
   markup.
 {%- endif %}
 
+## Quiet routine results
+
+When `quiet` is available and a completed status check found no change, issue,
+or user action, call `quiet()` before the final reply. This also applies to a
+manually requested routine check. The reply stays in the thread; quiet only
+suppresses the ordinary new badge for this turn. Keep useful findings, failed
+or uncertain checks, and requests for approval visible as new.
+
 ## Async task lifecycle
 
 Starting a task gives its full ID and returns immediately. Report that ID and

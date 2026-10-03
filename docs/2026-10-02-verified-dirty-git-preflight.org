@@ -1,0 +1,42 @@
+#+TITLE: Verified dirty Git preflight teardown
+#+DATE: 2026-10-02
+
+* Observed failure
+
+A Git-backed web turn left uncommitted work after reaching its step limit.
+The next turn correctly rejected the dirty checkout, and its restricted
+sandbox was verified stopped, but the preflight retained
+=sandbox_in_flight=true=. Later queued turns therefore reported uncertain
+teardown instead of the actual dirty-worktree hold. The user's files, index,
+branch and history must not be changed to resolve that reporting defect.
+
+* Correction
+
+Only the fixed, bounded =require_clean= probe can report positively dirty
+work. Both Git commands must finish successfully after their output is
+drained; timeout, truncation, lost sandbox or Git command failure is not
+positive dirt. Reconciliation and commit commands retain their generic
+fail-closed handling.
+
+The web lifecycle clears a dirty preflight's flight bit only after exact
+sandbox teardown and the accepted Run's terminal error are durable. Visible
+Deep and Pi turns also project the dirty error with the exact Run ID before
+clearance. If any of
+those steps fails, the stronger flight fence remains. Hidden child Runs use
+their own terminal handoff. Startup matches a stale busy or terminal-error
+status's exact Run ID against the terminal Run before it may synthesize legacy
+work from the old pending message. A retained Git flight or quarantine fence projects the
+stronger operator-verification reason even when the Run already records the
+dirty error; the failed prompt is not replayed. A following accepted Run
+checks the still-dirty work independently and reports its own hold.
+
+* Boundary
+
+This does not reconcile, reset, commit, stash or publish incomplete work. It
+does not relax an unverified teardown, change the operator-only recovery API,
+or alter source binding and main-merge behavior. An operator and user decide
+what to do with incomplete edits separately.
+
+* Historical supersessions
+
+None. This record documents a new observed preflight failure.

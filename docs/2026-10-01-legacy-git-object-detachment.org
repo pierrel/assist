@@ -1,0 +1,95 @@
+#+TITLE: Legacy Git object hardlink detachment
+#+DATE: 2026-10-01
+
+* Objective
+
+Old server-local Git clones may share object inodes with a source or with other
+thread clones.  The Git source-binding guard correctly refuses those clones.
+New clones already use =git clone --no-hardlinks=.  An operator needs a narrow
+way to make an individually approved old clone independent before the existing
+=enroll_legacy= path can authorize its thread branch.
+
+This is operator-only work.  A branch name, workspace origin, common object
+inode, or exact remote ref is corroboration, not source authority.  Root selects
+the configured source independently and excludes writers to *all* linked roots
+and the selected source for the entire detachment and enrollment operation.
+
+* Design
+
+1. Under the existing thread workspace lock and an operation-long stopped-writer
+   verifier, require the exact approved local branch/OID and an explicitly
+   approved remote branch OID or an approved absent remote branch.  Reject an
+   already-authorized or fenced binding.
+2. Traverse =domain=, =tmp= and =agent= with no-follow descriptors and the
+   current bounded entry/depth/time limits.  Permit linked regular files only
+   under standard =.git/objects= paths.  These include loose and packed objects
+   plus inert pack indexes and =info/packs=, because the existing independence
+   guard scans every regular file.  Verify every linked target is on the same
+   filesystem as host-private staging *before* replacing any target.
+3. Copy each linked object into a fresh exclusive host-private inode, compare
+   the bytes, fsync, then atomically replace only that local pathname.  Never
+   write a shared inode.  A partial interruption leaves either the original
+   linked file or a byte-identical detached file; a fresh scan determines what
+   remains.  Reconcile only exact helper-owned temporary files under the same
+   writer exclusion and lock.
+4. Re-run the unchanged independent-root guard and authenticate a private Git
+   snapshot with fsck.  Fetch only the selected configured source into that
+   private store, verify main ancestry and exact expected remote ref or approved
+   absence, and recapture identity and writer exclusion.  A moved/replaced
+   source ref, unexpected linked path, changed identity, exceeded bound or
+   unavailable proof leaves the clone held.
+5. Root may then invoke the existing =enroll_legacy= under the *same* exclusion.
+   Dirty work remains dirty; ordinary clean admission is a separate check.
+   Saved Runs, index, config, refs, working files and history are not rewritten
+   by detachment.  No prompt is replayed.
+
+* Verification and limits
+
+Focused fixtures reproduce the default local-clone hardlinks, cross-thread
+aliases, dirty/index preservation, interruption and retry, source-ref movement,
+writer-exclusion failures and unexpected linked files.  Production migration
+is a separate protected root operation after genuine per-thread source approval.
+Clones without independent source authority stay held.  The operation does not
+change main merge, phone Git credentials or the web request path.
+
+* Operator sequence
+
+This is not a web endpoint or a bulk migration command.  For each selected
+thread, the protected operator first records the exact configured source by
+independent authority, the local non-main branch/OID, and that source's exact
+thread-ref OID or its explicitly approved absence.  A ref match, =origin=,
+shared inode, or directory name alone does not select a source.  Verify the
+current sidecar is absent or never authorized.  An authorized, fenced, changed
+or source-unproven case remains on its existing hold path.  Dirty files and
+index may be detached and enrolled without modification, but still block
+ordinary clean preflight.
+
+The operator then establishes a single operation-long write exclusion over
+the target thread, *every* thread/root sharing any target inode, and the
+selected source.  The exclusion includes sandbox generations and host writers,
+not just absence of a currently visible container.  Keep it held through both
+=detach_legacy_object_hardlinks(thread_dir, worktree, source=...,
+expected=(branch, oid), expected_remote=oid_or_none,
+verify_stopped=adapter)= and the existing =enroll_legacy= call.  The adapter
+returns =None= only while that exclusion is genuinely held and raises or
+returns a reason otherwise.  The helper recaptures it at the end, but a final
+check cannot substitute for operation-long exclusion.
+
+If detachment fails, preserve the hold and inspect the exact failure.  A
+stopped, unchanged case can retry: already detached paths stay independent,
+remaining shared paths are copied, and only a verified helper-owned private
+temporary file is discarded.  Do not manually unlink shared objects, clear a
+flight fence, reset Git, or mark enrollment successful.  A changed remote ref,
+branch/OID, sidecar, alias set or source authority requires renewed operator
+proof; a dirty worktree is preserved, not cleaned by this helper.
+
+After successful enrollment, verify the selected binding, branch/OID, unchanged
+index/config/HEAD/worktree and source inodes.  The ordinary clean preflight
+still decides whether a new agent turn may run.  Root owns the protected live
+operation and deployment; this code change alone does not enroll any thread.
+
+* Historical supersessions
+
+This design narrows the unspecified legacy storage-migration step in the
+2026-09-26 direct-thread Git sync design.  Its binding and source-trust rules
+remain in effect.

@@ -1,9 +1,10 @@
 """Unit tests for the sandbox egress allowlist plumbing.
 
-Docker is mocked — these tests assert that SandboxManager passes the
+Docker calls are mocked — these tests assert that SandboxManager passes the
 right kwargs to ``containers.run`` and that ``_ensure_egress_proxy_running``
-is idempotent.  The actual policy enforcement is exercised in the
-build-time smoke (``dockerfiles/test-sandbox-egress.sh``).
+is idempotent.  One test exercises Docker SDK argument conversion.  The actual
+policy enforcement is exercised in the build-time smoke
+(``dockerfiles/test-sandbox-egress.sh``).
 """
 import hashlib
 import os
@@ -14,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 from assist.sandbox_manager import (
     EGRESS_NETWORK,
+    EGRESS_PROXY_IMAGE,
     EGRESS_PROXY_NAME,
     EGRESS_PROXY_PORT,
     SandboxManager,
@@ -125,6 +127,38 @@ class TestEnsureEgressProxy(TestCase):
         self.assertEqual(kwargs["labels"]["assist.egress-allowlist-hash"],
                          self._allowlist_hash())
 
+    def test_same_source_mounts_survive_docker_sdk_conversion(self):
+        from docker.models.containers import _create_container_args
+        from assist.sandbox_manager import _egress_proxy_mounts
+
+        with tempfile.TemporaryDirectory() as source:
+            args = _create_container_args({
+                "image": EGRESS_PROXY_IMAGE,
+                "version": "1.45",
+                "mounts": _egress_proxy_mounts(source, source),
+            })
+
+        self.assertEqual(args["host_config"]["Mounts"], [
+            {"Target": "/approvals", "Source": source,
+             "Type": "bind", "ReadOnly": True},
+            {"Target": "/client-map", "Source": source,
+             "Type": "bind", "ReadOnly": True},
+        ])
+
+    def test_proxy_uses_read_only_mounts_for_approvals(self):
+        client = self._make_client()
+        with tempfile.TemporaryDirectory() as egress_dir:
+            with patch.dict(os.environ, {"ASSIST_EGRESS_APPROVALS_DIR": egress_dir}):
+                SandboxManager._ensure_egress_proxy_running(client)
+
+            kwargs = client.containers.run.call_args.kwargs
+            self.assertNotIn("volumes", kwargs)
+            self.assertEqual([dict(mount) for mount in kwargs["mounts"]], [
+                {"Target": "/approvals",
+                 "Source": os.path.join(egress_dir, "approvals"),
+                 "Type": "bind", "ReadOnly": True},
+            ])
+
     def test_skips_recreate_when_hash_matches_and_running(self):
         running_proxy = MagicMock()
         running_proxy.status = "running"
@@ -149,14 +183,11 @@ class TestEnsureEgressProxy(TestCase):
         stale_proxy.remove.assert_called_once_with(force=True)
         client.containers.run.assert_called_once()
 
-    def test_recreates_when_proxy_policy_schema_changes(self):
-        """An older image cannot stay alive behind a matching allowlist.
-
-        Host throttling lives inside the proxy image, so its schema marker is
-        part of the label contract that forces a replacement after deployment.
-        """
+    def test_recreates_when_proxy_mount_schema_changes(self):
+        """The old volume-mount proxy is replaced after deployment."""
         old_hash = hashlib.sha256(
-            (",".join(_load_egress_allowlist()) + "|v2-approvals:").encode()
+            (",".join(_load_egress_allowlist())
+             + "|v4-host-throttle-guidance-approvals:").encode()
         ).hexdigest()[:16]
         stale_proxy = MagicMock()
         stale_proxy.id = "old-policy"

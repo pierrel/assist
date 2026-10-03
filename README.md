@@ -40,8 +40,9 @@ where reliability is harder than with frontier APIs.
 - **Web-path sandboxing.** When Docker is available, web turns run filesystem
   and code tools inside a per-turn container with the workspace bind-mounted at
   `/workspace`. The current CLI path is host-backed, and the web path falls back
-  to the host when Docker is unavailable; fail-closed cross-surface isolation is
-  planned rather than shipped.
+  to the host for non-Git work when Docker is unavailable. Git-bound web turns
+  instead fail closed without the restricted sandbox; broader cross-surface
+  isolation remains planned rather than shipped.
 
 - **Specialized agents and skills out of the box.**
   - **Research agent** rigorous fact-checking and critiquing with
@@ -81,7 +82,9 @@ where reliability is harder than with frontier APIs.
 - **Git domain integration.** Each thread works in its own git branch
   of a configured "domain" repo (your life repo, your work repo, etc.)
   with edits isolated until you choose to merge. Multiple domains
-  coexist.
+  coexist. Old local clones with shared Git object inodes need an
+  [operator-verified detachment](docs/2026-10-01-legacy-git-object-detachment.org)
+  before source enrollment; the helper does not infer a source or change work.
 
 - **Multiple frontends, one Deep Agents core.** Web UI, CLI, and an Emacs
   integration share the standard agent runtime, memory, and domain repos.
@@ -367,15 +370,14 @@ sync the template with `make deploy-code` and run `make deploy-service`
 before restarting.
 
 An intentional restart waits for in-flight turns and schedule callbacks to
-finish, including owned sandbox teardown. The separate Git transport change
-supplies Git sidecar flight fencing and finalization; this branch alone does not
-provide those Git guarantees. Accepted Runs not yet executing remain durable
+finish, including owned sandbox teardown. Git transport supplies sidecar flight
+fencing and finalization. Accepted Runs not yet executing remain durable
 and are requeued after restart. Install the updated service unit before relying
 on this behavior. A long turn can leave `systemctl restart` waiting; inspect the
 running stop job and service log rather than forcing the process down. If a live
 sandbox cannot be stopped and verified,
-the old process stays alive with its listener closed. With the Git transport
-change composed, a historical Git fence blocks only its own thread and is not
+the old process stays alive with its listener closed. A historical Git fence
+blocks only its own thread and is not
 cleared by restarting the service. Startup refuses admission while old-sandbox
 removal is unverified; systemd retries the service. Persistent proof failures
 require operator recovery.
@@ -469,6 +471,13 @@ ignored environment file, it immediately texts that fixed recipient with the mes
 and a link to the thread. These values intentionally do not use an `ASSIST_` prefix, so
 they are not passed into sandboxes. If the recipient is absent, Assist logs the missing
 configuration and keeps the in-app urgent behavior without sending SMS.
+
+### Quiet routine results
+
+The visible Deep web agent can call `quiet()` during a routine check with no
+change or action needed. Its reply remains in the thread, but that turn does
+not add an ordinary "new" badge. Quiet does not clear an earlier unread reply
+or suppress an approval, error, or urgent alert. SMS handling is unchanged.
 
 ---
 
@@ -949,16 +958,61 @@ ASSIST_DOMAINS=/path/to/repo1.git,/path/to/repo2.git
 
 When enabled, each thread creates a git branch and can merge changes back to main.
 
+New Git-backed web threads bind their configured source and actual non-main
+thread branch outside the agent workspace. Before fresh turns, clean phone-pushed
+commits fast-forward locally. After successful Deep, Pi, or hidden child work,
+changes attempt a commit inside the restricted sandbox and the server attempts publication
+of only that thread branch. No-file-change turns also attempt publication; main
+and tags are not automatically pushed. Dirty, divergent, rewritten, or unavailable
+Git state holds for explicit reconciliation while preserving work and saved answers.
+When a clean preflight positively finds uncommitted work and its exact sandbox
+teardown is verified, the turn ends with a dirty-worktree hold, not a teardown
+uncertainty. Later queued turns check that work independently; none replays the
+failed prompt. Unverified cleanup retains the stronger teardown fence.
+If a hidden child yields its fair-scheduling slot, a new parent message waits
+until the child's sandbox teardown and Git workspace lock release. After safe
+teardown, it runs normally instead of failing on a transient lock.
+Local commit or verified teardown failure reports a turn error with the saved
+answer retained. Remote-only publication failure remains best-effort and does
+not discard a finalized local answer; the pending Git error/fences remain.
+After restart, a saved reply alone is not Git finalization proof. Completed
+visible Git-bound Deep/Pi recovery reports an explicit reconciliation error, preserves the
+answer/work/fences, and does not replay the model or reconstruct the commit.
+Legacy threads need an operator-verified binding and independent object storage.
+An operator can enroll an unbound or never-authorized clone with
+`assist.git_sync.enroll_legacy`, supplying a verified configured source and exact
+branch/commit pair after stopping its legacy writers. Enrollment does not change
+files, index or history, does not infer `origin`, and preserves dirty files for
+explicit reconciliation. A failed setup Run stays failed; send a new message
+after the preserved clone is enrolled and clean. Snapshots omit standard
+multi-pack-index and cruft `.mtimes` metadata, while verifying the imported objects.
+For a bound thread with a retained teardown fence, `assist.git_sync.recover_stopped`
+is an operator-only path. It requires exact source/state/branch approval, stopped
+writers, authenticated history/floors and read-only clean verification with exact
+verifier teardown. It clears only the teardown fence/error, preserving work,
+saved answers and suspended preflights. Dirty, divergent or unknown publication
+state remains held; recovery never replays a failed prompt or commits files.
+Snapshots enforce a 128 MiB per-file and authenticated-object limit. Raw staging
+is separately capped at 256 MiB so duplicate packs can be authenticated and
+compacted in the disposable private store without changing the thread repository
+or expiring unreachable objects. The final snapshot still must fit 128 MiB;
+genuinely oversized repositories remain unavailable. Incoming bundles exclude
+verified existing history and skip import when no objects are new. See
+`docs/2026-09-27-duplicate-pack-runtime.org` for the observed runtime correction.
+The phone uses normal Git credentials, not an Assist-web Git proxy; pending sync
+is reported through bounded `workspace.sync_error` metadata.
+
 ## Docker Sandbox
 
-On the web path, the agent executes shell commands inside a Docker container rather than on the host. Each turn gets a fresh container with the domain repository bind-mounted at `/workspace`, also exposed as `/user`; persistent thread scratch at `/tmp`; and, for visible main-agent turns, private state at `/agent`. The current sandbox also inherits the configured `ASSIST_*` environment, so it is not yet a credential-free boundary. The CLI path remains host-backed.
+On the web path, the agent executes shell commands inside a Docker container rather than on the host. Each turn gets a fresh container with the domain repository bind-mounted at `/workspace`, also exposed as `/user`; persistent thread scratch at `/tmp`; and, for ordinary visible Deep main-agent turns, private state at `/agent`. Ordinary Deep sandboxes inherit the configured `ASSIST_*` environment, so that profile is not yet a credential-free boundary. Pi and Git preparation/commit profiles omit the generic application environment and private agent mount. The CLI path remains host-backed.
 
 The sandbox image is built automatically by `make web` (and `make deploy`). To build it manually:
 ```bash
 make sandbox-build
 ```
 
-If Docker is unavailable, the agent falls back to running without a sandbox.
+If Docker is unavailable, non-Git work can retain the established host fallback.
+Git-bound web turns fail closed instead of running unsafe host worktree commands.
 
 ---
 

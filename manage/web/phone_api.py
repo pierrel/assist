@@ -404,27 +404,8 @@ def _file_references(text: str, known_paths: set[str]) -> list[dict[str, str]]:
 
 
 def _thread_workspace(tid: str) -> dict[str, Any]:
-    manager = state._get_domain_manager(tid)
-    if manager is None or not manager.repo:
-        return {"repo_key": None, "repo_label": "No repository", "branch": None,
-                "revision": None, "dirty": False}
-    branch = current_branch(manager.repo_path) or None
-    revision = None
-    try:
-        result = subprocess.run(
-            ["git", "-C", manager.repo_path, "rev-parse", "HEAD"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False,
-        )
-        if result.returncode == 0:
-            revision = result.stdout.strip() or None
-    except OSError:
-        pass
-    try:
-        dirty = manager.has_changes_vs_main()
-    except Exception:
-        dirty = False
-    return {"repo_key": _repo_key(manager.repo), "repo_label": state._domain_label(manager.repo),
-            "branch": branch, "revision": revision, "dirty": dirty}
+    from assist.git_sync import workspace
+    return workspace(state.MANAGER.thread_dir(tid), state.MANAGER.thread_default_working_dir(tid))
 
 
 def _thread_messages(tid: str) -> list[dict]:
@@ -620,14 +601,18 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
 
 
 def _thread_repo_summary(tid: str, status: dict[str, Any]) -> tuple[str | None, str]:
-    """Return chooser metadata from setup state or the thread's durable repository."""
-    domain = status.get("domain")
-    if not isinstance(domain, str) or not domain:
-        manager = state._get_domain_manager(tid)
-        domain = manager.repo if manager is not None else None
-        if not isinstance(domain, str) or not domain:
-            return None, "No repository"
-    return _repo_key(domain), state._domain_label(domain)
+    """Use the host-owned source binding, never the workspace's mutable origin."""
+    from assist.git_sync import GitSyncError, read_state, source_label
+    try:
+        binding = read_state(state.MANAGER.thread_dir(tid))
+    except (GitSyncError, OSError):
+        return None, "Repository unavailable"
+    if binding is None:
+        if os.path.lexists(os.path.join(state.MANAGER.thread_default_working_dir(tid), ".git")):
+            return None, "Repository needs operator binding"
+        return None, "No repository"
+    source = binding["source"]
+    return _repo_key(source), source_label(source)
 
 
 def _list_threads() -> dict[str, Any]:

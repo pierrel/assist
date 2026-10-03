@@ -1,0 +1,35 @@
+#+title: Direct thread Git sync suspended work and child completion
+#+date: 2026-09-26
+
+* Per-work publication authority
+The host-owned sidecar retains a preflight per durable work ID, not one shared
+slot. Fresh queued writers fetch and check cleanliness; resumed slices select
+their own existing record without fetching/fast-forwarding. A failed child
+preflight never replaces the suspended parent's record. Verified publication
+removes only the finishing work's record, and advances remaining exact remote
+expectations only across the server's own verified FF publication. Their original
+local ancestry floors remain unchanged. User remote movement is not silently adopted.
+
+* Child completion
+A completed child result is saved durably on its still-running Run before Git
+finalization. Only verified local commit and generation teardown permit success.
+Commit/teardown failure becomes an error handoff with result/files retained,
+not a false successful completion. Remote publication remains best effort.
+
+A fixed host-only child receipt is fsynced after local commit/teardown and before
+publication. It binds the durable work ID and exact branch/revision. Recovery
+uses that receipt and saved result without re-executing the child model; its
+parent's ordinary fresh preflight can retry publication. An uncertain sandbox
+flight remains fenced. Receipt absence requires safe finalization or a visible hold.
+
+Automatic restricted Git command stdout/stderr is suppressed in-container so
+workspace hooks cannot fill host Docker output buffers. The bounded clean
+predicate also runs after commit, preventing a post-commit hook's dirty files
+from being reported as successful clean publication. Lock I/O faults become
+bounded GitSyncError and terminalize the exact accepted Pi ticket.
+
+* Historical supersessions
+This document directly replaces =Current per-turn boundaries= child-success
+claims in =2026-09-26-direct-thread-git-sync-review-r2.org=: local commit and
+teardown must complete before success; a failed finalization retains the result
+but cannot produce a normal success wake. Other r2 boundary corrections stand.
