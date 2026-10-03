@@ -66,6 +66,7 @@ from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
 from assist.location import LOCATION_CONTEXT_KEY, LocationSnapshot
 from assist.frequency import FREQUENCY_RUN_ID_KEY
 from assist.events.reply import SMS_SENDER_KEY
+from assist.gmail import GMAIL_INTERRUPT_ON, GmailError, gmail_action_preview
 from assist.events.email import email_identity, valid_email_content
 from assist.schedule.scheduler import Scheduler
 from assist.sandbox import SandboxContainerLostError
@@ -1065,6 +1066,28 @@ def render_thread(
             </div>
           </form>
         </div>"""
+    elif stage == "awaiting_approval" and status.get("pending_gmail_token"):
+        action = status.get("pending_gmail_action", {}).get("name", "")
+        label = "Archive" if action == "gmail_archive" else "Move to Trash"
+        token = html.escape(status["pending_gmail_token"])
+        previews = []
+        for mail in status.get("pending_gmail_messages", []):
+            headers = "\n".join(f"{key}: {mail.get(key, '')}" for key in
+                                ("id", "from", "to", "subject", "date"))
+            previews.append('<pre>' + html.escape(headers + "\n\n" + mail.get("body", ""))
+                            + '</pre><a href="' + html.escape(mail.get("url", ""))
+                            + '" rel="noreferrer">Open in Gmail</a>')
+        error = status.get("pending_gmail_error", "")
+        approve = (f'<button class="btn merge-btn" formaction="/thread/{tid}/gmail/approve" '
+                   f'type="submit">Approve {label.lower()}</button>' if not error else "")
+        status_banner = f"""
+        <div class="approval-banner"><strong>{label} awaiting your approval</strong>
+          <div>{html.escape(error)}</div>{''.join(previews)}
+          <form action="/thread/{tid}/gmail/reject" method="post">
+            <input type="hidden" name="token" value="{token}">
+            {approve}<button class="btn btn-secondary" type="submit">Reject</button>
+          </form>
+        </div>"""
     elif stage == "awaiting_approval":
         draft = html.escape(status.get("pending_reply", ""))
         to = html.escape(status.get("pending_sender", "") or "the sender")
@@ -1960,6 +1983,31 @@ def _pending_email(chat) -> dict | None:
     """Return a pending email when this web Thread supports the email action."""
     pending = getattr(chat, "pending_email", None)
     return pending() if pending is not None else None
+
+
+def _pending_gmail(chat) -> dict | None:
+    """Read an exact Gmail mutation request from the durable HITL checkpoint."""
+    pending = getattr(chat, "pending_action", None)
+    if pending is None:
+        return None
+    for name in GMAIL_INTERRUPT_ON:
+        args = pending(name)
+        if isinstance(args, dict):
+            return {"name": name, "args": args}
+    return None
+
+
+def _resume_gmail(chat, decision: dict) -> str:
+    """Resume only the previewed Gmail request; reject all other unseen actions."""
+    pending = _pending_gmail(chat)
+    requests = chat.pending_actions()
+    selected = next(index for index, action in enumerate(requests)
+                    if action.get("name") == pending["name"]
+                    and action.get("args") == pending["args"])
+    return chat.resume_actions([
+        decision if index == selected else {
+            "type": "reject", "message": "This action was not displayed for approval. Propose it separately."}
+        for index in range(len(requests))])
 
 
 _RUN_SERVICES_BY_ROOT = {RUN_SERVICE.root_dir: RUN_SERVICE}
@@ -2917,9 +2965,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     "claimed": [],
                     "run_id": _run.id if _run is not None else None}
             if origin == "continuation" and not resume and resume_decision is None:
-                # A HITL reply awaiting approval: the supersede flow below exists
-                # for a NEWER USER message and would silently REJECT the pending
-                # draft — a continuation must never do that; nor may it run on the
+                # A HITL action awaiting approval must keep its interrupted graph
+                # intact. A continuation must never supersede that action or run on the
                 # interrupted graph (langgraph would drop its message). Return
                 # WITHOUT claiming: the entry stays journaled and the approve/reject
                 # resume's own ready exit re-dispatches it. Safe from racing: a
@@ -2929,7 +2976,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 try:
                     pending_chat = MANAGER.get(tid, sandbox_backend=None)
                     _has_pending_reply = bool(
-                        pending_chat.pending_reply() or _pending_email(pending_chat))
+                        pending_chat.pending_reply() or _pending_email(pending_chat)
+                        or _pending_gmail(pending_chat))
                 except FileNotFoundError:
                     return   # thread deleted while queued — silent skip like every path
                 if _has_pending_reply:
@@ -2937,8 +2985,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                  "approval", tid)
                     return
             if not resume and resume_decision is None:
-                if _get_status(tid).get("pending_email_token"):
-                    logging.info("run on %s deferred: email is awaiting approval", tid)
+                if (_get_status(tid).get("pending_email_token")
+                        or _get_status(tid).get("pending_gmail_token")):
+                    logging.info("run on %s deferred: mail is awaiting approval", tid)
                     return
             if _run is not None:
                 try:
@@ -3017,6 +3066,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     # raise. Treat it as a no-op.
                     if chat.pending_reply():
                         resp = chat.resume_reply(resume_decision)
+                    elif _pending_gmail(chat):
+                        resp = _resume_gmail(chat, resume_decision)
                     elif _pending_email(chat):
                         resp = chat.resume_action(resume_decision)
                     else:
@@ -3087,7 +3138,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         logging.error("Git model sandbox teardown failed", exc_info=True)
                 else:
                     git_lifecycle.cleanup_model(sandbox_generation)
-            if git_lifecycle.bound and not chat.pending_reply() and not _pending_email(chat):
+            if (git_lifecycle.bound and not chat.pending_reply() and not _pending_email(chat)
+                    and not _pending_gmail(chat)):
                 try:
                     git_lifecycle.finish_visible(resp or "assistant update", rider.tz if rider else None)
                 except GitSyncError:
@@ -3122,6 +3174,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         _TURN_INTERJECTION.pop(tid, None)
         pending = chat.pending_reply()
         pending_email = _pending_email(chat)
+        pending_gmail = _pending_gmail(chat)
         if pending:
             # Preserve started_at so the HITL approve/reject resume reuses the original
             # submit time — the approved reply's badge then shows human→final-reply, not
@@ -3130,7 +3183,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         pending_reply=pending.get("text", ""), pending_sender=sender or "",
                         started_at=started_at)
             _terminal = ("awaiting_approval", pending.get("text", ""))
-        elif pending_email:
+        elif pending_email and not pending_gmail:
             _set_status(tid, "awaiting_approval",
                         pending_email_to=pending_email.get("to", ""),
                         pending_email_subject=pending_email.get("subject", ""),
@@ -3138,6 +3191,20 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         pending_email_token=secrets.token_urlsafe(16),
                         started_at=started_at)
             _terminal = ("awaiting_approval", pending_email.get("body", ""))
+        elif pending_gmail:
+            try:
+                gmail_messages = gmail_action_preview(pending_gmail)
+                gmail_error = ""
+            except GmailError as error:
+                gmail_messages = []
+                gmail_error = str(error)
+            _set_status(tid, "awaiting_approval",
+                        pending_gmail_action=pending_gmail,
+                        pending_gmail_messages=gmail_messages,
+                        pending_gmail_error=gmail_error,
+                        pending_gmail_token=secrets.token_urlsafe(16),
+                        started_at=started_at)
+            _terminal = ("awaiting_approval", gmail_error or "Gmail action awaiting approval")
         else:
             _set_status(tid, "ready", mark_unseen=not _quiet_ready(_run))
             _terminal = ("ready", resp)
@@ -3639,7 +3706,7 @@ _RUN_ADMISSION_LOCK = threading.Lock()
 
 
 class _EmailApprovalPending(Exception):
-    """A web submission tried to bypass a displayed email approval."""
+    """A web submission tried to bypass a displayed email or Gmail approval."""
 
 
 def _accept_message_run_locked(tid: str, text: str, rider=None,
@@ -3649,7 +3716,8 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
                                run_id: str | None = None,
                                work_id: str | None = None) -> tuple[Run, bool]:
     """Admit one message while ``_RUN_ADMISSION_LOCK`` is held."""
-    if _get_status(tid).get("pending_email_token"):
+    if (_get_status(tid).get("pending_email_token")
+            or _get_status(tid).get("pending_gmail_token")):
         raise _EmailApprovalPending
     prior_stage = _get_status(tid).get("stage")
     busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
@@ -3932,6 +4000,47 @@ def email_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
     run = _create_run(tid, None,
                       resume_decision=_EMAIL_DECISIONS[decision](to, subject, body))
     background_tasks.add_task(_execute_run, run.id, tid)
+    return RedirectResponse(url=f"/thread/{tid}", status_code=303)
+
+
+def gmail_decision_core(tid: str, decision: str, token: str) -> tuple[Run, bool]:
+    """Consume an exact Gmail approval once; shared by synchronous web/phone handlers."""
+    _existing_thread_dir(tid)
+    _require_deep_thread(tid)
+    if decision not in {"approve", "reject"}:
+        raise HTTPException(status_code=400, detail="decision must be approve or reject")
+    if not token or len(token) > 128:
+        raise HTTPException(status_code=409, detail="Gmail approval is unavailable or stale.")
+    key = "gmail-approval:" + token
+    with _RUN_ADMISSION_LOCK:
+        # A replay identifies its original resume Run, never the current successor.
+        previous = next((run for run in _runs().list(tid) if run.dispatch_key == key), None)
+        if previous is not None:
+            if previous.resume_decision != {"type": decision}:
+                raise HTTPException(status_code=409, detail="This approval was already decided.")
+            return previous, True
+        status = _get_status(tid)
+        expected = status.get("pending_gmail_token")
+        if (status.get("stage") != "awaiting_approval" or not isinstance(expected, str)
+                or not hmac.compare_digest(expected, token)
+                or status.get("pending_gmail_action", {}).get("name") not in GMAIL_INTERRUPT_ON):
+            raise HTTPException(status_code=409, detail="Gmail approval is unavailable or stale.")
+        if decision == "approve" and (status.get("pending_gmail_error")
+                                      or not status.get("pending_gmail_messages")):
+            raise HTTPException(status_code=409, detail="A complete Gmail preview is required.")
+        run = _create_run(tid, None, resume_decision={"type": decision}, dispatch_key=key)
+        _set_status(tid, "processing", pending_run_id=run.id,
+                    started_at=status.get("started_at"))
+        return run, False
+
+
+@app.post("/thread/{tid}/gmail/{decision}")
+def gmail_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
+                   token: str = Form(default="")):
+    """Approve/reject a Gmail action off the event loop, without executing mail inline."""
+    run, replayed = gmail_decision_core(tid, decision, token)
+    if not replayed or run.status == "pending":
+        background_tasks.add_task(_execute_run, run.id, tid)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
@@ -4636,7 +4745,7 @@ async def post_message(tid: str, background_tasks: BackgroundTasks,
             limiter=_get_run_admission_limiter())
     except _EmailApprovalPending:
         raise HTTPException(status_code=409,
-                            detail="Resolve the email awaiting approval before sending a message.")
+                            detail="Resolve the mail action awaiting approval before sending a message.")
     if not busy:
         background_tasks.add_task(_execute_run, run.id, tid)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)

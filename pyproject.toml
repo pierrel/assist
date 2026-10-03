@@ -35,9 +35,13 @@ dependencies = [
     "python-dotenv",
     "python-multipart",
     "requests",
+    "regex",
     "scipy",
     "uvicorn",
 ]
+
+[project.optional-dependencies]
+gmail-setup = ["google-auth-oauthlib"]
 
 [project.scripts]
 assist = "manage.cli:main"

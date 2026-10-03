@@ -276,24 +276,30 @@ class Thread:
         ``tests/test_subagent_durable_resume.py`` + ``tests/test_restart_recovery.py``."""
         return self._run(None)
 
-    def pending_action(self, name: str) -> dict | None:
-        """Return arguments for a named HITL action paused in this durable checkpoint."""
+    def pending_actions(self) -> list[dict]:
+        """Return the ordered HITL actions in this durable checkpoint."""
         try:
             snap = self.agent.get_state(self.runconfig)
         except Exception:
-            logger.warning("pending_action: get_state failed for %s; treating as no pending "
-                           "approval", self.thread_id, exc_info=True)
-            return None
-        for intr in (getattr(snap, "interrupts", None) or ()):
-            value = intr.value or {}
-            for ar in value.get("action_requests", []):
-                if ar.get("name") == name and isinstance(ar.get("args"), dict):
-                    return dict(ar["args"])
-        return None
+            logger.warning("pending_actions: get_state failed for %s", self.thread_id,
+                           exc_info=True)
+            return []
+        return [dict(action) for intr in (getattr(snap, "interrupts", None) or ())
+                for action in (intr.value or {}).get("action_requests", [])
+                if isinstance(action.get("args"), dict)]
+
+    def pending_action(self, name: str) -> dict | None:
+        """Return arguments for a named HITL action paused in this durable checkpoint."""
+        return next((dict(action["args"]) for action in self.pending_actions()
+                     if action.get("name") == name), None)
+
+    def resume_actions(self, decisions: list[dict]) -> str:
+        """Resume ordered HITL actions with one framework decision per request."""
+        return self._run(Command(resume={"decisions": decisions}))
 
     def resume_action(self, decision: dict) -> str:
-        """Resume a paused HITL action with a framework decision."""
-        return self._run(Command(resume={"decisions": [decision]}))
+        """Resume a paused single HITL action with a framework decision."""
+        return self.resume_actions([decision])
 
     def pending_reply(self) -> dict | None:
         """Return a pending ``send_reply`` draft, if this thread is paused for approval."""
