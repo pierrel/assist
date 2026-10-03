@@ -146,6 +146,9 @@ def test_reply_approve_refuses_superseded_draft(client, monkeypatch):
 
 
 def test_email_approval_requires_its_token_and_exact_review(client, monkeypatch):
+    monkeypatch.setenv("EMAIL_FROM_ADDRESS", "assistant@example.test")
+    monkeypatch.setenv("EMAIL_FROM_NAME", "Assistant")
+    monkeypatch.setenv("EMAIL_ALWAYS_CC", "oversight@example.test")
     monkeypatch.setattr(web.MANAGER, "get", lambda tid, **k: object())
     queued = []
     monkeypatch.setattr(threads, "_execute_run", lambda *a: queued.append(a))
@@ -175,6 +178,9 @@ def test_email_approval_requires_its_token_and_exact_review(client, monkeypatch)
 
 
 def test_email_edit_rewrites_only_user_editable_fields(client, monkeypatch):
+    monkeypatch.setenv("EMAIL_FROM_ADDRESS", "assistant@example.test")
+    monkeypatch.setenv("EMAIL_FROM_NAME", "Assistant")
+    monkeypatch.setenv("EMAIL_ALWAYS_CC", "oversight@example.test")
     monkeypatch.setattr(web.MANAGER, "get", lambda tid, **k: object())
     queued = []
     monkeypatch.setattr(threads, "_execute_run", lambda *a: queued.append(a))
