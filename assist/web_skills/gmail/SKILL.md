@@ -22,7 +22,8 @@ one particular meaning, distinguish these dates instead of inventing one.
 
 The scan is bounded to `scan_limit` candidates (default 20, maximum 50). Inspect
 `scanned`, `complete`, `incomplete_bodies`, `skipped` and `next_page_token`.
-Unreadable or oversized candidates are listed in `skipped`; successful matches
+Unexamined candidates, including unreadable, oversized or timed-out messages,
+are listed in `skipped`; successful matches
 and the next-page cursor remain available. Continue with
 the same filters and token when useful; narrow the query for large mailboxes.
 A partial page or truncated body is partial coverage, not proof no mail exists.

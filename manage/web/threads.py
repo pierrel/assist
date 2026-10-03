@@ -2700,7 +2700,7 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
 
 
 def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
-    """Queue the next pending run, user tier first and FIFO within each tier."""
+    """Resume a decided Gmail action before fresh user/FIFO pending turns."""
     runs = _runs().list(tid)
     if any(run.status == "running" for run in runs):
         return
@@ -2715,7 +2715,9 @@ def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
     user = next((run for run in pending_runs
                  if run.mode == "turn" and run.origin is None
                  and run.text is not None), None)
-    selected = user or pending_runs[0]
+    gmail_resume = next((run for run in pending_runs
+                         if run.dispatch_key and run.dispatch_key.startswith("gmail-approval:")), None)
+    selected = gmail_resume or user or pending_runs[0]
     if status.get("stage") in {"initializing", "cloning"}:
         _INITIALIZATION_SCHEDULER.submit(
             selected.id, tid, status.get("domain") or None)
@@ -2889,6 +2891,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # (reported as "error" at the post-block fire). Pauses and early returns
     # exit the function before that fire.
     _terminal: tuple[str, str | None] | None = None
+    gmail_terminal = None
+    queue_handle = None
+    hold_drained = False
 
     def on_queue_wait(stage: str) -> None:
         # `ThreadAffinityQueue.acquire` fires the callback with "queued"
@@ -2934,7 +2939,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 user_priority=(queue_user_priority
                                or (_run is not None and _run.origin is None
                                    and _run.mode == "turn"
-                                   and _run.text is not None))), GitLifecycle.acquire(
+                                   and _run.text is not None))) as queue_handle, GitLifecycle.acquire(
                 MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid),
                 _run.work_id if _run else tid) as git_lifecycle:
             # A queued run remains pending until it actually owns THREAD_QUEUE. This
@@ -2986,7 +2991,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     return
             if not resume and resume_decision is None:
                 if (_get_status(tid).get("pending_email_token")
-                        or _get_status(tid).get("pending_gmail_token")):
+                        or _get_status(tid).get("pending_gmail_token")
+                        or (any(run.dispatch_key and run.dispatch_key.startswith("gmail-approval:")
+                                for run in _runs().list(tid))
+                            and _pending_gmail(MANAGER.get(tid, sandbox_backend=None)))):
                     logging.info("run on %s deferred: mail is awaiting approval", tid)
                     return
             if _run is not None:
@@ -3138,79 +3146,102 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         logging.error("Git model sandbox teardown failed", exc_info=True)
                 else:
                     git_lifecycle.cleanup_model(sandbox_generation)
+            pending_gmail = _pending_gmail(chat)
+            if pending_gmail:
+                MANAGER.touch(tid)
+                gmail_token = secrets.token_urlsafe(16)
+                gmail_terminal = ("awaiting_approval", "Gmail action awaiting approval")
+                _terminal = gmail_terminal
+                with _RUN_ADMISSION_LOCK:
+                    _set_status(tid, "awaiting_approval",
+                                pending_gmail_action=pending_gmail,
+                                pending_gmail_messages=[],
+                                pending_gmail_error="Preparing complete Gmail preview.",
+                                pending_gmail_token=gmail_token,
+                                pending_gmail_run_id=_run.id if _run else None,
+                                started_at=started_at)
+                    if _run is not None:
+                        _runs().transition(tid, _run.id, "awaiting_approval")
             if (git_lifecycle.bound and not chat.pending_reply() and not _pending_email(chat)
-                    and not _pending_gmail(chat)):
+                    and not pending_gmail):
                 try:
                     git_lifecycle.finish_visible(resp or "assistant update", rider.tz if rider else None)
                 except GitSyncError:
                     _terminal = ("error", resp)
                     raise
-        MANAGER.touch(tid)
-
-        # Generate description if there is none
-        try:
-            DESCRIPTION_CACHE.pop(tid, None)
-            get_cached_description(tid)
-        except Exception as e:
-            logging.warning("Description generation failed for %s: %s", tid, e)
-
-        # Git finalization ran inside workspace ownership, including no-file-change turns.
-        # Record this turn's wall-clock elapsed (submit → completion) keyed by turn ordinal,
-        # for the completed-reply badge. Off-loop. Runs at BOTH success exits below (ready
-        # and awaiting_approval), keyed by the turn ordinal — so a HITL turn records
-        # human→proposal here, then the approve resume (started_at preserved, same ordinal)
-        # overwrites it with human→final-reply. The quantum-pause path returns earlier
-        # (ThreadPauseRequested) without reaching here, so a paused slice records nothing.
-        try:
-            _append_timing(tid, _human_ordinal(chat.get_messages()),
-                           (_now_ms() - started_at) / 1000.0)
-        except Exception as e:
-            logging.warning("turn-timing record failed for %s: %s", tid, e)
-        # Second interjection claim site (terminal): claim anything injected
-        # after the last before_model boundary, then END fate-sharing coverage
-        # — the answer is committed, so a later bookkeeping error must not
-        # re-journal an already-answered interjection.
-        _claim_seen_interjections(tid, chat)
-        _TURN_INTERJECTION.pop(tid, None)
-        pending = chat.pending_reply()
-        pending_email = _pending_email(chat)
-        pending_gmail = _pending_gmail(chat)
-        if pending:
-            # Preserve started_at so the HITL approve/reject resume reuses the original
-            # submit time — the approved reply's badge then shows human→final-reply, not
-            # the approval-reaction latency (the resume re-records this turn's ordinal).
-            _set_status(tid, "awaiting_approval",
-                        pending_reply=pending.get("text", ""), pending_sender=sender or "",
-                        started_at=started_at)
-            _terminal = ("awaiting_approval", pending.get("text", ""))
-        elif pending_email and not pending_gmail:
-            _set_status(tid, "awaiting_approval",
-                        pending_email_to=pending_email.get("to", ""),
-                        pending_email_subject=pending_email.get("subject", ""),
-                        pending_email_body=pending_email.get("body", ""),
-                        pending_email_token=secrets.token_urlsafe(16),
-                        started_at=started_at)
-            _terminal = ("awaiting_approval", pending_email.get("body", ""))
-        elif pending_gmail:
+            # Git finalization ran inside workspace ownership, including no-file-change turns.
+            # Record this turn's wall-clock elapsed (submit → completion) keyed by turn ordinal,
+            # for the completed-reply badge. Off-loop. Runs at BOTH success exits below (ready
+            # and awaiting_approval), keyed by the turn ordinal — so a HITL turn records
+            # human→proposal here, then the approve resume (started_at preserved, same ordinal)
+            # overwrites it with human→final-reply. The quantum-pause path returns earlier
+            # (ThreadPauseRequested) without reaching here, so a paused slice records nothing.
+            try:
+                _append_timing(tid, _human_ordinal(chat.get_messages()),
+                               (_now_ms() - started_at) / 1000.0)
+            except Exception as e:
+                logging.warning("turn-timing record failed for %s: %s", tid, e)
+            # Second interjection claim site (terminal): claim anything injected
+            # after the last before_model boundary, then END fate-sharing coverage
+            # — the answer is committed, so a later bookkeeping error must not
+            # re-journal an already-answered interjection.
+            _claim_seen_interjections(tid, chat)
+            _TURN_INTERJECTION.pop(tid, None)
+        if gmail_terminal is not None:
+            THREAD_QUEUE.pop_hold(tid, handle=queue_handle)
+            hold_drained = True
+            # The per-thread approval fence remains visible while provider I/O runs
+            # outside the global queue. Reject may resume meanwhile; only the exact
+            # still-pending card can receive the completed preview.
             try:
                 gmail_messages = gmail_action_preview(pending_gmail)
                 gmail_error = ""
             except GmailError as error:
                 gmail_messages = []
                 gmail_error = str(error)
-            _set_status(tid, "awaiting_approval",
-                        pending_gmail_action=pending_gmail,
-                        pending_gmail_messages=gmail_messages,
-                        pending_gmail_error=gmail_error,
-                        pending_gmail_token=secrets.token_urlsafe(16),
-                        started_at=started_at)
-            _terminal = ("awaiting_approval", gmail_error or "Gmail action awaiting approval")
+            with _RUN_ADMISSION_LOCK:
+                status = _get_status(tid)
+                if (status.get("stage") == "awaiting_approval"
+                        and status.get("pending_gmail_token") == gmail_token):
+                    _set_status(tid, "awaiting_approval", **{
+                        **{key:value for key,value in status.items() if key != "stage"},
+                        "pending_gmail_messages":gmail_messages,
+                        "pending_gmail_error":gmail_error})
         else:
-            _set_status(tid, "ready", mark_unseen=not _quiet_ready(_run))
-            _terminal = ("ready", resp)
-            if origin == "continuation":
-                append_event(MANAGER.thread_dir(tid), "continuation_completed",
-                             id=event_id or "")
+            MANAGER.touch(tid)
+
+            # Generate description if there is none
+            try:
+                DESCRIPTION_CACHE.pop(tid, None)
+                get_cached_description(tid)
+            except Exception as e:
+                logging.warning("Description generation failed for %s: %s", tid, e)
+
+            pending = chat.pending_reply()
+            pending_email = _pending_email(chat)
+            pending_gmail = _pending_gmail(chat)
+            if pending:
+                # Preserve started_at so the HITL approve/reject resume reuses the original
+                # submit time — the approved reply's badge then shows human→final-reply, not
+                # the approval-reaction latency (the resume re-records this turn's ordinal).
+                _set_status(tid, "awaiting_approval",
+                            pending_reply=pending.get("text", ""), pending_sender=sender or "",
+                            started_at=started_at)
+                _terminal = ("awaiting_approval", pending.get("text", ""))
+            elif pending_email and not pending_gmail:
+                _set_status(tid, "awaiting_approval",
+                            pending_email_to=pending_email.get("to", ""),
+                            pending_email_subject=pending_email.get("subject", ""),
+                            pending_email_body=pending_email.get("body", ""),
+                            pending_email_token=secrets.token_urlsafe(16),
+                            started_at=started_at)
+                _terminal = ("awaiting_approval", pending_email.get("body", ""))
+            else:
+                _set_status(tid, "ready", mark_unseen=not _quiet_ready(_run))
+                _terminal = ("ready", resp)
+                if origin == "continuation":
+                    append_event(MANAGER.thread_dir(tid), "continuation_completed",
+                                 id=event_id or "")
     except ThreadPauseRequested:
         # NON-terminal (fair scheduling): the turn yielded the slot at its quantum so a
         # waiting turn could run. Its work is durable in the checkpoint (nothing lost);
@@ -3219,7 +3250,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # resume scheduler — NOT a BackgroundTask (that would park a shared-threadpool
         # worker per paused turn and stall request handling). Carry the active hold it
         # burned so the 2h cap accounts across resumes.
-        carry = THREAD_QUEUE.pop_hold(tid)
+        carry = THREAD_QUEUE.pop_hold(tid, handle=queue_handle)
         logging.info("fair-sched: %s paused (active hold %.0fs carried); queuing resume", tid,
                      carry / 1000.0)
         DOMAIN_MANAGERS.pop(tid, None)  # fresh container on resume; drop the cached backend
@@ -3355,9 +3386,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         **pending_kwargs)
     finally:
         # Drain this turn's persisted active-hold on any TERMINAL exit (success/error)
-        # so it can't leak — the pause path already popped it (to carry) and returned,
-        # so this is a no-op there.
-        THREAD_QUEUE.pop_hold(tid)
+        # so it can't leak. A Gmail proposal drained before preview I/O; a pause
+        # already popped its own handle to carry. Never consume a newer slice.
+        if queue_handle is not None and not hold_drained:
+            THREAD_QUEUE.pop_hold(tid, handle=queue_handle)
 
     # Turn-completion observers (§7.1), fired ONCE after the terminal status is
     # durable AND the queue is released. Terminal exits reach here: ready/awaiting set
@@ -4028,7 +4060,10 @@ def gmail_decision_core(tid: str, decision: str, token: str) -> tuple[Run, bool]
         if decision == "approve" and (status.get("pending_gmail_error")
                                       or not status.get("pending_gmail_messages")):
             raise HTTPException(status_code=409, detail="A complete Gmail preview is required.")
-        run = _create_run(tid, None, resume_decision={"type": decision}, dispatch_key=key)
+        proposal_id = status.get("pending_gmail_run_id")
+        proposal = _runs().get(tid, proposal_id) if proposal_id else None
+        run = _create_run(tid, None, resume_decision={"type": decision}, dispatch_key=key,
+                          work_id=proposal.work_id if proposal else None)
         _set_status(tid, "processing", pending_run_id=run.id,
                     started_at=status.get("started_at"))
         return run, False

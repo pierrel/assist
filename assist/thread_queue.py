@@ -156,7 +156,7 @@ class ThreadAffinityQueue:
         # in ``acquire``'s finally; drained by ``pop_hold`` on every exit (a pause
         # carries the value to the resume; a terminal exit discards it).  Touched
         # only under ``self._cond``, only off the event loop.
-        self._active_hold_ms: dict[str, float] = {}
+        self._active_hold_ms: dict[str, tuple[_Handle, float]] = {}
 
     @contextmanager
     def acquire(
@@ -289,7 +289,7 @@ class ThreadAffinityQueue:
                 if self._holder is handle:
                     slice_ms = (time.time() - handle.acquired_at) * 1000.0
                     self._active_hold_ms[thread_id] = (
-                        handle.accumulated_active_ms + slice_ms)
+                        handle, handle.accumulated_active_ms + slice_ms)
                 self._release_if_holder(handle)
 
     def _release_if_holder(self, handle: _Handle) -> bool:
@@ -370,16 +370,22 @@ class ThreadAffinityQueue:
         remaining_to_cap = handle.hold_timeout_s - cumulative_s
         return max(0.0, min(handle.quantum_s, remaining_to_cap))
 
-    def pop_hold(self, thread_id: str) -> float:
+    def pop_hold(self, thread_id: str, *, handle: _Handle | None = None) -> float:
         """Remove and return the thread's persisted cumulative-active-hold (ms).
 
         Called on EVERY exit of a turn's ``acquire`` block by the run path: a pause
         passes the value to the resume's ``accumulated_active_ms`` seed (so the 2h
         cap can't be dodged by pausing); a terminal exit discards it (a fresh turn
-        starts at 0).  Draining on every exit keeps ``_active_hold_ms`` from growing.
+        starts at 0). An exact handle prevents a delayed terminal worker from
+        draining a newer same-thread slice. Draining on every exit keeps this
+        map from growing.
         """
         with self._cond:
-            return self._active_hold_ms.pop(thread_id, 0.0)
+            saved = self._active_hold_ms.get(thread_id)
+            if saved is None or (handle is not None and saved[0] is not handle):
+                return 0.0
+            del self._active_hold_ms[thread_id]
+            return saved[1]
 
     def _next_waiter(self) -> _Waiter | None:
         """Return the next waiter. Caller must hold ``self._cond``."""

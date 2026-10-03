@@ -1240,6 +1240,7 @@ def _write_skill(root: Path, name: str, description: str, marker: str,
 
 def _web_toolset(root: Path, *, full: bool) -> list:
     from assist.events.email import email_tools
+    from assist.gmail import gmail_tools
     from assist.events.notify import notify_tools
     from assist.events.quiet import quiet_tools
     from assist.events.store import SubscriptionStore
@@ -1255,7 +1256,7 @@ def _web_toolset(root: Path, *, full: bool) -> list:
         + subscription_tools(SubscriptionStore(str(root)))
         + notify_tools(lambda _tid: None)
         + quiet_tools(lambda _tid, _run_id: False)
-        + email_tools()
+        + email_tools() + gmail_tools()
         + [get_location]
         + frequency_tools(FrequencyDecisionStore(str(root)))
     )
@@ -1282,11 +1283,12 @@ def _web_toolset(root: Path, *, full: bool) -> list:
 def _web_config(tools: list) -> Iterator[None]:
     import assist.thread_manager as manager_mod
     from assist.events.email import EMAIL_INTERRUPT_ON
+    from assist.gmail import GMAIL_INTERRUPT_ON
 
     old_tools = manager_mod._web_tools
     old_interrupt = manager_mod._web_interrupt_on
     manager_mod.set_web_tools(tools)
-    manager_mod.set_web_interrupt_on(EMAIL_INTERRUPT_ON)
+    manager_mod.set_web_interrupt_on({**EMAIL_INTERRUPT_ON, **GMAIL_INTERRUPT_ON})
     try:
         yield
     finally:
@@ -1703,6 +1705,10 @@ _TOOL_ORIGINS = {
     "resume_schedule": "assist.schedule.tools",
     "search_internet": "assist.tools",
     "send_email": "assist.events.email",
+    "gmail_search": "assist.gmail",
+    "gmail_read": "assist.gmail",
+    "gmail_archive": "assist.gmail",
+    "gmail_delete": "assist.gmail",
     "start_async_task": "assist.async_subagents",
     "task": "deepagents.middleware.subagents",
     "travel": "assist.tools",
@@ -2128,9 +2134,9 @@ _TOOL_RESULT_METADATA = {
 }
 
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "b83832c07ad98424cc27c49c2a8ab962333d5fdee863eea9de5c75b4e4596823"
+    "011af416c9ce7136a455c146aaf130882caf31270b5ed334ecd0cfbe2b0b603b"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "8a84e4503eda611862995f1d8b10e43de07babfa6c8c59c891df858f5b8d4e95"
+    "938264b2257a527089fd95a671e1716174b302c918906306fccdf537833fc9a3"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:

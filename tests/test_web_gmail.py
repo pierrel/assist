@@ -95,9 +95,15 @@ def test_worker_gmail_proposal_and_approval_resume(client,monkeypatch):
         thread_id="mail-thread"
         pending=False
         decisions=[]
+        messages=[]
         def message(self,text):
-            self.pending=True
-            return "Approval required"
+            self.messages.append(text)
+            if text=="Archive this":
+                # Real admission while the model turn is still processing.
+                self.follower=threads._accept_message_run("mail-thread","Followup")[0]
+                self.pending=True
+                return "Approval required"
+            return "Followup acknowledged"
         def pending_reply(self):
             return None
         def pending_action(self,name):
@@ -118,22 +124,60 @@ def test_worker_gmail_proposal_and_approval_resume(client,monkeypatch):
     monkeypatch.setattr(web.MANAGER,"touch",lambda *a:None)
     monkeypatch.setattr(threads,"_get_sandbox_backend",lambda *a,**k:None)
     monkeypatch.setattr(threads,"_get_domain_manager",lambda *a,**k:None)
-    monkeypatch.setattr(threads,"gmail_action_preview",lambda action:[{
-        "id":"abc123","body":"Full booking", "subject":"Receipt"}])
-    response=client.post("/thread/mail-thread/message",data={"text":"Archive this"},follow_redirects=False)
-    assert response.status_code==303
+    scheduled=[]
+    monkeypatch.setattr(threads._RESUME_SCHEDULER,"submit",lambda *a,**k:scheduled.append(a))
+    import threading
+    preview_started=threading.Event()
+    release_preview=threading.Event()
+    def preview(action):
+        preview_started.set()
+        assert release_preview.wait(2)
+        return [{"id":"abc123","body":"Full booking", "subject":"Receipt"}]
+    monkeypatch.setattr(threads,"gmail_action_preview",preview)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        request=pool.submit(client.post,"/thread/mail-thread/message",
+                            data={"text":"Archive this"},follow_redirects=False)
+        try:
+            assert preview_started.wait(2)
+            queued=threads._create_run("mail-thread","Followup",origin="continuation")
+            continuation=pool.submit(threads._execute_run,queued.id,"mail-thread")
+            assert threads.THREAD_QUEUE.peek_holder() is None
+            continuation.result(2)
+            assert threads._runs().get("mail-thread",queued.id).status=="pending"
+            loading=_get_status("mail-thread")
+            with pytest.raises(HTTPException):
+                threads.gmail_decision_core("mail-thread","approve",loading["pending_gmail_token"])
+        finally:
+            release_preview.set()
+        assert request.result(2).status_code==303
+        continuation.result(2)
     status=_get_status("mail-thread")
     assert status["stage"]=="awaiting_approval"
     assert status["pending_gmail_action"]["name"]=="gmail_archive"
     # A system continuation stays pending rather than entering the interrupted graph.
-    queued=threads._create_run("mail-thread","Followup",origin="continuation")
-    threads._execute_run(queued.id,"mail-thread")
     assert threads._runs().get("mail-thread",queued.id).status=="pending"
     # Avoid executing that artificial continuation after the tested approval resumes.
     threads._runs().transition("mail-thread",queued.id,"cancelled")
-    response=client.post("/thread/mail-thread/gmail/approve",data={"token":status["pending_gmail_token"]},follow_redirects=False)
-    assert response.status_code==303
+    successor,replayed=threads.gmail_decision_core("mail-thread","approve",status["pending_gmail_token"])
+    assert not replayed
+    # A previously admitted user Run cannot enter the paused graph after token consumption.
+    threads._execute_run(chat.follower.id,"mail-thread")
+    assert threads._runs().get("mail-thread",chat.follower.id).status=="pending"
+    assert chat.messages==["Archive this"]
+    threads._dispatch_pending_after("mail-thread")
+    assert scheduled[-1]==(successor.id,"mail-thread")
+    threads._execute_run(successor.id,"mail-thread")
     assert chat.decisions==[{"type":"approve"}]
+    proposal=threads._runs().get("mail-thread",status["pending_gmail_run_id"])
+    successor=threads._runs().get("mail-thread",successor.id)
+    assert successor.work_id==proposal.work_id and successor.status=="success"
+    from manage.web.phone_api import _logical_status
+    projection=_logical_status("mail-thread",proposal.id)
+    assert projection["physical_run_id"]==successor.id and projection["status"]=="success"
+    threads._execute_run(chat.follower.id,"mail-thread")
+    threads._execute_run(chat.follower.id,"mail-thread")
+    assert chat.messages==["Archive this","Followup"]
+    assert threads._runs().get("mail-thread",chat.follower.id).status=="success"
     assert _get_status("mail-thread")["stage"]=="ready"
 
 
@@ -181,3 +225,75 @@ def test_resume_admission_survives_status_write_failure(client,monkeypatch):
     response=client.post("/thread/mail-thread/gmail/approve",data={"token":"exact-token"},follow_redirects=False)
     assert response.status_code==303 and len(calls)==1
     assert len(threads._runs().list("mail-thread"))==1
+
+
+def test_reject_during_preview_preserves_successor_status_and_context(client,monkeypatch):
+    import threading
+    started=threading.Event()
+    release=threading.Event()
+    class Chat:
+        pending=False
+        agent=None
+        def message(self,text):
+            self.pending=True
+            return "Proposal"
+        def pending_reply(self):
+            return None
+        def pending_action(self,name):
+            return {"message_ids":["abc123"]} if self.pending and name=="gmail_delete" else None
+        def pending_actions(self):
+            return [{"name":"gmail_delete","args":{"message_ids":["abc123"]}}] if self.pending else []
+        def resume_actions(self,decisions):
+            assert decisions==[{"type":"reject"}]
+            self.pending=False
+            return "Rejected"
+        def get_messages(self):
+            return [{"role":"user","content":"Trash this"},{"role":"assistant","content":"Proposal"}]
+    chat=Chat()
+    monkeypatch.setattr(web.MANAGER,"get",lambda *a,**k:chat)
+    monkeypatch.setattr(web.MANAGER,"touch",lambda *a:None)
+    monkeypatch.setattr(threads,"_get_sandbox_backend",lambda *a,**k:None)
+    monkeypatch.setattr(threads,"_get_domain_manager",lambda *a,**k:None)
+    def preview(action):
+        started.set()
+        assert release.wait(2)
+        return [{"id":"abc123","body":"Complete preview"}]
+    monkeypatch.setattr(threads,"gmail_action_preview",preview)
+    proposal=threads._create_run("mail-thread","Trash this")
+    context={"claimed":[],"run_id":"a-new-successor-context"}
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending=pool.submit(threads._execute_run,proposal.id,"mail-thread")
+        try:
+            assert started.wait(2)
+            assert threads.THREAD_QUEUE.peek_holder() is None
+            status=_get_status("mail-thread")
+            successor,_=threads.gmail_decision_core("mail-thread","reject",status["pending_gmail_token"])
+            threads._execute_run(successor.id,"mail-thread")
+            assert _get_status("mail-thread")["stage"]=="ready"
+            threads._TURN_INTERJECTION["mail-thread"]=context
+            # Persist a new same-thread slice as a paused successor would.
+            with threads.THREAD_QUEUE.acquire("mail-thread",accumulated_active_ms=2000):
+                pass
+        finally:
+            release.set()
+        pending.result(2)
+    try:
+        assert _get_status("mail-thread")["stage"]=="ready"
+        assert threads._TURN_INTERJECTION["mail-thread"] is context
+        assert threads.THREAD_QUEUE.pop_hold("mail-thread") >= 2000
+        assert threads._runs().get("mail-thread",proposal.id).status=="awaiting_approval"
+        assert threads._runs().get("mail-thread",successor.id).status=="success"
+    finally:
+        threads._TURN_INTERJECTION.pop("mail-thread",None)
+
+
+def test_delayed_queue_owner_cannot_drain_a_newer_same_thread_hold():
+    from assist.thread_queue import ThreadAffinityQueue
+    queue=ThreadAffinityQueue()
+    with queue.acquire("same-thread") as old:
+        pass
+    with queue.acquire("same-thread",accumulated_active_ms=2000) as successor:
+        pass
+    assert queue.pop_hold("same-thread",handle=old)==0
+    assert queue.pop_hold("same-thread",handle=successor)>=2000
+    assert queue.pop_hold("same-thread")==0
