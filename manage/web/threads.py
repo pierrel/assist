@@ -2970,17 +2970,17 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # interrupted graph (langgraph would drop its message). Return
                 # WITHOUT claiming: the entry stays journaled and the approve/reject
                 # resume's own ready exit re-dispatches it. Safe from racing: a
-                # pending reply can only appear from a turn on THIS thread, and we
+                # pending action can only appear from a turn on THIS thread, and we
                 # hold the slot. (Resumes skip this check — a paused continuation
                 # must always be able to continue.)
                 try:
                     pending_chat = MANAGER.get(tid, sandbox_backend=None)
-                    _has_pending_reply = bool(
+                    _has_pending_action = bool(
                         pending_chat.pending_reply() or _pending_email(pending_chat)
                         or _pending_gmail(pending_chat))
                 except FileNotFoundError:
                     return   # thread deleted while queued — silent skip like every path
-                if _has_pending_reply:
+                if _has_pending_action:
                     logging.info("continuation on %s deferred: an action is awaiting "
                                  "approval", tid)
                     return
