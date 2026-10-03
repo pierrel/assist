@@ -140,8 +140,8 @@ def test_gmail_preview_and_reject_only_error_share_owner_contract(approval, monk
     assert proposal["action"]["args"]["message_ids"] == ["abc"]
     calls = []
 
-    def core(tid, decision, token, *, expected_action_kind=None):
-        calls.append((tid, decision, token, expected_action_kind))
+    def core(tid, decision, token, *, expected_kind=None):
+        calls.append((tid, decision, token, expected_kind))
         return type("Run", (), {"id": "resume-run", "status": "pending"})(), False
 
     monkeypatch.setattr(threads, "gmail_decision_core", core, raising=False)
@@ -158,10 +158,10 @@ def test_phone_binds_gmail_kind_to_owner_admission(approval, monkeypatch):
                       pending_gmail_messages=[])
     before = state._get_status("thread-a")
 
-    def core(tid, decision, token, *, expected_action_kind=None):
+    def core(tid, decision, token, *, expected_kind=None):
         with threads._RUN_ADMISSION_LOCK:
-            if (expected_action_kind is not None
-                    and state._get_status(tid)["pending_gmail_action"]["name"] != expected_action_kind):
+            if (expected_kind is not None
+                    and state._get_status(tid)["pending_gmail_action"]["name"] != expected_kind):
                 raise HTTPException(status_code=409, detail="Mailbox action changed")
             return type("Run", (), {"id": "resume-run", "status": "pending"})(), False
 

@@ -1155,7 +1155,7 @@ def _approval_decision(tid: str, body: _ApprovalDecision):
         raise HTTPException(status_code=409, detail="Mailbox approval is unavailable")
     if body.decision == "edit" or body.to or body.subject or body.body:
         raise HTTPException(status_code=422, detail="Mailbox decisions cannot edit messages")
-    return core(tid, body.decision, body.token, expected_action_kind=body.kind)
+    return core(tid, body.decision, body.token, expected_kind=body.kind)
 
 
 @router.get("/threads/{tid}/approval")
