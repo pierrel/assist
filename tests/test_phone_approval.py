@@ -79,7 +79,8 @@ def test_edited_email_uses_only_the_user_editable_fields(approval):
     assert response.status_code == 200 and len(scheduled) == 1
     assert runs.get("thread-a", response.json()["run_id"]).resume_decision == {
         "type": "edit", "edited_action": {"name": "send_email", "args": {
-            "to": "edited@example.test", "subject": "Edited", "body": "New\nbody"}}}
+            "to": "edited@example.test", "subject": "Edited", "body": "New\nbody"}},
+        "email_review_identity": ["Assistant <assistant@example.test>", "oversight@example.test"]}
     assert _proposal(client) is None
 
 
@@ -207,7 +208,7 @@ def test_real_hitl_resumes_only_the_displayed_email(decision):
     chat.agent, chat.runconfig, chat.thread_id = agent, config, "isolated-email"
     chat._run = lambda command: agent.invoke(command, config)
     assert chat.pending_email() == first
-    threads._resume_email(chat, decision)
+    threads._resume_email(chat, {**decision, "email_review_identity": ["From", "Cc"]})
     expected = ([] if decision["type"] == "reject" else
                 [decision["edited_action"]["args"] if decision["type"] == "edit" else first])
     assert sent == expected
@@ -246,3 +247,39 @@ def test_legacy_non_run_proposal_does_not_inherit_an_old_awaiting_work(approval)
     assert response.status_code == 200
     resumed = runs.get("thread-a", response.json()["run_id"])
     assert resumed.work_id != old.work_id
+
+
+@pytest.mark.parametrize("kind", ["email", "gmail"])
+@pytest.mark.parametrize("handle", ["original", "resume"])
+def test_phone_cannot_cancel_an_accepted_approval_decision(approval, kind, handle):
+    client, runs, _ = approval
+    original = runs.create("thread-a", "general-agent", "Review this action")
+    runs.claim("thread-a", original.id)
+    runs.transition("thread-a", original.id, "awaiting_approval")
+    if kind == "email":
+        status = state._get_status("thread-a")
+        status.pop("stage")
+        state._set_status("thread-a", "awaiting_approval", **status, pending_email_run_id=original.id)
+        response = client.post(URL, headers=HEADERS, json={
+            "kind": "send_email", "token": _proposal(client)["token"], "decision": "approve"})
+        assert response.status_code == 200
+        resumed = runs.get("thread-a", response.json()["run_id"])
+    else:
+        resumed = runs.create("thread-a", "general-agent", None, work_id=original.work_id,
+                              dispatch_key="gmail-approval:token", resume_decision={"type": "approve"})
+        state._set_status("thread-a", "processing", pending_run_id=resumed.id)
+    before = state._get_status("thread-a")
+    run_id = original.id if handle == "original" else resumed.id
+    response = client.delete(f"/api/v1/phone/threads/thread-a/runs/{run_id}", headers=HEADERS)
+    assert response.status_code == 409 and response.json()["outcome"] == "pending"
+    assert runs.get("thread-a", resumed.id).status == "pending"
+    assert state._get_status("thread-a") == before
+
+
+def test_reviewed_email_identity_is_durable_before_dispatch(approval):
+    client, runs, _ = approval
+    response = client.post(URL, headers=HEADERS, json={
+        "kind": "send_email", "token": _proposal(client)["token"], "decision": "approve"})
+    reloaded = RunService(runs.root_dir).get("thread-a", response.json()["run_id"])
+    assert reloaded.resume_decision["email_review_identity"] == [
+        "Assistant <assistant@example.test>", "oversight@example.test"]

@@ -446,6 +446,11 @@ and `body`. Email tokens bind
 the fixed sender and Cc as well as the message. Decisions reuse the web HITL
 resume path, run off the event loop, and cannot consume a newer proposal. Complete
 approval responses and request bodies are bounded to 512 KiB without truncation.
+Email approval resumes persist the reviewed sender and fixed Cc. If they change
+before dispatch, the checkpoint keeps its original proposal for fresh review;
+reapply any edits before approving again. The email tool checks that reviewed
+identity against its captured delivery configuration. Once a decision is accepted,
+phone Run cancellation returns HTTP 409 without cancelling it or losing its receipt.
 The EmacsOS client offers scrollable previews, two-tap decisions and an email
 editor. Gmail archive/Trash decisions require the separately installed Gmail tools.
 The exact request, cursor, event, failure, and repository-label contract is in

@@ -786,3 +786,54 @@ def test_email_proposal_is_published_before_the_queue_slot_is_released(client, m
     assert len(publications) == 1
     assert _get_status("thread-e2e")["stage"] == "queued"
     assert threads._TURN_INTERJECTION.pop("thread-e2e") is successor_context
+
+
+def test_touch_failure_does_not_erase_a_published_email_proposal(client, monkeypatch):
+    class Chat:
+        def message(self, _text):
+            return "Review this email"
+
+        def pending_reply(self):
+            return None
+
+        def pending_email(self):
+            return {"to": "person@example.test", "subject": "Subject", "body": "Full body"}
+
+        def get_messages(self):
+            return []
+
+    _stub_happy_path(monkeypatch, Chat())
+    monkeypatch.setattr(web.MANAGER, "touch", lambda tid: (_ for _ in ()).throw(OSError("utime")))
+    run = threads._create_run("thread-e2e", "Email this person")
+    threads._execute_run(run.id, "thread-e2e")
+    status = _get_status("thread-e2e")
+    assert status["stage"] == "awaiting_approval"
+    assert status["pending_email_body"] == "Full body"
+    assert threads._runs().get("thread-e2e", run.id).status == "awaiting_approval"
+
+
+def test_changed_delivery_identity_requires_fresh_review_without_resuming(client, monkeypatch):
+    class Chat:
+        resumed = False
+
+        def pending_reply(self):
+            return None
+
+        def pending_email(self):
+            return {"to": "person@example.test", "subject": "Subject", "body": "Full body"}
+
+        def pending_actions(self):
+            raise AssertionError("Changed identity must not resume the interrupted checkpoint")
+
+        def get_messages(self):
+            return []
+
+    _stub_happy_path(monkeypatch, Chat())
+    monkeypatch.setattr(threads, "email_identity", lambda: ("New <new@example.test>", "cc@example.test"))
+    run = threads._create_run("thread-e2e", None, resume_decision={"type": "approve",
+        "email_review_identity": ["Old <old@example.test>", "cc@example.test"]})
+    threads._execute_run(run.id, "thread-e2e")
+    status = _get_status("thread-e2e")
+    assert status["stage"] == "awaiting_approval" and status["pending_email_token"]
+    assert threads._runs().get("thread-e2e", run.id).status == "awaiting_approval"
+    assert threads.email_approval_preview(status)["from"] == "New <new@example.test>"

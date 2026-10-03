@@ -67,7 +67,7 @@ from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
 from assist.location import LOCATION_CONTEXT_KEY, LocationSnapshot
 from assist.frequency import FREQUENCY_RUN_ID_KEY
 from assist.events.reply import SMS_SENDER_KEY
-from assist.events.email import email_identity, valid_email_content
+from assist.events.email import EMAIL_REVIEW_IDENTITY_KEY, email_identity, valid_email_content
 from assist.schedule.scheduler import Scheduler
 from manage.web.drain import DrainClosed, RUN_GATE
 from assist.sandbox import SandboxContainerLostError
@@ -1979,8 +1979,10 @@ def _resume_email(chat, decision: dict) -> str:
     requests = chat.pending_actions()
     selected = next(index for index, action in enumerate(requests)
                     if action.get("name") == "send_email" and action.get("args") == pending)
+    action_decision = {key: value for key, value in decision.items()
+                       if key != EMAIL_REVIEW_IDENTITY_KEY}
     return chat.resume_actions([
-        decision if index == selected else {
+        action_decision if index == selected else {
             "type": "reject", "message": "This action was not displayed for approval. Propose it separately."}
         for index in range(len(requests))])
 
@@ -3019,6 +3021,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         _cfg[SMS_SENDER_KEY] = sender
                     elif _run is not None and _run.mode == "turn" and assistant_id == "general-agent":
                         _cfg["web_run_id"] = _run.id
+                    if _run is not None and _run.resume_decision is not None:
+                        _cfg[EMAIL_REVIEW_IDENTITY_KEY] = _run.resume_decision.get(EMAIL_REVIEW_IDENTITY_KEY)
                     _cfg.update(_frequency_configurable(
                         _run, sender=sender, assistant_id=assistant_id) or {})
                     # A triage turn (sender set) gets the reduced, HITL-gated tool surface.
@@ -3050,7 +3054,13 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     if chat.pending_reply():
                         resp = chat.resume_reply(resume_decision)
                     elif _pending_email(chat):
-                        resp = _resume_email(chat, resume_decision)
+                        if (resume_decision.get("type") != "reject"
+                                and resume_decision.get(EMAIL_REVIEW_IDENTITY_KEY)
+                                != list(email_identity() or ("", ""))):
+                            # Keep the checkpoint interrupted and publish a fresh proposal.
+                            resp = ""
+                        else:
+                            resp = _resume_email(chat, resume_decision)
                     else:
                         resp = ""
                 else:
@@ -3138,7 +3148,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                 started_at=started_at)
                     if _run is not None:
                         _runs().transition(tid, _run.id, "awaiting_approval")
-        MANAGER.touch(tid)
+        try:
+            MANAGER.touch(tid)
+        except OSError:
+            logging.warning("Thread activity timestamp could not be updated for %s", tid, exc_info=True)
 
         # Generate description if there is none
         try:
@@ -3966,7 +3979,8 @@ def email_decision_core(tid: str, decision: str, token: str, *,
                         preview_token: bool = False) -> tuple[Run, bool]:
     """Atomically accept one exact email decision for browser or phone callers.
 
-    Phone tokens also bind the fixed From/Cc preview. The durable dispatch key
+    Phone tokens bind the fixed From/Cc preview, which remains durable in the
+    resume's host-only identity metadata and is enforced at delivery. The dispatch key
     prevents duplicate resumes if status publication fails after Run creation.
     The resume retains the awaiting Run's logical work identity, so its accepted
     phone handle follows the decision through completion. Legacy non-Run proposals
@@ -3983,8 +3997,9 @@ def email_decision_core(tid: str, decision: str, token: str, *,
         expected_token = status.get("pending_email_token")
         if status.get("stage") != "awaiting_approval" or not isinstance(expected_token, str):
             raise HTTPException(status_code=409, detail="This thread has no email awaiting approval.")
+        proposal = email_approval_preview(status)
         if preview_token:
-            expected_token = email_approval_preview(status)["token"]
+            expected_token = proposal["token"]
         if not hmac.compare_digest(token, expected_token):
             raise HTTPException(status_code=409, detail="This email was updated; reload and review it.")
         if decision == "approve":
@@ -3999,6 +4014,8 @@ def email_decision_core(tid: str, decision: str, token: str, *,
         if decision == "edit" and not valid_email_content(to, subject, body):
             raise HTTPException(status_code=400, detail="The edited email is invalid.")
         resume_decision = _EMAIL_DECISIONS[decision](to, subject, body)
+        if decision != "reject":
+            resume_decision[EMAIL_REVIEW_IDENTITY_KEY] = [proposal["from"], proposal["cc"]]
         dispatch_key = "email-approval:" + status["pending_email_token"]
         runs = _runs().list(tid)
         replay = next((run for run in runs if run.dispatch_key == dispatch_key), None)

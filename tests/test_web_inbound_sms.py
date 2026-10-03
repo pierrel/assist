@@ -170,7 +170,8 @@ def test_email_approval_requires_its_token_and_exact_review(client, monkeypatch)
         "seen_subject": "Subject", "seen_body": "Body"}, follow_redirects=False)
     assert approved.status_code == 303 and len(queued) == 1
     run = threads._runs().get("t-sub", queued[0][0])
-    assert run.resume_decision == {"type": "approve"}
+    assert run.resume_decision == {"type": "approve",
+        "email_review_identity": list(threads.email_identity() or ("", ""))}
 
 
 def test_email_edit_rewrites_only_user_editable_fields(client, monkeypatch):
@@ -189,7 +190,8 @@ def test_email_edit_rewrites_only_user_editable_fields(client, monkeypatch):
     run = threads._runs().get("t-sub", queued[0][0])
     assert run.resume_decision == {
         "type": "edit", "edited_action": {"name": "send_email", "args": {
-            "to": "b@example.test", "subject": "Edited", "body": "Edited body"}}}
+            "to": "b@example.test", "subject": "Edited", "body": "Edited body"}},
+        "email_review_identity": list(threads.email_identity() or ("", ""))}
 
 
 def test_message_post_refuses_while_email_is_awaiting_approval(client):
