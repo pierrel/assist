@@ -177,6 +177,19 @@ def test_email_approval_requires_its_token_and_exact_review(client, monkeypatch)
         "email_review_identity": list(threads.email_identity() or ("", ""))}
 
 
+def test_email_unicode_token_refuses_without_consuming_proposal(client):
+    _set_status("t-sub", "awaiting_approval", pending_email_to="a@example.test",
+                pending_email_subject="Subject", pending_email_body="Body",
+                pending_email_token="approval-token")
+    before = threads._get_status("t-sub")
+
+    response = client.post("/thread/t-sub/email/reject", data={"token": "é"})
+
+    assert response.status_code == 409
+    assert threads._get_status("t-sub") == before
+    assert threads._runs().list("t-sub") == []
+
+
 def test_email_edit_rewrites_only_user_editable_fields(client, monkeypatch):
     monkeypatch.setenv("EMAIL_FROM_ADDRESS", "assistant@example.test")
     monkeypatch.setenv("EMAIL_FROM_NAME", "Assistant")

@@ -4000,7 +4000,7 @@ def email_decision_core(tid: str, decision: str, token: str, *,
         proposal = email_approval_preview(status)
         if preview_token:
             expected_token = proposal["token"]
-        if not hmac.compare_digest(token, expected_token):
+        if not token.isascii() or not hmac.compare_digest(token, expected_token):
             raise HTTPException(status_code=409, detail="This email was updated; reload and review it.")
         if decision == "approve":
             pending = (status.get("pending_email_to", ""), status.get("pending_email_subject", ""),
