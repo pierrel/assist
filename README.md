@@ -405,6 +405,15 @@ until `ASSIST_PHONE_API_TOKEN` is set in an ignored owner-only deployment
 environment file. Send that value only as `Authorization: Bearer <token>` from
 the phone; never pass it into a sandbox or commit it. The API exposes visible
 thread snapshots, durable idempotent sends, and bounded workspace snapshots.
+`GET /threads/{tid}/approval` returns a complete pending email or Gmail mailbox
+proposal. `POST` to the same path requires `kind`, `token`, and `decision` (`approve`
+or `reject`); outbound email also accepts `decision="edit"` with `to`, `subject`
+and `body`. Email tokens bind
+the fixed sender and Cc as well as the message. Decisions reuse the web HITL
+resume path, run off the event loop, and cannot consume a newer proposal. Complete
+approval responses and request bodies are bounded to 512 KiB without truncation.
+The EmacsOS client offers scrollable previews, two-tap decisions and an email
+editor. Gmail archive/Trash decisions require the separately installed Gmail tools.
 The exact request, cursor, event, failure, and repository-label contract is in
 [the phone API design note](docs/2026-09-04-phone-api.org), amended for
 [mature-thread message admission](docs/2026-09-07-phone-api-mature-thread-admission.org),

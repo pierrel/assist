@@ -8,6 +8,7 @@ synchronous ``_process_message`` turn implementation. This module also owns
 from __future__ import annotations
 
 import html
+import hashlib
 import io
 import json
 import logging
@@ -1962,6 +1963,18 @@ def _pending_email(chat) -> dict | None:
     return pending() if pending is not None else None
 
 
+def _resume_email(chat, decision: dict) -> str:
+    """Resume the displayed email and reject other unseen gated requests."""
+    pending = _pending_email(chat)
+    requests = chat.pending_actions()
+    selected = next(index for index, action in enumerate(requests)
+                    if action.get("name") == "send_email" and action.get("args") == pending)
+    return chat.resume_actions([
+        decision if index == selected else {
+            "type": "reject", "message": "This action was not displayed for approval. Propose it separately."}
+        for index in range(len(requests))])
+
+
 _RUN_SERVICES_BY_ROOT = {RUN_SERVICE.root_dir: RUN_SERVICE}
 _RUN_SERVICES_LOCK = threading.Lock()
 _PI_CONVERSATIONS = PiConversationStore()
@@ -2774,7 +2787,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # `origin` ("continuation", "task-completion", or None) keys
     # the render surfaces (agent-note bubble, "Following up" banner), the origin-aware
     # failure path, and recovery fidelity — persisted in every busy status write below.
-    # `resume_decision` (set only when approving/rejecting a pending send_reply) resumes the
+    # `resume_decision` (set when deciding a pending HITL action) resumes the
     # paused graph instead of starting a new turn — reusing this path's sandbox/queue/sync.
     # `resume=True` (set only by the fair-scheduling resume scheduler after a quantum pause)
     # continues this thread's in-flight turn from its durable checkpoint (input=None) rather
@@ -3018,7 +3031,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     if chat.pending_reply():
                         resp = chat.resume_reply(resume_decision)
                     elif _pending_email(chat):
-                        resp = chat.resume_action(resume_decision)
+                        resp = _resume_email(chat, resume_decision)
                     else:
                         resp = ""
                 else:
@@ -3909,30 +3922,76 @@ def email_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
                    seen_to: str = Form(default=""), seen_subject: str = Form(default=""),
                    seen_body: str = Form(default="")):
     """Approve, edit, or reject the exact pending email proposal off the event loop."""
+    run, replayed = email_decision_core(
+        tid, decision, token, to=to, subject=subject, body=body,
+        seen_to=seen_to, seen_subject=seen_subject, seen_body=seen_body)
+    if not replayed or run.status == "pending":
+        background_tasks.add_task(_execute_run, run.id, tid)
+    return RedirectResponse(url=f"/thread/{tid}", status_code=303)
+
+
+def email_approval_preview(status: dict) -> dict:
+    """Bind the complete email, including fixed delivery identity, to its preview."""
+    identity = email_identity()
+    sender, cc = identity if identity else ("Email sender is not configured", "")
+    action = {"name": "send_email", "args": {
+        "to": status.get("pending_email_to", ""),
+        "subject": status.get("pending_email_subject", ""),
+        "body": status.get("pending_email_body", "")}}
+    token = hashlib.sha256(json.dumps(
+        [status["pending_email_token"], sender, cc, action],
+        sort_keys=True).encode()).hexdigest()
+    return {"kind": "send_email", "token": token, "action": action,
+            "from": sender, "cc": cc}
+
+
+def email_decision_core(tid: str, decision: str, token: str, *,
+                        to: str = "", subject: str = "", body: str = "",
+                        seen_to: str = "", seen_subject: str = "", seen_body: str = "",
+                        preview_token: bool = False) -> tuple[Run, bool]:
+    """Atomically accept one exact email decision for browser or phone callers.
+
+    Phone tokens also bind the fixed From/Cc preview. The durable dispatch key
+    prevents duplicate resumes if status publication fails after Run creation.
+    Callers schedule new or still-pending Runs, including a replay after a failed
+    status write. The executor's claim gate handles duplicate dispatch safely.
+    """
     _existing_thread_dir(tid)
     _require_deep_thread(tid)
     if decision not in _EMAIL_DECISIONS:
         raise HTTPException(status_code=400, detail="decision must be approve, reject or edit")
-    status = _get_status(tid)
-    expected_token = status.get("pending_email_token")
-    if (status.get("stage") != "awaiting_approval" or not isinstance(expected_token, str)
-            or not hmac.compare_digest(token, expected_token)):
-        raise HTTPException(status_code=409, detail="This thread has no email awaiting approval.")
-    if decision == "approve":
-        pending = (status.get("pending_email_to", ""), status.get("pending_email_subject", ""),
-                   status.get("pending_email_body", ""))
-        seen = (seen_to, seen_subject, seen_body.replace("\r\n", "\n"))
-        current = (pending[0], pending[1], pending[2].replace("\r\n", "\n"))
-        submitted = (to, subject, body.replace("\r\n", "\n"))
-        if seen != current or submitted != current:
-            raise HTTPException(status_code=409,
-                                detail="This email was updated — reload and review it.")
-    if decision == "edit" and not valid_email_content(to, subject, body):
-        raise HTTPException(status_code=400, detail="The edited email is invalid.")
-    run = _create_run(tid, None,
-                      resume_decision=_EMAIL_DECISIONS[decision](to, subject, body))
-    background_tasks.add_task(_execute_run, run.id, tid)
-    return RedirectResponse(url=f"/thread/{tid}", status_code=303)
+    with _RUN_ADMISSION_LOCK:
+        status = _get_status(tid)
+        expected_token = status.get("pending_email_token")
+        if status.get("stage") != "awaiting_approval" or not isinstance(expected_token, str):
+            raise HTTPException(status_code=409, detail="This thread has no email awaiting approval.")
+        if preview_token:
+            expected_token = email_approval_preview(status)["token"]
+        if not hmac.compare_digest(token, expected_token):
+            raise HTTPException(status_code=409, detail="This email was updated; reload and review it.")
+        if decision == "approve":
+            pending = (status.get("pending_email_to", ""), status.get("pending_email_subject", ""),
+                       status.get("pending_email_body", ""))
+            current = (pending[0], pending[1], pending[2].replace("\r\n", "\n"))
+            seen = (seen_to, seen_subject, seen_body.replace("\r\n", "\n"))
+            submitted = (to, subject, body.replace("\r\n", "\n"))
+            if not preview_token and (seen != current or submitted != current):
+                raise HTTPException(status_code=409,
+                                    detail="This email was updated — reload and review it.")
+        if decision == "edit" and not valid_email_content(to, subject, body):
+            raise HTTPException(status_code=400, detail="The edited email is invalid.")
+        resume_decision = _EMAIL_DECISIONS[decision](to, subject, body)
+        dispatch_key = "email-approval:" + status["pending_email_token"]
+        replay = next((run for run in _runs().list(tid)
+                       if run.dispatch_key == dispatch_key), None)
+        if replay is not None and replay.resume_decision != resume_decision:
+            raise HTTPException(status_code=409, detail="This email already has a decision.")
+        run = replay or _create_run(tid, None, dispatch_key=dispatch_key,
+                                    resume_decision=resume_decision)
+        queued_status = {key: value for key, value in status.items() if key != "stage"}
+        queued_status["pending_run_id"] = run.id
+        _set_status(tid, "queued", **queued_status)
+        return run, replay is not None
 
 
 # The single in-process scheduler (the web runs one uvicorn worker). Started/stopped by
