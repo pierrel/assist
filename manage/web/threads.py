@@ -2843,7 +2843,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # `origin` ("continuation", "task-completion", or None) keys
     # the render surfaces (agent-note bubble, "Following up" banner), the origin-aware
     # failure path, and recovery fidelity — persisted in every busy status write below.
-    # `resume_decision` (set only when approving/rejecting a pending send_reply) resumes the
+    # `resume_decision` carries a reply, email or Gmail approval decision and resumes the
     # paused graph instead of starting a new turn — reusing this path's sandbox/queue/sync.
     # `resume=True` (set only by the fair-scheduling resume scheduler after a quantum pause)
     # continues this thread's in-flight turn from its durable checkpoint (input=None) rather
@@ -2940,8 +2940,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
 
     try:
         # Acquire the queue BEFORE starting the sandbox.  We create a fresh
-        # container per turn and tear it down when the turn ends; creating it
-        # only after acquiring the queue means it never ages against the 3h
+        # container per turn and attempt teardown at turn end; shutdown proves
+        # removal of retained generations. Creating only after acquiring the
+        # queue means it never ages against the 3h
         # backstop TTL (sleep 10800 in Dockerfile.sandbox) while waiting in
         # line (behind a holder past its hold_timeout_s, or many backlogged
         # threads).  Observed pre-defer on 2026-05-30 thread
@@ -3035,8 +3036,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             sandbox = None
             sandbox_generation = None
             try:
-                # Inside the try so the `finally` reaps even if sandbox
-                # creation registers a container and then raises — cleanup
+                # Inside the try so `finally` attempts cleanup even if sandbox
+                # creation registers a container and then raises; cleanup
                 # keys on work_dir, not on the `sandbox` handle.
                 try:
                     sandbox = _get_sandbox_backend(
@@ -3135,7 +3136,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                             # inline: this is INSIDE the
                             # THREAD_QUEUE.acquire scope, and a synchronous observer would then
                             # run while holding the global single-flight slot, stalling every
-                            # turn. Unwind instead (reaping the container via the finally,
+                            # turn. Unwind instead (attempting cleanup via the finally,
                             # releasing the queue) to the common notify at the function end.
                             _terminal = ("awaiting_approval", _pending_text)
                             raise _SupersedeCapReached
