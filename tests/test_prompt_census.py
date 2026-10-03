@@ -1374,3 +1374,56 @@ def test_email_tools_are_web_only_skill_scoped_and_hidden_at_bootstrap(census):
                        for tool in surface["registered_tools"] if tool["name"] in names)
         else:
             assert names.isdisjoint(registered)
+
+
+def test_census_saves_checkpoint_before_starting_the_next_step(tmp_path):
+    import sqlite3
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from typing import TypedDict
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.graph import END, START, StateGraph
+
+    entered = threading.Event()
+    release = threading.Event()
+    saved = threading.Event()
+    next_step = threading.Event()
+    observed = []
+
+    class Saver(SqliteSaver):
+        def put(self, config, checkpoint, metadata, new_versions):
+            if checkpoint["channel_values"].get("step") == 1:
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError("test checkpoint was not released")
+                result = super().put(config, checkpoint, metadata, new_versions)
+                saved.set()
+                return result
+            return super().put(config, checkpoint, metadata, new_versions)
+
+    class State(TypedDict):
+        messages: list
+        step: int
+
+    def second(state):
+        observed.append(saved.is_set())
+        next_step.set()
+        return {"step": 2}
+
+    graph = StateGraph(State)
+    graph.add_node("first", lambda state: {"step": 1})
+    graph.add_node("second", second)
+    graph.add_edge(START, "first")
+    graph.add_edge("first", "second")
+    graph.add_edge("second", END)
+    with sqlite3.connect(tmp_path / "census.db", check_same_thread=False) as connection:
+        agent = graph.compile(checkpointer=Saver(connection))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(prompt_census._invoke_agent, agent, "checkpoint-order")
+            try:
+                assert entered.wait(5)
+                assert not next_step.wait(0.1), "next step overtook its checkpoint"
+            finally:
+                release.set()
+            assert result.result(timeout=5)["step"] == 2
+        assert observed == [True]

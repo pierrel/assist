@@ -1302,6 +1302,7 @@ def _invoke_agent(agent, scenario: str, config: dict[str, Any] | None = None):
     return agent.invoke(
         {"messages": [HumanMessage(content=f"SYNTHETIC USER {scenario}")]},
         config,
+        durability="sync",
     )
 
 
@@ -1317,16 +1318,10 @@ def _invoke_web(trace: CensusTrace, root: Path, *, full: bool,
                 delegate: bool = False) -> dict[str, Any]:
     from assist.context_rider import CONTEXT_RIDER_KEY, ContextRider
     from assist.thread_manager import ThreadManager
-    from langgraph.checkpoint.memory import InMemorySaver
 
     name = "web-delegate" if delegate else ("web-main-full" if full else "web-main-core")
     manager = ThreadManager(str(root / name / "threads"))
     manager._model = RecordingChatModel(trace)
-    # ThreadManager.get is the production composition seam.  Its SQLite saver is
-    # irrelevant to request composition and can self-deadlock under a synthetic
-    # rapid multi-tool loop (the same chained-put shape production avoids with
-    # sync durability).  Keep the real constructor, replace only persistence.
-    manager.checkpointer = InMemorySaver()
     tid = f"synthetic-{name}"
     thread_dir = Path(manager.thread_dir(tid))
     working_dir = Path(manager.make_default_working_dir(str(thread_dir)))
