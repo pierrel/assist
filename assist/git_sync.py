@@ -687,8 +687,8 @@ class _Store:
             self.git("update-ref", "refs/assist/snapshot-main", main)
         return before
 
-    def fetch(self, source: str, branch: str) -> str | None:
-        # Wildcard-free branch selector; absent branch is distinct from failed auth/fetch.
+    def remote_ref(self, source: str, branch: str) -> str | None:
+        """Read one exact source ref without accepting a wildcard selector."""
         listing = self.git("ls-remote", "--refs", source, "refs/heads/" + branch)
         remote = None
         if listing:
@@ -696,6 +696,11 @@ class _Store:
             if len(fields) != 2 or fields[1] != "refs/heads/" + branch or not _OID.fullmatch(fields[0]):
                 raise GitSyncError("Remote branch identity is invalid")
             remote = fields[0]
+        return remote
+
+    def fetch(self, source: str, branch: str) -> str | None:
+        # Wildcard-free branch selector; absent branch is distinct from failed auth/fetch.
+        remote = self.remote_ref(source, branch)
         refs = ["refs/heads/main:refs/remotes/origin/main"]
         if remote is not None:
             refs.append("refs/heads/" + branch + ":refs/remotes/origin/thread")
@@ -846,6 +851,48 @@ class GitSync:
 
     def sandbox_stopped(self) -> None:
         self.state["sandbox_in_flight"] = False
+        _write_state(self.thread_dir, self.state)
+
+    def validate_merge_candidate(self) -> None:
+        """Refuse an unsafe handoff before the user-gated main merge has effects."""
+        branch, revision = self.state["branch"], self.state["local_revision"]
+        if (not branch or not revision or self.state.get("sandbox_in_flight")
+                or self.state.get("quarantine") or self.state.get("intent")
+                or self.state["preflights"]
+                or self.state["published"].get(branch) != revision
+                or (self.state.get("published_branch"), self.state.get("published_revision"))
+                != (branch, revision)):
+            raise GitSyncError("Thread merge needs Git branch reconciliation")
+        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
+            store = _Store(path)
+            if (store.snapshot(self.worktree) != (branch, revision)
+                    or store.remote_ref(self.state["source"], branch) != revision):
+                raise GitSyncError("Thread branch changed before merge")
+
+    def record_merged_branch(self) -> None:
+        """Follow a successful user-gated main merge without publishing its new branch."""
+        old_branch, old_revision = self.state["branch"], self.state["local_revision"]
+        branch, revision = identity(self.worktree)
+        if branch == old_branch:
+            if revision != old_revision:
+                raise GitSyncError("Thread branch changed during merge")
+            return  # A pending main push did not rebranch this thread.
+        if (self.state.get("sandbox_in_flight") or self.state.get("quarantine")
+                or self.state.get("intent") or self.state["preflights"]
+                or self.state["published"].get(old_branch) != old_revision
+                or (self.state.get("published_branch"), self.state.get("published_revision"))
+                != (old_branch, old_revision)):
+            raise GitSyncError("Post-merge thread branch needs operator reconciliation")
+        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
+            store = _Store(path)
+            if (store.snapshot(self.worktree) != (branch, revision)
+                    or store.fetch(self.state["source"], "main") != revision
+                    or store.remote_ref(self.state["source"], old_branch) != old_revision):
+                raise GitSyncError("Post-merge Git source or branch changed")
+        if identity(self.worktree) != (branch, revision):
+            raise GitSyncError("Post-merge thread branch changed during verification")
+        self.state.update(branch=branch, local_revision=revision,
+                          published_branch=None, published_revision=None, error=None)
         _write_state(self.thread_dir, self.state)
 
     def _branch(self) -> tuple[str, str]:

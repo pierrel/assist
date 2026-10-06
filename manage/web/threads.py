@@ -5462,9 +5462,11 @@ def merge_thread(tid: str):
 
     with MERGE_LOCK, ExitStack() as merge_scope:
         try:
-            merge_scope.enter_context(GitLifecycle.acquire(
+            git_lifecycle = merge_scope.enter_context(GitLifecycle.acquire(
                 MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid)))
+            git_lifecycle.validate_merge_candidate()
             dm.merge_and_push()
+            git_lifecycle.record_merged_branch()
             _clear_conflict(tid)
             return RedirectResponse(
                 url=f"/thread/{tid}?merged=1",

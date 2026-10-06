@@ -2229,3 +2229,148 @@ def test_completed_git_recovery_is_error_without_replaying_saved_answer(repos, m
     assert "Git" in saved.error and "reconcile" in saved.error.lower()
     assert sync.read_state(str(repos[3])) == before
     assert (repos[1] / "crash-work").read_text() == "preserve crash edits\n"
+
+
+def test_web_merge_records_new_thread_branch_without_losing_published_ref(repos, monkeypatch):
+    """A successful gated merge must leave the next turn on its new branch."""
+    from assist.domain_manager import DomainManager
+    from manage.web import threads
+
+    remote, worktree, phone, binding = repos
+    (worktree / "tracked").write_text("merged work\n")
+    git(worktree, "add", "tracked")
+    git(worktree, "commit", "-m", "thread work")
+    (worktree / "user-untracked").write_text("keep this user work\n")
+    old_branch, old_revision = sync.identity(str(worktree))
+    git(worktree, "push", "origin", "HEAD:refs/heads/" + old_branch)
+    state = sync.read_state(str(binding))
+    state.update(local_revision=old_revision,
+                 published={old_branch: old_revision},
+                 published_branch=old_branch,
+                 published_revision=old_revision)
+    sync._write_state(str(binding), state)
+    (phone / "main-only").write_text("independent main work\n")
+    git(phone, "add", "main-only")
+    git(phone, "commit", "-m", "advance main")
+    git(phone, "push", "origin", "main")
+    manager = DomainManager(str(worktree), str(remote), branch_suffix="fixture")
+    monkeypatch.setattr(threads, "MANAGER", SimpleNamespace(
+        get=lambda _tid: object(),
+        thread_dir=lambda _tid: str(binding),
+        thread_default_working_dir=lambda _tid: str(worktree)))
+    monkeypatch.setattr(threads, "_require_deep_thread", lambda _tid: None)
+    monkeypatch.setattr(threads, "_get_status", lambda _tid: {"stage": "ready"})
+    monkeypatch.setattr(threads, "_get_domain_manager", lambda _tid: manager)
+    monkeypatch.setattr(threads, "_clear_conflict", lambda _tid: None)
+
+    assert threads.merge_thread("fixture").status_code == 303
+    new_branch, new_revision = sync.identity(str(worktree))
+    after = sync.read_state(str(binding))
+    assert new_branch != old_branch
+    assert (after["branch"], after["local_revision"]) == (new_branch, new_revision)
+    assert after["published"][old_branch] == old_revision
+    assert git(remote, "rev-parse", "refs/heads/" + old_branch) == old_revision
+    assert (after["published_branch"], after["published_revision"]) == (None, None)
+    assert after["preflights"] == {}
+    assert git(remote, "rev-parse", "refs/heads/main") == new_revision
+    assert (worktree / "user-untracked").read_text() == "keep this user work\n"
+    with pytest.raises(sync.GitDirtyWorktreeError):
+        sync.require_clean(LocalBackend(worktree))
+
+
+def test_post_merge_branch_rejects_unverified_remote_main(repos):
+    remote, worktree, _, binding = repos
+    old_branch, old_revision = sync.identity(str(worktree))
+    git(worktree, "push", "origin", "HEAD:refs/heads/" + old_branch)
+    state = sync.read_state(str(binding))
+    state.update(published={old_branch: old_revision},
+                 published_branch=old_branch, published_revision=old_revision)
+    sync._write_state(str(binding), state)
+    git(worktree, "checkout", "-b", "assist/new-branch")
+    (worktree / "tracked").write_text("unverified new history\n")
+    git(worktree, "add", "tracked")
+    git(worktree, "commit", "-m", "unverified")
+    before = sync.read_state(str(binding))
+
+    with pytest.raises(sync.GitSyncError, match="source or branch changed"):
+        sync.GitSync(str(binding), str(worktree)).record_merged_branch()
+
+    assert sync.read_state(str(binding)) == before
+    assert git(remote, "rev-parse", "refs/heads/main") != sync.identity(str(worktree))[1]
+
+
+def test_post_merge_branch_keeps_retained_preflight_fenced(repos):
+    remote, worktree, _, binding = repos
+    old_branch, old_revision = sync.identity(str(worktree))
+    git(worktree, "push", "origin", "HEAD:refs/heads/" + old_branch)
+    state = sync.read_state(str(binding))
+    state.update(published={old_branch: old_revision},
+                 published_branch=old_branch, published_revision=old_revision,
+                 preflights={"old-work": {"branch": old_branch,
+                                          "expected": old_revision,
+                                          "base": old_revision}})
+    sync._write_state(str(binding), state)
+    git(worktree, "checkout", "-b", "assist/new-branch")
+    before = sync.read_state(str(binding))
+
+    with pytest.raises(sync.GitSyncError, match="operator reconciliation"):
+        sync.GitSync(str(binding), str(worktree)).record_merged_branch()
+
+    assert sync.read_state(str(binding)) == before
+    assert git(remote, "rev-parse", "refs/heads/" + old_branch) == old_revision
+
+
+def test_web_merge_rejects_retained_preflight_before_main_push(repos, monkeypatch):
+    from fastapi import HTTPException
+    from manage.web import threads
+
+    remote, worktree, _, binding = repos
+    branch, revision = sync.identity(str(worktree))
+    git(worktree, "push", "origin", "HEAD:refs/heads/" + branch)
+    state = sync.read_state(str(binding))
+    state.update(published={branch: revision}, published_branch=branch,
+                 published_revision=revision,
+                 preflights={"old-work": {"branch": branch,
+                                          "expected": revision, "base": revision}})
+    sync._write_state(str(binding), state)
+    main_before = git(remote, "rev-parse", "refs/heads/main")
+    monkeypatch.setattr(threads, "MANAGER", SimpleNamespace(
+        get=lambda _tid: object(),
+        thread_dir=lambda _tid: str(binding),
+        thread_default_working_dir=lambda _tid: str(worktree)))
+    monkeypatch.setattr(threads, "_require_deep_thread", lambda _tid: None)
+    monkeypatch.setattr(threads, "_get_status", lambda _tid: {"stage": "ready"})
+    monkeypatch.setattr(threads, "_get_domain_manager", lambda _tid: SimpleNamespace(
+        repo=object(), merge_and_push=lambda: pytest.fail("merge ran before Git validation")))
+
+    with pytest.raises(HTTPException) as error:
+        threads.merge_thread("fixture")
+
+    assert error.value.status_code == 409
+    assert git(remote, "rev-parse", "refs/heads/main") == main_before
+    assert sync.read_state(str(binding)) == state
+
+
+def test_post_merge_branch_retains_remote_history_after_local_rebase(repos):
+    remote, worktree, _, binding = repos
+    (worktree / "tracked").write_text("old branch work\n")
+    git(worktree, "add", "tracked")
+    git(worktree, "commit", "-m", "old branch")
+    old_branch, old_revision = sync.identity(str(worktree))
+    git(worktree, "push", "origin", "HEAD:refs/heads/" + old_branch)
+    state = sync.read_state(str(binding))
+    state.update(local_revision=old_revision,
+                 published={old_branch: old_revision},
+                 published_branch=old_branch, published_revision=old_revision)
+    sync._write_state(str(binding), state)
+    git(worktree, "checkout", "main")
+    git(worktree, "checkout", "-b", "assist/new-branch")
+    git(worktree, "branch", "-f", old_branch, "main")
+    before = sync.read_state(str(binding))
+
+    sync.GitSync(str(binding), str(worktree)).record_merged_branch()
+
+    assert sync.read_state(str(binding))["branch"] == "assist/new-branch"
+    assert sync.read_state(str(binding))["published"][old_branch] == old_revision
+    assert before["published"][old_branch] == old_revision
+    assert git(remote, "rev-parse", "refs/heads/" + old_branch) == old_revision

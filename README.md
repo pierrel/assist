@@ -82,7 +82,11 @@ where reliability is harder than with frontier APIs.
 - **Git domain integration.** Each thread works in its own git branch
   of a configured "domain" repo (your life repo, your work repo, etc.)
   with edits isolated until you choose to merge. Multiple domains
-  coexist. Old local clones with shared Git object inodes need an
+  coexist. When Merge & Push creates a fresh branch, the thread records that
+  local branch; it remains unpublished until a later successful
+  turn, while the previous published ref remains intact. Dirty files still
+  block the next turn rather than being committed by the merge handoff.
+  Old local clones with shared Git object inodes need an
   [operator-verified detachment](docs/2026-10-01-legacy-git-object-detachment.org)
   before source enrollment; the helper does not infer a source or change work.
 
