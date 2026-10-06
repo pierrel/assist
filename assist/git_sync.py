@@ -541,7 +541,7 @@ def recover_merged_branch_stopped(thread_dir: str, worktree: str, *, source: str
                 or (state["branch"], state["local_revision"]) != expected_old
                 or (state.get("published_branch"), state.get("published_revision")) != expected_old
                 or state["published"].get(old_branch) != old_revision
-                or not state.get("sandbox_in_flight") or state.get("quarantine")
+                or type(state.get("sandbox_in_flight")) is not bool or state.get("quarantine")
                 or state.get("intent")
                 or tuple(sorted(state["preflights"])) != tuple(sorted(expected_work_ids))
                 or not state["preflights"]):

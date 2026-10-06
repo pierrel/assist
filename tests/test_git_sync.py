@@ -2351,7 +2351,8 @@ def test_web_merge_rejects_retained_preflight_before_main_push(repos, monkeypatc
     assert sync.read_state(str(binding)) == state
 
 
-def test_operator_recovers_terminal_post_merge_fence_without_touching_work(repos):
+@pytest.mark.parametrize("in_flight", [True, False])
+def test_operator_recovers_terminal_post_merge_fence_without_touching_work(repos, in_flight):
     import hashlib
 
     remote, worktree, phone, binding = repos
@@ -2363,7 +2364,7 @@ def test_operator_recovers_terminal_post_merge_fence_without_touching_work(repos
                  published_branch=old[0], published_revision=old[1],
                  preflights={"terminal-work": {"branch": old[0], "base": old[1],
                                                "expected": old[1]}},
-                 sandbox_in_flight=True)
+                 sandbox_in_flight=in_flight)
     sync._write_state(str(binding), state)
     git(worktree, "checkout", "-b", "assist/merged-branch")
     (worktree / "tracked").write_text("merged content\n")
@@ -2403,7 +2404,8 @@ def test_operator_recovers_terminal_post_merge_fence_without_touching_work(repos
         sync.require_clean(LocalBackend(worktree))
 
 
-def test_operator_post_merge_recovery_requires_terminal_run_proof(repos):
+@pytest.mark.parametrize("in_flight", [True, False])
+def test_operator_post_merge_recovery_requires_terminal_run_proof(repos, in_flight):
     import hashlib
 
     remote, worktree, _, binding = repos
@@ -2411,7 +2413,7 @@ def test_operator_post_merge_recovery_requires_terminal_run_proof(repos):
     git(worktree, "push", "origin", "HEAD:refs/heads/" + old[0])
     state = sync.read_state(str(binding))
     state.update(published={old[0]: old[1]}, published_branch=old[0],
-                 published_revision=old[1], sandbox_in_flight=True,
+                 published_revision=old[1], sandbox_in_flight=in_flight,
                  preflights={"active-work": {"branch": old[0], "base": old[1],
                                              "expected": old[1]}})
     sync._write_state(str(binding), state)
@@ -2425,6 +2427,37 @@ def test_operator_post_merge_recovery_requires_terminal_run_proof(repos):
             expected_new=new, expected_state=hashlib.sha256(raw).hexdigest(),
             expected_work_ids=("active-work",), verify_stopped=lambda: None,
             verify_terminal_runs=lambda _ids: False)
+
+    assert (binding / "git-sync.json").read_bytes() == raw
+
+
+@pytest.mark.parametrize("marker", ["missing", None, "false", 0])
+def test_operator_post_merge_recovery_rejects_invalid_flight_marker(repos, marker):
+    import hashlib
+
+    remote, worktree, _, binding = repos
+    old = sync.identity(str(worktree))
+    git(worktree, "push", "origin", "HEAD:refs/heads/" + old[0])
+    state = sync.read_state(str(binding))
+    state.update(published={old[0]: old[1]}, published_branch=old[0],
+                 published_revision=old[1],
+                 preflights={"terminal-work": {"branch": old[0], "base": old[1],
+                                               "expected": old[1]}})
+    if marker == "missing":
+        state.pop("sandbox_in_flight", None)
+    else:
+        state["sandbox_in_flight"] = marker
+    sync._write_state(str(binding), state)
+    git(worktree, "checkout", "-b", "assist/new")
+    new = sync.identity(str(worktree))
+    raw = (binding / "git-sync.json").read_bytes()
+
+    with pytest.raises(sync.GitSyncError, match="operator reconciliation"):
+        sync.recover_merged_branch_stopped(
+            str(binding), str(worktree), source=str(remote), expected_old=old,
+            expected_new=new, expected_state=hashlib.sha256(raw).hexdigest(),
+            expected_work_ids=("terminal-work",), verify_stopped=lambda: None,
+            verify_terminal_runs=lambda _ids: None)
 
     assert (binding / "git-sync.json").read_bytes() == raw
 
