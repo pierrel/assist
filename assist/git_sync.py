@@ -19,6 +19,7 @@ import stat
 import subprocess
 import tempfile
 import time
+from typing import Callable
 from urllib.parse import urlsplit
 
 
@@ -177,6 +178,8 @@ def read_state(thread_dir: str) -> dict | None:
             raise GitSyncError("Git source binding is unavailable")
         if field == "intent" and (not isinstance(entry.get("desired"), str)
                                    or not _OID.fullmatch(entry["desired"])):
+            raise GitSyncError("Git source binding is unavailable")
+        if field == "intent" and entry.get("kind") not in (None, "initial"):
             raise GitSyncError("Git source binding is unavailable")
     return value
 
@@ -585,6 +588,59 @@ def authorize_branch(thread_dir: str, worktree: str) -> None:
     _write_state(thread_dir, state)
 
 
+def publish_initial_branch(thread_dir: str, worktree: str,
+                           verify_owner: Callable[[], None] | None = None) -> None:
+    """Publish a newly authorized thread branch before its first model turn."""
+    with _workspace_lock(thread_dir):
+        if verify_owner is not None:
+            verify_owner()
+        state = read_state(thread_dir)
+        if state is None or not state.get("branch") or not state.get("local_revision"):
+            raise GitSyncError("New Git thread branch is unavailable")
+        branch, revision = state["branch"], state["local_revision"]
+        if (state.get("sandbox_in_flight") or state.get("quarantine")
+                or state["preflights"]):
+            raise GitSyncError("New Git thread has retained work; reconcile before publication")
+        if state["published"]:
+            if (state["published"].get(branch) == revision
+                    and (state.get("published_branch"), state.get("published_revision"))
+                    == (branch, revision) and state.get("intent") is None):
+                return
+            raise GitSyncError("New Git thread publication needs operator reconciliation")
+        intent = state.get("intent")
+        expected_intent = {"kind": "initial", "branch": branch,
+                           "expected": None, "desired": revision}
+        if intent is not None and intent != expected_intent:
+            raise GitSyncError("New Git thread publication outcome is unknown")
+        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
+            store = _Store(path)
+            if store.snapshot(worktree) != (branch, revision):
+                raise GitSyncError("New Git thread branch changed before publication")
+            main = store.fetch(state["source"], "main")
+            if main is None or not store.ancestor(revision, main):
+                raise GitSyncError("New Git thread branch is not in trusted main history")
+            remote = store.remote_ref(state["source"], branch)
+            if remote is not None and (intent is None or remote != revision):
+                raise GitSyncError("New Git thread branch already exists remotely")
+            if remote is None:
+                if intent is None:
+                    state["intent"] = expected_intent
+                    _write_state(thread_dir, state)
+                store.git("push", "--porcelain", "--no-verify",
+                          "--force-with-lease=refs/heads/" + branch + ":",
+                          state["source"], revision + ":refs/heads/" + branch,
+                          allowed=(0, 1))
+                remote = store.remote_ref(state["source"], branch)
+            if remote != revision:
+                raise GitSyncError("New Git thread publication is pending verification")
+        if identity(worktree) != (branch, revision):
+            raise GitSyncError("New Git thread checkout changed during publication")
+        state["published"][branch] = revision
+        state.update(published_branch=branch, published_revision=revision,
+                     intent=None, error=None)
+        _write_state(thread_dir, state)
+
+
 def _independent_roots(roots) -> None:
     """Bounded no-follow inode proof for all writable mounts before legacy admission."""
     count = 0
@@ -975,6 +1031,8 @@ class GitSync:
             remote = store.fetch(self.state["source"], branch)
             intent = self.state.get("intent")
             if intent:
+                if intent.get("kind") == "initial":
+                    raise GitSyncError("Initial thread publication needs exact verification")
                 if (intent["branch"] != branch or not remote
                         or not store.ancestor(intent["desired"], remote)):
                     raise GitSyncError("Previous publication outcome is unknown; reconcile explicitly")

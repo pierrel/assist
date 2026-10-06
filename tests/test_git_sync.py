@@ -3,6 +3,7 @@ import hashlib
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import threading
 import zlib
@@ -66,6 +67,186 @@ def turn(repos):
     backend = LocalBackend(thread)
     owner.prepare(backend, "work-1")
     return owner, backend
+
+
+def test_initial_thread_branch_is_remote_before_first_turn_even_at_main(repos):
+    remote, thread, _, binding = repos
+    branch, revision = sync.identity(str(thread))
+    assert git(thread, "rev-parse", "main") == revision
+    assert subprocess.run(["git", "-C", str(remote), "show-ref", "--verify", "--quiet",
+                           "refs/heads/" + branch]).returncode != 0
+
+    sync.publish_initial_branch(str(binding), str(thread))
+
+    state = sync.read_state(str(binding))
+    assert git(remote, "rev-parse", "refs/heads/" + branch) == revision
+    assert state["published"][branch] == revision
+    assert (state["published_branch"], state["published_revision"]) == (branch, revision)
+    assert state["preflights"] == {} and state["intent"] is None
+    assert sync.identity(str(thread)) == (branch, revision)
+
+
+def test_initial_thread_branch_ref_collision_cannot_rewrite_remote(repos):
+    remote, thread, phone, binding = repos
+    branch, revision = sync.identity(str(thread))
+    git(phone, "checkout", "-b", branch)
+    (phone / "other").write_text("another owner's commit\n")
+    git(phone, "add", "other")
+    git(phone, "commit", "-m", "other owner")
+    git(phone, "push", "origin", "HEAD:refs/heads/" + branch)
+    remote_before = git(remote, "rev-parse", "refs/heads/" + branch)
+    state_before = sync.read_state(str(binding))
+
+    with pytest.raises(sync.GitSyncError, match="already exists"):
+        sync.publish_initial_branch(str(binding), str(thread))
+
+    assert git(remote, "rev-parse", "refs/heads/" + branch) == remote_before
+    assert sync.read_state(str(binding)) == state_before
+    assert revision != remote_before
+
+
+def test_initial_branch_absent_ref_lease_rejects_concurrent_creation(repos, monkeypatch):
+    remote, thread, phone, binding = repos
+    branch, revision = sync.identity(str(thread))
+    git(phone, "checkout", "-b", branch)
+    (phone / "other").write_text("concurrent user commit\n")
+    git(phone, "add", "other")
+    git(phone, "commit", "-m", "other owner")
+    competitor = git(phone, "rev-parse", "HEAD")
+    original_git = sync._Store.git
+
+    def create_ref_before_push(store, *arguments, **kwargs):
+        if arguments[0] == "push":
+            git(phone, "push", "origin", "HEAD:refs/heads/" + branch)
+        return original_git(store, *arguments, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sync._Store, "git", create_ref_before_push)
+        with pytest.raises(sync.GitSyncError, match="pending verification"):
+            sync.publish_initial_branch(str(binding), str(thread))
+
+    state = sync.read_state(str(binding))
+    assert git(remote, "rev-parse", "refs/heads/" + branch) == competitor
+    assert competitor != revision
+    assert state["published"] == {}
+    assert state["intent"] == {"kind": "initial", "branch": branch,
+                               "expected": None, "desired": revision}
+    assert sync.identity(str(thread)) == (branch, revision)
+
+
+def test_initial_thread_branch_exact_intent_recovers_after_remote_acceptance(repos):
+    remote, thread, _, binding = repos
+    branch, revision = sync.identity(str(thread))
+    state = sync.read_state(str(binding))
+    state["intent"] = {"kind": "initial", "branch": branch,
+                       "expected": None, "desired": revision}
+    sync._write_state(str(binding), state)
+    git(thread, "push", "origin", "HEAD:refs/heads/" + branch)
+
+    sync.publish_initial_branch(str(binding), str(thread))
+
+    state = sync.read_state(str(binding))
+    assert git(remote, "rev-parse", "refs/heads/" + branch) == revision
+    assert state["intent"] is None
+    assert state["published"][branch] == revision
+
+
+def test_initial_thread_branch_retries_exact_intent_after_pre_push_failure(repos, monkeypatch):
+    remote, thread, _, binding = repos
+    branch, revision = sync.identity(str(thread))
+    original_git = sync._Store.git
+
+    def fail_one_push(store, *arguments, **kwargs):
+        if arguments[0] == "push":
+            raise sync.GitSyncError("Git operation timed out")
+        return original_git(store, *arguments, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sync._Store, "git", fail_one_push)
+        with pytest.raises(sync.GitSyncError, match="timed out"):
+            sync.publish_initial_branch(str(binding), str(thread))
+    pending = sync.read_state(str(binding))
+    assert pending["intent"] == {"kind": "initial", "branch": branch,
+                                 "expected": None, "desired": revision}
+    assert pending["published"] == {}
+    assert subprocess.run(["git", "-C", str(remote), "show-ref", "--verify", "--quiet",
+                           "refs/heads/" + branch]).returncode != 0
+
+    sync.publish_initial_branch(str(binding), str(thread))
+    assert git(remote, "rev-parse", "refs/heads/" + branch) == revision
+    assert sync.read_state(str(binding))["intent"] is None
+
+
+def test_initial_branch_accepts_trusted_main_fast_forward_during_clone(repos):
+    remote, thread, _, binding = repos
+    seed = remote.parent / "seed"
+    branch, revision = sync.identity(str(thread))
+    (seed / "later").write_text("main advanced\n")
+    git(seed, "add", "later")
+    git(seed, "commit", "-m", "later main")
+    git(seed, "push", "origin", "main")
+    assert git(remote, "rev-parse", "refs/heads/main") != revision
+
+    sync.publish_initial_branch(str(binding), str(thread))
+
+    assert git(remote, "rev-parse", "refs/heads/" + branch) == revision
+    assert sync.read_state(str(binding))["published_revision"] == revision
+
+
+def test_initial_intent_does_not_use_descendant_tolerant_turn_reconciliation(repos):
+    remote, thread, phone, binding = repos
+    branch, revision = sync.identity(str(thread))
+    state = sync.read_state(str(binding))
+    state["intent"] = {"kind": "initial", "branch": branch,
+                       "expected": None, "desired": revision}
+    sync._write_state(str(binding), state)
+    git(thread, "push", "origin", "HEAD:refs/heads/" + branch)
+    git(phone, "fetch", "origin", branch)
+    git(phone, "checkout", "-b", branch, "FETCH_HEAD")
+    (phone / "phone").write_text("later user commit\n")
+    git(phone, "add", "phone")
+    git(phone, "commit", "-m", "phone")
+    git(phone, "push", "origin", "HEAD:refs/heads/" + branch)
+
+    owner = sync.GitSync(str(binding), str(thread))
+    with pytest.raises(sync.GitSyncError, match="exact verification"):
+        owner.prepare(LocalBackend(thread), "first-work")
+    with pytest.raises(sync.GitSyncError, match="already exists"):
+        sync.publish_initial_branch(str(binding), str(thread))
+    assert sync.read_state(str(binding)) == state
+    assert git(remote, "rev-parse", "refs/heads/" + branch) != revision
+
+
+def test_unknown_publication_intent_kind_fails_closed(repos):
+    _, thread, _, binding = repos
+    branch, revision = sync.identity(str(thread))
+    state = sync.read_state(str(binding))
+    state["intent"] = {"kind": "unknown", "branch": branch,
+                       "expected": None, "desired": revision}
+    sync._write_state(str(binding), state)
+
+    with pytest.raises(sync.GitSyncError, match="binding is unavailable"):
+        sync.read_state(str(binding))
+
+
+def test_settled_initial_publication_allows_later_phone_fast_forward(repos):
+    remote, thread, phone, binding = repos
+    sync.publish_initial_branch(str(binding), str(thread))
+    state = sync.read_state(str(binding))
+    branch, revision = sync.identity(str(thread))
+    git(phone, "fetch", "origin", branch)
+    git(phone, "checkout", "-b", branch, "FETCH_HEAD")
+    (phone / "phone").write_text("later user commit\n")
+    git(phone, "add", "phone")
+    git(phone, "commit", "-m", "phone")
+    git(phone, "push", "origin", "HEAD:refs/heads/" + branch)
+
+    sync.publish_initial_branch(str(binding), str(thread))
+    assert sync.read_state(str(binding)) == state
+    owner = sync.GitSync(str(binding), str(thread))
+    owner.prepare(LocalBackend(thread), "first-work")
+    assert sync.identity(str(thread)) == (branch, git(remote, "rev-parse", "refs/heads/" + branch))
+    assert owner.state["published"][branch] == revision
 
 
 def test_web_lifecycle_keeps_non_git_cleanup_and_noop_turn_contract(tmp_path, monkeypatch):
@@ -2003,6 +2184,206 @@ def test_recovered_initializer_preserves_authorized_workspace_and_ancestry(repos
     assert executed == [(run.id, "state")]
     assert sync.read_state(str(repos[3])) == before
     assert (repos[1] / "tracked").read_text() == "preserve dirty work\n"
+
+
+def test_authenticated_phone_initial_branch_is_fetchable_before_model_wait(repos, monkeypatch):
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: "model must not run")
+    remote, thread, phone, binding = repos
+    branch, revision = sync.identity(str(thread))
+    main = git(remote, "rev-parse", "refs/heads/main")
+    run = threads._create_run("state", "first phone message", dispatch_key="phone:accepted-key")
+    threads._set_status("state", "initializing", pending_message=run.text,
+                        pending_run_id=run.id, domain=str(remote))
+    monkeypatch.setattr(threads, "_reset_unexecuted_workspace", lambda *_: (
+        _ for _ in ()).throw(AssertionError("Authorized clone must not reset")))
+    monkeypatch.setattr(threads, "DomainManager", lambda *_args, **_kw: (
+        _ for _ in ()).throw(AssertionError("Authorized clone must not rebuild")))
+    monkeypatch.setattr(threads._INITIALIZATION_SCHEDULER, "complete", lambda *_: None)
+    waiting = threading.Event()
+    release = threading.Event()
+
+    def block_model_queue(_run_id, _tid):
+        waiting.set()
+        assert release.wait(5), "Model queue was not released"
+
+    monkeypatch.setattr(threads, "_execute_run", block_model_queue)
+    worker = threading.Thread(target=threads._initialize_thread,
+                              args=("state", run.id, str(remote)))
+    worker.start()
+    try:
+        assert waiting.wait(5), "Initializer did not reach the model queue"
+        git(phone, "fetch", "origin", branch)
+        assert git(phone, "rev-parse", "FETCH_HEAD") == revision
+        assert git(remote, "rev-parse", "refs/heads/main") == main
+        assert sync.identity(str(thread)) == (branch, revision)
+        assert (thread / "tracked").read_text() == "base\n"
+        state = sync.read_state(str(binding))
+        assert (state["published_branch"], state["published_revision"]) == (branch, revision)
+    finally:
+        release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+
+
+def test_phone_create_core_publishes_branch_before_first_run_dispatch(repos, monkeypatch):
+    from manage.web import phone_api, threads
+
+    remote, _, _, _ = repos
+    root = remote.parent / "fresh-threads"
+    root.mkdir()
+    monkeypatch.setattr(threads.MANAGER, "root_dir", str(root))
+    monkeypatch.setattr(threads, "DOMAINS", [str(remote)])
+    monkeypatch.setattr(phone_api.state, "DOMAINS", [str(remote)])
+    monkeypatch.setattr(threads._INITIALIZATION_SCHEDULER, "complete", lambda *_: None)
+    dispatched = []
+
+    def observe_dispatch(run_id, tid):
+        state = sync.read_state(threads.MANAGER.thread_dir(tid))
+        branch = state["branch"]
+        dispatched.append((run_id, git(remote, "rev-parse", "refs/heads/" + branch)))
+
+    monkeypatch.setattr(threads, "_execute_run", observe_dispatch)
+    body = phone_api._CreateThread(message="start", repo_key=phone_api._repo_key(str(remote)))
+    tid, run, source, replay = phone_api._create_and_submit(body, "a" * 16)
+    assert not replay and run.dispatch_key == "phone:" + "a" * 16
+
+    threads._initialize_thread(tid, run.id, source)
+
+    state = sync.read_state(threads.MANAGER.thread_dir(tid))
+    assert dispatched == [(run.id, state["published_revision"])]
+    assert state["published_branch"] == state["branch"]
+    assert git(remote, "rev-parse", "refs/heads/main") == state["published_revision"]
+
+
+def test_phone_initial_branch_remains_fetchable_after_first_run_fails(repos, monkeypatch):
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: "model must not run")
+    remote, thread, _, binding = repos
+    branch, revision = sync.identity(str(thread))
+    run = threads._create_run("state", "first phone message", dispatch_key="phone:accepted-key")
+    threads._set_status("state", "initializing", pending_message=run.text,
+                        pending_run_id=run.id, domain=str(remote))
+    monkeypatch.setattr(threads, "_execute_run", lambda *_: (
+        _ for _ in ()).throw(RuntimeError("first Run failed")))
+    monkeypatch.setattr(threads._INITIALIZATION_SCHEDULER, "complete", lambda *_: None)
+
+    threads._initialize_thread("state", run.id, str(remote))
+
+    assert threads._runs().get("state", run.id).status == "error"
+    assert git(remote, "rev-parse", "refs/heads/" + branch) == revision
+    assert sync.read_state(str(binding))["published_revision"] == revision
+
+
+def test_browser_initializer_does_not_publish_initial_branch(repos, monkeypatch):
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: "model must not run")
+    remote, _, _, _ = repos
+    run = threads._create_run("state", "first browser message")
+    threads._set_status("state", "initializing", pending_message=run.text,
+                        pending_run_id=run.id, domain=str(remote))
+    monkeypatch.setattr(threads, "_execute_run", lambda *_: None)
+    monkeypatch.setattr(threads._INITIALIZATION_SCHEDULER, "complete", lambda *_: None)
+
+    threads._initialize_thread("state", run.id, str(remote))
+
+    assert subprocess.run(["git", "-C", str(remote), "show-ref", "--verify", "--quiet",
+                           "refs/heads/thread/test"]).returncode != 0
+
+
+def test_initializing_phone_delete_fences_publication_before_retirement(repos, monkeypatch):
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: "unused")
+    remote, _, _, binding = repos
+    retired = []
+    deleted = []
+    monkeypatch.setattr(threads, "_get_status", lambda _tid: {
+        "stage": "cloning", "domain": str(remote)})
+    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda tid: retired.append(tid))
+    monkeypatch.setattr(threads.MANAGER, "hard_delete", lambda tid, **kw: deleted.append(tid))
+
+    with sync._workspace_lock(str(binding)):
+        with pytest.raises(threads.HTTPException) as error:
+            threads._delete_thread_and_children("phone-accepted")
+
+    assert error.value.status_code == 409
+    assert retired == deleted == []
+
+
+def test_initializing_phone_delete_wins_before_remote_publication(repos, monkeypatch):
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: "unused")
+    remote, thread, _, binding = repos
+    branch, _ = sync.identity(str(thread))
+    monkeypatch.setattr(threads, "_get_status", lambda _tid: {
+        "stage": "initializing", "domain": str(remote)})
+    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+    monkeypatch.setattr(threads._runs(), "scan_children", lambda: [])
+    monkeypatch.setattr(threads.MANAGER, "hard_delete",
+                        lambda _tid, **_kw: shutil.rmtree(binding))
+
+    threads._delete_thread_and_children("phone-accepted")
+    with pytest.raises(sync.GitSyncError):
+        sync.publish_initial_branch(str(binding), str(thread))
+    assert subprocess.run(["git", "-C", str(remote), "show-ref", "--verify", "--quiet",
+                           "refs/heads/" + branch]).returncode != 0
+
+
+def test_phone_delete_rejects_recreated_directory_generation(repos, monkeypatch):
+    from contextlib import contextmanager
+
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: "unused")
+    _, _, _, binding = repos
+    retired = []
+    monkeypatch.setattr(threads, "_get_status", lambda _tid: {"stage": "ready"})
+    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda tid: retired.append(tid))
+    original_lock = threads.git_workspace_lock
+
+    @contextmanager
+    def replace_before_lock(directory):
+        shutil.rmtree(binding)
+        binding.mkdir()
+        with original_lock(directory):
+            yield
+
+    monkeypatch.setattr(threads, "git_workspace_lock", replace_before_lock)
+    with pytest.raises(threads.HTTPException, match="Thread changed during deletion"):
+        threads._delete_thread_and_children("phone-accepted")
+    assert retired == []
+
+
+def test_deleted_phone_generation_cannot_publish_recreated_thread_path(repos, monkeypatch):
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: "unused")
+    remote, thread, _, binding = repos
+    branch, _ = sync.identity(str(thread))
+    old = threads._create_run("state", "old first message", dispatch_key="phone:old")
+    threads._set_status("state", "initializing", pending_run_id=old.id, domain=str(remote))
+
+    shutil.rmtree(binding)
+    binding.mkdir()
+    sync.bind(str(binding), str(remote))
+    sync.authorize_branch(str(binding), str(thread))
+    replacement = threads._create_run("state", "new first message", dispatch_key="phone:new")
+    threads._set_status("state", "initializing", pending_run_id=replacement.id,
+                        domain=str(remote))
+
+    with pytest.raises(sync.GitSyncError, match="replaced"):
+        sync.publish_initial_branch(
+            str(binding), str(thread),
+            lambda: threads._verify_phone_initializer_owner("state", old.id))
+    assert subprocess.run(["git", "-C", str(remote), "show-ref", "--verify", "--quiet",
+                           "refs/heads/" + branch]).returncode != 0
+    assert threads._runs().get("state", replacement.id).status == "pending"
+
+
+def test_phone_initial_cancel_cannot_succeed_while_publication_owns_fence(repos, monkeypatch):
+    from manage.web import phone_api
+
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: "unused")
+    remote, _, _, binding = repos
+    monkeypatch.setattr(phone_api.state, "_get_status", lambda _tid: {
+        "stage": "cloning", "domain": str(remote)})
+    monkeypatch.setattr(threads, "_runs", lambda: (
+        _ for _ in ()).throw(AssertionError("Cancellation must not reach the Run store")))
+
+    with sync._workspace_lock(str(binding)):
+        with pytest.raises(sync.GitSyncError, match="owns this Git workspace"):
+            phone_api._cancel_logical_run("phone-state", "first-run")
 
 
 def test_preflight_crash_after_writer_exit_keeps_resume_fenced(repos, monkeypatch):

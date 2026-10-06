@@ -969,6 +969,11 @@ changes attempt a commit inside the restricted sandbox and the server attempts p
 of only that thread branch. No-file-change turns also attempt publication; main
 and tags are not automatically pushed. Dirty, divergent, rewritten, or unavailable
 Git state holds for explicit reconciliation while preserving work and saved answers.
+For an uncancelled authenticated phone-created Git thread, successful initial
+publication makes its branch fetchable before the first model turn, even when
+that branch still points at main's commit. A later model failure does not
+undo that publication. Clone or publication failure can still leave no remote
+branch. Browser-created threads do not use this early publication path.
 When a clean preflight positively finds uncommitted work and its exact sandbox
 teardown is verified, the turn ends with a dirty-worktree hold, not a teardown
 uncertainty. Later queued turns check that work independently; none replays the

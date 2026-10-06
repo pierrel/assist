@@ -1,0 +1,84 @@
+#+title: Authenticated phone first-branch publication
+#+date: 2026-10-06
+
+* Requirement and boundary
+
+An authenticated phone create with a Git repository accepts a first Run before
+its slow clone. The thread's new non-main branch is currently local until a
+successful model turn; an idle or failed first turn gives the phone's Git
+client no branch to fetch. Publish that exact initial commit before the first
+model invocation. Browser thread creation remains unchanged while Pierre's
+separate browser-authentication choice is pending. Existing thread deletion
+does not delete remote Git refs; this change does not invent that behavior.
+
+* Numbered implementation
+
+1. In =assist/git_sync.py=, retain the draft creation-only publisher from the
+   preserved WIP commit. It uses the host-private source binding and workspace
+   lock, proves the exact local non-main branch in a private object store, and
+   requires the initial commit to be an ancestor of trusted source main. An
+   absent destination ref is created with an expected-absent lease; an exact
+   creation intent is durable before push. Never push main, tags, an arbitrary
+   client ref, or rewrite a competing tip. Verify the exact remote OID before
+   recording the nullable published pair. Keep the worktree, index and local
+   refs unchanged. =GitSync.prepare= rejects unresolved creation intent rather
+   than using later-turn descendant-tolerant reconciliation.
+2. In =manage/web/threads.py=, identify only the first Run accepted by the
+   authenticated phone create path through its server-generated =phone:=
+   dispatch key. Do not change =Run.origin=: =None= is a user message contract
+   for interjections and rendering. After clone/authorization and a cancellation
+   check, publish before =_execute_run=. On a failed or unknown publication,
+   terminalize that same first Run visibly; preserve any persisted exact
+   intent and do not invoke the model. A nonterminal initializer retried after
+   a crash can reconcile an exact already-published tip without replaying a
+   model turn. Publication finishes in this off-event-loop initializer before
+   any model execution or model-queue wait, so the ref is fetchable even if
+   the first model Run later fails or never executes.
+3. Keep =manage/web/phone_api.py= under its existing router-level bearer
+   authentication, bounded create admission and deterministic idempotency key.
+   It already generates the =phone:= key and calls the shared initializer; no
+   new client-selected source, branch, URL or credential field is added. Browser
+   empty and browser with-message routes do not carry this key and remain
+   unchanged. On a same-key replay, resubmit only the exact pending initializer
+   when status is still initializing/cloning. The dedicated scheduler dedups an
+   already queued or active key; a missed first wake can then heal without
+   replaying a terminal Run. If the first Run persisted but its separate
+   =pending_run_id= status write failed, repair that projection only when it
+   is the sole pending Run and the status remains initializing. Preserve the
+   original selected source on replay through its durable Git binding, since
+   ready status no longer carries the creation domain.
+   The ordinary pre-turn path still fetches a later phone-pushed descendant
+   commit before model admission.
+4. Test the existing phone bearer boundary separately, and exercise its actual
+   create core plus initializer with a disposable bare repo:
+   exact initial ref before model, main advanced during clone, competing ref,
+   ambiguous push/intent restart, missed first submit followed by same-key
+   replay, later phone commit, cancelled first Run, browser non-publication,
+   and Run failure without replay. A browser DELETE of a phone Git thread
+   must pin its directory generation and take that thread's nonblocking Git
+   workspace fence before removing the directory; if publication owns it, return a
+   controlled conflict without deleting. A phone cancellation takes the same
+   fence before committing a cancelled receipt, so it cannot succeed during
+   a publication that will subsequently push. If deletion takes the fence
+   first, the publisher rechecks the exact first Run under its newly acquired
+   fence, rejecting a recreated directory with the same deterministic thread
+   ID but a different Run generation. A same-key retry that discards a bound
+   draft with no Run takes the same Git fence before deleting it. This shares
+   exclusion only for a phone Git thread. Ordinary ready-thread Pi retirement
+   remains outside the global Run admission lock. Do not claim a
+   natural model/eval result from stubbed deterministic tests.
+
+* Trade-offs and held choices
+
+An already terminal failed initializer is not silently replayed solely to
+publish a branch; a retained ambiguous intent needs exact operator
+reconciliation. Ordinary clean admission remains intact. Existing deletion
+semantics may leave a published remote branch after a local thread is deleted,
+as they already can after a successful turn. The initializing-thread fence
+prevents a push after concurrent deletion wins; it does not attempt remote
+deletion or widen deletion authorization.
+
+The unauthenticated browser create routes are a separate principal and are
+not wired to this publisher until Pierre chooses their authentication
+boundary. This phone-only step neither resolves that choice nor implies that
+the browser can invoke a credentialed remote publication effect.
