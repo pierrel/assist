@@ -1,0 +1,42 @@
+#+TITLE: Census checkpoint ordering correction
+#+DATE: 2026-10-03
+
+* Observed failure and correction
+Email source 5e9cd553 passed its local census, but GitHub CI 37161217774 timed
+out its module-scope census child after 120 seconds. The remaining 2,309 unit
+cases and sandbox smoke passed. Thirty-three setup errors share that one timeout.
+
+The captured stack is inside capture, not interpreter teardown: web-main-core
+invoke exits its graph while the main thread waits for background checkpoint
+workers. One worker waits for a previous save; another waits for delta writes.
+The census helper invoked the graph with default asynchronous durability, even
+though both production invoke_with_rollback and Thread.stream_message already
+use synchronous checkpoint barriers. Replacing SQLite with an in-memory saver
+did not remove asynchronous checkpoint scheduling.
+
+The helper now requests durability="sync", waiting for each checkpoint before
+advancing the graph. Remove the in-memory substitution and its inaccurate
+SQLite-only workaround comment; the web capture again uses ThreadManager's
+actual SQLite saver. Prompt content, tool order, observation assertions and
+120-second child timeout remain unchanged. The existing 60-second stack
+diagnostic remains armed through exit. No production message path changes.
+
+* Verification and limits
+A two-step actual LangGraph/SQLite regression blocks the first node's checkpoint.
+Before the correction, the second node runs before that save finishes. After the
+correction, it cannot start until the checkpoint is released and saved. This is
+an ordering contract, not a test that mirrors an invoke keyword.
+
+All 50 affected census tests pass, including the new ordering regression and
+unchanged prompt/tool fingerprints. This identifies and corrects the observed
+capture scheduling mismatch. It does not establish that every earlier timeout
+had this cause or replace failed CI evidence with a passing local run. The next
+exact-source CI result remains separate evidence. Root owns any successor
+installation; the currently verified server and phone are unchanged during
+this investigation. No model, provider, mailbox or account operation is used.
+
+* Historical supersessions
+[[file:2026-10-03-provider-neutral-email.org][Provider-neutral Email interface]], Validation: its local checks remain valid
+for that source, but they do not establish a clean CI result. This correction
+adds checkpoint ordering coverage and restores the production persistence seam
+following the subsequently observed capture-time failure.

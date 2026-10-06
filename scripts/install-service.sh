@@ -58,6 +58,7 @@ ENV_VARS=""
 [ -n "$EMAIL_FROM_ADDRESS" ] && ENV_VARS="${ENV_VARS}Environment=\"EMAIL_FROM_ADDRESS=$EMAIL_FROM_ADDRESS\"\n"
 [ -n "$EMAIL_FROM_NAME" ] && ENV_VARS="${ENV_VARS}Environment=\"EMAIL_FROM_NAME=$EMAIL_FROM_NAME\"\n"
 [ -n "$EMAIL_ALWAYS_CC" ] && ENV_VARS="${ENV_VARS}Environment=\"EMAIL_ALWAYS_CC=$EMAIL_ALWAYS_CC\"\n"
+[ -n "$ASSIST_GMAIL_TOKEN_FILE" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_GMAIL_TOKEN_FILE=$ASSIST_GMAIL_TOKEN_FILE\"\n"
 
 # Generate service file from template and install it
 cat "$DEPLOY_PATH/scripts/assist-web.service.template" | \

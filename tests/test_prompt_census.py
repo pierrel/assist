@@ -1295,8 +1295,8 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     )
     assert len(historical_p0_prompt) == 31_279
     # The composed current prompt includes V1 browser/egress wording plus the
-    # landed Git and quiet guidance. Historical P0-P2b3 rows remain unchanged.
-    assert len(current_prompt) == 27_121
+    # landed Git, quiet and Email guidance. Historical P0-P2b3 rows remain unchanged.
+    assert len(current_prompt) == 27_403
     assert len(schemas) == 18_735
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 37
@@ -1358,3 +1358,72 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     ]
     assert section_sizes == [123, 621, 551, 492, 615, 466]
     assert len(kernel) == 2_868
+
+
+def test_email_tools_are_web_only_skill_scoped_and_hidden_at_bootstrap(census):
+    names = {"email_search", "email_read", "email_archive", "email_delete"}
+    legacy_names = {"gmail_search", "gmail_read", "gmail_archive", "gmail_delete"}
+    for key, surface in census["capabilities"].items():
+        registered = {tool["name"] for tool in surface["registered_tools"]}
+        assert legacy_names.isdisjoint(registered)
+        if key.startswith(("web-main-core:", "web-main-full:")):
+            assert names <= registered
+            assert names.isdisjoint(surface["model_visible_tools"])
+            assert all(tool["classification"] == "skill-scoped candidate"
+                       and tool["possible_owners"] == ["email"]
+                       for tool in surface["registered_tools"] if tool["name"] in names)
+        else:
+            assert names.isdisjoint(registered)
+
+
+def test_census_saves_checkpoint_before_starting_the_next_step(tmp_path):
+    import sqlite3
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from typing import TypedDict
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.graph import END, START, StateGraph
+
+    entered = threading.Event()
+    release = threading.Event()
+    saved = threading.Event()
+    next_step = threading.Event()
+    observed = []
+
+    class Saver(SqliteSaver):
+        def put(self, config, checkpoint, metadata, new_versions):
+            if checkpoint["channel_values"].get("step") == 1:
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError("test checkpoint was not released")
+                result = super().put(config, checkpoint, metadata, new_versions)
+                saved.set()
+                return result
+            return super().put(config, checkpoint, metadata, new_versions)
+
+    class State(TypedDict):
+        messages: list
+        step: int
+
+    def second(state):
+        observed.append(saved.is_set())
+        next_step.set()
+        return {"step": 2}
+
+    graph = StateGraph(State)
+    graph.add_node("first", lambda state: {"step": 1})
+    graph.add_node("second", second)
+    graph.add_edge(START, "first")
+    graph.add_edge("first", "second")
+    graph.add_edge("second", END)
+    with sqlite3.connect(tmp_path / "census.db", check_same_thread=False) as connection:
+        agent = graph.compile(checkpointer=Saver(connection))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(prompt_census._invoke_agent, agent, "checkpoint-order")
+            try:
+                assert entered.wait(5)
+                assert not next_step.wait(0.1), "next step overtook its checkpoint"
+            finally:
+                release.set()
+            assert result.result(timeout=5)["step"] == 2
+        assert observed == [True]

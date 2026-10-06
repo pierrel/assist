@@ -104,3 +104,28 @@ def test_make_leaves_unconfigured_runtime_directory_unset(tmp_path):
          "show-egress-runtime"],
         cwd=tmp_path, env=environment, capture_output=True, text=True, check=True)
     assert result.stdout == "False\n"
+
+def test_make_deployment_preserves_gmail_token_path_in_service_unit(tmp_path):
+    deploy = tmp_path / "deployment"
+    (deploy / "scripts").mkdir(parents=True)
+    repo = os.path.dirname(os.path.dirname(__file__))
+    from pathlib import Path
+    (deploy / "scripts" / "assist-web.service.template").write_text(
+        (Path(repo) / "scripts" / "assist-web.service.template").read_text())
+    data = tmp_path / "threads"
+    data.mkdir()
+    captured = tmp_path / "service-unit"
+    ssh = tmp_path / "ssh"
+    ssh.write_text("#!/bin/sh\nexec bash -s\n")
+    ssh.chmod(0o755)
+    sudo = tmp_path / "sudo"
+    sudo.write_text('#!/bin/sh\nif [ "$1" = tee ]; then cat > "$GMAIL_TEST_UNIT"; fi\n')
+    sudo.chmod(0o755)
+    token_path = str(tmp_path / "private" / "gmail-token.json")
+    configuration = tmp_path / "gmail.mk"
+    configuration.write_text(f"ASSIST_GMAIL_TOKEN_FILE := {token_path}\nDEPLOY_PATH := {deploy}\nASSIST_THREADS_DIR := {data}\nDEPLOY_HOST := synthetic-host\nSERVICE_NAME := synthetic-assist\n")
+    subprocess.run(["make", "-f", "Makefile", "-f", str(configuration), "deploy-service"],
+                   check=True, cwd=repo,
+                   env=os.environ | {"PATH": f"{tmp_path}:{os.environ['PATH']}",
+                                     "GMAIL_TEST_UNIT": str(captured)})
+    assert f'Environment="ASSIST_GMAIL_TOKEN_FILE={token_path}"' in captured.read_text()
