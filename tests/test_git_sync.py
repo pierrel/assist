@@ -2347,6 +2347,27 @@ def test_phone_delete_rejects_recreated_directory_generation(repos, monkeypatch)
     assert retired == []
 
 
+def test_unbound_phone_delete_serializes_other_delete_before_reuse(repos, monkeypatch):
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: "unused")
+    _, _, _, binding = repos
+    (binding / "git-sync.json").unlink()
+    retired = []
+    deleted = []
+    monkeypatch.setattr(threads, "_get_status", lambda _tid: {"stage": "ready"})
+    monkeypatch.setattr(threads, "_delete_thread_and_children_locked",
+                        lambda tid: deleted.append(tid))
+
+    def retire_with_competing_delete(tid):
+        with pytest.raises(threads.HTTPException) as error:
+            threads._delete_thread_and_children(tid)
+        assert error.value.status_code == 409
+        retired.append(tid)
+
+    monkeypatch.setattr(threads._PI_RUNTIME, "retire", retire_with_competing_delete)
+    threads._delete_thread_and_children("phone-accepted")
+    assert retired == deleted == ["phone-accepted"]
+
+
 def test_deleted_phone_generation_cannot_publish_recreated_thread_path(repos, monkeypatch):
     threads, _, _ = web_turn(repos, monkeypatch, lambda: "unused")
     remote, thread, _, binding = repos

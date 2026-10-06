@@ -718,14 +718,12 @@ def _create_and_submit(body: _CreateThread, key: str, *, run_id: str | None = No
                 if threads._runs().list(tid):
                     raise HTTPException(status_code=409, detail="Phone draft conflicts with an existing thread")
                 try:
-                    binding = read_git_binding(state.MANAGER.thread_dir(tid))
-                    if binding is not None:
-                        with threads.git_workspace_lock(state.MANAGER.thread_dir(tid)):
-                            state.MANAGER.hard_delete(tid)
-                    else:
+                    directory = state.MANAGER.thread_dir(tid)
+                    read_git_binding(directory)
+                    with threads.git_workspace_lock(directory):
                         state.MANAGER.hard_delete(tid)
                 except GitSyncError as error:
-                    raise HTTPException(status_code=409, detail="Git workspace is busy") from error
+                    raise HTTPException(status_code=409, detail="Thread workspace is busy") from error
             else:
                 expected_domain = domain or (state.DOMAINS[0] if state.DOMAINS else None)
                 try:

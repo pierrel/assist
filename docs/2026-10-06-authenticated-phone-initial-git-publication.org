@@ -54,7 +54,7 @@ does not delete remote Git refs; this change does not invent that behavior.
    exact initial ref before model, main advanced during clone, competing ref,
    ambiguous push/intent restart, missed first submit followed by same-key
    replay, later phone commit, cancelled first Run, browser non-publication,
-   and Run failure without replay. A browser DELETE of a phone Git thread
+   and Run failure without replay. A browser DELETE of any deterministic phone thread
    must pin its directory generation and take that thread's nonblocking Git
    workspace fence before removing the directory; if publication owns it, return a
    controlled conflict without deleting. A phone cancellation takes the same
@@ -62,9 +62,10 @@ does not delete remote Git refs; this change does not invent that behavior.
    a publication that will subsequently push. If deletion takes the fence
    first, the publisher rechecks the exact first Run under its newly acquired
    fence, rejecting a recreated directory with the same deterministic thread
-   ID but a different Run generation. A same-key retry that discards a bound
-   draft with no Run takes the same Git fence before deleting it. This shares
-   exclusion only for a phone Git thread. Ordinary ready-thread Pi retirement
+   ID but a different Run generation. A same-key retry that discards a draft
+   with no Run takes the same workspace fence before deleting it, including
+   a pre-bind draft. This shares exclusion only for deterministic phone IDs.
+   Ordinary ready-thread Pi retirement
    remains outside the global Run admission lock. Do not claim a
    natural model/eval result from stubbed deterministic tests.
 

@@ -312,13 +312,16 @@ def test_phone_create_replay_uses_binding_after_ready_status_drops_domain(tmp_pa
     assert returned is replay and repeated and domain == source
 
 
-def test_phone_create_retry_cannot_remove_bound_draft_during_git_ownership(tmp_path, monkeypatch):
+@pytest.mark.parametrize("bound", [False, True])
+def test_phone_create_retry_cannot_remove_draft_during_workspace_ownership(
+        tmp_path, monkeypatch, bound):
     from assist.git_sync import _workspace_lock, bind
 
     thread_dir = tmp_path / "draft"
     thread_dir.mkdir()
     source = str(tmp_path / "trusted.git")
-    bind(str(thread_dir), source)
+    if bound:
+        bind(str(thread_dir), source)
     deleted = []
     monkeypatch.setattr(phone_api, "_domain_for_key", lambda _key: source)
     monkeypatch.setattr(state.MANAGER, "thread_dir", lambda _tid: str(thread_dir))

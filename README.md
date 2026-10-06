@@ -197,13 +197,19 @@ Mis-classification was an issue early on; the table above is the rule.
 
 **Unit/Integration Tests** (`tests/`):
 ```bash
-# Run all tests
+# Run the default offline tests (no live Docker egress integration)
 make test
 
 # Run specific test file
 .venv/bin/pytest tests/test_domain_manager.py -v
 .venv/bin/pytest tests/middleware/test_loop_detection.py -v
 ```
+
+`pytest.ini` excludes the live Docker egress integration module and real
+per-turn teardown test from a default `pytest tests/` run. Run
+`make sandbox-smoke` only when live Docker testing is authorized; that explicit
+target builds the sandbox and proxy, runs the shell probes, and selects both
+live Python tests. CI runs this smoke separately from its unit-test invocation.
 
 **Agent Evaluations** (`edd/eval/`):
 

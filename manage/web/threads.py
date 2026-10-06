@@ -5323,18 +5323,15 @@ async def delete_thread(tid: str):
 def _delete_thread_and_children(tid: str) -> None:
     """Delete a visible thread and each non-running hidden task directory."""
     with _RUN_ADMISSION_LOCK:
-        try:
-            phone_git = (tid.startswith("phone-")
-                         and read_git_binding(MANAGER.thread_dir(tid)) is not None)
-        except GitSyncError as error:
-            raise HTTPException(status_code=409, detail="Git source binding is unavailable") from error
-        if phone_git:
+        phone_thread = tid.startswith("phone-")
+        if phone_thread:
             directory = MANAGER.thread_dir(tid)
             try:
+                read_git_binding(directory)
                 generation = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            except OSError as error:
+            except (GitSyncError, OSError) as error:
                 raise HTTPException(status_code=409, detail="Thread changed during deletion") from error
-    if phone_git:
+    if phone_thread:
         try:
             with git_workspace_lock(directory):
                 try:
@@ -5354,7 +5351,7 @@ def _delete_thread_and_children(tid: str) -> None:
                 with _RUN_ADMISSION_LOCK:
                     _delete_thread_and_children_locked(tid)
         except GitSyncError as error:
-            raise HTTPException(status_code=409, detail="Git workspace is busy") from error
+            raise HTTPException(status_code=409, detail="Thread workspace is busy") from error
         finally:
             os.close(generation)
         return
