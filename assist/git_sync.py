@@ -513,6 +513,63 @@ def recover_stopped(thread_dir: str, worktree: str, *, source: str,
         _write_state(thread_dir, state)
 
 
+def recover_merged_branch_stopped(thread_dir: str, worktree: str, *, source: str,
+                                  expected_old: tuple[str, str],
+                                  expected_new: tuple[str, str], expected_state: str,
+                                  expected_work_ids: tuple[str, ...],
+                                  verify_stopped, verify_terminal_runs) -> None:
+    """Operator-only handoff of stopped, terminal preflights across a past merge.
+
+    The operator selects both exact identities and attests the historical merge
+    from independent records. Callbacks must hold all writer exclusion through
+    return and prove every named Run terminal without replaying it.
+    """
+    _initial_binding(source)
+    old_branch, old_revision = _branch(expected_old[0]), expected_old[1]
+    new_branch, new_revision = _branch(expected_new[0]), expected_new[1]
+    if (old_branch == new_branch or not _OID.fullmatch(old_revision)
+            or not _OID.fullmatch(new_revision)):
+        raise GitSyncError("Approved post-merge identity is unavailable")
+    with _workspace_lock(thread_dir):
+        if verify_stopped() is not None:
+            raise GitSyncError("Stopped writer proof is unavailable")
+        with _directory(thread_dir) as directory:
+            if hashlib.sha256(_read_at(directory, _BINDING)).hexdigest() != expected_state:
+                raise GitSyncError("Approved Git recovery state changed")
+        state = read_state(thread_dir)
+        if (state is None or state["source"] != source
+                or (state["branch"], state["local_revision"]) != expected_old
+                or (state.get("published_branch"), state.get("published_revision")) != expected_old
+                or state["published"].get(old_branch) != old_revision
+                or not state.get("sandbox_in_flight") or state.get("quarantine")
+                or state.get("intent")
+                or tuple(sorted(state["preflights"])) != tuple(sorted(expected_work_ids))
+                or not state["preflights"]):
+            raise GitSyncError("Post-merge recovery needs operator reconciliation")
+        if verify_terminal_runs(expected_work_ids) is not None:
+            raise GitSyncError("Retained Git work is not terminal")
+        _independent_roots((worktree, os.path.join(os.path.dirname(worktree), "tmp"),
+                            os.path.join(thread_dir, "agent")))
+        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
+            store = _Store(path)
+            if store.snapshot(worktree) != expected_new:
+                raise GitSyncError("Approved post-merge branch identity changed")
+            main = store.fetch(source, "main")
+            if (main is None or not store.ancestor(new_revision, main)
+                    or store.remote_ref(source, old_branch) != old_revision):
+                raise GitSyncError("Approved post-merge source history changed")
+        if verify_terminal_runs(expected_work_ids) is not None or verify_stopped() is not None:
+            raise GitSyncError("Post-merge recovery proof changed")
+        with _directory(thread_dir) as directory:
+            unchanged = hashlib.sha256(_read_at(directory, _BINDING)).hexdigest() == expected_state
+        if not unchanged or identity(worktree) != expected_new:
+            raise GitSyncError("Approved post-merge state or branch changed")
+        state.update(branch=new_branch, local_revision=new_revision, preflights={},
+                     published_branch=None, published_revision=None,
+                     sandbox_in_flight=False, error=None)
+        _write_state(thread_dir, state)
+
+
 def authorize_branch(thread_dir: str, worktree: str) -> None:
     """Authorize an independent clone without rebinding an existing thread branch."""
     state = read_state(thread_dir)

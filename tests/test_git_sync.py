@@ -2351,6 +2351,115 @@ def test_web_merge_rejects_retained_preflight_before_main_push(repos, monkeypatc
     assert sync.read_state(str(binding)) == state
 
 
+def test_operator_recovers_terminal_post_merge_fence_without_touching_work(repos):
+    import hashlib
+
+    remote, worktree, phone, binding = repos
+    old = sync.identity(str(worktree))
+    git(worktree, "push", "origin", "HEAD:refs/heads/" + old[0])
+    state = sync.read_state(str(binding))
+    state.update(branch=old[0], local_revision=old[1],
+                 published={old[0]: old[1]},
+                 published_branch=old[0], published_revision=old[1],
+                 preflights={"terminal-work": {"branch": old[0], "base": old[1],
+                                               "expected": old[1]}},
+                 sandbox_in_flight=True)
+    sync._write_state(str(binding), state)
+    git(worktree, "checkout", "-b", "assist/merged-branch")
+    (worktree / "tracked").write_text("merged content\n")
+    git(worktree, "add", "tracked")
+    git(worktree, "commit", "-m", "merged content")
+    new = sync.identity(str(worktree))
+    git(worktree, "push", "origin", new[1] + ":refs/heads/main")
+    git(worktree, "branch", "-f", old[0], "main")
+    git(phone, "pull", "--ff-only", "origin", "main")
+    (phone / "later-main").write_text("later trusted main work\n")
+    git(phone, "add", "later-main")
+    git(phone, "commit", "-m", "later main")
+    git(phone, "push", "origin", "main")
+    (worktree / "user-untracked").write_text("retain dirty work\n")
+    old_raw = (binding / "git-sync.json").read_bytes()
+    checked = []
+
+    def terminal(work_ids):
+        checked.append(work_ids)
+        assert work_ids == ("terminal-work",)
+
+    sync.recover_merged_branch_stopped(
+        str(binding), str(worktree), source=str(remote), expected_old=old,
+        expected_new=new, expected_state=hashlib.sha256(old_raw).hexdigest(),
+        expected_work_ids=("terminal-work",), verify_stopped=lambda: None,
+        verify_terminal_runs=terminal)
+
+    after = sync.read_state(str(binding))
+    assert checked == [("terminal-work",), ("terminal-work",)]
+    assert (after["branch"], after["local_revision"]) == new
+    assert (after["published_branch"], after["published_revision"]) == (None, None)
+    assert after["published"][old[0]] == old[1]
+    assert after["preflights"] == {} and after["sandbox_in_flight"] is False
+    assert (worktree / "user-untracked").read_text() == "retain dirty work\n"
+    assert git(remote, "rev-parse", "refs/heads/" + old[0]) == old[1]
+    with pytest.raises(sync.GitDirtyWorktreeError):
+        sync.require_clean(LocalBackend(worktree))
+
+
+def test_operator_post_merge_recovery_requires_terminal_run_proof(repos):
+    import hashlib
+
+    remote, worktree, _, binding = repos
+    old = sync.identity(str(worktree))
+    git(worktree, "push", "origin", "HEAD:refs/heads/" + old[0])
+    state = sync.read_state(str(binding))
+    state.update(published={old[0]: old[1]}, published_branch=old[0],
+                 published_revision=old[1], sandbox_in_flight=True,
+                 preflights={"active-work": {"branch": old[0], "base": old[1],
+                                             "expected": old[1]}})
+    sync._write_state(str(binding), state)
+    git(worktree, "checkout", "-b", "assist/new")
+    new = sync.identity(str(worktree))
+    raw = (binding / "git-sync.json").read_bytes()
+
+    with pytest.raises(sync.GitSyncError, match="terminal"):
+        sync.recover_merged_branch_stopped(
+            str(binding), str(worktree), source=str(remote), expected_old=old,
+            expected_new=new, expected_state=hashlib.sha256(raw).hexdigest(),
+            expected_work_ids=("active-work",), verify_stopped=lambda: None,
+            verify_terminal_runs=lambda _ids: False)
+
+    assert (binding / "git-sync.json").read_bytes() == raw
+
+
+def test_operator_post_merge_recovery_rejects_changed_old_source_ref(repos):
+    import hashlib
+
+    remote, worktree, phone, binding = repos
+    old = sync.identity(str(worktree))
+    git(worktree, "push", "origin", "HEAD:refs/heads/" + old[0])
+    state = sync.read_state(str(binding))
+    state.update(published={old[0]: old[1]}, published_branch=old[0],
+                 published_revision=old[1], sandbox_in_flight=True,
+                 preflights={"terminal-work": {"branch": old[0], "base": old[1],
+                                               "expected": old[1]}})
+    sync._write_state(str(binding), state)
+    git(worktree, "checkout", "-b", "assist/new")
+    new = sync.identity(str(worktree))
+    git(phone, "checkout", "-b", old[0])
+    (phone / "remote-change").write_text("another writer\n")
+    git(phone, "add", "remote-change")
+    git(phone, "commit", "-m", "remote change")
+    git(phone, "push", "origin", "HEAD:refs/heads/" + old[0])
+    raw = (binding / "git-sync.json").read_bytes()
+
+    with pytest.raises(sync.GitSyncError, match="source history changed"):
+        sync.recover_merged_branch_stopped(
+            str(binding), str(worktree), source=str(remote), expected_old=old,
+            expected_new=new, expected_state=hashlib.sha256(raw).hexdigest(),
+            expected_work_ids=("terminal-work",), verify_stopped=lambda: None,
+            verify_terminal_runs=lambda _ids: None)
+
+    assert (binding / "git-sync.json").read_bytes() == raw
+
+
 def test_post_merge_branch_retains_remote_history_after_local_rebase(repos):
     remote, worktree, _, binding = repos
     (worktree / "tracked").write_text("old branch work\n")
