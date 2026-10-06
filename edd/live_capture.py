@@ -610,6 +610,7 @@ class CaptureWorker:
 
     def _call(self, capture_id: str, fn: Callable[[], Any]) -> Any:
         queue_id = f"capture:{capture_id}"
+        queue_handle = None
         try:
             deadline = monotonic() + CAPTURE_QUEUE_HOLD_TIMEOUT_S
             while not self._stopping.is_set():
@@ -619,7 +620,7 @@ class CaptureWorker:
                         wait_timeout_s=min(CAPTURE_QUEUE_POLL_TIMEOUT_S, max(0.01, deadline - monotonic())),
                         hold_timeout_s=CAPTURE_QUEUE_HOLD_TIMEOUT_S,
                         quantum_s=CAPTURE_QUEUE_HOLD_TIMEOUT_S,
-                    ):
+                    ) as queue_handle:
                         if self._stopping.is_set():
                             raise RuntimeError("capture worker is stopping")
                         return fn()
@@ -628,7 +629,8 @@ class CaptureWorker:
                         raise
             raise RuntimeError("capture worker is stopping")
         finally:
-            THREAD_QUEUE.pop_hold(queue_id)
+            if queue_handle is not None:
+                THREAD_QUEUE.pop_hold(queue_handle)
 
     def _run(self) -> None:
         while not self._stopping.is_set():

@@ -35,9 +35,13 @@ dependencies = [
     "python-dotenv",
     "python-multipart",
     "requests",
+    "regex",
     "scipy",
     "uvicorn",
 ]
+
+[project.optional-dependencies]
+gmail-setup = ["google-auth-oauthlib"]
 
 [project.scripts]
 assist = "manage.cli:main"
@@ -51,7 +55,7 @@ where = ["."]
 # this, a non-editable install crashes at prompt-render time — which
 # is why emacsos-server historically required an editable install.
 [tool.setuptools.package-data]
-assist = ["templates/**/*", "skills/**/*", "main_skills/**/*", "main_guidance_skills/**/*", "caller_skills/**/*"]
+assist = ["templates/**/*", "skills/**/*", "main_skills/**/*", "main_guidance_skills/**/*", "caller_skills/**/*", "web_skills/**/*"]
 
 [tool.mypy]
 python_version = "3.14.2"

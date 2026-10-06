@@ -472,6 +472,49 @@ and a link to the thread. These values intentionally do not use an `ASSIST_` pre
 they are not passed into sandboxes. If the recipient is absent, Assist logs the missing
 configuration and keeps the in-app urgent behavior without sending SMS.
 
+### Email mailbox
+
+The ordinary Deep Agents web assistant can search/read email and propose archive
+or recoverable Trash actions. Load the Email skill through a natural mail request.
+The current provider is Gmail. Searches support its queries plus local regex
+filters for sender, subject, body and date, scanning at most 50 candidates per
+page with explicit coverage/cursors.
+Reads return plain bodies and links without remote images/scripts. Date headers
+represent the sender's date; received timestamps are UTC. Gmail native date bounds
+follow [Gmail query semantics](https://developers.google.com/workspace/gmail/api/guides/filtering).
+Archive/Trash requires approval of complete message previews; oversized previews
+remain rejectable. These mailbox tools offer no send/reply, permanent delete or
+attachment download.
+Pi, delegates and inbound SMS triage do not receive these tools.
+
+An operator connects the account once, outside an agent turn:
+
+1. Enable Gmail API in a Google Cloud project; configure OAuth consent and create
+   a **Desktop app** OAuth client. Download its client JSON into a private
+   directory outside `ASSIST_THREADS_DIR` and make the file mode `0600`.
+2. Install the optional setup extra in the operator environment:
+   `pip install -e ".[gmail-setup]"`.
+3. Run `python -m assist.gmail_setup --client-file <private-client.json>
+   --token-file <private-gmail-token.json>`. Open the printed Google consent link
+   and approve the account. For a remote host, forward port 8765 with SSH and
+   add `--no-browser`; keep that tunnel open for the five-minute consent window.
+4. Set `ASSIST_GMAIL_TOKEN_FILE` to the saved private file in the service's ignored
+   `.deploy.env`. Have the normal deployment owner regenerate and install the
+   systemd environment with `make deploy-service`, then restart the service. The runtime
+   refuses credential files under the thread directory, symlinks, non-owner
+   files and permissions other than `0600`.
+
+Enrollment requests only `gmail.modify`, the scope needed for read/archive/Trash.
+Google gives that scope broader send capabilities, but Assist exposes only its
+fixed read/archive/Trash endpoints. It does not request `gmail.send` or the full
+`mail.google.com` permanent-delete scope. Google's external OAuth apps in
+**Testing** expire refresh tokens after seven days; this enrollment is not a
+permanent connection while that status remains. See Google's
+[Desktop authorization](https://developers.google.com/identity/protocols/oauth2/native-app),
+[scope reference](https://developers.google.com/workspace/gmail/api/auth/scopes) and
+[token expiry rules](https://developers.google.com/identity/protocols/oauth2#expiration).
+No token contents belong in prompts, logs, source or browser storage.
+
 ### Quiet routine results
 
 The visible Deep web agent can call `quiet()` during a routine check with no

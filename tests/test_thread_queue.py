@@ -106,72 +106,79 @@ def test_fifo_among_waiters():
 def test_user_priority_overtakes_background_but_not_active_holder():
     q = ThreadAffinityQueue()
     release = threading.Event()
+    active_entered = threading.Event()
     acquired = []
 
     def run(tid, *, user=False):
         with q.acquire(tid, user_priority=user):
             acquired.append(tid)
             if tid == "active":
+                active_entered.set()
                 release.wait(timeout=5)
 
     active = threading.Thread(target=run, args=("active",))
-    active.start()
-    deadline = time.time() + 2
-    while q.peek_holder() != "active" and time.time() < deadline:
-        time.sleep(0.01)
     background = threading.Thread(target=run, args=("background",))
     user = threading.Thread(target=run, args=("user",), kwargs={"user": True})
-    background.start()
-    deadline = time.time() + 2
-    while q.waiter_count() != 1 and time.time() < deadline:
-        time.sleep(0.01)
-    user.start()
-    deadline = time.time() + 2
-    while q.waiter_count() != 2 and time.time() < deadline:
-        time.sleep(0.01)
+    try:
+        active.start()
+        # Queue registration precedes entry into the worker body.
+        assert active_entered.wait(timeout=2)
+        background.start()
+        deadline = time.time() + 2
+        while q.waiter_count() != 1 and time.time() < deadline:
+            time.sleep(0.01)
+        user.start()
+        deadline = time.time() + 2
+        while q.waiter_count() != 2 and time.time() < deadline:
+            time.sleep(0.01)
 
-    assert q.waiter_count() == 2
-    assert acquired == ["active"]
-    release.set()
-    for thread in (active, background, user):
-        thread.join(timeout=5)
-        assert not thread.is_alive()
+        assert q.waiter_count() == 2
+        assert acquired == ["active"]
+    finally:
+        release.set()
+        for thread in (active, background, user):
+            if thread.ident is not None:
+                thread.join(timeout=5)
+                assert not thread.is_alive()
     assert acquired == ["active", "user", "background"]
 
 
 def test_promote_already_parked_waiter_is_stable_within_user_tier():
     q = ThreadAffinityQueue()
     release = threading.Event()
+    active_entered = threading.Event()
     acquired = []
 
     def run(tid, *, user=False):
         with q.acquire(tid, user_priority=user):
             acquired.append(tid)
             if tid == "active":
+                active_entered.set()
                 release.wait(timeout=5)
 
     threads = [threading.Thread(target=run, args=("active",))]
-    threads[0].start()
-    deadline = time.time() + 2
-    while q.peek_holder() != "active" and time.time() < deadline:
-        time.sleep(0.01)
-    for tid, user in (("existing-user", True), ("parent", False),
-                      ("other-background", False)):
-        thread = threading.Thread(target=run, args=(tid,), kwargs={"user": user})
-        threads.append(thread)
-        thread.start()
-        deadline = time.time() + 2
-        expected = len(threads) - 1
-        while q.waiter_count() != expected and time.time() < deadline:
-            time.sleep(0.01)
-        assert q.waiter_count() == expected
+    try:
+        threads[0].start()
+        assert active_entered.wait(timeout=2)
+        for tid, user in (("existing-user", True), ("parent", False),
+                          ("other-background", False)):
+            thread = threading.Thread(target=run, args=(tid,), kwargs={"user": user})
+            threads.append(thread)
+            thread.start()
+            deadline = time.time() + 2
+            expected = len(threads) - 1
+            while q.waiter_count() != expected and time.time() < deadline:
+                time.sleep(0.01)
+            assert q.waiter_count() == expected
 
-    q.promote("parent")
-    assert acquired == ["active"]
-    release.set()
-    for thread in threads:
-        thread.join(timeout=5)
-        assert not thread.is_alive()
+        q.promote("parent")
+        assert acquired == ["active"]
+    finally:
+        release.set()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(timeout=5)
+                assert not thread.is_alive()
     assert acquired == ["active", "existing-user", "parent", "other-background"]
 
 
