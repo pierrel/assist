@@ -1,5 +1,6 @@
 """Run-owned approvals at real storage and SQLite checkpoint crash boundaries."""
 from dataclasses import replace
+from contextlib import nullcontext
 import json
 import os
 import sqlite3
@@ -12,6 +13,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.types import Command, interrupt
 
 from assist.run_service import InvalidRunTransition, RunService, RunStoreUnavailable
+from assist.git_sync import GitSyncError
 from assist.thread import Thread
 from manage.web import phone_api, state, threads
 
@@ -85,7 +87,8 @@ def test_rejection_is_unfinished_until_checkpoint_completion(records):
     assert service.approval(owner.thread_id, approval.id).state == "consumed"
     service.reconcile_approval(owner.thread_id, approval.id, checkpoint_id="end", completed=True, outcome="checkpoint_end")
     assert service.unfinished_approval_continuation(owner.thread_id) is None
-    assert service.get(owner.thread_id, run.id).status == "success"
+    assert service.get(owner.thread_id, run.id).status == "running"
+    service.transition(owner.thread_id, run.id, "success")
 
 
 def test_review_revision_keeps_proposal_identity_and_forbids_accepted_refresh(records):
@@ -223,6 +226,111 @@ def test_sqlite_checkpoint_crash_boundaries(sqlite_approval, monkeypatch, window
             assert pending.interrupt_id != approval.interrupt_id
             assert pending.proposal_id != approval.proposal_id
             assert pending.action == approval.action
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_sqlite_approval_end_waits_for_git_finalization(sqlite_approval, monkeypatch, failure):
+    tid, root, service, queued = sqlite_approval
+    effects = []
+    def gate(value):
+        interrupt({"action_requests":[ACTION]})
+        effects.append("sent")
+        return {"messages":[AIMessage("Saved reply")]}
+    connection = sqlite3.connect(root / "checkpoint.db", check_same_thread=False)
+    graph = StateGraph(MessagesState)
+    graph.add_node("gate", gate)
+    graph.add_edge(START, "gate"); graph.add_edge("gate", END)
+    graph = graph.compile(checkpointer=SqliteSaver(connection))
+    owner = service.create(tid, "general-agent", "Email this person")
+    service.claim(tid, owner.id)
+    config = {"configurable":{"thread_id":tid, "work_id":owner.work_id}}
+    graph.invoke({"messages":[HumanMessage(owner.text)]}, config, durability="sync")
+    snapshot = graph.get_state(config)
+    approval = service.publish_approval(tid, owner.id, action=ACTION, requests=[ACTION],
+        proposal=PROPOSAL, interrupt_id=snapshot.interrupts[0].id,
+        checkpoint_id=snapshot.config["configurable"]["checkpoint_id"])
+    accepted, _ = threads.email_decision_core(tid, "approve", approval.id, phone_preview=True)
+    def get(value, configurable=None, **kwargs):
+        chat = Thread.__new__(Thread)
+        chat.thread_id, chat.agent = tid, graph
+        chat.runconfig = {"configurable":{"thread_id":tid, **(configurable or {})}}
+        chat._run = lambda value:graph.invoke(value, chat.runconfig, durability="sync")["messages"][-1].content
+        return chat
+    monkeypatch.setattr(state.MANAGER, "get", get)
+    def finish(*args):
+        assert service.approval(tid, approval.id).state == "completed"
+        assert service.get(tid, accepted.id).status == "running"
+        assert service.get(tid, accepted.id).result == "Saved reply"
+        if failure:
+            raise GitSyncError("Git finalization failed")
+    lifecycle = SimpleNamespace(bound=True, resume=lambda:None,
+        require_sandbox=lambda value:None, cleanup_model=lambda value:None,
+        model_starting=lambda:None, finish_visible=finish)
+    monkeypatch.setattr(threads.GitLifecycle, "acquire", lambda *args:nullcontext(lifecycle))
+    try:
+        threads._execute_run(accepted.id, tid)
+        saved = RunService(service.root_dir).get(tid, accepted.id)
+        assert service.approval(tid, approval.id).state == "completed"
+        assert saved.status == ("error" if failure else "success")
+        assert saved.result == "Saved reply"
+        assert saved.error == ("Git finalization failed" if failure else None)
+        assert effects == ["sent"]
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("recorded", [False, True])
+@pytest.mark.parametrize("git_bound", [False, True])
+def test_sqlite_approval_end_recovery_retains_git_fence(sqlite_approval, monkeypatch, recorded, git_bound):
+    tid, root, service, queued = sqlite_approval
+    effects = []
+    def gate(value):
+        interrupt({"action_requests":[ACTION]})
+        effects.append("sent")
+        return {"messages":[AIMessage("Saved reply")]}
+    connection = sqlite3.connect(root / "checkpoint.db", check_same_thread=False)
+    builder = StateGraph(MessagesState)
+    builder.add_node("gate", gate)
+    builder.add_edge(START, "gate"); builder.add_edge("gate", END)
+    graph = builder.compile(checkpointer=SqliteSaver(connection))
+    owner = service.create(tid, "general-agent", "Email this person")
+    service.claim(tid, owner.id)
+    config = {"configurable":{"thread_id":tid, "work_id":owner.work_id}}
+    graph.invoke({"messages":[HumanMessage(owner.text)]}, config, durability="sync")
+    snapshot = graph.get_state(config)
+    approval = service.publish_approval(tid, owner.id, action=ACTION, requests=[ACTION], proposal=PROPOSAL,
+        interrupt_id=snapshot.interrupts[0].id, checkpoint_id=snapshot.config["configurable"]["checkpoint_id"])
+    accepted, _ = accept(service, approval)
+    service.claim(tid, accepted.id)
+    config["configurable"]["approval_id"] = approval.id
+    graph.invoke(Command(resume={"decisions":[{"type":"approve"}]}), config, durability="sync")
+    service.transition(tid, accepted.id, "running", result="Saved reply")
+    if recorded:
+        service.reconcile_approval(tid, approval.id,
+            checkpoint_id=graph.get_state(config).config["configurable"]["checkpoint_id"],
+            consumed=True, completed=True, outcome="checkpoint_end")
+    connection.close()
+    if git_bound:
+        (root / tid / ".git").mkdir()
+    restarted = RunService(service.root_dir)
+    monkeypatch.setattr(threads, "_runs", lambda:restarted)
+    connection = sqlite3.connect(root / "checkpoint.db", check_same_thread=False)
+    graph = builder.compile(checkpointer=SqliteSaver(connection))
+    monkeypatch.setattr(state.MANAGER, "get", lambda *args, **kwargs:SimpleNamespace(
+        agent=graph, runconfig=config))
+    try:
+        threads.queue_recovery_runs()
+        assert queued == [(accepted.id, tid)]
+        threads._execute_run(*queued.pop(0))
+        saved = restarted.get(tid, accepted.id)
+        expected_error = threads.git_recovery_error(str(root / tid), str(root / tid))
+        assert saved.status == ("error" if git_bound else "success")
+        assert saved.error == expected_error and saved.result == "Saved reply"
+        assert threads._get_status(tid)["stage"] == ("error" if git_bound else "ready")
+        assert restarted.approval(tid, approval.id).state == "completed"
+        assert effects == ["sent"]
     finally:
         connection.close()
 

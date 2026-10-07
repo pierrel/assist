@@ -466,6 +466,9 @@ Checkpoint recovery reads the exact Approval link, preserves the reviewed identi
 and applies its stored ordered decisions only to the original verified interrupt.
 Unseen requests are rejected. Observed checkpoint progress moves an approval through
 `accepted` or `rejected`, `consumed`, then `completed` at END or a new HITL gate.
+At END, the worker saves the answer while the execution Run stays running
+until Git finalization succeeds. Restart recovery preserves the saved answer and
+the existing Git verification error without repeating the approved effect.
 Pending cards rebuild from these records after lost status writes. Accepted
 continuations run before followers; blocked continuations keep that fence and expose
 the recovery error without automatic retries. An operator can use
@@ -478,7 +481,8 @@ ones remain blocked.
 
 Approval persistence provides process-crash recovery, not universal exactly-once
 external effects. Email delivery retains the existing stable provider idempotency
-key. An already completed checkpoint finalizes its receipt without another slice.
+key. An already completed checkpoint recovers its receipt without another slice;
+Git-backed work still requires operator reconciliation after restart.
 Other work retains user-turn priority.
 The EmacsOS client offers scrollable previews, two-tap decisions and an email
 editor. Email archive/Trash decisions bind the submitted kind as well as the token

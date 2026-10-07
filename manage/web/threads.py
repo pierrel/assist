@@ -3062,16 +3062,27 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
         return
     if run.approval_id is not None:
         approval = _runs().approval(tid, run.approval_id)
-        if approval is None or approval.blocked_reason or approval.state == "completed":
+        if approval is None or approval.blocked_reason:
             return
-        chat = MANAGER.get(tid, sandbox_backend=None)
         try:
             with THREAD_QUEUE.acquire(tid):
-                snapshot, checkpoint_id, consumed = _approval_checkpoint(chat, approval)
-                if consumed and not snapshot.next and not snapshot.interrupts:
-                    _runs().reconcile_approval(tid, approval.id, checkpoint_id=checkpoint_id,
-                        consumed=True, completed=True, outcome="checkpoint_end")
-                    _set_status(tid, "ready")
+                completed = approval.state == "completed" and approval.outcome == "checkpoint_end"
+                if not completed:
+                    if approval.state == "completed":
+                        return
+                    chat = MANAGER.get(tid, sandbox_backend=None)
+                    snapshot, checkpoint_id, consumed = _approval_checkpoint(chat, approval)
+                    completed = consumed and not snapshot.next and not snapshot.interrupts
+                    if completed:
+                        _runs().reconcile_approval(tid, approval.id, checkpoint_id=checkpoint_id,
+                            consumed=True, completed=True, outcome="checkpoint_end")
+                if completed:
+                    git_error = git_recovery_error(
+                        MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid))
+                    _runs().transition(tid, run.id, "error" if git_error else "success",
+                                       **({"error": git_error} if git_error else {}))
+                    _set_status(tid, "error" if git_error else "ready",
+                                **({"error": git_error} if git_error else {}))
                     _dispatch_pending_after(tid)
                     return
         except Exception as error:
@@ -3538,6 +3549,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 if consumed:
                     new_nonmail_gate = bool(verified.interrupts) and not _pending_email(chat) and not _pending_gmail(chat)
                     completed = not verified.next and not verified.interrupts or new_nonmail_gate
+                    if completed and not new_nonmail_gate:
+                        # Save the answer before END completion; Git still owns finalization.
+                        _runs().transition(tid, _run.id, "running", result=resp)
                     _runs().reconcile_approval(tid, record.id, checkpoint_id=checkpoint_id,
                         consumed=True, completed=completed,
                         outcome="new_gate" if new_nonmail_gate else "checkpoint_end" if completed else None)
@@ -4940,7 +4954,8 @@ def queue_recovery_runs() -> None:
             candidate = runs[index]
             if candidate.approval_id is not None:
                 record = _runs().approval(tid, candidate.approval_id)
-                if record is not None and (record.blocked_reason or record.state == "completed"):
+                if record is not None and (record.blocked_reason or
+                        record.state == "completed" and record.outcome != "checkpoint_end"):
                     continue
             if candidate.status == "running":
                 abandoned = candidate

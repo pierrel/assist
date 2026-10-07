@@ -1,0 +1,37 @@
+#+title: Approval checkpoint completion and Git finalization correction
+#+date: 2026-10-07
+
+* Scope
+The PR272 successor preserves the existing Git lifecycle contract when an approved
+graph reaches END. It does not change Email effects, approval authority, browser
+ownership or provider idempotency.
+
+* Correction
+=RunService.reconcile_approval= records END completion without terminalizing the
+execution Run. The worker saves the reply before recording completion, then keeps
+the Run running through =GitLifecycle.finish_visible=. A finalization failure
+persists an error and the saved reply while the Approval remains completed.
+A new HITL gate still parks its execution slice as =awaiting_approval=.
+
+Recovery covers crashes before and after the Approval completion write. Startup
+queues a running completed-END head. Recovery uses the existing
+=git_recovery_error= contract to terminalize that Run as error for Git-backed work,
+or success for work without Git. It retains a saved Run result and does not invoke
+the completed graph or repeat its approved effect. An already recorded END is
+trusted durable progress; an unrecorded END still requires checkpoint lineage
+verification.
+
+* Validation
+Real SQLite checkpoints and reopened Run stores cover successful and failed Git
+finalization, and restart before/after the Approval completion write with and
+without Git. Fake effects prove that the approved action runs once. The scheduler
+isolation fixture explicitly declares the model reachable so startup model probing
+cannot obscure the blocked-clone liveness assertion.
+
+* Historical supersessions
+The =Lifecycle and recovery= section of
+=2026-10-07-run-owned-approvals.org= described checkpoint completion but omitted
+the execution Run's separate Git finalization boundary. Its implementation at the
+original candidate terminalized that Run at END. The replacement behavior above
+keeps checkpoint completion durable while Git success remains unverified, including
+after a process restart.

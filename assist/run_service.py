@@ -735,7 +735,11 @@ class RunService(PerThreadJsonStore[Run]):
     def reconcile_approval(self, thread_id: str, approval_id: str, *, checkpoint_id: str | None,
                            consumed: bool = False, completed: bool = False,
                            blocked_reason: str | None = None, outcome: str | None = None) -> Approval:
-        """Record verified checkpoint progress, never an optimistic pre-execution bit."""
+        """Record checkpoint progress; END does not finalize the execution Run.
+
+        The worker retains running ownership through Git finalization. A new HITL
+        gate instead parks that slice, which cannot finalize Git yet.
+        """
         if (consumed or completed) and not checkpoint_id:
             raise InvalidRunTransition("Checkpoint progress requires an observed checkpoint identity")
         with self._lock:
@@ -758,10 +762,10 @@ class RunService(PerThreadJsonStore[Run]):
                     runs[runs.index(active)] = replace(active,
                         status="cancelled" if active.status == "pending" else "error" if active.status == "running" else "interrupted",
                         error=blocked_reason, updated_at=_now())
-            elif completed:
+            elif completed and outcome == "new_gate":
                 active = self._find(runs, changed.execution_run_id)
                 if active.status == "running":
-                    runs[runs.index(active)] = replace(active, status="awaiting_approval" if outcome == "new_gate" else "success", updated_at=_now())
+                    runs[runs.index(active)] = replace(active, status="awaiting_approval", updated_at=_now())
             self._write(thread_id, runs)
             return changed
 

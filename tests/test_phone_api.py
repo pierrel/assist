@@ -1481,6 +1481,7 @@ def test_blocked_initialization_cannot_stall_the_run_scheduler(monkeypatch):
                         lambda *args: (cloning.set(), release.wait(1)))
     monkeypatch.setattr(phone_api.threads, "_execute_run",
                         lambda *args, **kwargs: ran.set())
+    monkeypatch.setattr(phone_api.threads, "_llm_reachable", lambda: True)
 
     initializer.start()
     initializer.submit("clone-run", "clone-thread", "repo-a")
