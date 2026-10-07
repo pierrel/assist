@@ -454,16 +454,32 @@ reapply any edits before approving again. The email tool checks that reviewed
 identity against its captured delivery configuration. Once a decision is accepted,
 phone Run cancellation returns HTTP 409, including after checkpoint recovery,
 without cancelling the work or losing its receipt.
-Checkpoint recovery retains the reviewed identity from the durable work chain.
-It applies an accepted email decision only while its original checkpoint interrupt
-is still pending, then continues consumed checkpoints without reapplying it.
-Legacy pending proposals without an interrupt identity require fresh review after recovery.
-An accepted approval remains that chain's
-successor rather than being replaced by recovery of an older interrupted slice.
-An already completed approval checkpoint finalizes that receipt without creating
-another invocation. Pending continuations in an accepted approval's work chain run
-before that thread's followers until recovery finishes, even after the decision is
-consumed or the status loses its proposal token. Other work retains user-turn priority.
+Approvals are first-class records owned by `RunService` in the existing `runs.json`.
+Each review has its own token, with stable proposal, work, interrupt and checkpoint
+identities. A changed complete preview or fixed sender/Cc creates a new review;
+identical text at a later interrupt also needs a new decision. Accepting a decision
+and its execution Run is one atomic storage commit. Record-native replays return the original
+accepted receipt even when recovery creates a new execution slice. Legacy email
+replays retain their original pending-card requirement.
+
+Checkpoint recovery reads the exact Approval link, preserves the reviewed identity,
+and applies its stored ordered decisions only to the original verified interrupt.
+Unseen requests are rejected. Observed checkpoint progress moves an approval through
+`accepted` or `rejected`, `consumed`, then `completed` at END or a new HITL gate.
+Pending cards rebuild from these records after lost status writes. Accepted
+continuations run before followers; blocked continuations keep that fence and expose
+the recovery error without automatic retries. An operator can use
+`repair_approval_core` after restoring the checkpoint; it verifies ownership before
+creating a new slice. If the imported proposal could not be read, use
+`fresh_review_approval_core` to publish an undecided review of its verified original
+interrupt. Legacy cards with no original interrupt require fresh review.
+Legacy accepted Runs migrate once using their exact interrupt binding; unverifiable
+ones remain blocked.
+
+Approval persistence provides process-crash recovery, not universal exactly-once
+external effects. Email delivery retains the existing stable provider idempotency
+key. An already completed checkpoint finalizes its receipt without another slice.
+Other work retains user-turn priority.
 The EmacsOS client offers scrollable previews, two-tap decisions and an email
 editor. Email archive/Trash decisions bind the submitted kind as well as the token
 inside the separately installed email tools' admission boundary. Their kinds are
@@ -500,6 +516,49 @@ ignored environment file, it immediately texts that fixed recipient with the mes
 and a link to the thread. These values intentionally do not use an `ASSIST_` prefix, so
 they are not passed into sandboxes. If the recipient is absent, Assist logs the missing
 configuration and keeps the in-app urgent behavior without sending SMS.
+
+### Email mailbox
+
+The ordinary Deep Agents web assistant can search/read email and propose archive
+or recoverable Trash actions. Load the Email skill through a natural mail request.
+The current provider is Gmail. Searches support its queries plus local regex
+filters for sender, subject, body and date, scanning at most 50 candidates per
+page with explicit coverage/cursors.
+Reads return plain bodies and links without remote images/scripts. Date headers
+represent the sender's date; received timestamps are UTC. Gmail native date bounds
+follow [Gmail query semantics](https://developers.google.com/workspace/gmail/api/guides/filtering).
+Archive/Trash requires approval of complete message previews; oversized previews
+remain rejectable. These mailbox tools offer no send/reply, permanent delete or
+attachment download.
+Pi, delegates and inbound SMS triage do not receive these tools.
+
+An operator connects the account once, outside an agent turn:
+
+1. Enable Gmail API in a Google Cloud project; configure OAuth consent and create
+   a **Desktop app** OAuth client. Download its client JSON into a private
+   directory outside `ASSIST_THREADS_DIR` and make the file mode `0600`.
+2. Install the optional setup extra in the operator environment:
+   `pip install -e ".[gmail-setup]"`.
+3. Run `python -m assist.gmail_setup --client-file <private-client.json>
+   --token-file <private-gmail-token.json>`. Open the printed Google consent link
+   and approve the account. For a remote host, forward port 8765 with SSH and
+   add `--no-browser`; keep that tunnel open for the five-minute consent window.
+4. Set `ASSIST_GMAIL_TOKEN_FILE` to the saved private file in the service's ignored
+   `.deploy.env`. Have the normal deployment owner regenerate and install the
+   systemd environment with `make deploy-service`, then restart the service. The runtime
+   refuses credential files under the thread directory, symlinks, non-owner
+   files and permissions other than `0600`.
+
+Enrollment requests only `gmail.modify`, the scope needed for read/archive/Trash.
+Google gives that scope broader send capabilities, but Assist exposes only its
+fixed read/archive/Trash endpoints. It does not request `gmail.send` or the full
+`mail.google.com` permanent-delete scope. Google's external OAuth apps in
+**Testing** expire refresh tokens after seven days; this enrollment is not a
+permanent connection while that status remains. See Google's
+[Desktop authorization](https://developers.google.com/identity/protocols/oauth2/native-app),
+[scope reference](https://developers.google.com/workspace/gmail/api/auth/scopes) and
+[token expiry rules](https://developers.google.com/identity/protocols/oauth2#expiration).
+No token contents belong in prompts, logs, source or browser storage.
 
 ### Quiet routine results
 

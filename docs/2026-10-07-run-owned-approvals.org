@@ -1,0 +1,93 @@
+#+TITLE: Run-owned durable approvals in phone HITL PR272
+#+DATE: 2026-10-07
+
+* Decision and scope
+Pierre requested the durable-approval replacement in existing Assist PR272.
+The same Implementer and effort retain the original offered commits and reconcile
+with landed provider-neutral Email main. Paired Emacsos PR56 keeps its existing
+client contract; no additional client source change is needed.
+
+The implementation owns mail approvals only. It adds no database, ApprovalStore,
+action adapter, live provider/model/device effect, or ordinary SMS approval fix.
+Root owns composition preserving browser/phone/Git, deployment, merge and repin.
+
+* Implementation plan and resulting ownership
+1. =assist/run_service.py=: typed Approval revisions belong to the parked Run in
+   =runs.json=. Store proposal/work/owner/interrupt/checkpoint identities, ordered
+   requests, full review, immutable decision, original accepted receipt and active
+   execution link. Bound one revision to 2 MiB and one owner to 64 revisions.
+2. =manage/web/threads.py=: publish the checkpoint-bound review under queue
+   ownership, then project the card. Acceptance commits decision and execution
+   together. Preview reads run outside the global queue and recheck the exact
+   pending record before publishing a distinct complete-review revision.
+3. Worker dispatch/recovery reads explicit =approval_id= and unfinished Approval
+   links. Every non-owner Run, including generic resumes, is fenced at queue claim.
+   Check thread, namespace, explicit foreign work metadata and reviewed ancestor
+   before applying an original decision or treating it as consumed.
+4. =assist/thread.py=: approval continuations disable checkpoint rollback. Normal
+   turns retain rollback. This prevents retry from rewinding behind consumption.
+5. Phone/browser project records through =approval_status=. Core admission keeps
+   full-preview checks, editable To/subject/body, fixed From/Cc, typed mail actions,
+   exact binding, and ordered rejection of unseen requests.
+6. Legacy pending cards import at acceptance. Legacy accepted mail Runs migrate
+   once using their original interrupt. Old routing prefixes are read only at that
+   import boundary; they do not authorize normal worker execution. Missing exact
+   evidence blocks recovery rather than guessing a newer proposal.
+
+* Lifecycle and recovery
+=pending= becomes =accepted= or =rejected= in the same atomic replacement that
+creates the execution Run. Rejection still needs its continuation. Observed durable
+checkpoint progress becomes =consumed=. END or a verified new HITL gate becomes
+=completed=, with mail publication closing the old record and parking its successor
+in one RunService write. Continuation completion describes graph progress, not
+provider success. An unanswered review may also become =completed= with outcome
+=new_proposal= when a complete preview or fixed identity revision supersedes it at
+the same gate; this does not imply a decision was consumed.
+
+The original accepted Run ID stays immutable; the active execution Run ID changes
+for recovery or fair scheduling. Record-native replays retain their original receipt. Legacy email replays retain
+their original pending-card requirement. A changed
+review gets another review ID while the same interrupt/action retains its proposal
+ID. A later identical-text interrupt has a different proposal and review identity.
+
+Unverifiable checkpoints or worker failures persist a blocked reason with the
+failed execution outcome. Automatic scheduling excludes blocked work but followers
+stay fenced. =repair_approval_core= is an explicit operator operation: it checks
+checkpoint authority under queue ownership, then atomically creates a new slice
+and clears the block. The executor checks ownership again before any decision.
+If a legacy import could not read its proposal, =fresh_review_approval_core= can
+verify its original interrupt and unique named action, then atomically close the
+blocked work and publish an undecided review. It never applies the old decision.
+Mailbox replacement owners can be dispatched only to complete their preview.
+A changed fixed identity instead closes the old unconsumed review and publishes a
+fresh pending review without applying its old decision.
+
+* Storage and effects
+The existing JSON store uses atomic temporary-file replacement. Tests cover a
+failure before rename and a lost response after rename. This is a process-crash
+boundary, not a power-loss fsync guarantee. The graph remains execution truth;
+record consumption can lag a checkpoint, but is never an optimistic pre-invoke bit.
+
+A crash after a provider accepted an effect and before its tool checkpoint committed
+can still repeat that tool. Email keeps its stable tool-call delivery idempotency
+key; this implementation does not claim universal exactly-once effects.
+
+* Validation and review
+Retained real SQLite restart coverage is joined by =tests/test_durable_approvals.py=:
+reopen both stores at acceptance, consumption, post-consumption, END and new gates;
+use fake effects; verify distinct identical-text interrupts, unseen rejection,
+receipt stability, blocked authority failures, generic-resume fences and explicit
+repair. Narrow web fakes expose checkpoint-shaped state; they do not replace the
+real SQLite crash tests. Full unit status and exact reviewed commit are recorded
+in the implementation handoff after checks finish.
+
+The independent security/concurrency Reviewer found and verified fixes for receipt
+stability, accepted-preview refresh, modern lineage/namespace checks, generic resume
+fencing and non-mail gate completion. A separate documentation alignment pass is
+required before the exact candidate is offered.
+
+* Historical supersessions
+Directly supersedes the 2026-10-07 durable-approval assessment sections
+"Recommendation and scope" and "Effort progress and next action": Pierre requested
+implementation in the current PR rather than a follow-up. The assessment's
+technical invariants and its historical no-implementation claim remain valid.

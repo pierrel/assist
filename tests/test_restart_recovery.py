@@ -26,6 +26,7 @@ from manage.web import phone_api, threads
 from manage.web.run_stream import RunStreamJournal
 from manage.web.state import MESSAGE_BACKLOG, _get_status, _set_status
 from assist.backlog import MessageBacklog, PendingMessage
+from tests.approval_helpers import checkpoint_chat
 from assist.thread_engine import write_new_thread_engine
 
 
@@ -976,7 +977,7 @@ def test_restart_keeps_the_accepted_email_successor_and_original_receipt(wired, 
     threads._runs().transition(tid, proposal.id, "awaiting_approval")
     args = {"to": "recipient@example.test", "subject": "Subject", "body": "Body"}
     _set_status(tid, "awaiting_approval", pending_email_token="stored-token",
-                pending_email_run_id=proposal.id,
+                pending_email_run_id=proposal.id, pending_email_interrupt_id="original-interrupt",
                 **{"pending_email_" + key: value for key, value in args.items()})
     accepted, _ = threads.email_decision_core(
         tid, "approve", threads.email_approval_preview(_get_status(tid))["token"],
@@ -992,6 +993,9 @@ def test_restart_keeps_the_accepted_email_successor_and_original_receipt(wired, 
         def pending_email(self):
             return args if self.pending else None
 
+        def pending_action_interrupt_id(self, name, args=None):
+            return "original-interrupt" if self.pending else None
+
         def pending_actions(self):
             return [{"name": "send_email", "args": args}]
 
@@ -1002,7 +1006,7 @@ def test_restart_keeps_the_accepted_email_successor_and_original_receipt(wired, 
             return "done"
 
     chat = EmailChat(tid, calls)
-    monkeypatch.setattr(web.MANAGER, "get", lambda *a, **k: chat)
+    monkeypatch.setattr(web.MANAGER, "get", lambda *a, **k: checkpoint_chat(chat, k.get("configurable")))
     threads.queue_recovery_runs()
     _drain_worker_queue(tid)
 
@@ -1081,6 +1085,7 @@ def test_recovery_email_approval_consumption(wired, monkeypatch, decision, crash
     _set_status(tid, "awaiting_approval", pending_email_token="stored-token",
                 pending_email_run_id=proposal.id,
                 pending_email_interrupt_id=graph.get_state(config).interrupts[0].id,
+                pending_email_checkpoint_id=graph.get_state(config).config["configurable"]["checkpoint_id"],
                 **{"pending_email_" + name: value for name, value in args.items()})
     accepted, _ = threads.email_decision_core(
         tid, decision, threads.email_approval_preview(_get_status(tid))["token"],
@@ -1175,7 +1180,7 @@ def test_restart_dispatches_email_approval_before_pending_follower(
     if recovered:
         threads._runs().claim(tid, accepted.id)
         threads._runs().transition(tid, accepted.id, "interrupted")
-        selected = threads._create_run(tid, None, resume=True, work_id=accepted.work_id)
+        selected = threads._runs().continue_approval(tid, accepted.id)
     else:
         selected = accepted
     calls = []
@@ -1202,7 +1207,7 @@ def test_restart_dispatches_email_approval_before_pending_follower(
             return "done"
 
     chat = EmailChat(tid, calls)
-    monkeypatch.setattr(web.MANAGER, "get", lambda *a, **k: chat)
+    monkeypatch.setattr(web.MANAGER, "get", lambda *a, **k: checkpoint_chat(chat, k.get("configurable")))
     threads.queue_recovery_runs()
     queued = threads._RESUME_SCHEDULER._q.get_nowait()
     assert queued["run_id"] == selected.id
@@ -1263,6 +1268,7 @@ def test_second_restart_dispatches_approval_recovery_without_proposal_token(
         _set_status(tid, "awaiting_approval", pending_email_token="review",
                     pending_email_run_id=original.id,
                     pending_email_interrupt_id=graph.get_state(config).interrupts[0].id,
+                pending_email_checkpoint_id=graph.get_state(config).config["configurable"]["checkpoint_id"],
                     **{"pending_email_" + key: value for key, value in args.items()})
         accepted, _ = threads.email_decision_core(
             tid, "approve", threads.email_approval_preview(_get_status(tid))["token"],
@@ -1327,6 +1333,7 @@ def test_recovered_email_does_not_guess_an_interrupt_identity(wired, monkeypatch
     _set_status(tid, "awaiting_approval", pending_email_token="stored-token",
                 pending_email_run_id=proposal.id,
                 pending_email_interrupt_id=None if legacy else original_id,
+                pending_email_checkpoint_id=graph.get_state(config).config["configurable"]["checkpoint_id"],
                 **{"pending_email_" + name: value for name, value in args.items()})
     accepted, _ = threads.email_decision_core(
         tid, "approve", threads.email_approval_preview(_get_status(tid))["token"],

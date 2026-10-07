@@ -1,0 +1,53 @@
+#+TITLE: Provider-neutral Email interface
+#+DATE: 2026-10-03
+
+* Outcome and scope
+Pierre requested email, not a Gmail-branded feature. The agent now discovers the
+Email skill and uses email_search, email_read, email_archive and email_delete.
+Mailbox previews say Open email. Gmail remains the current internal provider,
+including its OAuth setup, token-file setting, query semantics and message links.
+No multi-account search or additional provider is implemented. These mailbox tools
+still cannot send or reply; outbound send_email remains a separate existing tool.
+
+* Approval and recovery contract
+Archive and recoverable Trash still require complete previews and approval bound
+to the exact action, checkpoint interrupt and durable proposal work. New action
+names are email_archive and email_delete. Internal pending_gmail_* status fields,
+gmail-approval dispatch family and gmail_decision_core remain unchanged, keeping
+mailbox changes separate from outbound-send approvals. Bounds, regex behavior,
+opaque ID validation, preview recovery and rejection behavior are retained.
+
+Before cutover Root inspected production status, Run and latest SQLite checkpoint
+metadata without printing mail contents, identifiers or arguments. There were no
+pending mailbox status cards, no gmail-approval Run keys and no interrupted or
+unresolved old mailbox tool calls. One checkpoint retained an old loaded skill.
+Existing catalog fingerprint invalidation clears that activation and makes the
+Email skill available on its next ordinary turn. No old tool aliases or checkpoint
+migration are added. Root must recheck the same aggregates under the existing
+protected drain before deployment; newly pending legacy work requires preserving
+its accepted decision rather than silently dropping or rejecting it.
+
+Phone API/UI naming is maintained by the Phone owner. The combined deployment
+must use its generic action kinds and neutral labels with this successor. Root
+owns composition, protected cutover and actual live verification.
+
+* Validation
+Deterministic coverage exercises current mailbox tools, worker admission and
+approval/recovery, web preview escaping, loaded skill catalog invalidation and
+bootstrap tool visibility. The final runtime selection passed 241 tests; the
+rename, kernel and census selection passed 174 tests, with the valid-old-activation
+refinement separately passing before the final runtime selection. The current
+prompt census fingerprints are refreshed
+for the renamed catalog and registered tools; historical prompt records retain
+their original measurements.
+
+The four natural mail acceptance evals keep their user prompts. Tool/skill checks
+and hostile-mail fixture references use current names. They were not rerun against
+the model for this naming correction. Earlier model evidence concerns the earlier
+Gmail-named interface and does not prove fresh Email routing or user acceptance.
+No real mailbox mutation, account change or provider call is part of these checks.
+
+* Historical supersessions
+[[file:2026-10-02-gmail-integration.org][2026-10-02 Gmail integration]], Outcome and scope, Design and Phone interface:
+replace the agent-facing Gmail skill/tool naming with Email and email_* names.
+The provider implementation and operational constraints remain applicable.

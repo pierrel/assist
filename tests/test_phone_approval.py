@@ -322,8 +322,7 @@ def test_phone_cannot_cancel_recovered_accepted_approval(approval, monkeypatch, 
     accepted = runs.claim("thread-a", response.json()["run_id"])
     monkeypatch.setattr(threads, "_is_pi_thread", lambda tid: False)
     monkeypatch.setattr(threads, "_recovery_decision", lambda tid, text, continuation=False: "resume")
-    threads._recover_run(accepted)
-    recovered = runs.list("thread-a")[-1]
+    recovered = runs.continue_approval("thread-a", accepted.id)
     assert recovered.resume and recovered.resume_decision is None
     before = state._get_status("thread-a")
     run_id = original.id if handle == "original" else recovered.id

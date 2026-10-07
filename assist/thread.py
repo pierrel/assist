@@ -253,10 +253,14 @@ class Thread:
     def _run(self, graph_input) -> str:
         """Acquire the per-thread LLM affinity queue for the agent loop (so concurrent
         threads don't thrash llama.cpp's single KV-cache slot — see ``assist/thread_queue``),
-        invoke the graph with checkpoint-rollback, and return the last AIMessage's content.
-        ``graph_input`` is a ``{"messages": …}`` dict (a new turn) or a ``Command`` (resume)."""
+        invoke the graph, and return the last AIMessage's content. Ordinary turns use
+        checkpoint rollback; approval continuations disable it so a consumed decision
+        cannot rewind. ``graph_input`` is a message dict, a HITL ``Command``, or ``None``
+        for checkpoint continuation."""
         with THREAD_QUEUE.acquire(self.thread_id, on_state_change=self.on_queue_state):
-            result = invoke_with_rollback(self.agent, graph_input, self.runconfig)
+            # Approval authority must never rewind behind a consumed decision.
+            kwargs = {"rollback_on": ()} if self.runconfig["configurable"].get("approval_id") else {}
+            result = invoke_with_rollback(self.agent, graph_input, self.runconfig, **kwargs)
         messages = result.get("messages", [])
         if messages and isinstance(messages[-1], AIMessage):
             return messages[-1].content
@@ -325,7 +329,7 @@ class Thread:
         return self.resume_action(decision)
 
     def _observe(self, graph_input, on_delta, on_reset=None) -> str:
-        """Execute with rollback while publishing observed-graph model prose.
+        """Publish observed model prose with rollback only for ordinary turns.
 
         ``stream_with_rollback`` requests LangGraph's top-level stream only;
         model checkpoint namespaces also occur on ordinary top-level chunks.
@@ -343,8 +347,9 @@ class Thread:
                 on_delta(text)
 
         with THREAD_QUEUE.acquire(self.thread_id, on_state_change=self.on_queue_state):
+            kwargs = {"rollback_on": ()} if self.runconfig["configurable"].get("approval_id") else {}
             result = stream_with_rollback(
-                self.agent, graph_input, self.runconfig, receive, on_reset=on_reset)
+                self.agent, graph_input, self.runconfig, receive, on_reset=on_reset, **kwargs)
         messages = result.get("messages", [])
         if messages and isinstance(messages[-1], AIMessage):
             return messages[-1].content

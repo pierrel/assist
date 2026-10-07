@@ -12,6 +12,7 @@ import ast
 import contextvars
 import ctypes
 import errno
+import faulthandler
 import hashlib
 import inspect
 import json
@@ -1240,6 +1241,7 @@ def _write_skill(root: Path, name: str, description: str, marker: str,
 
 def _web_toolset(root: Path, *, full: bool) -> list:
     from assist.events.email import email_tools
+    from assist.gmail import gmail_tools
     from assist.events.notify import notify_tools
     from assist.events.quiet import quiet_tools
     from assist.events.store import SubscriptionStore
@@ -1255,7 +1257,7 @@ def _web_toolset(root: Path, *, full: bool) -> list:
         + subscription_tools(SubscriptionStore(str(root)))
         + notify_tools(lambda _tid: None)
         + quiet_tools(lambda _tid, _run_id: False)
-        + email_tools()
+        + email_tools() + gmail_tools()
         + [get_location]
         + frequency_tools(FrequencyDecisionStore(str(root)))
     )
@@ -1282,11 +1284,12 @@ def _web_toolset(root: Path, *, full: bool) -> list:
 def _web_config(tools: list) -> Iterator[None]:
     import assist.thread_manager as manager_mod
     from assist.events.email import EMAIL_INTERRUPT_ON
+    from assist.gmail import GMAIL_INTERRUPT_ON
 
     old_tools = manager_mod._web_tools
     old_interrupt = manager_mod._web_interrupt_on
     manager_mod.set_web_tools(tools)
-    manager_mod.set_web_interrupt_on(EMAIL_INTERRUPT_ON)
+    manager_mod.set_web_interrupt_on({**EMAIL_INTERRUPT_ON, **GMAIL_INTERRUPT_ON})
     try:
         yield
     finally:
@@ -1299,6 +1302,7 @@ def _invoke_agent(agent, scenario: str, config: dict[str, Any] | None = None):
     return agent.invoke(
         {"messages": [HumanMessage(content=f"SYNTHETIC USER {scenario}")]},
         config,
+        durability="sync",
     )
 
 
@@ -1314,16 +1318,10 @@ def _invoke_web(trace: CensusTrace, root: Path, *, full: bool,
                 delegate: bool = False) -> dict[str, Any]:
     from assist.context_rider import CONTEXT_RIDER_KEY, ContextRider
     from assist.thread_manager import ThreadManager
-    from langgraph.checkpoint.memory import InMemorySaver
 
     name = "web-delegate" if delegate else ("web-main-full" if full else "web-main-core")
     manager = ThreadManager(str(root / name / "threads"))
     manager._model = RecordingChatModel(trace)
-    # ThreadManager.get is the production composition seam.  Its SQLite saver is
-    # irrelevant to request composition and can self-deadlock under a synthetic
-    # rapid multi-tool loop (the same chained-put shape production avoids with
-    # sync durability).  Keep the real constructor, replace only persistence.
-    manager.checkpointer = InMemorySaver()
     tid = f"synthetic-{name}"
     thread_dir = Path(manager.thread_dir(tid))
     working_dir = Path(manager.make_default_working_dir(str(thread_dir)))
@@ -1703,6 +1701,10 @@ _TOOL_ORIGINS = {
     "resume_schedule": "assist.schedule.tools",
     "search_internet": "assist.tools",
     "send_email": "assist.events.email",
+    "email_search": "assist.gmail",
+    "email_read": "assist.gmail",
+    "email_archive": "assist.gmail",
+    "email_delete": "assist.gmail",
     "start_async_task": "assist.async_subagents",
     "task": "deepagents.middleware.subagents",
     "travel": "assist.tools",
@@ -2128,9 +2130,9 @@ _TOOL_RESULT_METADATA = {
 }
 
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "b83832c07ad98424cc27c49c2a8ab962333d5fdee863eea9de5c75b4e4596823"
+    "e0900ef5753a28b196509ea1d8cc9336e9eb5ad5c13f52d81c1dc20577462e49"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "8a84e4503eda611862995f1d8b10e43de07babfa6c8c59c891df858f5b8d4e95"
+    "3609ffcb79c436bed132dc3accfae6a7d5ec72a13b7cb513524cd72f1bee877e"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
@@ -3857,6 +3859,9 @@ def _main() -> int:
     if args.stdout_census:
         if args.label or args.stdout_observer:
             parser.error("isolated census mode does not accept a label")
+        # Keep the one-shot diagnostic armed through child teardown, before the
+        # parent's 120-second bound.
+        faulthandler.dump_traceback_later(60, file=sys.stderr)
         sys.stdout.buffer.write(artifact_bytes(_capture_census()))
         return 0
     if args.stdout_observer:

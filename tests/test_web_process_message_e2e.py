@@ -175,14 +175,17 @@ def test_post_message_runs_process_message_without_crashing(
 # by tests/test_sandbox_per_turn.py's real-Docker test).
 
 
+from tests.approval_helpers import checkpoint_chat
+
 def _stub_happy_path(monkeypatch, chat):
     """Stub the sandbox lookup, MANAGER.get, and the post-message hooks so
     _process_message runs end-to-end against `chat`."""
     monkeypatch.setattr("manage.web.state._get_sandbox_backend", lambda tid, tz=None: None)
     monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None: None)
+    chat.thread_id = "thread-e2e"
     monkeypatch.setattr(
         web.MANAGER, "get",
-        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False, continuation=False: chat,
+        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False, continuation=False: checkpoint_chat(chat, configurable),
     )
     monkeypatch.setattr(web.MANAGER, "touch", lambda tid: None)
     monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
@@ -823,16 +826,24 @@ def test_changed_delivery_identity_requires_fresh_review_without_resuming(client
             return {"to": "person@example.test", "subject": "Subject", "body": "Full body"}
 
         def pending_actions(self):
-            raise AssertionError("Changed identity must not resume the interrupted checkpoint")
+            return [{"name":"send_email", "args":self.pending_email()}]
+
+        def resume_actions(self, decisions):
+            pytest.fail("Changed identity must not resume the interrupted checkpoint")
 
         def get_messages(self):
             return []
 
     _stub_happy_path(monkeypatch, Chat())
+    monkeypatch.setattr(threads, "email_identity", lambda: ("Old <old@example.test>", "cc@example.test"))
+    owner = threads._create_run("thread-e2e", "Email this person")
+    threads._runs().claim("thread-e2e", owner.id)
+    action = {"name":"send_email", "args":{"to":"person@example.test", "subject":"Subject", "body":"Full body"}}
+    record = threads._runs().publish_approval("thread-e2e", owner.id, action=action, requests=[action],
+        proposal={"kind":"send_email", "action":action, "from":"Old <old@example.test>", "cc":"cc@example.test"},
+        interrupt_id="gmail-interrupt", checkpoint_id="proposal")
+    run, _ = threads.email_decision_core("thread-e2e", "approve", record.id, phone_preview=True)
     monkeypatch.setattr(threads, "email_identity", lambda: ("New <new@example.test>", "cc@example.test"))
-    run = threads._create_run("thread-e2e", None, dispatch_key="email-approval:synthetic-review",
-                             resume_decision={"type": "approve",
-        "email_review_identity": ["Old <old@example.test>", "cc@example.test"]})
     threads._execute_run(run.id, "thread-e2e")
     status = _get_status("thread-e2e")
     assert status["stage"] == "awaiting_approval" and status["pending_email_token"]

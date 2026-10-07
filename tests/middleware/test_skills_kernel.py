@@ -899,3 +899,51 @@ def test_compiled_graph_discloses_embedder_tool_after_load():
     assert "custom_lookup" not in model.bound_tools[0]
     assert any(message.name == "custom_lookup" and message.status == "success"
                for message in result["messages"] if isinstance(message, ToolMessage))
+
+
+def test_loaded_mailbox_skill_refreshes_after_provider_neutral_rename(tmp_path):
+    from assist.gmail import gmail_tools
+
+    source = "/render-skill/"
+    names = frozenset(tool.__name__ for tool in gmail_tools())
+    legacy_names = frozenset(name.replace("email_", "gmail_") for name in names)
+    current = (Path(__file__).parents[2] / "assist/web_skills/email/SKILL.md").read_text()
+    legacy = current.replace("name: email", "name: gmail").replace("email_", "gmail_")
+    old_path = tmp_path / "render-skill/gmail/SKILL.md"
+    old_path.parent.mkdir(parents=True)
+    old_path.write_text(legacy)
+    backend = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+    old_tools = [tool(callable.__name__.replace("email_", "gmail_"))(callable)
+                 for callable in gmail_tools()]
+    old_middleware = SmallModelSkillsMiddleware(
+        backend=backend, sources=[source], bundled_sources=[source],
+        tool_definitions=old_tools)
+    initial = old_middleware.before_agent({}, SimpleNamespace(), {})
+    loaded = old_middleware.tools[0].func(
+        "gmail", SimpleNamespace(state=initial, config={}, tool_call_id="old-mail-skill"))
+    checkpoint = {**initial, **loaded.update}
+    assert old_middleware._activation_is_current(
+        "gmail", checkpoint["active_skills"]["gmail"], initial["skills_metadata"])
+    assert old_middleware.before_agent(checkpoint, SimpleNamespace(), {})[
+        "loaded_skill_tools"].value == legacy_names
+    middleware = SmallModelSkillsMiddleware(
+        backend=backend, sources=[source], bundled_sources=[source],
+        tool_definitions=gmail_tools())
+
+    old_path.unlink()
+    old_path.parent.rmdir()
+    new_path = tmp_path / "render-skill/email/SKILL.md"
+    new_path.parent.mkdir()
+    new_path.write_text(current)
+    refreshed = middleware.before_agent(checkpoint, SimpleNamespace(), {})
+
+    assert [skill["name"] for skill in refreshed["skills_metadata"]] == ["email"]
+    assert refreshed["skills_catalog_fingerprint"] != initial["skills_catalog_fingerprint"]
+    assert refreshed["active_skills"].value == {}
+    assert refreshed["loaded_skill_tools"].value == frozenset()
+    state = {**checkpoint, **refreshed}
+    assert all(not middleware._tool_is_allowed(state, name) for name in names)
+    loaded = middleware.tools[0].func(
+        "email", SimpleNamespace(state=state, config={}, tool_call_id="mail-skill"))
+    assert isinstance(loaded, Command)
+    assert loaded.update["loaded_skill_tools"] == names

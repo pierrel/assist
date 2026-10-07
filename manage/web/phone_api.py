@@ -938,7 +938,7 @@ def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
             return 409, {"detail": detail, "outcome": projection["status"],
                          "run": _public_run_projection(projection)}
         if projection["status"] == "pending" and any(
-                run.work_id == projection["work_id"] and run.resume_decision is not None
+                run.work_id == projection["work_id"] and (run.approval_id is not None or run.resume_decision is not None)
                 for run in runs):
             return 409, {"detail": "An approval decision is already accepted", "outcome": "pending",
                          "run": _public_run_projection(projection)}
@@ -1123,7 +1123,7 @@ def _approval_preview(tid: str) -> dict[str, Any]:
     """Return a complete bounded proposal, never a silently shortened approval."""
     _thread_dir(tid)
     with threads._RUN_ADMISSION_LOCK:
-        status = state._get_status(tid)
+        status = threads.approval_status(tid)
         proposal = None
         if status.get("stage") == "awaiting_approval":
             if status.get("pending_email_token"):
