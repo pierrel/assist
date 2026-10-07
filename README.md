@@ -472,7 +472,8 @@ the existing Git verification error without repeating the approved effect.
 Pending cards rebuild from these records after lost status writes. Accepted
 continuations run before followers; blocked continuations keep that fence and expose
 the recovery error without automatic retries. An operator can use
-`repair_approval_core` after restoring the checkpoint; it verifies ownership before
+`repair_approval_core` after fixing the blocking Git condition or restoring the
+checkpoint; it verifies checkpoint ownership before
 creating a new slice. If the imported proposal could not be read, use
 `fresh_review_approval_core` to publish an undecided review of its verified original
 interrupt. Legacy cards with no original interrupt require fresh review.

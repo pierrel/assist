@@ -2203,7 +2203,7 @@ def fresh_review_approval_core(tid: str, approval_id: str) -> Approval:
 
 
 def repair_approval_core(tid: str, approval_id: str) -> Run:
-    """Explicitly repair blocked checkpoint work; the operator schedules the returned Run.
+    """Explicitly repair blocked approval work; the operator schedules the returned Run.
 
     No model or provider effect occurs here. Unreadable or foreign checkpoints keep
     the durable fence. Invocation is an operator action, never a startup retry.
@@ -3771,6 +3771,11 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 if current.status == "pending":
                     current = _runs().claim(tid, current.id)
                 if current.status == "running":
+                    if current.approval_id is not None:
+                        # Persist the unfinished Approval block with its Run error;
+                        # completed checkpoint work retains its saved result below.
+                        _runs().reconcile_approval(tid, current.approval_id,
+                                                   checkpoint_id=None, blocked_reason=message)
                     _runs().transition(tid, current.id, "error", error=message,
                                        **({"result": _terminal[1]} if _terminal is not None else {}))
                 other_running = any(candidate.id != _run.id and candidate.status == "running"

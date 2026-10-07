@@ -335,6 +335,90 @@ def test_sqlite_approval_end_recovery_retains_git_fence(sqlite_approval, monkeyp
         connection.close()
 
 
+@pytest.mark.parametrize("phase", ["ownership", "resume", "sandbox"])
+@pytest.mark.parametrize("consumed", [False, True])
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+def test_precompletion_git_error_is_atomically_repairable(sqlite_approval, monkeypatch, phase, consumed, decision):
+    tid, root, service, queued = sqlite_approval
+    effects = []
+    def gate(value):
+        choice = interrupt({"action_requests":[ACTION]})
+        if choice["decisions"][0]["type"] != "reject":
+            effects.append("sent")
+        return {"messages":[AIMessage("Decision consumed")]}
+    connection = sqlite3.connect(root / "checkpoint.db", check_same_thread=False)
+    builder = StateGraph(MessagesState)
+    builder.add_node("gate", gate)
+    builder.add_node("finish", lambda value:{"messages":[AIMessage("Saved reply")]})
+    builder.add_edge(START, "gate"); builder.add_edge("gate", "finish"); builder.add_edge("finish", END)
+    graph = builder.compile(checkpointer=SqliteSaver(connection), interrupt_before=["finish"] if consumed else [])
+    owner = service.create(tid, "general-agent", "Email this person")
+    service.claim(tid, owner.id)
+    config = {"configurable":{"thread_id":tid, "work_id":owner.work_id}}
+    graph.invoke({"messages":[HumanMessage(owner.text)]}, config, durability="sync")
+    snapshot = graph.get_state(config)
+    approval = service.publish_approval(tid, owner.id, action=ACTION, requests=[ACTION], proposal=PROPOSAL,
+        interrupt_id=snapshot.interrupts[0].id, checkpoint_id=snapshot.config["configurable"]["checkpoint_id"])
+    accepted, _ = threads.email_decision_core(tid, decision, approval.id, phone_preview=True)
+    if consumed:
+        config["configurable"]["approval_id"] = approval.id
+        graph.invoke(Command(resume={"decisions":list(service.approval(tid, approval.id).decisions)}), config, durability="sync")
+        service.reconcile_approval(tid, approval.id,
+            checkpoint_id=graph.get_state(config).config["configurable"]["checkpoint_id"], consumed=True)
+    follower = service.create(tid, "general-agent", "Follower")
+    queued.clear()
+    failed = True
+    error = "Git verification needs operator repair"
+    def boundary(name):
+        if failed and name == phase:
+            raise GitSyncError(error)
+    lifecycle = SimpleNamespace(bound=True, resume=lambda:boundary("resume"),
+        require_sandbox=lambda value:boundary("sandbox"), cleanup_model=lambda value:None,
+        model_starting=lambda:None, finish_visible=lambda *args:None)
+    def acquire(*args):
+        boundary("ownership")
+        return nullcontext(lifecycle)
+    monkeypatch.setattr(threads.GitLifecycle, "acquire", acquire)
+    def get(value, configurable=None, **kwargs):
+        chat = Thread.__new__(Thread)
+        chat.thread_id, chat.agent = tid, graph
+        chat.runconfig = {"configurable":{"thread_id":tid, **(configurable or {})}}
+        chat._run = lambda value:graph.invoke(value, chat.runconfig, durability="sync")["messages"][-1].content
+        return chat
+    monkeypatch.setattr(state.MANAGER, "get", get)
+    writes = []
+    write = service._write
+    def observe_write(*args):
+        write(*args)
+        reopened = RunService(service.root_dir)
+        writes.append((reopened.get(tid, accepted.id).status, reopened.approval(tid, approval.id).blocked_reason))
+    monkeypatch.setattr(service, "_write", observe_write)
+    try:
+        threads._execute_run(accepted.id, tid)
+        assert all(reason == error for status, reason in writes if status == "error")
+        restarted = RunService(service.root_dir)
+        record = restarted.approval(tid, approval.id)
+        assert record.blocked_reason == error and record.state == ("consumed" if consumed else "rejected" if decision == "reject" else "accepted")
+        assert restarted.get(tid, accepted.id).status == "error"
+        assert restarted.get(tid, accepted.id).error == error
+        assert effects == (["sent"] if consumed and decision == "approve" else [])
+        monkeypatch.setattr(threads, "_runs", lambda:restarted)
+        threads.queue_recovery_runs()
+        assert queued == [] and restarted.get(tid, follower.id).status == "pending"
+        assert threads.approval_status(tid)["stage"] == "error"
+        failed = False
+        repaired = threads.repair_approval_core(tid, approval.id)
+        assert repaired.id != accepted.id and repaired.approval_id == approval.id
+        assert restarted.approval(tid, approval.id).accepted_run_id == accepted.id
+        threads._execute_run(repaired.id, tid)
+        assert restarted.approval(tid, approval.id).state == "completed"
+        assert restarted.get(tid, repaired.id).status == "success"
+        assert effects == (["sent"] if decision == "approve" else [])
+        assert restarted.get(tid, follower.id).status == "pending"
+    finally:
+        connection.close()
+
+
 @pytest.mark.parametrize("corruption", ["missing", "unreadable", "foreign"])
 def test_checkpoint_authority_failure_fences_followers(records, monkeypatch, corruption):
     service, owner, approval = records
