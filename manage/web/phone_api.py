@@ -517,6 +517,16 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
     _thread_dir(tid)
     if before is not None and not _HISTORY_CURSOR_RE.fullmatch(before):
         raise HTTPException(status_code=422, detail="Invalid history cursor")
+    if before is None:
+        # Opening the thread on the phone is the phone's "view" — clear the
+        # unseen ("new") and urgent flags, reusing the SAME helpers the web
+        # thread page (get_thread) calls, so the two surfaces share the
+        # read-receipt/ack semantics instead of duplicating them.  History
+        # pagination (before is not None) must NOT clear: the user is still
+        # scrolling an already-opened view.  Both clears are missing-ok and
+        # never-raise, so a flag hiccup can't 500 an open.
+        state._clear_unseen_response(tid)
+        state._clear_urgent(tid)
     raw_messages, stored_has_more, checkpoint_backed = _thread_history(tid, before)
     end = len(raw_messages)
     start = max(0, end - MAX_HISTORY_MESSAGES)
@@ -623,17 +633,24 @@ def _list_threads() -> dict[str, Any]:
             repo_key, repo_label = _thread_repo_summary(tid, status)
             title = _stored_thread_title(tid)
             activity_at = os.stat(_thread_dir(tid)).st_mtime
-            values.append((threads._thread_status_rank(tid, status.get("stage", "ready")), {
+            stage = status.get("stage", "ready")
+            unread = state._has_unseen_response(tid)
+            urgent = state._has_urgent(tid)
+            values.append((threads._thread_status_rank(tid, stage), {
                 "id": tid,
                 "description": title,
                 "search_description": _normalized_search_title(title),
                 "harness": read_thread_engine(_thread_dir(tid)).name,
-                "status": status.get("stage", "ready"),
+                "status": stage,
                 "repo_key": repo_key,
                 "repo_label": repo_label,
-                "unread": state._has_unseen_response(tid),
-                "urgent": state._has_urgent(tid),
-                "unmerged": state._has_unmerged_changes(tid),
+                "unread": unread,
+                "urgent": urgent,
+                # Tri-state, mirroring web's index short-circuit: "yes" (dirty),
+                # "no" (checked, clean), or "unknown" (not checked because a
+                # stronger pill is already present).  "unknown" != "no" on the
+                # wire — the client only shows the unmerged pill for "yes".
+                "unmerged": state._unmerged_state(tid, stage, urgent, unread),
                 "activity_at": activity_at,
                 "revision": _thread_revision_cursor(tid),
             }))

@@ -334,6 +334,32 @@ def _has_unmerged_changes(tid: str) -> bool:
         return False
 
 
+def _unmerged_state(tid: str, stage: str, urgent: bool, unseen: bool) -> str:
+    """Tri-state unmerged indicator shared by the web index and the phone catalog.
+
+    Returns one of:
+      ``"yes"``     — a git check ran and found unmerged work vs main;
+      ``"no"``      — a git check ran and the working tree is confirmed clean;
+      ``"unknown"`` — the git check was NOT run because a higher-priority
+                     indicator (a live busy stage, an error, an urgent flag, or
+                     an unseen reply) is already present.
+
+    ``unknown`` is distinct from ``"no"`` on purpose: it means "not checked",
+    not "confirmed clean".  This is the web's render_index short-circuit made
+    explicit and shared with the phone: neither surface burns the (expensive,
+    git-subprocess) unmerged check when a stronger pill is already showing, so
+    a busy thread's unmerged-ness is "unknown", not "known-clean".  Both the
+    badge logic and the catalog call the same helper, so the two surfaces can't
+    disagree about when the check is skipped.
+    """
+    if (stage in BUSY_STAGES) or (stage == "error") or urgent or unseen:
+        # A stronger pill is already present.  Do not burn the git check: the
+        # unmerged pill would be masked anyway, so the honest answer is
+        # "not checked", not "confirmed clean".
+        return "unknown"
+    return "yes" if _has_unmerged_changes(tid) else "no"
+
+
 def _conflict_path(tid: str) -> str:
     return os.path.join(MANAGER.thread_dir(tid), "merge_conflict.json")
 
