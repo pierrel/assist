@@ -632,6 +632,8 @@ def _list_threads() -> dict[str, Any]:
                 "repo_key": repo_key,
                 "repo_label": repo_label,
                 "unread": state._has_unseen_response(tid),
+                "urgent": state._has_urgent(tid),
+                "unmerged": state._has_unmerged_changes(tid),
                 "activity_at": activity_at,
                 "revision": _thread_revision_cursor(tid),
             }))

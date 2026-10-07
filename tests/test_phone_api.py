@@ -167,6 +167,8 @@ def test_thread_list_uses_stored_titles_and_supplies_chooser_metadata(tmp_path, 
     monkeypatch.setattr(state, "_get_status", lambda tid: {"stage": "ready"})
     monkeypatch.setattr(state, "_get_domain_manager",
                         lambda tid: (_ for _ in ()).throw(AssertionError("no mutable origin")))
+    monkeypatch.setattr(state, "_has_urgent", lambda tid: False)
+    monkeypatch.setattr(state, "_has_unmerged_changes", lambda tid: False)
     monkeypatch.setattr(phone_api, "_thread_workspace",
                         lambda tid: (_ for _ in ()).throw(AssertionError("no Git worktree scan")))
 
@@ -182,6 +184,37 @@ def test_thread_list_uses_stored_titles_and_supplies_chooser_metadata(tmp_path, 
     assert len(thread["revision"]) == 24
 
 
+def test_thread_list_exposes_urgent_and_unmerged_from_state(tmp_path, monkeypatch):
+    thread_dir = _thread_environment(tmp_path, monkeypatch, [])
+    from assist.git_sync import bind
+    bind(str(thread_dir), "https://example.com/repo.git")
+    monkeypatch.setattr(state.MANAGER, "list", lambda: ["thread-a"])
+    monkeypatch.setattr(state, "_get_status", lambda tid: {"stage": "ready"})
+    monkeypatch.setattr(state, "_has_urgent", lambda tid: True)
+    monkeypatch.setattr(
+        state, "_get_domain_manager",
+        lambda tid: SimpleNamespace(has_changes_vs_main=lambda: True))
+
+    response = _client(monkeypatch).get("/api/v1/phone/threads", headers=_auth())
+
+    assert response.status_code == 200
+    thread = response.json()["threads"][0]
+    assert thread["urgent"] is True
+    assert thread["unmerged"] is True
+
+    monkeypatch.setattr(state, "_has_urgent", lambda tid: False)
+    monkeypatch.setattr(
+        state, "_get_domain_manager",
+        lambda tid: SimpleNamespace(has_changes_vs_main=lambda: False))
+
+    response = _client(monkeypatch).get("/api/v1/phone/threads", headers=_auth())
+
+    assert response.status_code == 200
+    thread = response.json()["threads"][0]
+    assert thread["urgent"] is False
+    assert thread["unmerged"] is False
+
+
 def test_thread_list_uses_setup_domain_without_caching_an_empty_manager(tmp_path, monkeypatch):
     thread_dir = _thread_environment(tmp_path, monkeypatch, [])
     from assist.git_sync import bind
@@ -194,6 +227,8 @@ def test_thread_list_uses_setup_domain_without_caching_an_empty_manager(tmp_path
         state, "_get_domain_manager",
         lambda tid: (_ for _ in ()).throw(AssertionError("no pre-clone manager")),
     )
+    monkeypatch.setattr(state, "_has_urgent", lambda tid: False)
+    monkeypatch.setattr(state, "_has_unmerged_changes", lambda tid: False)
 
     response = _client(monkeypatch).get("/api/v1/phone/threads", headers=_auth())
 
