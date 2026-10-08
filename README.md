@@ -449,6 +449,56 @@ until `ASSIST_PHONE_API_TOKEN` is set in an ignored owner-only deployment
 environment file. Send that value only as `Authorization: Bearer <token>` from
 the phone; never pass it into a sandbox or commit it. The API exposes visible
 thread snapshots, durable idempotent sends, and bounded workspace snapshots.
+`GET /threads/{tid}/approval` returns a complete pending proposal to send, archive
+or move email to Trash. `POST` to the same path requires `kind`, `token`, and `decision` (`approve`
+or `reject`); outbound email also accepts `decision="edit"` with `to`, `subject`
+and `body`. Email tokens bind
+the fixed sender and Cc as well as the message. Browser forms use the same
+identity-bound preview token while retaining their exact content checks. Decisions
+reuse the web HITL
+resume path, run off the event loop, and cannot consume a newer proposal. Complete
+approval responses and request bodies are bounded to 512 KiB without truncation.
+Email approval resumes persist the reviewed sender and fixed Cc. If they change
+before dispatch, the checkpoint keeps its original proposal for fresh review;
+reapply any edits before approving again. The email tool checks that reviewed
+identity against its captured delivery configuration. Once a decision is accepted,
+phone Run cancellation returns HTTP 409, including after checkpoint recovery,
+without cancelling the work or losing its receipt.
+Approvals are first-class records owned by `RunService` in the existing `runs.json`.
+Each review has its own token, with stable proposal, work, interrupt and checkpoint
+identities. A changed complete preview or fixed sender/Cc creates a new review;
+identical text at a later interrupt also needs a new decision. Accepting a decision
+and its execution Run is one atomic storage commit. Record-native replays return the original
+accepted receipt even when recovery creates a new execution slice. Legacy email
+replays retain their original pending-card requirement.
+
+Checkpoint recovery reads the exact Approval link, preserves the reviewed identity,
+and applies its stored ordered decisions only to the original verified interrupt.
+Unseen requests are rejected. Observed checkpoint progress moves an approval through
+`accepted` or `rejected`, `consumed`, then `completed` at END or a new HITL gate.
+At END, the worker saves the answer while the execution Run stays running
+until Git finalization succeeds. Restart recovery preserves the saved answer and
+the existing Git verification error without repeating the approved effect.
+Pending cards rebuild from these records after lost status writes. Accepted
+continuations run before followers; blocked continuations keep that fence and expose
+the recovery error without automatic retries. An operator can use
+`repair_approval_core` after fixing the blocking Git condition or restoring the
+checkpoint; it verifies checkpoint ownership before
+creating a new slice. If the imported proposal could not be read, use
+`fresh_review_approval_core` to publish an undecided review of its verified original
+interrupt. Legacy cards with no original interrupt require fresh review.
+Legacy accepted Runs migrate once using their exact interrupt binding; unverifiable
+ones remain blocked.
+
+Approval persistence provides process-crash recovery, not universal exactly-once
+external effects. Email delivery retains the existing stable provider idempotency
+key. An already completed checkpoint recovers its receipt without another slice;
+Git-backed work still requires operator reconciliation after restart.
+Other work retains user-turn priority.
+The EmacsOS client offers scrollable previews, two-tap decisions and an email
+editor. Email archive/Trash decisions bind the submitted kind as well as the token
+inside the separately installed email tools' admission boundary. Their kinds are
+`email_archive` and `email_delete`; deletion moves messages to recoverable Trash.
 The exact request, cursor, event, failure, and repository-label contract is in
 [the phone API design note](docs/2026-09-04-phone-api.org), amended for
 [mature-thread message admission](docs/2026-09-07-phone-api-mature-thread-admission.org),

@@ -708,7 +708,7 @@ def test_phone_create_reservation_is_active_but_initialization_stays_status_only
 
 def test_logical_projection_uses_one_run_snapshot_for_successor_and_crash_states(monkeypatch):
     def run(identifier, work_id, status):
-        return SimpleNamespace(id=identifier, work_id=work_id, status=status,
+        return SimpleNamespace(id=identifier, work_id=work_id, status=status, resume_decision=None, approval_id=None,
                                updated_at=1, error=None, cancel_cleanup=None)
 
     cases = [
@@ -760,7 +760,7 @@ def test_logical_projection_reads_a_fair_handoff_under_the_admission_lock(monkey
 
 def test_logical_cancel_closes_only_its_chain_and_dispatches_one_follower(monkeypatch):
     def run(identifier, work_id, status):
-        return SimpleNamespace(id=identifier, work_id=work_id, status=status,
+        return SimpleNamespace(id=identifier, work_id=work_id, status=status, resume_decision=None, approval_id=None,
                                updated_at=1, error=None, cancel_cleanup=None)
 
     predecessor = run("run-a", "work-a", "interrupted")
@@ -871,7 +871,7 @@ def test_phone_cancel_does_not_replay_an_unrelated_terminal_run(monkeypatch):
 
 
 def test_phone_cancel_sanitizes_a_mid_cancel_run_store_failure(monkeypatch):
-    pending = SimpleNamespace(id="run-a", work_id="work-a", status="pending",
+    pending = SimpleNamespace(id="run-a", work_id="work-a", status="pending", resume_decision=None, approval_id=None,
                               updated_at=1, error=None, cancel_cleanup=None)
 
     class Runs:
@@ -897,7 +897,7 @@ def test_phone_cancel_sanitizes_a_mid_cancel_run_store_failure(monkeypatch):
 def test_phone_cancel_retry_replays_a_pending_cleanup_receipt(monkeypatch):
     """A failed final receipt repeats cleanup, then records completion once durable."""
     def run(identifier, work_id, status):
-        return SimpleNamespace(id=identifier, work_id=work_id, status=status,
+        return SimpleNamespace(id=identifier, work_id=work_id, status=status, resume_decision=None, approval_id=None,
                                updated_at=1, error=None, cancel_cleanup=None)
 
     predecessor = run("run-a", "work-a", "interrupted")
@@ -1173,7 +1173,7 @@ def test_phone_sse_does_not_rescan_large_run_history_without_invalidation(monkey
 
 
 def test_phone_sse_uses_a_revision_only_to_trigger_a_durable_reprojection(monkeypatch):
-    pending = SimpleNamespace(id="run-a", work_id="work-a", status="pending",
+    pending = SimpleNamespace(id="run-a", work_id="work-a", status="pending", resume_decision=None, approval_id=None,
                               updated_at=1, error=None)
     success = SimpleNamespace(id="run-a", work_id="work-a", status="success",
                               updated_at=2, error=None)
@@ -1633,6 +1633,7 @@ def test_blocked_initialization_cannot_stall_the_run_scheduler(monkeypatch):
                         lambda *args: (cloning.set(), release.wait(1)))
     monkeypatch.setattr(phone_api.threads, "_execute_run",
                         lambda *args, **kwargs: ran.set())
+    monkeypatch.setattr(phone_api.threads, "_llm_reachable", lambda: True)
 
     initializer.start()
     initializer.submit("clone-run", "clone-thread", "repo-a")

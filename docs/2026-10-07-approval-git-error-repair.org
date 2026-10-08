@@ -1,0 +1,32 @@
+#+title: Unfinished approvals remain repairable after Git admission failure
+#+date: 2026-10-07
+
+* Scope and correction
+A Git ownership, resume or restricted-sandbox failure can occur before an accepted
+approval reaches checkpoint completion. Previously the worker persisted the
+execution Run error first, then its running-only fallback skipped blocking the
+Approval. The unfinished record kept followers fenced but refused operator repair.
+
+The existing Git error handler now reconciles the linked Approval before its
+terminal result transition. RunService commits the unfinished Approval block and
+execution Run error together. A process crash cannot leave a persisted execution
+error without the corresponding repairable block. The original accepted receipt,
+decision and consumed progress remain intact. Operator repair verifies the exact
+checkpoint and schedules another execution slice after the Git condition is fixed.
+
+Completed approvals remain exempt. A Git finalization error after END still saves
+the reply on the execution Run without changing completed checkpoint progress.
+The worker rechecks Git admission when executing a repaired slice.
+
+* Validation
+Real SQLite checkpoints, reopened Run stores and fake effects exercise approve and
+reject decisions before and after consumption at ownership, resume and sandbox
+admission failures. Every persisted error snapshot must already have its Approval
+block. Restart keeps followers fenced; explicit repair completes without repeating
+the consumed effect. Existing END finalization and Git recovery checks are retained.
+
+* Historical supersessions
+The =Lifecycle and recovery= section of =2026-10-07-run-owned-approvals.org=
+described worker failures blocking unfinished approvals. The original worker's Git
+error handler omitted that block when it terminalized the Run before checkpoint
+completion. The atomic Git-error reconciliation above implements that contract.
