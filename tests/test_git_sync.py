@@ -61,6 +61,25 @@ def repos(tmp_path):
     return remote, thread, phone, binding
 
 
+@pytest.fixture
+def phone_repos(repos, monkeypatch):
+    """Keep real browser/Git fences; double only an empty Docker listing."""
+    from assist.browser import manager as browser
+
+    remote, thread, phone, binding = repos
+    directory = binding.rename(binding.with_name("phone-state"))
+    monkeypatch.setenv("ASSIST_THREADS_DIR", str(directory.parent))
+    monkeypatch.setenv("ASSIST_EGRESS_CLIENT_MAP_DIR",
+                       str(directory.parent.parent / (directory.parent.name + "-proxy-map")))
+
+    def empty_docker_listing(argv, **_kwargs):
+        assert argv[:2] == ["docker", "ps"]
+        return b""
+
+    monkeypatch.setattr(browser, "_bounded_cli", empty_docker_listing)
+    return remote, thread, phone, directory
+
+
 def turn(repos):
     _, thread, _, binding = repos
     owner = sync.GitSync(str(binding), str(thread))
@@ -2306,18 +2325,18 @@ def test_initializing_phone_delete_fences_publication_before_retirement(repos, m
     assert retired == deleted == []
 
 
-def test_initializing_phone_delete_wins_before_remote_publication(repos, monkeypatch):
-    threads, _, _ = web_turn(repos, monkeypatch, lambda: "unused")
-    remote, thread, _, binding = repos
+def test_initializing_phone_delete_wins_before_remote_publication(phone_repos, monkeypatch):
+    threads, _, _ = web_turn(phone_repos, monkeypatch, lambda: "unused")
+    remote, thread, _, binding = phone_repos
     branch, _ = sync.identity(str(thread))
     monkeypatch.setattr(threads, "_get_status", lambda _tid: {
         "stage": "initializing", "domain": str(remote)})
     monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
     monkeypatch.setattr(threads._runs(), "scan_children", lambda: [])
-    monkeypatch.setattr(threads.MANAGER, "hard_delete",
+    monkeypatch.setattr(threads.MANAGER, "_hard_delete_after_browser_stop",
                         lambda _tid, **_kw: shutil.rmtree(binding))
 
-    threads._delete_thread_and_children("phone-accepted")
+    threads._delete_thread_and_children("phone-state")
     with pytest.raises(sync.GitSyncError):
         sync.publish_initial_branch(str(binding), str(thread))
     assert subprocess.run(["git", "-C", str(remote), "show-ref", "--verify", "--quiet",
@@ -2347,15 +2366,15 @@ def test_phone_delete_rejects_recreated_directory_generation(repos, monkeypatch)
     assert retired == []
 
 
-def test_unbound_phone_delete_serializes_other_delete_before_reuse(repos, monkeypatch):
-    threads, _, _ = web_turn(repos, monkeypatch, lambda: "unused")
-    _, _, _, binding = repos
+def test_unbound_phone_delete_serializes_other_delete_before_reuse(phone_repos, monkeypatch):
+    threads, _, _ = web_turn(phone_repos, monkeypatch, lambda: "unused")
+    _, _, _, binding = phone_repos
     (binding / "git-sync.json").unlink()
     retired = []
     deleted = []
     monkeypatch.setattr(threads, "_get_status", lambda _tid: {"stage": "ready"})
-    monkeypatch.setattr(threads, "_delete_thread_and_children_locked",
-                        lambda tid: deleted.append(tid))
+    monkeypatch.setattr(threads.MANAGER, "_hard_delete_after_browser_stop",
+                        lambda tid, **_kw: deleted.append(tid))
 
     def retire_with_competing_delete(tid):
         with pytest.raises(threads.HTTPException) as error:
@@ -2364,8 +2383,8 @@ def test_unbound_phone_delete_serializes_other_delete_before_reuse(repos, monkey
         retired.append(tid)
 
     monkeypatch.setattr(threads._PI_RUNTIME, "retire", retire_with_competing_delete)
-    threads._delete_thread_and_children("phone-accepted")
-    assert retired == deleted == ["phone-accepted"]
+    threads._delete_thread_and_children("phone-state")
+    assert retired == deleted == ["phone-state"]
 
 
 def test_deleted_phone_generation_cannot_publish_recreated_thread_path(repos, monkeypatch):
@@ -2392,11 +2411,11 @@ def test_deleted_phone_generation_cannot_publish_recreated_thread_path(repos, mo
     assert threads._runs().get("state", replacement.id).status == "pending"
 
 
-def test_phone_initial_cancel_cannot_succeed_while_publication_owns_fence(repos, monkeypatch):
+def test_phone_initial_cancel_cannot_succeed_while_publication_owns_fence(phone_repos, monkeypatch):
     from manage.web import phone_api
 
-    threads, _, _ = web_turn(repos, monkeypatch, lambda: "unused")
-    remote, _, _, binding = repos
+    threads, _, _ = web_turn(phone_repos, monkeypatch, lambda: "unused")
+    remote, _, _, binding = phone_repos
     monkeypatch.setattr(phone_api.state, "_get_status", lambda _tid: {
         "stage": "cloning", "domain": str(remote)})
     monkeypatch.setattr(threads, "_runs", lambda: (
