@@ -254,21 +254,42 @@ def test_phone_thread_open_clears_unread_and_urgent(tmp_path, monkeypatch):
     thread_dir = _thread_environment(tmp_path, monkeypatch, [
         {"content": "hi", "role": "user"},
     ])
-    # Reuse the SAME helpers the web thread page clears through: open the phone
-    # view and the unseen ("new") + urgent flags must drop.
+    # The phone's "view" is the dedicated open endpoint — it reuses the SAME
+    # helpers the web thread page clears through, so the unseen ("new") +
+    # urgent flags drop there.
     state._mark_unseen_response("thread-a")
     state._mark_urgent("thread-a")
     assert state._has_unseen_response("thread-a")
     assert state._has_urgent("thread-a")
 
-    response = _client(monkeypatch).get(
-        "/api/v1/phone/threads/thread-a", headers=_auth())
+    response = _client(monkeypatch).post(
+        "/api/v1/phone/threads/thread-a/open", headers=_auth())
 
     assert response.status_code == 200
     assert not state._has_unseen_response("thread-a")
     assert not state._has_urgent("thread-a")
     assert not (thread_dir / "unseen_response").exists()
     assert not (thread_dir / "urgent_response").exists()
+
+
+def test_phone_snapshot_get_never_clears_unread_or_urgent(tmp_path, monkeypatch):
+    thread_dir = _thread_environment(tmp_path, monkeypatch, [
+        {"content": "hi", "role": "user"},
+    ])
+    state._mark_unseen_response("thread-a")
+    state._mark_urgent("thread-a")
+
+    # GET /threads/{tid} is overloaded: clients also use it for auth probes
+    # and busy-check polls that must never clear a flag.  Only the dedicated
+    # open endpoint clears.
+    response = _client(monkeypatch).get(
+        "/api/v1/phone/threads/thread-a", headers=_auth())
+
+    assert response.status_code == 200
+    assert state._has_unseen_response("thread-a")
+    assert state._has_urgent("thread-a")
+    assert (thread_dir / "unseen_response").exists()
+    assert (thread_dir / "urgent_response").exists()
 
 
 def test_phone_history_page_does_not_clear_unread_or_urgent(tmp_path, monkeypatch):
@@ -280,8 +301,9 @@ def test_phone_history_page_does_not_clear_unread_or_urgent(tmp_path, monkeypatc
     state._mark_urgent("thread-a")
     cursor = phone_api._message_id("thread-a", {"content": "one", "role": "user"}, 1)
 
-    # History pagination (before is set) must NOT clear: the user is still
-    # scrolling an already-opened view — the web thread page is the only "open".
+    # History pagination (before is set) is still a read: the user is scrolling
+    # an already-opened view, and clearing belongs to the dedicated open
+    # endpoint, not to any snapshot GET.
     response = _client(monkeypatch).get(
         f"/api/v1/phone/threads/thread-a/history?before={cursor}", headers=_auth())
 

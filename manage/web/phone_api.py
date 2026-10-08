@@ -517,16 +517,6 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
     _thread_dir(tid)
     if before is not None and not _HISTORY_CURSOR_RE.fullmatch(before):
         raise HTTPException(status_code=422, detail="Invalid history cursor")
-    if before is None:
-        # Opening the thread on the phone is the phone's "view" — clear the
-        # unseen ("new") and urgent flags, reusing the SAME helpers the web
-        # thread page (get_thread) calls, so the two surfaces share the
-        # read-receipt/ack semantics instead of duplicating them.  History
-        # pagination (before is not None) must NOT clear: the user is still
-        # scrolling an already-opened view.  Both clears are missing-ok and
-        # never-raise, so a flag hiccup can't 500 an open.
-        state._clear_unseen_response(tid)
-        state._clear_urgent(tid)
     raw_messages, stored_has_more, checkpoint_backed = _thread_history(tid, before)
     end = len(raw_messages)
     start = max(0, end - MAX_HISTORY_MESSAGES)
@@ -608,6 +598,23 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
         "next_before": next_before,
         "truncated": truncated,
     }
+
+
+def _open_thread(tid: str) -> dict[str, Any]:
+    """Acknowledge that the user opened the thread on the phone.
+
+    This is the phone's "view": it clears the unseen ("new") and urgent flags,
+    reusing the SAME helpers the web thread page (get_thread) calls, so the two
+    surfaces share the read-receipt/ack semantics instead of duplicating them.
+    It is a dedicated endpoint because GET /threads/{tid} is overloaded —
+    clients also use it for auth probes and busy-check polls that must never
+    clear a flag.  Both clears are missing-ok and never-raise, so a flag hiccup
+    can't 500 an open.
+    """
+    _thread_dir(tid)
+    state._clear_unseen_response(tid)
+    state._clear_urgent(tid)
+    return {"thread_id": tid}
 
 
 def _thread_repo_summary(tid: str, status: dict[str, Any]) -> tuple[str | None, str]:
@@ -1115,6 +1122,12 @@ async def list_threads() -> dict[str, Any]:
 @router.get("/threads/{tid}")
 async def get_thread(tid: str) -> dict[str, Any]:
     return await anyio.to_thread.run_sync(_snapshot, tid)
+
+
+@router.post("/threads/{tid}/open")
+async def open_thread(tid: str) -> dict[str, Any]:
+    """Clear the unseen/urgent flags once the user has opened the thread."""
+    return await anyio.to_thread.run_sync(_open_thread, tid)
 
 
 @router.get("/threads/{tid}/history")
