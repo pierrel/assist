@@ -1,5 +1,8 @@
 """Offline regressions for real serialized requests and durable compaction."""
+import asyncio
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -181,3 +184,91 @@ def test_summary_output_cap_reaches_llama_without_losing_template_options():
     assert payloads[0]["max_tokens"] == 2048
     assert payloads[0]["max_completion_tokens"] == 2048
     assert payloads[0]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_forced_compaction_uses_the_installed_bounded_middleware():
+    model = _model(lambda request: _response("brief synthetic summary"))
+    backend = StateBackend()
+    with patch("assist.middleware.summarization.compute_summarization_defaults",
+               return_value={"trigger": ("messages", 5), "keep": ("messages", 2)}):
+        middleware = BoundedSummarizationMiddleware(model, backend)
+    graph = create_deep_agent(model, backend=backend, subagents=[],
+        middleware=[middleware, BadRequestRetryMiddleware()], checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "forced-compaction"}}
+    messages = [HumanMessage("old goal"), AIMessage("old reply"),
+                HumanMessage("middle"), AIMessage("middle reply"), HumanMessage("continue")]
+    graph.invoke({"messages": messages}, config)
+    state = graph.get_state(config).values
+    assert state["_summarization_event"]["cutoff_index"] == 3
+    assert state["messages"][:5] == messages
+
+
+def test_async_summary_splits_an_actual_overflow():
+    middleware = BoundedSummarizationMiddleware(_model(lambda r: _response("unused")), StateBackend())
+    prompt_overhead = len(middleware._summary_prompt(""))
+    calls = []
+
+    async def summarize(prompt, config):
+        assert config["metadata"] == {"lc_source": "summarization"}
+        calls.append(prompt)
+        if len(prompt) > prompt_overhead + 8000:
+            raise _error()
+        return AIMessage("brief synthetic summary")
+
+    middleware._summary_model = SimpleNamespace(ainvoke=summarize)
+    result = asyncio.run(middleware._asummarize_text("x" * 12000))
+    assert result == "brief synthetic summary"
+    assert len(calls) == 4
+    assert all(len(prompt) <= prompt_overhead + 8000 for prompt in calls[1:])
+
+
+@pytest.mark.parametrize("native_error", [False, True])
+def test_async_post_compaction_overflow_advances_without_changing_raw_state(native_error):
+    model = _model(lambda r: _response("unused"))
+    middleware = BoundedSummarizationMiddleware(model, StateBackend())
+    middleware._summary_model = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage("brief summary")))
+    middleware._determine_cutoff_index = lambda messages: 2
+    middleware._get_backend = lambda state, runtime: StateBackend()
+    middleware._aoffload_to_backend = AsyncMock(return_value="/conversation_history/test.md")
+    messages = [HumanMessage("old"), AIMessage("reply"), HumanMessage("middle"), AIMessage("reply"),
+        AIMessage(content="", tool_calls=[{"id": "call", "name": "read_file", "args": {}}]),
+        ToolMessage("content", tool_call_id="call"), HumanMessage("latest")]
+    state = {"messages": messages}
+    attempted = []
+
+    async def handler(request):
+        attempted.append(request.messages)
+        if len(attempted) < 3:
+            raise _error() if native_error else ContextOverflowError("request exceeds context")
+        return ModelResponse(result=[AIMessage("continued")])
+
+    result = asyncio.run(middleware.awrap_model_call(
+        ModelRequest(model=model, messages=messages, state=state), handler))
+    assert [len(a) for a in attempted] == [7, 6, 4]
+    assert result.command.update["_summarization_event"]["cutoff_index"] == 4
+    assert attempted[-1][1:] == messages[4:]
+    assert state == {"messages": messages}
+    assert middleware._aoffload_to_backend.await_count == 2
+
+
+def test_async_summary_failure_leaves_the_durable_event_unset():
+    model = _model(lambda r: _response("unused"))
+    middleware = BoundedSummarizationMiddleware(model, StateBackend())
+    response = httpx.Response(400, request=httpx.Request("POST", "http://unit.test"))
+    error = BadRequestError("bad summary request", response=response,
+                            body={"type": "invalid_request_error"})
+    middleware._summary_model = SimpleNamespace(ainvoke=AsyncMock(side_effect=error))
+    middleware._get_backend = lambda state, runtime: StateBackend()
+    middleware._aoffload_to_backend = AsyncMock(return_value="/conversation_history/test.md")
+    messages = [HumanMessage("old goal"), AIMessage("old reply"), HumanMessage("continue")]
+    state = {"messages": messages}
+
+    async def handler(request):
+        raise _error()
+
+    with pytest.raises(BadRequestError, match="bad summary request"):
+        asyncio.run(middleware.awrap_model_call(
+            ModelRequest(model=model, messages=messages, state=state), handler))
+    assert state == {"messages": messages}
+    assert "_summarization_event" not in state
+    middleware._aoffload_to_backend.assert_awaited_once()

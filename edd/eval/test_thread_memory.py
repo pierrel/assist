@@ -259,23 +259,18 @@ class TestAgentWorkspaceGuidance(TestCase):
         the result tells us whether the model relies on the automatically loaded
         thread memory, makes an explicit private-file check, or does both.
         """
-        from deepagents.middleware.summarization import SummarizationMiddleware
+        from assist.middleware.summarization import compute_summarization_defaults
 
         create_filesystem(self.agent_dir, {
             "memory.md": "# Thread memory\nCommunity garden permit work is active.\n",
         })
 
-        def low_threshold_summary(model, backend):
-            return SummarizationMiddleware(
-                model,
-                backend=backend,
-                trigger=("messages", 5),
-                keep=("messages", 2),
-            )
+        summary_defaults = {**compute_summarization_defaults(self.model),
+                            "trigger": ("messages", 5), "keep": ("messages", 2)}
 
         def run():
-            with mock.patch("deepagents.graph.create_summarization_middleware",
-                            side_effect=low_threshold_summary):
+            with mock.patch("assist.middleware.summarization.compute_summarization_defaults",
+                            return_value=summary_defaults):
                 agent = self._agent()
             self._message(
                 agent,

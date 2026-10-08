@@ -125,7 +125,9 @@ class BoundedSummarizationMiddleware(SummarizationMiddleware):
         if not summarize:
             try:
                 return handler(request.override(messages=messages))
-            except ContextOverflowError as exc:
+            except (BadRequestError, ContextOverflowError) as exc:
+                if not _overflow(exc):
+                    raise
                 error = exc
         previous = request.state.get("_summarization_event")
         force = False
@@ -145,7 +147,9 @@ class BoundedSummarizationMiddleware(SummarizationMiddleware):
             messages = [event["summary_message"], *recent]
             try:
                 response = handler(request.override(messages=messages))
-            except ContextOverflowError as exc:
+            except (BadRequestError, ContextOverflowError) as exc:
+                if not _overflow(exc):
+                    raise
                 error, previous, force = exc, event, True
                 continue
             return ExtendedModelResponse(model_response=response,
@@ -157,7 +161,9 @@ class BoundedSummarizationMiddleware(SummarizationMiddleware):
         if not summarize:
             try:
                 return await handler(request.override(messages=messages))
-            except ContextOverflowError as exc:
+            except (BadRequestError, ContextOverflowError) as exc:
+                if not _overflow(exc):
+                    raise
                 error = exc
         previous = request.state.get("_summarization_event")
         force = False
@@ -177,7 +183,9 @@ class BoundedSummarizationMiddleware(SummarizationMiddleware):
             messages = [event["summary_message"], *recent]
             try:
                 response = await handler(request.override(messages=messages))
-            except ContextOverflowError as exc:
+            except (BadRequestError, ContextOverflowError) as exc:
+                if not _overflow(exc):
+                    raise
                 error, previous, force = exc, event, True
                 continue
             return ExtendedModelResponse(model_response=response,
