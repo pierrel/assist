@@ -1,4 +1,5 @@
 """Real web approval admission/worker checks, isolated from mail and local models."""
+from tests.approval_helpers import checkpoint_chat
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -64,7 +65,8 @@ def test_one_resume_for_concurrent_web_phone_and_replay(client):
     assert sorted(replayed for _,replayed in replies)==[False,True]
     runs=threads._runs().list("mail-thread")
     assert len(runs)==2 and runs[-1].resume_decision=={"type":"approve","approval_interrupt_id":"gmail-interrupt"}
-    assert runs[-1].dispatch_key=="gmail-approval:email_delete:exact-token"
+    assert runs[-1].approval_id == "exact-token"
+    assert threads._runs().approval("mail-thread", "exact-token").accepted_run_id == runs[-1].id
     assert not _get_status("mail-thread").get("pending_gmail_token")
     with pytest.raises(HTTPException) as failure:
         threads.gmail_decision_core("mail-thread","reject","exact-token")
@@ -136,7 +138,7 @@ def test_worker_gmail_proposal_and_approval_resume(client,monkeypatch,preview_wr
         def get_raw_messages(self):
             return self.get_messages()
     chat=Chat()
-    monkeypatch.setattr(web.MANAGER,"get",lambda *a,**k:chat)
+    monkeypatch.setattr(web.MANAGER,"get",lambda *a,**k:checkpoint_chat(chat, k.get("configurable")))
     def touch(*args):
         if chat.pending:
             raise OSError("synthetic timestamp write failure")
@@ -207,10 +209,16 @@ def test_worker_gmail_proposal_and_approval_resume(client,monkeypatch,preview_wr
         with threads.THREAD_QUEUE.acquire("other-thread"):
             threads._execute_run(status["pending_gmail_run_id"], "mail-thread")
         recovered = _get_status("mail-thread")
-        assert recovered["pending_gmail_token"] == status["pending_gmail_token"]
+        assert recovered["pending_gmail_token"] == threads.approval_status("mail-thread")["pending_gmail_token"]
+        assert recovered["pending_gmail_token"] != loading["pending_gmail_token"]
         assert recovered["pending_gmail_messages"][0]["body"] == "Full booking"
         assert not recovered["pending_gmail_preview_pending"]
         status = recovered
+    if preview_write_recovery:
+        # The complete preview committed before the failed status projection.
+        status = threads.approval_status("mail-thread")
+        assert status["pending_gmail_messages"][0]["body"] == "Full booking"
+        assert not status["pending_gmail_preview_pending"]
     # A system continuation stays pending rather than entering the interrupted graph.
     assert threads._runs().get("mail-thread",queued.id).status=="pending"
     # Avoid executing that artificial continuation after the tested approval resumes.
@@ -310,7 +318,7 @@ def test_reject_during_preview_preserves_successor_status_and_context(client,mon
         def get_messages(self):
             return [{"role":"user","content":"Trash this"},{"role":"assistant","content":"Proposal"}]
     chat=Chat()
-    monkeypatch.setattr(web.MANAGER,"get",lambda *a,**k:chat)
+    monkeypatch.setattr(web.MANAGER,"get",lambda *a,**k:checkpoint_chat(chat, k.get("configurable")))
     monkeypatch.setattr(web.MANAGER,"touch",lambda *a:None)
     monkeypatch.setattr(threads,"_get_sandbox_backend",lambda *a,**k:None)
     monkeypatch.setattr(threads,"_get_domain_manager",lambda *a,**k:None)
@@ -420,7 +428,7 @@ def test_worker_binds_gmail_decision_to_its_dispatch_kind(client,monkeypatch,gma
         def get_raw_messages(self):
             return []
     chat=Chat()
-    monkeypatch.setattr(web.MANAGER,"get",lambda *a,**k:chat)
+    monkeypatch.setattr(web.MANAGER,"get",lambda *a,**k:checkpoint_chat(chat, k.get("configurable")))
     monkeypatch.setattr(threads,"_get_sandbox_backend",lambda *a,**k:None)
     monkeypatch.setattr(threads,"_get_domain_manager",lambda *a,**k:None)
     monkeypatch.setattr(threads,"gmail_action_preview",lambda _: [{"id":"abc123","body":"Complete preview"}])
@@ -527,7 +535,7 @@ def test_reply_run_cannot_fall_through_to_email_approval(client,monkeypatch,send
         def get_raw_messages(self):
             return []
     chat=Chat()
-    monkeypatch.setattr(web.MANAGER,"get",lambda *a,**k:chat)
+    monkeypatch.setattr(web.MANAGER,"get",lambda *a,**k:checkpoint_chat(chat, k.get("configurable")))
     monkeypatch.setattr(threads,"_get_sandbox_backend",lambda *a,**k:None)
     monkeypatch.setattr(threads,"_get_domain_manager",lambda *a,**k:None)
     monkeypatch.setattr(threads._RESUME_SCHEDULER,"submit",lambda *a,**k:None)
@@ -538,10 +546,10 @@ def test_reply_run_cannot_fall_through_to_email_approval(client,monkeypatch,send
     run=threads._create_run("mail-thread",None,sender=sender,dispatch_key=key,
                             resume_decision={"type":"approve"})
     threads._execute_run(run.id,"mail-thread")
-    assert chat.decisions==([] if key is None else [{"type":"approve"}])
-    if key is None:
-        assert _get_status("mail-thread")==before
-        assert threads._runs().get("mail-thread",run.id).status=="cancelled"
+    # A dispatch prefix without a stored exact binding is not approval authority.
+    assert chat.decisions == []
+    assert _get_status("mail-thread") == before
+    assert threads._runs().get("mail-thread",run.id).status == "cancelled"
 
 
 @pytest.mark.parametrize("decision",["approve","reject"])
@@ -558,7 +566,8 @@ def test_gmail_core_binds_requested_kind_before_admission_and_on_replay(client,d
     with pytest.raises(HTTPException) as replay_mismatch:
         threads.gmail_decision_core("mail-thread",decision,"exact-token",expected_kind="email_archive")
     assert replay_mismatch.value.status_code==409
-    assert threads._runs().list("mail-thread")==[proposal,run]
+    assert [item.id for item in threads._runs().list("mail-thread")] == [proposal.id, run.id]
+    assert threads._runs().get("mail-thread", proposal.id).approvals[0].decision == run.resume_decision
 
 
 @pytest.mark.parametrize("proposal_state",["running","awaiting_approval"])

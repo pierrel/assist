@@ -106,7 +106,11 @@ where reliability is harder than with frontier APIs.
 - **Git domain integration.** Each thread works in its own git branch
   of a configured "domain" repo (your life repo, your work repo, etc.)
   with edits isolated until you choose to merge. Multiple domains
-  coexist. Old local clones with shared Git object inodes need an
+  coexist. When Merge & Push creates a fresh branch, the thread records that
+  local branch; it remains unpublished until a later successful
+  turn, while the previous published ref remains intact. Dirty files still
+  block the next turn rather than being committed by the merge handoff.
+  Old local clones with shared Git object inodes need an
   [operator-verified detachment](docs/2026-10-01-legacy-git-object-detachment.org)
   before source enrollment; the helper does not infer a source or change work.
 
@@ -217,13 +221,19 @@ Mis-classification was an issue early on; the table above is the rule.
 
 **Unit/Integration Tests** (`tests/`):
 ```bash
-# Run all tests
+# Run the default offline tests (no live Docker egress integration)
 make test
 
 # Run specific test file
 .venv/bin/pytest tests/test_domain_manager.py -v
 .venv/bin/pytest tests/middleware/test_loop_detection.py -v
 ```
+
+`pytest.ini` excludes the live Docker egress integration module and real
+per-turn teardown test from a default `pytest tests/` run. Run
+`make sandbox-smoke` only when live Docker testing is authorized; that explicit
+target builds the sandbox and proxy, runs the shell probes, and selects both
+live Python tests. CI runs this smoke separately from its unit-test invocation.
 
 **Agent Evaluations** (`edd/eval/`):
 
@@ -463,6 +473,56 @@ until `ASSIST_PHONE_API_TOKEN` is set in an ignored owner-only deployment
 environment file. Send that value only as `Authorization: Bearer <token>` from
 the phone; never pass it into a sandbox or commit it. The API exposes visible
 thread snapshots, durable idempotent sends, and bounded workspace snapshots.
+`GET /threads/{tid}/approval` returns a complete pending proposal to send, archive
+or move email to Trash. `POST` to the same path requires `kind`, `token`, and `decision` (`approve`
+or `reject`); outbound email also accepts `decision="edit"` with `to`, `subject`
+and `body`. Email tokens bind
+the fixed sender and Cc as well as the message. Browser forms use the same
+identity-bound preview token while retaining their exact content checks. Decisions
+reuse the web HITL
+resume path, run off the event loop, and cannot consume a newer proposal. Complete
+approval responses and request bodies are bounded to 512 KiB without truncation.
+Email approval resumes persist the reviewed sender and fixed Cc. If they change
+before dispatch, the checkpoint keeps its original proposal for fresh review;
+reapply any edits before approving again. The email tool checks that reviewed
+identity against its captured delivery configuration. Once a decision is accepted,
+phone Run cancellation returns HTTP 409, including after checkpoint recovery,
+without cancelling the work or losing its receipt.
+Approvals are first-class records owned by `RunService` in the existing `runs.json`.
+Each review has its own token, with stable proposal, work, interrupt and checkpoint
+identities. A changed complete preview or fixed sender/Cc creates a new review;
+identical text at a later interrupt also needs a new decision. Accepting a decision
+and its execution Run is one atomic storage commit. Record-native replays return the original
+accepted receipt even when recovery creates a new execution slice. Legacy email
+replays retain their original pending-card requirement.
+
+Checkpoint recovery reads the exact Approval link, preserves the reviewed identity,
+and applies its stored ordered decisions only to the original verified interrupt.
+Unseen requests are rejected. Observed checkpoint progress moves an approval through
+`accepted` or `rejected`, `consumed`, then `completed` at END or a new HITL gate.
+At END, the worker saves the answer while the execution Run stays running
+until Git finalization succeeds. Restart recovery preserves the saved answer and
+the existing Git verification error without repeating the approved effect.
+Pending cards rebuild from these records after lost status writes. Accepted
+continuations run before followers; blocked continuations keep that fence and expose
+the recovery error without automatic retries. An operator can use
+`repair_approval_core` after fixing the blocking Git condition or restoring the
+checkpoint; it verifies checkpoint ownership before
+creating a new slice. If the imported proposal could not be read, use
+`fresh_review_approval_core` to publish an undecided review of its verified original
+interrupt. Legacy cards with no original interrupt require fresh review.
+Legacy accepted Runs migrate once using their exact interrupt binding; unverifiable
+ones remain blocked.
+
+Approval persistence provides process-crash recovery, not universal exactly-once
+external effects. Email delivery retains the existing stable provider idempotency
+key. An already completed checkpoint recovers its receipt without another slice;
+Git-backed work still requires operator reconciliation after restart.
+Other work retains user-turn priority.
+The EmacsOS client offers scrollable previews, two-tap decisions and an email
+editor. Email archive/Trash decisions bind the submitted kind as well as the token
+inside the separately installed email tools' admission boundary. Their kinds are
+`email_archive` and `email_delete`; deletion moves messages to recoverable Trash.
 The exact request, cursor, event, failure, and repository-label contract is in
 [the phone API design note](docs/2026-09-04-phone-api.org), amended for
 [mature-thread message admission](docs/2026-09-07-phone-api-mature-thread-admission.org),
@@ -1034,6 +1094,11 @@ changes attempt a commit inside the restricted sandbox and the server attempts p
 of only that thread branch. No-file-change turns also attempt publication; main
 and tags are not automatically pushed. Dirty, divergent, rewritten, or unavailable
 Git state holds for explicit reconciliation while preserving work and saved answers.
+For an uncancelled authenticated phone-created Git thread, successful initial
+publication makes its branch fetchable before the first model turn, even when
+that branch still points at main's commit. A later model failure does not
+undo that publication. Clone or publication failure can still leave no remote
+branch. Browser-created threads do not use this early publication path.
 When a clean preflight positively finds uncommitted work and its exact sandbox
 teardown is verified, the turn ends with a dirty-worktree hold, not a teardown
 uncertainty. Later queued turns check that work independently; none replays the

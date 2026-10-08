@@ -21,6 +21,11 @@ class _Response:
         self.closed = True
 
 
+def _reviewed_runtime():
+    return SimpleNamespace(tool_call_id="call-1", config={"configurable": {
+        email.EMAIL_REVIEW_IDENTITY_KEY: ["Assistant <assistant@example.test>", "oversight@example.test"]}})
+
+
 @pytest.fixture
 def configured_email(monkeypatch, tmp_path):
     key = tmp_path / "resend-key"
@@ -40,7 +45,7 @@ def test_send_email_fixes_identity_and_uses_tool_call_id(configured_email, monke
 
     result = email.send_email(
         "recipient@example.test", "A subject", "Plain message",
-        SimpleNamespace(tool_call_id="call-1"))
+        _reviewed_runtime())
 
     assert result == "Email sent to recipient@example.test."
     assert response.closed
@@ -64,7 +69,7 @@ def test_send_email_fails_closed_without_complete_configuration(monkeypatch):
     monkeypatch.setattr(email.requests, "post", lambda *args, **kwargs: called.append(1))
 
     result = email.send_email(
-        "recipient@example.test", "Subject", "Body", SimpleNamespace(tool_call_id="call-1"))
+        "recipient@example.test", "Subject", "Body", _reviewed_runtime())
 
     assert result.startswith("Email not sent:")
     assert called == []
@@ -79,7 +84,7 @@ def test_send_email_rejects_header_injection(configured_email, monkeypatch, to, 
     called = []
     monkeypatch.setattr(email.requests, "post", lambda *args, **kwargs: called.append(1))
 
-    result = email.send_email(to, subject, "Body", SimpleNamespace(tool_call_id="call-1"))
+    result = email.send_email(to, subject, "Body", _reviewed_runtime())
 
     assert result.startswith("Email not sent:")
     assert called == []
@@ -94,7 +99,7 @@ def test_send_email_does_not_retry_an_uncertain_delivery(configured_email, monke
 
     monkeypatch.setattr(email.requests, "post", timeout)
     result = email.send_email(
-        "recipient@example.test", "Subject", "Body", SimpleNamespace(tool_call_id="call-1"))
+        "recipient@example.test", "Subject", "Body", _reviewed_runtime())
 
     assert result == "Email delivery status is unknown: the provider connection failed."
     assert calls == [1]
@@ -105,7 +110,7 @@ def test_send_email_rejects_invalid_provider_response(configured_email, monkeypa
     monkeypatch.setattr(email.requests, "post", lambda *args, **kwargs: response)
 
     result = email.send_email(
-        "recipient@example.test", "Subject", "Body", SimpleNamespace(tool_call_id="call-1"))
+        "recipient@example.test", "Subject", "Body", _reviewed_runtime())
 
     assert result == "Email not sent: the delivery provider returned an invalid response."
     assert response.closed
@@ -120,7 +125,18 @@ def test_send_email_bounds_user_content(configured_email, monkeypatch, subject, 
     monkeypatch.setattr(email.requests, "post", lambda *args, **kwargs: called.append(1))
 
     result = email.send_email(
-        "recipient@example.test", subject, body, SimpleNamespace(tool_call_id="call-1"))
+        "recipient@example.test", subject, body, _reviewed_runtime())
 
     assert result.startswith("Email not sent:")
     assert called == []
+
+
+def test_delivery_uses_only_the_exact_reviewed_identity(configured_email, monkeypatch):
+    calls = []
+    runtime = SimpleNamespace(tool_call_id="call-1", config={"configurable": {
+        email.EMAIL_REVIEW_IDENTITY_KEY: ["Assistant <assistant@example.test>", "oversight@example.test"]}})
+    monkeypatch.setenv("EMAIL_ALWAYS_CC", "different@example.test")
+    monkeypatch.setattr(email.requests, "post", lambda *a, **kw: calls.append(kw))
+    result = email.send_email("recipient@example.test", "Subject", "Body", runtime)
+    assert "review the proposal again" in result
+    assert calls == []

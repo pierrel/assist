@@ -89,6 +89,7 @@ pi-preview-status:
 #     get_sandbox_backend → DockerSandboxBackend.execute("curl ..."),
 #     the same call path the agent's tool hits.  Requires Docker;
 #     fails loudly if missing (no skip — too important).
+#   - TestPerTurnTeardownRealDocker: real container cleanup and absence proof.
 #
 # `deploy-sandbox-build` runs the two shell harnesses on the remote (no venv
 # there); use `make sandbox-smoke` locally / in CI for shell egress integration.
@@ -97,7 +98,8 @@ pi-preview-status:
 sandbox-smoke: sandbox-build
 	bash dockerfiles/test-sandbox-shim.sh
 	bash dockerfiles/test-sandbox-egress.sh
-	.venv/bin/pytest tests/test_sandbox_egress_integration.py -v
+	.venv/bin/pytest -o addopts= tests/test_sandbox_egress_integration.py -v
+	.venv/bin/pytest -o addopts= tests/test_sandbox_per_turn.py::TestPerTurnTeardownRealDocker -v
 
 sandbox-shell:
 	docker run --rm -it assist-sandbox bash

@@ -19,6 +19,8 @@ _MAX_RESPONSE_BYTES = 64 * 1024
 _MAX_SUBJECT_BYTES = 998
 _MAX_BODY_BYTES = 64 * 1024
 
+EMAIL_REVIEW_IDENTITY_KEY = "email_review_identity"
+
 EMAIL_INTERRUPT_ON = {
     "send_email": {"allowed_decisions": ["approve", "edit", "reject"]},
 }
@@ -133,8 +135,12 @@ def send_email(to: str, subject: str, body: str, runtime: ToolRuntime) -> str:
     if not runtime.tool_call_id:
         return "Email not sent: this email has no durable delivery identifier."
 
+    sender = str(Address(display_name=config.sender_name, addr_spec=config.sender))
+    reviewed = runtime.config.get("configurable", {}).get(EMAIL_REVIEW_IDENTITY_KEY)
+    if reviewed != [sender, config.oversight_cc]:
+        return "Email not sent: sender or Cc changed; review the proposal again."
     payload = {
-        "from": str(Address(display_name=config.sender_name, addr_spec=config.sender)),
+        "from": sender,
         "to": [recipient],
         "cc": [config.oversight_cc],
         "subject": subject,

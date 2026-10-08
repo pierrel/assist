@@ -1,0 +1,39 @@
+#+title: Post-merge thread Git branch handoff
+#+date: 2026-10-06
+
+* Observed failure
+
+A successful user-gated Merge & Push created a new local thread branch, but the
+private Git binding still named the old branch. The next turn failed branch
+preflight and retained a sandbox flight fence. A later Run then stopped at the
+fence before model admission. The old published branch and the newly merged
+commit were both present; a matching commit in a later thread came from the
+trusted source's main history, not a shared checkout.
+
+* Numbered implementation
+
+1. Keep the existing merge algorithm and its workspace ownership gate. Reject
+   retained flight, intent, or preflight before the merge has effects. Only
+   after its successful return, ask the Git lifecycle to record the new branch.
+2. Authenticate the new checkout in a private object store. Require its commit
+   to equal the configured source's just-published main tip. Require the old
+   source branch ref to remain at the recorded published OID. The existing
+   merge may rebase the old local ref; the published remote ref is not rewritten.
+3. Refuse a handoff with a retained sandbox flight, publication intent, or
+   preflight. Preserve the old published map, set the current local branch and
+   revision to the new checkout, and leave the published pair empty until a
+   later successful turn publishes the new branch by the normal FF-only path.
+4. Keep dirty work untouched. The next turn's existing restricted clean probe
+   still refuses untracked, staged, and unstaged files.
+
+The private state replacement is atomic after verification, but a failure after
+replacement may leave the new binding and needs inspection. Validation failures
+before replacement leave the old binding. This cannot make an already-completed
+main push atomic with the state file. Recovery of an older retained flight or suspended
+preflight needs separate operator proof of writer exit and branch ancestry. This
+change never clears such a fence, rewrites a branch, or replays a Run.
+
+* Scope
+
+The pre-existing host Git config/hooks exposure inside the user-gated merge
+algorithm remains separate debt. The handoff does not certify that merge path.

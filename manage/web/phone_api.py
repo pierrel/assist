@@ -23,9 +23,9 @@ import tarfile
 import threading
 import unicodedata
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -34,6 +34,7 @@ from langchain_core.messages import convert_to_messages
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from assist.domain_manager import current_branch
+from assist.git_sync import GitSyncError, read_state as read_git_binding
 from assist.run_service import (AWAITING_APPROVAL_STATUSES, InvalidRunTransition,
                                 ObservationToken, RunStoreUnavailable, TERMINAL_STATUSES)
 from assist.thread import _messages_to_dicts
@@ -47,6 +48,7 @@ from manage.web.run_stream import RUN_STREAMS, encode_sse
 PHONE_API_PREFIX = "/api/v1/phone"
 PHONE_API_TOKEN_ENV = "ASSIST_PHONE_API_TOKEN"
 MAX_BODY_BYTES = 66_000
+MAX_APPROVAL_BYTES = 512 * 1024
 MAX_MESSAGE_CHARS = 64_000
 MAX_HISTORY_MESSAGES = 80
 MAX_SNAPSHOT_MESSAGE_BYTES = 32 * 1024
@@ -130,18 +132,28 @@ class _SendMessage(_StrictModel):
     message: Annotated[str, Field(min_length=1, max_length=MAX_MESSAGE_CHARS)]
 
 
-async def _validated_body(request: Request, model: type[_StrictModel]) -> _StrictModel:
+class _ApprovalDecision(_StrictModel):
+    kind: Literal["send_email", "email_archive", "email_delete"]
+    token: Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")]
+    decision: Literal["approve", "reject", "edit"]
+    to: Annotated[str, Field(max_length=320)] = ""
+    subject: Annotated[str, Field(max_length=998)] = ""
+    body: Annotated[str, Field(max_length=64 * 1024)] = ""
+
+
+async def _validated_body(request: Request, model: type[_StrictModel],
+                          max_bytes: int = MAX_BODY_BYTES) -> _StrictModel:
     """Read one bounded strict JSON request without trusting Content-Length."""
     content_length = request.headers.get("content-length")
     if content_length:
         try:
-            if int(content_length) > MAX_BODY_BYTES:
+            if int(content_length) > max_bytes:
                 raise HTTPException(status_code=413, detail="Request body too large")
         except ValueError as error:
             raise HTTPException(status_code=400, detail="Invalid Content-Length") from error
     body = bytearray()
     async for chunk in request.stream():
-        if len(body) + len(chunk) > MAX_BODY_BYTES:
+        if len(body) + len(chunk) > max_bytes:
             raise HTTPException(status_code=413, detail="Request body too large")
         body.extend(chunk)
     try:
@@ -728,6 +740,12 @@ def _create_and_submit(body: _CreateThread, key: str, *, run_id: str | None = No
         if os.path.isdir(state.MANAGER.thread_dir(tid)):
             generation_guard.enter_context(threads.browser_authority.generation_fence(
                 state.MANAGER.root_dir, tid))
+            try:
+                directory = state.MANAGER.thread_dir(tid)
+                read_git_binding(directory)
+                generation_guard.enter_context(threads.git_workspace_lock(directory))
+            except GitSyncError as error:
+                raise HTTPException(status_code=409, detail="Thread workspace is busy") from error
         with threads._RUN_ADMISSION_LOCK:
             stale = (os.path.isdir(state.MANAGER.thread_dir(tid))
                      and _find_dispatch(tid, dispatch_key) is None
@@ -751,10 +769,14 @@ def _create_and_submit(body: _CreateThread, key: str, *, run_id: str | None = No
                         existing_engine = read_thread_engine(_thread_dir(tid)).name
                     except ThreadEngineError as error:
                         raise HTTPException(status_code=409, detail="Thread harness is unavailable") from error
+                    try:
+                        binding = read_git_binding(_thread_dir(tid))
+                    except GitSyncError as error:
+                        raise HTTPException(status_code=409, detail="Git source binding is unavailable") from error
                     if (replay.text != body.message or existing_engine != body.harness
-                            or state._get_status(tid).get("domain", "") != (expected_domain or "")):
+                            or (binding["source"] if binding else None) != expected_domain):
                         raise HTTPException(status_code=409, detail="Idempotency-Key conflicts with prior message")
-                    return tid, replay, None, True
+                    return tid, replay, expected_domain, True
             if _phone_thread_limit_reached():
                 raise HTTPException(status_code=429, detail="Phone thread limit reached")
             if _phone_initialization_limit_reached():
@@ -940,6 +962,33 @@ def _reserve_create(body: _CreateThread, key: str) -> tuple[str, Any, str | None
     return tid, run, domain, False, reserved
 
 
+def _pending_initializer_needs_wake(tid: str, run_id: str) -> bool:
+    """Identify a pending initializer, repairing its missing first-Run projection."""
+    with threads._RUN_ADMISSION_LOCK:
+        run = threads._runs().get(tid, run_id)
+        status = state._get_status(tid)
+        if run.status != "pending" or status.get("stage") not in threads.INIT_STAGES:
+            return False
+        if status.get("pending_run_id") == run_id:
+            return True
+        if (status.get("stage") != "initializing" or "pending_run_id" in status
+                or [item.id for item in threads._runs().list(tid)] != [run_id]):
+            return False
+        threads._set_status(tid, "initializing", pending_message=run.text or "",
+                            domain=status.get("domain", ""), pending_run_id=run_id,
+                            started_at=status.get("started_at"))
+        return True
+
+
+def _initializing_git_cancel_fence(tid: str):
+    """Serialize initial phone cancellation with its in-flight Git publication."""
+    status = state._get_status(tid)
+    if (tid.startswith("phone-") and status.get("stage") in threads.INIT_STAGES
+            and status.get("domain")):
+        return threads.git_workspace_lock(state.MANAGER.thread_dir(tid))
+    return nullcontext()
+
+
 def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
     """Cancel one accepted logical Run and durably receipt its cleanup."""
     directory = _thread_dir(tid)
@@ -950,14 +999,14 @@ def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
         if (isinstance(directory, (str, bytes, os.PathLike))
                 and not os.path.isdir(directory)):
             raise HTTPException(status_code=404, detail="Thread not found") from error
-        if isinstance(error, RunStoreUnavailable):
+        if isinstance(error, (RunStoreUnavailable, GitSyncError)):
             raise
         raise RunStoreUnavailable("Browser cancellation state is unavailable") from error
 
 
 def _cancel_logical_run_fenced(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
     """Commit cancellation in the same short order as browser admission."""
-    with threads._RUN_ADMISSION_LOCK:
+    with threads._RUN_ADMISSION_LOCK, _initializing_git_cancel_fence(tid):
         current_status = state._get_status(tid)
         projection, runs = _logical_status_locked(
             tid, run_id, with_runs=True, include_cleanup=True)
@@ -973,6 +1022,11 @@ def _cancel_logical_run_fenced(tid: str, run_id: str) -> tuple[int, dict[str, An
                       if projection["status"] in AWAITING_APPROVAL_STATUSES
                       else "Run is already terminal")
             return 409, {"detail": detail, "outcome": projection["status"],
+                         "run": _public_run_projection(projection)}
+        if projection["status"] == "pending" and any(
+                run.work_id == projection["work_id"] and (run.approval_id is not None or run.resume_decision is not None)
+                for run in runs):
+            return 409, {"detail": "An approval decision is already accepted", "outcome": "pending",
                          "run": _public_run_projection(projection)}
         service = threads._runs()
         try:
@@ -1189,6 +1243,65 @@ async def get_thread_history(tid: str, before: str) -> dict[str, Any]:
     return await anyio.to_thread.run_sync(_snapshot, tid, before)
 
 
+def _approval_preview(tid: str) -> dict[str, Any]:
+    """Return a complete bounded proposal, never a silently shortened approval."""
+    _thread_dir(tid)
+    with threads._RUN_ADMISSION_LOCK:
+        status = threads.approval_status(tid)
+        proposal = None
+        if status.get("stage") == "awaiting_approval":
+            if status.get("pending_email_token"):
+                proposal = threads.email_approval_preview(status)
+            elif status.get("pending_gmail_token"):
+                action = status["pending_gmail_action"]
+                if action["name"] in {"email_archive", "email_delete"}:
+                    proposal = {"kind": action["name"], "action": action,
+                                "token": status["pending_gmail_token"],
+                                "messages": status["pending_gmail_messages"],
+                                "error": status.get("pending_gmail_error", "")}
+        value = {"thread_id": tid, "proposal": proposal}
+        if len(json.dumps(value).encode()) > MAX_APPROVAL_BYTES:
+            raise HTTPException(status_code=413,
+                                detail="Approval preview too large; review in Assist Web")
+        return value
+
+
+def _approval_decision(tid: str, body: _ApprovalDecision):
+    _thread_dir(tid)
+    if body.decision != "edit" and (body.to or body.subject or body.body):
+        raise HTTPException(status_code=422, detail="Only edited email decisions accept content")
+    if body.kind == "send_email":
+        return threads.email_decision_core(
+            tid, body.decision, body.token, to=body.to, subject=body.subject,
+            body=body.body, phone_preview=True)
+    core = getattr(threads, "gmail_decision_core", None)
+    if core is None:
+        raise HTTPException(status_code=409, detail="Mailbox approval is unavailable")
+    if body.decision == "edit" or body.to or body.subject or body.body:
+        raise HTTPException(status_code=422, detail="Mailbox decisions cannot edit messages")
+    return core(tid, body.decision, body.token, expected_kind=body.kind)
+
+
+@router.get("/threads/{tid}/approval")
+async def get_approval(tid: str) -> dict[str, Any]:
+    return await anyio.to_thread.run_sync(_approval_preview, tid)
+
+
+@router.post("/threads/{tid}/approval")
+async def decide_approval(tid: str, request: Request) -> dict[str, Any]:
+    body = await _validated_body(request, _ApprovalDecision, MAX_APPROVAL_BYTES)
+    assert isinstance(body, _ApprovalDecision)
+    try:
+        run, replayed = await anyio.to_thread.run_sync(_approval_decision, tid, body)
+    except RunStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail="run-store-unavailable") from error
+    if not replayed or run.status == "pending":
+        await anyio.to_thread.run_sync(
+            lambda: threads._RESUME_SCHEDULER.submit(run.id, tid, user_priority=True))
+    return {"thread_id": tid, "run_id": run.id, "status": run.status,
+            "replayed": replayed}
+
+
 @router.post("/threads")
 async def create_thread(request: Request) -> dict[str, Any]:
     body = await _validated_body(request, _CreateThread)
@@ -1199,7 +1312,7 @@ async def create_thread(request: Request) -> dict[str, Any]:
             _reserve_create, body, key)
     except RunStoreUnavailable as error:
         raise HTTPException(status_code=503, detail="run-store-unavailable") from error
-    if not replay:
+    if not replay or await anyio.to_thread.run_sync(_pending_initializer_needs_wake, tid, run.id):
         await anyio.to_thread.run_sync(
             threads._INITIALIZATION_SCHEDULER.submit, run.id, tid, domain)
     return {"thread_id": tid, "run_id": run.id, "replayed": replay,
@@ -1237,6 +1350,8 @@ async def cancel_run(tid: str, run_id: str):
         code, value = await anyio.to_thread.run_sync(_cancel_logical_run, tid, run_id)
     except RunStoreUnavailable as error:
         raise HTTPException(status_code=503, detail="run-store-unavailable") from error
+    except threads.GitSyncError as error:
+        raise HTTPException(status_code=409, detail="Git workspace is busy") from error
     if code != 200:
         return JSONResponse(value, status_code=code)
     return value

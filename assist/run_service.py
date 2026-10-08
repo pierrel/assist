@@ -13,6 +13,7 @@ import shutil
 import stat
 import threading
 import uuid
+from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal
@@ -54,6 +55,72 @@ class RunStoreUnavailable(RuntimeError):
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+ApprovalState = Literal["pending", "accepted", "rejected", "consumed", "completed"]
+
+
+@dataclass(frozen=True)
+class Approval:
+    """One immutable review/decision identity with a checkpoint-backed lifecycle.
+
+    The parked Run owns proposal revisions. Execution slices reference ``id``;
+    status cards and dispatch keys do not authorize checkpoint resumption.
+    Completion describes the continuation, not success of an external effect.
+    """
+
+    id: str
+    thread_id: str
+    work_id: str
+    owner_run_id: str
+    interrupt_id: str | None
+    checkpoint_id: str | None
+    checkpoint_ns: str
+    action: dict
+    requests: tuple[dict, ...]
+    proposal: dict
+    state: ApprovalState = "pending"
+    decision: dict | None = None
+    decisions: tuple[dict, ...] = ()
+    proposal_id: str | None = None
+    legacy_binding: bool = False
+    accepted_run_id: str | None = None
+    execution_run_id: str | None = None
+    consumed_checkpoint_id: str | None = None
+    completed_checkpoint_id: str | None = None
+    recovery_checkpoint_id: str | None = None
+    blocked_reason: str | None = None
+    outcome: str | None = None
+
+    @classmethod
+    def from_dict(cls, value: dict) -> "Approval":
+        if value.get("state") not in {"pending", "accepted", "rejected", "consumed", "completed"}:
+            raise ValueError("invalid approval state")
+        data = dict(value)
+        for name in ("id", "thread_id", "work_id", "owner_run_id"):
+            Run._required_opaque_id(data.get(name), "approval " + name)
+        for name in ("interrupt_id", "checkpoint_id", "proposal_id", "accepted_run_id", "execution_run_id",
+                     "consumed_checkpoint_id", "completed_checkpoint_id", "recovery_checkpoint_id"):
+            Run._optional_opaque_id(data.get(name), "approval " + name)
+        if not isinstance(data.get("checkpoint_ns"), str):
+            raise ValueError("invalid approval checkpoint namespace")
+        for name in ("action", "proposal"):
+            if not isinstance(data.get(name), dict):
+                raise ValueError("invalid approval " + name)
+        for name in ("requests", "decisions"):
+            if not isinstance(data.get(name), list | tuple) or any(
+                    not isinstance(item, dict) for item in data[name]):
+                raise ValueError("invalid approval " + name)
+            data[name] = tuple(data[name])
+        if not isinstance(data["action"].get("name"), str) or not isinstance(
+                data["action"].get("args"), dict):
+            raise ValueError("invalid approval action")
+        if not isinstance(data.get("legacy_binding", False), bool):
+            raise ValueError("invalid approval legacy binding")
+        Run._optional_mapping(data.get("decision"), "approval decision")
+        for name in ("blocked_reason", "outcome"):
+            Run._optional_text(data.get(name), "approval " + name)
+        return cls(**data)
 
 
 @dataclass(frozen=True)
@@ -109,6 +176,8 @@ class Run:
     # cancellation cleanup may dispatch a follower.
     browser_cancel_reset: bool = False
     quiet_requested: bool = False
+    approval_id: str | None = None
+    approvals: tuple[Approval, ...] = ()
 
     _MAX_OPAQUE_ID_CHARS = 256
 
@@ -167,6 +236,10 @@ class Run:
             value.pop("browser_cancel_reset")
         if not self.quiet_requested:
             value.pop("quiet_requested")
+        if self.approval_id is None:
+            value.pop("approval_id")
+        if not self.approvals:
+            value.pop("approvals")
         return value
 
     @staticmethod
@@ -245,6 +318,8 @@ class Run:
                 value.get("browser_reset_run_id"), "browser reset run id"),
             browser_cancel_reset=browser_cancel_reset,
             quiet_requested=quiet_requested,
+            approval_id=Run._optional_opaque_id(value.get("approval_id"), "approval id"),
+            approvals=tuple(Approval.from_dict(item) for item in value.get("approvals", ())),
         )
 
 
@@ -266,8 +341,8 @@ _TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     # A protocol run that interrupts never becomes running again. Resumption creates a
     # NEW run on the same thread with the same logical work_id.
     "interrupted": frozenset({"cancelled"}),
-    # A user resolution starts a NEW child slice, preserving the interrupted
-    # graph checkpoint and leaving this parked invocation immutable.
+    # A resolution starts a NEW execution slice. The parked invocation remains
+    # parked while its owned Approval record tracks the decision's lifecycle.
     "awaiting_approval": frozenset({"cancelled"}),
     "success": frozenset(),
     "error": frozenset(),
@@ -415,6 +490,7 @@ class RunService(PerThreadJsonStore[Run]):
         user_event_id: str | None = None,
         revocation_pending: bool = False,
         browser_reset_run_id: str | None = None,
+        approval_id: str | None = None,
     ) -> Run:
         """Persist a direct held event or a dispatchable pending Run."""
         if not assistant_id:
@@ -455,6 +531,7 @@ class RunService(PerThreadJsonStore[Run]):
             location=dict(location) if location else None,
             user_event_id=user_event_id,
             browser_reset_run_id=browser_reset_run_id,
+            approval_id=approval_id,
         )
         with self._lock:
             if mode == "child":
@@ -533,6 +610,306 @@ class RunService(PerThreadJsonStore[Run]):
             if run.id == run_id:
                 return run
         raise RunNotFound(run_id)
+
+    @staticmethod
+    def _approval_in(runs: list[Run], approval_id: str) -> Approval | None:
+        for owner in runs:
+            for approval in owner.approvals:
+                if approval.id == approval_id:
+                    if (approval.owner_run_id != owner.id or approval.work_id != owner.work_id
+                            or approval.thread_id != owner.thread_id):
+                        raise RunStoreUnavailable("Approval owner does not match its Run")
+                    return approval
+        return None
+
+    @staticmethod
+    def _put_approval(runs: list[Run], approval: Approval) -> None:
+        owner = RunService._find(runs, approval.owner_run_id)
+        records = tuple(item for item in owner.approvals if item.id != approval.id)
+        if len(records) >= 64:
+            raise ValueError("Approval revision limit reached")
+        if len(json.dumps(asdict(approval)).encode()) > 2 * 1024 * 1024:
+            raise ValueError("Approval exceeds the durable record size limit")
+        runs[runs.index(owner)] = replace(owner, approvals=(*records, approval), updated_at=_now())
+
+    def approval(self, thread_id: str, approval_id: str) -> Approval | None:
+        """Read the exact proposal, including a previously accepted decision."""
+        with self._lock:
+            return self._approval_in(self._read(thread_id), approval_id)
+
+    def pending_approval(self, thread_id: str) -> Approval | None:
+        """Read the unanswered proposal independently of its status projection."""
+        with self._lock:
+            return next((item for run in reversed(self._read(thread_id))
+                         for item in reversed(run.approvals) if item.state == "pending"), None)
+
+    def unfinished_approval_continuation(self, thread_id: str) -> Approval | None:
+        """Return the continuation fence, including blocked work with no runnable job."""
+        with self._lock:
+            return next((item for run in self._read(thread_id) for item in run.approvals
+                         if item.state in {"accepted", "rejected", "consumed"}), None)
+
+    def publish_approval(self, thread_id: str, owner_run_id: str, *, action: dict,
+                         requests: list[dict], proposal: dict, interrupt_id: str | None,
+                         checkpoint_id: str | None = None, checkpoint_ns: str = "",
+                         approval_id: str | None = None) -> Approval:
+        """Park a proposal atomically; revisions retain distinct review identities.
+
+        Publication after a continuation's new gate closes its previous approval
+        in the same write. Callers inspect the checkpoint under queue ownership.
+        """
+        with self._lock:
+            runs = self._read(thread_id)
+            owner = self._find(runs, owner_run_id)
+            if approval_id is not None and self._approval_in(runs, approval_id) is not None:
+                raise InvalidRunTransition("Review identity already exists")
+            if any(item.decision is not None and item.state != "completed"
+                   and not (owner.approval_id == item.id and item.execution_run_id == owner.id)
+                   for item in owner.approvals):
+                raise InvalidRunTransition("Accepted proposal cannot be refreshed")
+            existing = next((item for run in runs for item in run.approvals
+                             if item.state == "pending" and item.owner_run_id == owner_run_id
+                             and item.interrupt_id == interrupt_id and item.action == action
+                             and item.requests == tuple(requests) and item.proposal == proposal), None)
+            if existing is not None:
+                return existing
+            for run in tuple(runs):
+                for old in run.approvals:
+                    if old.state == "pending" or (old.id == owner.approval_id
+                                                 and old.state != "completed"):
+                        self._put_approval(runs, replace(old, state="completed",
+                            completed_checkpoint_id=checkpoint_id, outcome="new_proposal"))
+            previous = self._approval_in(runs, owner.approval_id) if owner.approval_id else None
+            proposal_id = next((item.proposal_id or item.id for item in owner.approvals
+                                if item.interrupt_id == interrupt_id and item.action == action), None)
+            if previous is not None and previous.interrupt_id == interrupt_id and previous.action == action:
+                proposal_id = previous.proposal_id or previous.id
+            approval = Approval(approval_id or uuid.uuid4().hex, thread_id, owner.work_id,
+                                owner.id, interrupt_id, checkpoint_id, checkpoint_ns,
+                                deepcopy(action), tuple(deepcopy(requests)), deepcopy(proposal),
+                                proposal_id=proposal_id or uuid.uuid4().hex)
+            self._put_approval(runs, approval)
+            parked = self._find(runs, owner_run_id)
+            if parked.status not in {"running", "awaiting_approval"}:
+                raise InvalidRunTransition("Approval publication requires a running or parked owner")
+            runs[runs.index(parked)] = replace(parked, status="awaiting_approval", updated_at=_now())
+            self._write(thread_id, runs)
+            return approval
+
+    def accept_approval(self, thread_id: str, approval_id: str, decision: dict,
+                        decisions: list[dict], *, legacy: Approval | None = None) -> tuple[Run, bool]:
+        """Persist an immutable decision and exactly one execution Run in one commit.
+
+        ``legacy`` imports an already-visible pre-record card at admission. Its
+        missing original interrupt binding requires fresh review. An exact legacy
+        interrupt is bound to its checkpoint under queue ownership before execution.
+        New cards are published before admission.
+        """
+        with self._lock:
+            runs = self._read(thread_id)
+            approval = self._approval_in(runs, approval_id)
+            new_owner = False
+            if approval is None:
+                if legacy is None or legacy.id != approval_id or legacy.thread_id != thread_id:
+                    raise InvalidRunTransition("Approval is unavailable or stale")
+                approval = legacy
+                owner = next((run for run in runs if run.id == approval.owner_run_id), None)
+                if owner is None:
+                    new_owner = True
+                    now = _now()
+                    owner = Run(thread_id, "general-agent", None, approval.owner_run_id,
+                        approval.work_id, "awaiting_approval", "turn", None, None, None,
+                        None, None, None, False, None, None, 0.0, None, None, None,
+                        "enqueue", now, now)
+                    runs.append(owner)
+            else:
+                owner = self._find(runs, approval.owner_run_id)
+            if approval.decision is not None:
+                if approval.decision != decision or approval.decisions != tuple(decisions):
+                    raise InvalidRunTransition("Approval already has a different decision")
+                return self._find(runs, approval.accepted_run_id), True
+            if approval.state != "pending" or owner.status != "awaiting_approval":
+                raise InvalidRunTransition("Approval is no longer pending")
+            # A legacy non-Run card needs only one acceptance Run, which also owns
+            # its imported record. Modern proposals already have a parked owner.
+            rid = owner.id if new_owner else uuid.uuid4().hex
+            execution = replace(owner, id=rid, text=None, status="pending", resume=False,
+                resume_decision=deepcopy(decision), dispatch_key="approval:" + approval.id,
+                approvals=(), approval_id=approval.id, error=None, result=None,
+                created_at=_now(), updated_at=_now())
+            accepted = replace(approval, state="rejected" if decision["type"] == "reject" else "accepted",
+                               decision=deepcopy(decision), decisions=tuple(deepcopy(decisions)),
+                               accepted_run_id=rid, execution_run_id=rid)
+            if rid == owner.id:
+                runs[runs.index(owner)] = execution
+                self._put_approval(runs, accepted)
+            else:
+                self._put_approval(runs, accepted)
+                runs.append(execution)
+            self._write(thread_id, runs)
+            return self._find(runs, rid), False
+
+    def adopt_legacy_approval(self, thread_id: str, approval: Approval) -> Approval:
+        """One-time import of an exact pre-record decision and its existing Run slices."""
+        with self._lock:
+            runs = self._read(thread_id)
+            existing = self._approval_in(runs, approval.id)
+            if existing is not None:
+                return existing
+            owner = self._find(runs, approval.owner_run_id)
+            accepted = self._find(runs, approval.accepted_run_id)
+            active = self._find(runs, approval.execution_run_id)
+            if (any(item.work_id != approval.work_id or item.thread_id != thread_id
+                    for item in (owner, accepted, active))
+                    or accepted.resume_decision != approval.decision):
+                raise InvalidRunTransition("Legacy approval ownership is inconsistent")
+            self._put_approval(runs, approval)
+            for run_id in {accepted.id, active.id}:
+                item = self._find(runs, run_id)
+                runs[runs.index(item)] = replace(item, approval_id=approval.id, updated_at=_now())
+            if approval.blocked_reason and active.status in {"pending", "running"}:
+                linked = self._find(runs, active.id)
+                runs[runs.index(linked)] = replace(linked,
+                    status="cancelled" if linked.status == "pending" else "error",
+                    error=approval.blocked_reason, updated_at=_now())
+            self._write(thread_id, runs)
+            return approval
+
+    def bind_legacy_requests(self, thread_id: str, approval_id: str, requests: list[dict], *,
+                             checkpoint_id: str, checkpoint_ns: str) -> Approval:
+        """Bind an old exact interrupt's ordered unseen rejections before execution.
+
+        Only imported pre-record approvals carry a legacy binding. The worker
+        verifies their original interrupt and selected action under queue ownership.
+        """
+        with self._lock:
+            runs = self._read(thread_id)
+            approval = self._approval_in(runs, approval_id)
+            if approval is None or not approval.legacy_binding or approval.state not in {"accepted", "rejected"}:
+                raise InvalidRunTransition("Legacy approval cannot be bound")
+            if approval.checkpoint_id and approval.checkpoint_id != checkpoint_id:
+                raise InvalidRunTransition("Legacy approval checkpoint changed")
+            selected = requests.index(approval.action)
+            decision = {key:value for key,value in approval.decision.items()
+                        if key not in {"approval_interrupt_id", "email_review_identity"}}
+            decisions = tuple(decision if index == selected else {
+                "type":"reject", "message":"This action was not displayed for approval. Propose it separately."}
+                for index in range(len(requests)))
+            changed = replace(approval, checkpoint_id=checkpoint_id, checkpoint_ns=checkpoint_ns,
+                              requests=tuple(deepcopy(requests)), decisions=deepcopy(decisions))
+            self._put_approval(runs, changed)
+            self._write(thread_id, runs)
+            return changed
+
+    def reconcile_approval(self, thread_id: str, approval_id: str, *, checkpoint_id: str | None,
+                           consumed: bool = False, completed: bool = False,
+                           blocked_reason: str | None = None, outcome: str | None = None) -> Approval:
+        """Record checkpoint progress; END does not finalize the execution Run.
+
+        The worker retains running ownership through Git finalization. A new HITL
+        gate instead parks that slice, which cannot finalize Git yet.
+        """
+        if (consumed or completed) and not checkpoint_id:
+            raise InvalidRunTransition("Checkpoint progress requires an observed checkpoint identity")
+        with self._lock:
+            runs = self._read(thread_id)
+            approval = self._approval_in(runs, approval_id)
+            if approval is None or approval.decision is None:
+                raise InvalidRunTransition("No accepted approval to reconcile")
+            if approval.state == "completed":
+                return approval
+            changed = replace(approval,
+                state="completed" if completed else "consumed" if consumed else approval.state,
+                consumed_checkpoint_id=(checkpoint_id if consumed else approval.consumed_checkpoint_id),
+                completed_checkpoint_id=(checkpoint_id if completed else approval.completed_checkpoint_id),
+                blocked_reason=blocked_reason or approval.blocked_reason,
+                outcome=outcome or approval.outcome)
+            self._put_approval(runs, changed)
+            if blocked_reason:
+                active = self._find(runs, changed.execution_run_id)
+                if active.status in {"pending", "running", "interrupted"}:
+                    runs[runs.index(active)] = replace(active,
+                        status="cancelled" if active.status == "pending" else "error" if active.status == "running" else "interrupted",
+                        error=blocked_reason, updated_at=_now())
+            elif completed and outcome == "new_gate":
+                active = self._find(runs, changed.execution_run_id)
+                if active.status == "running":
+                    runs[runs.index(active)] = replace(active, status="awaiting_approval", updated_at=_now())
+            self._write(thread_id, runs)
+            return changed
+
+    def fresh_review_approval(self, thread_id: str, approval_id: str, *, action: dict,
+                              requests: list[dict], proposal: dict, interrupt_id: str,
+                              checkpoint_id: str, checkpoint_ns: str) -> Approval:
+        """Atomically close blocked work and park a checked proposal for fresh review.
+
+        The caller verifies checkpoint ownership under the queue. The old decision
+        is never copied to the new record or applied to the graph.
+        """
+        with self._lock:
+            runs = self._read(thread_id)
+            old = self._approval_in(runs, approval_id)
+            if old is None or not old.blocked_reason or old.state == "completed":
+                raise InvalidRunTransition("Approval is not blocked")
+            previous = self._find(runs, old.execution_run_id)
+            owner = replace(previous, id=uuid.uuid4().hex, status="awaiting_approval", text=None,
+                resume=False, resume_decision=None, dispatch_key=None, approval_id=None,
+                approvals=(), error=None, result=None, created_at=_now(), updated_at=_now())
+            same_proposal = old.interrupt_id == interrupt_id and old.action["name"] == action["name"]
+            fresh = Approval(uuid.uuid4().hex, thread_id, old.work_id, owner.id,
+                interrupt_id, checkpoint_id, checkpoint_ns, deepcopy(action), tuple(deepcopy(requests)),
+                deepcopy(proposal), proposal_id=old.proposal_id if same_proposal else uuid.uuid4().hex)
+            self._put_approval(runs, replace(old, state="completed", completed_checkpoint_id=checkpoint_id,
+                                             outcome="fresh_review"))
+            runs.append(owner)
+            self._put_approval(runs, fresh)
+            self._write(thread_id, runs)
+            return fresh
+
+    def repair_approval(self, thread_id: str, approval_id: str, *, checkpoint_id: str) -> Run:
+        """Unblock through a new slice after the caller verifies checkpoint ownership.
+
+        This explicit operator path never runs from startup or automatic dispatch.
+        The worker rechecks the same checkpoint authority before applying a decision.
+        """
+        with self._lock:
+            runs = self._read(thread_id)
+            approval = self._approval_in(runs, approval_id)
+            if approval is None or not approval.blocked_reason or approval.state == "completed":
+                raise InvalidRunTransition("Approval is not blocked")
+            previous = self._find(runs, approval.execution_run_id)
+            if previous.status not in {"error", "cancelled", "interrupted"}:
+                raise InvalidRunTransition("Blocked approval still has an active Run")
+            successor = replace(previous, id=uuid.uuid4().hex, status="pending", text=None,
+                resume=True, resume_decision=None, dispatch_key=None, approvals=(),
+                error=None, result=None, created_at=_now(), updated_at=_now())
+            self._put_approval(runs, replace(approval, blocked_reason=None, execution_run_id=successor.id, recovery_checkpoint_id=checkpoint_id))
+            runs.append(successor)
+            self._write(thread_id, runs)
+            return successor
+
+    def continue_approval(self, thread_id: str, run_id: str, *, active_ms: float = 0.0) -> Run:
+        """Link a recovery/quantum slice atomically, preserving its exact approval."""
+        with self._lock:
+            runs = self._read(thread_id)
+            previous = self._find(runs, run_id)
+            approval = self._approval_in(runs, previous.approval_id)
+            if approval is None or approval.state == "completed" or approval.blocked_reason:
+                raise InvalidRunTransition("Approval continuation is unavailable")
+            active = self._find(runs, approval.execution_run_id)
+            if active.id != previous.id and active.status in {"pending", "running"}:
+                return active
+            if previous.status not in {"running", "interrupted"}:
+                raise InvalidRunTransition("Only abandoned/paused approval work can continue")
+            successor = replace(previous, id=uuid.uuid4().hex, status="pending", text=None,
+                resume=True, resume_decision=None, dispatch_key=None, approvals=(),
+                active_ms=active_ms, error=None, result=None, created_at=_now(), updated_at=_now())
+            if previous.status == "running":
+                runs[runs.index(previous)] = replace(previous, status="interrupted", updated_at=_now())
+            self._put_approval(runs, replace(approval, execution_run_id=successor.id))
+            runs.append(successor)
+            self._write(thread_id, runs)
+            return successor
 
     def transition(
         self,

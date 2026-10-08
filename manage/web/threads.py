@@ -8,6 +8,7 @@ synchronous ``_process_message`` turn implementation. This module also owns
 from __future__ import annotations
 
 import html
+import hashlib
 import io
 import json
 import logging
@@ -16,6 +17,7 @@ import os
 import queue
 import re
 import secrets
+import uuid
 import shutil
 import subprocess
 import threading
@@ -43,7 +45,9 @@ from assist.domain_manager import (
     MergeConflictError,
     OriginAdvancedError,
 )
-from assist.git_sync import (GitSyncError, authorize_branch, bind as bind_git,
+from assist.git_sync import (GitSyncError, _workspace_lock as git_workspace_lock,
+                             authorize_branch, bind as bind_git,
+                             publish_initial_branch,
                              read_state as read_git_binding)
 from langgraph.errors import GraphRecursionError
 import anyio
@@ -51,7 +55,7 @@ import anyio.to_thread
 from langchain_core.messages import HumanMessage
 
 from assist.backlog import PendingMessage
-from assist.run_service import InvalidRunTransition, Run, RunNotFound, browser_reset_owed
+from assist.run_service import Approval, InvalidRunTransition, Run, RunNotFound, browser_reset_owed
 from assist.async_subagents import AsyncTaskContext, async_task_context
 from assist.egress.store import EgressWaiter, resolution_prompt
 from assist.egress.tools import (EGRESS_ORIGIN_THREAD_ID,
@@ -67,7 +71,7 @@ from assist.location import LOCATION_CONTEXT_KEY, LocationSnapshot
 from assist.frequency import FREQUENCY_RUN_ID_KEY
 from assist.events.reply import SMS_SENDER_KEY
 from assist.gmail import GMAIL_INTERRUPT_ON, GmailError, gmail_action_preview
-from assist.events.email import email_identity, valid_email_content
+from assist.events.email import EMAIL_REVIEW_IDENTITY_KEY, email_identity, valid_email_content
 from assist.schedule.scheduler import Scheduler
 from manage.web.drain import DrainClosed, RUN_GATE
 from assist.sandbox import SandboxContainerLostError
@@ -715,7 +719,7 @@ def render_thread(
     # Local import to avoid circular dependency with review.py at module load.
     from manage.web.review import _REVIEW_HEADER
 
-    status = _get_status(tid)
+    status = _get_status(tid) if history_before is not None else approval_status(tid)
     stage = status.get("stage", "ready")
     busy = stage in BUSY_STAGES
     is_init = stage in INIT_STAGES
@@ -1061,12 +1065,11 @@ def render_thread(
         label = "Couldn't process your message:" if had_prior_turn else "Setup failed:"
         status_banner = f'<div class="error-msg"><strong>{label}</strong> {err}</div>'
     elif stage == "awaiting_approval" and status.get("pending_email_token"):
-        identity = email_identity()
-        sender, cc = identity if identity else ("Email sender is not configured", "")
-        to = status.get("pending_email_to", "")
-        subject = status.get("pending_email_subject", "")
-        body = status.get("pending_email_body", "")
-        token = status["pending_email_token"]
+        proposal = email_approval_preview(status)
+        sender, cc = proposal["from"], proposal["cc"]
+        args = proposal["action"]["args"]
+        to, subject, body = args["to"], args["subject"], args["body"]
+        token = proposal["token"]
         status_banner = f"""
         <div class="approval-banner">
           <div><strong>Email awaiting your approval</strong></div>
@@ -1689,6 +1692,17 @@ def _settle_cancelled_initializer(tid: str, run_id: str) -> bool:
     return True
 
 
+def _verify_phone_initializer_owner(tid: str, run_id: str) -> None:
+    """Reject a deleted or replaced first Run while its Git fence is held."""
+    try:
+        current = _runs().get(tid, run_id)
+    except RunNotFound as error:
+        raise GitSyncError("Phone thread initializer was replaced") from error
+    if (current.status != "pending"
+            or _get_status(tid).get("pending_run_id") != run_id):
+        raise GitSyncError("Phone thread initializer is no longer pending")
+
+
 def _initialize_thread(
     tid: str, run_id: str, domain: str | None,
     rider: ContextRider | None = None,
@@ -1744,6 +1758,12 @@ def _initialize_thread_active(
         # A DELETE may have committed while this initializer was queued or
         # cloning.  The clone is bounded setup already owned by this worker;
         # it is never interrupted, but the cancelled Run is never executed.
+        if _settle_cancelled_initializer(tid, run_id):
+            return
+        if domain and current.dispatch_key and current.dispatch_key.startswith("phone:"):
+            publish_initial_branch(MANAGER.thread_dir(tid),
+                                   MANAGER.thread_default_working_dir(tid),
+                                   lambda: _verify_phone_initializer_owner(tid, run_id))
         if _settle_cancelled_initializer(tid, run_id):
             return
         _execute_run(run_id, tid)
@@ -2041,6 +2061,29 @@ def _pending_email(chat) -> dict | None:
     return pending() if pending is not None else None
 
 
+APPROVAL_INTERRUPT_ID_KEY = "approval_interrupt_id"
+
+
+def _email_interrupt_id(chat) -> str | None:
+    """Read the email interrupt identity when the Thread exposes it."""
+    read = getattr(chat, "pending_action_interrupt_id", None)
+    return read("send_email") if read is not None else None
+
+
+def _resume_email(chat, decision: dict) -> str:
+    """Resume the displayed email and reject other unseen gated requests."""
+    pending = _pending_email(chat)
+    requests = chat.pending_actions()
+    selected = next(index for index, action in enumerate(requests)
+                    if action.get("name") == "send_email" and action.get("args") == pending)
+    action_decision = {key: value for key, value in decision.items()
+                       if key not in {EMAIL_REVIEW_IDENTITY_KEY, APPROVAL_INTERRUPT_ID_KEY}}
+    return chat.resume_actions([
+        action_decision if index == selected else {
+            "type": "reject", "message": "This action was not displayed for approval. Propose it separately."}
+        for index in range(len(requests))])
+
+
 def _pending_gmail(chat) -> dict | None:
     """Read an exact Email mutation request from the durable HITL checkpoint."""
     pending = getattr(chat, "pending_action", None)
@@ -2053,10 +2096,198 @@ def _pending_gmail(chat) -> dict | None:
     return None
 
 
+def _checkpoint_review(chat, action: dict) -> tuple[str, str | None, str, list[dict]]:
+    """Read exact checkpoint authority; read failures are never consumption evidence."""
+    snapshot = chat.agent.get_state(chat.runconfig)
+    requests = [dict(request) for intr in snapshot.interrupts
+                for request in intr.value.get("action_requests", [])]
+    interrupt_id = next(intr.id for intr in snapshot.interrupts
+                        if action in intr.value.get("action_requests", []))
+    config = (snapshot.config or {}).get("configurable", {})
+    return interrupt_id, config.get("checkpoint_id"), config.get("checkpoint_ns", ""), requests
+
+
+def approval_status(tid: str) -> dict:
+    """Rebuild a pending card from its durable record, independent of status writes."""
+    status = _get_status(tid)
+    pending = _runs().pending_approval(tid)
+    if pending is None:
+        continuation = _runs().unfinished_approval_continuation(tid)
+        if continuation is not None:
+            return {"stage":"error" if continuation.blocked_reason else "processing",
+                    "pending_run_id":continuation.execution_run_id,
+                    "error":continuation.blocked_reason}
+        return status
+    status = {"stage": "awaiting_approval", "started_at": status.get("started_at"),
+              "pending_approval_id": pending.id}
+    if pending.action["name"] == "send_email":
+        status.update({"pending_email_" + key: value for key, value in pending.action["args"].items()})
+        status.update(pending_email_token=pending.id, pending_email_run_id=pending.owner_run_id,
+                      pending_email_interrupt_id=pending.interrupt_id,
+                      pending_email_review_identity=[pending.proposal["from"], pending.proposal["cc"]])
+    else:
+        status.update(pending_gmail_token=pending.id, pending_gmail_run_id=pending.owner_run_id,
+                      pending_gmail_interrupt_id=pending.interrupt_id, pending_gmail_action=pending.action,
+                      pending_gmail_messages=pending.proposal.get("messages", []),
+                      pending_gmail_error=pending.proposal.get("error", ""),
+                      pending_gmail_preview_pending=pending.proposal.get("preview_pending", False))
+    return status
+
+
+def _decision_vector(action: dict, requests: list[dict], decision: dict) -> list[dict]:
+    selected = requests.index(action)
+    value = {key: item for key, item in decision.items()
+             if key not in {EMAIL_REVIEW_IDENTITY_KEY, APPROVAL_INTERRUPT_ID_KEY}}
+    return [value if index == selected else {
+        "type": "reject", "message": "This action was not displayed for approval. Propose it separately."}
+        for index in range(len(requests))]
+
+
+def _admit_approval(tid: str, token: str, proposal: dict, status: dict, decision: dict) -> tuple[Run, bool]:
+    """Import legacy exact bindings once; modern admission reads only Run-owned records."""
+    service = _runs()
+    record = service.approval(tid, token)
+    legacy = None
+    if record is None:
+        field = "email" if proposal["kind"] == "send_email" else "gmail"
+        owner_id = status.get("pending_" + field + "_run_id") or uuid.uuid4().hex
+        owner = next((run for run in service.list(tid) if run.id == owner_id), None)
+        if field == "gmail" and owner is None:
+            raise HTTPException(status_code=409, detail="Email proposal Run is unavailable.")
+        requests = status.get("pending_" + field + "_requests") or [proposal["action"]]
+        legacy = Approval(token, tid, owner.work_id if owner else uuid.uuid4().hex, owner_id,
+                          status.get("pending_" + field + "_interrupt_id"),
+                          status.get("pending_" + field + "_checkpoint_id"), "",
+                          proposal["action"], tuple(requests), {key:value for key,value in proposal.items() if key != "token"},
+                          proposal_id=token, legacy_binding=True)
+        record = legacy
+    if record.action["name"] != proposal["kind"]:
+        raise HTTPException(status_code=409, detail="Email action kind does not match this approval.")
+    try:
+        return service.accept_approval(tid, token, decision,
+            _decision_vector(record.action, list(record.requests), decision), legacy=legacy)
+    except InvalidRunTransition as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+def _approval_checkpoint(chat, approval: Approval):
+    """Classify an exact interrupt using host work, namespace and checkpoint lineage.
+
+    Legacy cards may prove only their original interrupt. Absence of that interrupt
+    requires a reviewed ancestor or an observed host-stamped continuation checkpoint.
+    """
+    snapshot = chat.agent.get_state(chat.runconfig)
+    config = (snapshot.config or {}).get("configurable", {})
+    cp = config.get("checkpoint_id")
+    if not cp:
+        raise ValueError("Approval checkpoint is unavailable")
+    if config.get("thread_id") != approval.thread_id or config.get("checkpoint_ns", "") != approval.checkpoint_ns:
+        raise ValueError("Approval checkpoint thread or namespace changed")
+    metadata = snapshot.metadata or {}
+    if metadata.get("work_id") is not None and metadata["work_id"] != approval.work_id:
+        raise ValueError("Approval checkpoint belongs to different work")
+    requests = [dict(action) for intr in snapshot.interrupts
+                for action in intr.value.get("action_requests", [])]
+    original = next((intr for intr in snapshot.interrupts if intr.id == approval.interrupt_id), None)
+    lineage = False
+    cursor = snapshot
+    for _ in range(502):
+        cursor_config = (cursor.config or {}).get("configurable", {})
+        cursor_metadata = cursor.metadata or {}
+        if (cursor_config.get("thread_id") != approval.thread_id
+                or cursor_config.get("checkpoint_ns", "") != approval.checkpoint_ns
+                or cursor_metadata.get("work_id") is not None and cursor_metadata["work_id"] != approval.work_id):
+            raise ValueError("Approval checkpoint ancestry is foreign")
+        if (approval.checkpoint_id and cursor_config.get("checkpoint_id") == approval.checkpoint_id
+                or cursor_metadata.get("approval_id") == approval.id
+                and cursor_metadata.get("work_id") == approval.work_id):
+            lineage = True
+            break
+        if not cursor.parent_config:
+            break
+        cursor = chat.agent.get_state(cursor.parent_config)
+    if original is not None:
+        if not approval.legacy_binding and not lineage:
+            raise ValueError("Approval proposal checkpoint lineage changed")
+        if approval.legacy_binding and approval.action in requests:
+            approval = _runs().bind_legacy_requests(approval.thread_id, approval.id, requests,
+                checkpoint_id=cp, checkpoint_ns=config.get("checkpoint_ns", ""))
+        if requests != list(approval.requests) or approval.action not in requests:
+            raise ValueError("Approval checkpoint requests changed")
+        if approval.state == "consumed":
+            raise ValueError("Approval checkpoint moved behind its consumed decision")
+        return snapshot, cp, False
+    if approval.interrupt_id is None and snapshot.interrupts:
+        return snapshot, cp, False
+    if lineage and cp != approval.checkpoint_id:
+        return snapshot, cp, True
+    raise ValueError("Approval checkpoint lineage is unavailable or foreign")
+
+
+def fresh_review_approval_core(tid: str, approval_id: str) -> Approval:
+    """Explicitly replace blocked approval work with a checked, undecided review.
+
+    A legacy import that could not read its original proposal can recover only by
+    fresh review of that exact interrupt's unique named action. Mailbox records
+    start with a loading preview; dispatch their owner to complete its preview.
+    """
+    with THREAD_QUEUE.acquire(tid), _RUN_ADMISSION_LOCK:
+        record = _runs().approval(tid, approval_id)
+        if record is None or not record.blocked_reason:
+            raise InvalidRunTransition("Approval is not blocked")
+        chat = MANAGER.get(tid, sandbox_backend=None)
+        snapshot = chat.agent.get_state(chat.runconfig)
+        config = (snapshot.config or {}).get("configurable", {})
+        if (not config.get("checkpoint_id") or config.get("thread_id") != tid
+                or config.get("checkpoint_ns", "") != record.checkpoint_ns
+                or (snapshot.metadata or {}).get("work_id") not in {None, record.work_id}):
+            raise ValueError("Fresh review checkpoint is unavailable or foreign")
+        original = next((intr for intr in snapshot.interrupts if intr.id == record.interrupt_id), None)
+        if not record.legacy_binding or original is None:
+            _approval_checkpoint(chat, record)
+        selected = [(intr, action) for intr in snapshot.interrupts
+                    for action in intr.value.get("action_requests", [])
+                    if action.get("name") == record.action["name"]]
+        if len(selected) != 1:
+            raise ValueError("Fresh review requires one exact pending mail request")
+        intr, action = selected[0]
+        if record.legacy_binding and record.checkpoint_id is None and intr.id != record.interrupt_id:
+            raise ValueError("Legacy fresh review cannot substitute a newer interrupt")
+        requests = [dict(action) for item in snapshot.interrupts for action in item.value.get("action_requests", [])]
+        if action["name"] == "send_email":
+            sender, cc = email_identity() or ("Email sender is not configured", "")
+            proposal = {"kind":"send_email", "action":action, "from":sender, "cc":cc}
+        elif action["name"] in GMAIL_INTERRUPT_ON:
+            proposal = {"kind":action["name"], "action":action, "messages":[],
+                        "error":"Preparing complete Email preview.", "preview_pending":True}
+        else:
+            raise ValueError("Fresh review is limited to mail approvals")
+        return _runs().fresh_review_approval(tid, record.id, action=action, requests=requests,
+            proposal=proposal, interrupt_id=intr.id, checkpoint_id=config["checkpoint_id"],
+            checkpoint_ns=config.get("checkpoint_ns", ""))
+
+
+def repair_approval_core(tid: str, approval_id: str) -> Run:
+    """Explicitly repair blocked approval work; the operator schedules the returned Run.
+
+    No model or provider effect occurs here. Unreadable or foreign checkpoints keep
+    the durable fence. Invocation is an operator action, never a startup retry.
+    """
+    with THREAD_QUEUE.acquire(tid), _RUN_ADMISSION_LOCK:
+        record = _runs().approval(tid, approval_id)
+        if record is None or not record.blocked_reason:
+            raise InvalidRunTransition("Approval is not blocked")
+        chat = MANAGER.get(tid, sandbox_backend=None)
+        snapshot, checkpoint_id, consumed = _approval_checkpoint(chat, record)
+        if consumed:
+            _runs().reconcile_approval(tid, record.id, checkpoint_id=checkpoint_id, consumed=True)
+        return _runs().repair_approval(tid, record.id, checkpoint_id=checkpoint_id)
+
+
 def _refresh_gmail_preview(tid: str, token: str, action: dict) -> None:
     """Complete a still-pending card's preview outside the model queue."""
     with _RUN_ADMISSION_LOCK:
-        status = _get_status(tid)
+        status = approval_status(tid)
         if (status.get("stage") != "awaiting_approval"
                 or status.get("pending_gmail_token") != token
                 or not status.get("pending_gmail_preview_pending")):
@@ -2068,9 +2299,20 @@ def _refresh_gmail_preview(tid: str, token: str, action: dict) -> None:
         messages = []
         error = str(failure)
     with _RUN_ADMISSION_LOCK:
-        status = _get_status(tid)
+        status = approval_status(tid)
         if (status.get("stage") == "awaiting_approval"
                 and status.get("pending_gmail_token") == token):
+            record = _runs().approval(tid, token)
+            if record is not None:
+                if record.state != "pending":
+                    return
+                refreshed = _runs().publish_approval(tid, record.owner_run_id,
+                    action=record.action, requests=list(record.requests),
+                    proposal={"kind":action["name"], "action":action, "messages":messages,
+                              "error":error, "preview_pending":False},
+                    interrupt_id=record.interrupt_id, checkpoint_id=record.checkpoint_id,
+                    checkpoint_ns=record.checkpoint_ns)
+                status = approval_status(tid)
             try:
                 _set_status(tid, "awaiting_approval", **{
                     **{key:value for key,value in status.items() if key != "stage"},
@@ -2618,7 +2860,11 @@ def _execute_run_active(run_id: str, tid: str, *, user_priority: bool = False) -
                 current = _runs().get(tid, run.id)
                 if current.status == "pending":
                     current = _runs().claim(tid, run.id)
-                if current.status == "running":
+                if current.approval_id is not None and current.status in {"running", "interrupted"}:
+                    _runs().reconcile_approval(tid, current.approval_id, checkpoint_id=None,
+                        blocked_reason=str(error))
+                    finished_work_id = current.work_id
+                elif current.status == "running":
                     _runs().transition(tid, run.id, "error", error=str(error))
                     finished_work_id = current.work_id
         if finished_work_id is not None:
@@ -2641,7 +2887,7 @@ def _execute_run_active(run_id: str, tid: str, *, user_priority: bool = False) -
             _complete_child_handoff(run)
         return
     with _RUN_ADMISSION_LOCK:
-        status = _get_status(tid)
+        status = approval_status(tid)
         preview_pending = (status.get("stage") == "awaiting_approval"
                            and status.get("pending_gmail_run_id") == run.id
                            and status.get("pending_gmail_preview_pending"))
@@ -2678,6 +2924,12 @@ def _execute_run_active(run_id: str, tid: str, *, user_priority: bool = False) -
         # already created its successor. Terminal means another dispatcher or an
         # interjection consumer completed the ticket. Only a still-running run owns
         # this invocation's terminal projection.
+        if current.status == "running" and current.approval_id is not None:
+            approval = _runs().approval(tid, current.approval_id)
+            if approval.state != "completed":
+                _runs().reconcile_approval(tid, approval.id, checkpoint_id=None,
+                    blocked_reason=_get_status(tid).get("error") or "Approval continuation stopped before a verified checkpoint boundary")
+                current = _runs().get(tid, run_id)
         if current.status == "running":
             status = _get_status(tid)
             stage = status.get("stage")
@@ -2827,14 +3079,11 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
 
 
 def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
-    """Resume a decided Email action before fresh user/FIFO pending turns."""
+    """Queue unfinished approval chains first, then user turns and other FIFO work."""
     runs = _runs().list(tid)
     if any(run.status == "running" for run in runs):
         return
     status = _get_status(tid)
-    if (status.get("stage") == "paused"
-            and any(run.status == "interrupted" for run in runs)):
-        return
     eligible = _runs_before_browser_reset(runs)
     pending_runs = [run for run in eligible
                     if run.status == "pending" and run.id != run_id]
@@ -2843,9 +3092,22 @@ def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
     user = next((run for run in pending_runs
                  if run.mode == "turn" and run.origin is None
                  and run.text is not None), None)
-    gmail_resume = next((run for run in pending_runs
-                         if run.dispatch_key and run.dispatch_key.startswith("gmail-approval:")), None)
-    selected = gmail_resume or user or pending_runs[0]
+    continuation = _runs().unfinished_approval_continuation(tid)
+    if continuation is not None:
+        if continuation.blocked_reason:
+            return
+        approval = next((run for run in pending_runs if run.id == continuation.execution_run_id), None)
+        if approval is None:
+            return
+    else:
+        if _runs().pending_approval(tid) is not None:
+            return
+        # Pre-record reply approvals retain their existing routing contract.
+        approval = next((run for run in pending_runs if run.resume_decision is not None), None)
+    if (approval is None and status.get("stage") == "paused"
+            and any(run.status == "interrupted" for run in runs)):
+        return
+    selected = approval or user or pending_runs[0]
     if status.get("stage") in {"initializing", "cloning"}:
         _INITIALIZATION_SCHEDULER.submit(
             selected.id, tid, status.get("domain") or None)
@@ -2857,9 +3119,9 @@ def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
 def _recover_run(run: Run, *, user_priority: bool = False) -> None:
     """Recover one invocation abandoned in running/interrupted state.
 
-    A protocol invocation is never restarted in place. Recovery finalizes it or creates
-    one successor on the same thread/work, then queues accepted followers behind that
-    successor by construction.
+    A protocol invocation is never restarted in place. Recovery finalizes it, creates
+    or reuses one successor on the same thread/work, then queues accepted followers
+    behind that successor. An accepted approval is already such a successor.
     """
     tid = run.thread_id
     # Pi has no LangGraph checkpoint or resumable session. Classify before
@@ -2880,12 +3142,47 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
         _set_status(tid, "error", error="Pi turn was interrupted; send the message again")
         _dispatch_pending_after(tid, run.id)
         return
+    if run.approval_id is not None:
+        approval = _runs().approval(tid, run.approval_id)
+        if approval is None or approval.blocked_reason:
+            return
+        try:
+            with THREAD_QUEUE.acquire(tid):
+                completed = approval.state == "completed" and approval.outcome == "checkpoint_end"
+                if not completed:
+                    if approval.state == "completed":
+                        return
+                    chat = MANAGER.get(tid, sandbox_backend=None)
+                    snapshot, checkpoint_id, consumed = _approval_checkpoint(chat, approval)
+                    completed = consumed and not snapshot.next and not snapshot.interrupts
+                    if completed:
+                        _runs().reconcile_approval(tid, approval.id, checkpoint_id=checkpoint_id,
+                            consumed=True, completed=True, outcome="checkpoint_end")
+                if completed:
+                    git_error = git_recovery_error(
+                        MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid))
+                    _runs().transition(tid, run.id, "error" if git_error else "success",
+                                       **({"error": git_error} if git_error else {}))
+                    _set_status(tid, "error" if git_error else "ready",
+                                **({"error": git_error} if git_error else {}))
+                    _dispatch_pending_after(tid)
+                    return
+        except Exception as error:
+            _runs().reconcile_approval(tid, approval.id, checkpoint_id=None, blocked_reason=str(error))
+            _set_status(tid, "error", error=str(error))
+            return
+        successor = _runs().continue_approval(tid, run.id, active_ms=run.active_ms)
+        _RESUME_SCHEDULER.submit(successor.id, tid, user_priority=user_priority)
+        return
+    if (_runs().pending_approval(tid) is not None
+            or _runs().unfinished_approval_continuation(tid) is not None):
+        return
     pending_text = run.pending_text or run.text or _get_status(tid).get("pending_message")
     if run.status == "interrupted":
         successor = next((candidate for candidate in _runs().list(tid)
                           if candidate.status in {"pending", "running"}
                           and candidate.work_id == run.work_id
-                          and candidate.resume), None)
+                          and (candidate.resume or candidate.resume_decision is not None)), None)
         if successor is None:
             successor = _create_run(
                 tid, None, rider=_rider_from_fields(run.rider), sender=run.sender,
@@ -2897,7 +3194,9 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
             successor.id, tid, user_priority=user_priority)
         return
 
-    decision = _recovery_decision(tid, pending_text or "")
+    decision = _recovery_decision(
+        tid, pending_text or "",
+        **({"continuation": True} if run.resume or run.resume_decision is not None else {}))
     logging.info("recovery: run %s on %s -> %s", run.id, tid, decision)
     if decision == "finalize":
         git_error = git_recovery_error(
@@ -2979,10 +3278,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # `origin` ("continuation", "task-completion", or None) keys
     # the render surfaces (agent-note bubble, "Following up" banner), the origin-aware
     # failure path, and recovery fidelity — persisted in every busy status write below.
-    # `resume_decision` resumes a reply, outbound-send or mailbox approval only through an
-    # admitted Run with the matching approval dispatch key and checkpoint action.
-    # `resume=True` (set only by the fair-scheduling resume scheduler after a quantum pause)
-    # continues this thread's in-flight turn from its durable checkpoint (input=None) rather
+    # `resume_decision` resumes only an admitted matching HITL action.
+    # `resume=True` continues this thread's checkpoint (input=None) after a
+    # quantum pause or restart rather
     # than starting a new message; `accumulated_active_ms` carries the active hold it already
     # burned so the 2h cap can't be dodged by pausing.
     # Carry the pending message in the status so the thread page can show it as a
@@ -3054,8 +3352,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     queue_handle = None
     hold_drained = False
     decision_key = (_run.dispatch_key or "") if _run is not None else ""
-    decision_kind = next((kind for kind in ("gmail", "email", "reply")
-                          if decision_key.startswith(kind + "-approval:")), None)
+    decision_kind = "reply" if decision_key.startswith("reply-approval:") else None
 
     def on_queue_wait(stage: str) -> None:
         # `ThreadAffinityQueue.acquire` fires the callback with "queued"
@@ -3119,30 +3416,18 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     logging.info("run %s on %s reached %s before slot claim; skipping",
                                  _run.id, tid, current_run.status)
                     return
-            if resume_decision is not None:
-                # Refuse foreign/stale decisions before clearing the visible card
-                # or claiming its proposal lineage. Legacy untyped decisions cannot
-                # prove which kind of action was approved. Mailbox approval also binds the
-                # exact admitted owner/action (including startup's paused projection),
-                # or its card after a failed status write.
+            if _run is not None and _run.approval_id is None:
+                if (_runs().pending_approval(tid) is not None
+                        or _runs().unfinished_approval_continuation(tid) is not None):
+                    logging.info("run %s deferred: another approval owns the checkpoint", _run.id)
+                    return
+            if resume_decision is not None and (_run is None or _run.approval_id is None):
+                # Unlinked legacy Runs may authorize only the existing reply path.
+                # Mail decisions require a durable Approval and its exact execution link.
                 pending_chat = MANAGER.get(tid, sandbox_backend=None)
                 pending_gmail = _pending_gmail(pending_chat)
-                decision_status = _get_status(tid)
-                matches = ((decision_kind == "gmail" and pending_gmail
-                            and pending_gmail == decision_status.get("pending_gmail_action")
-                            and resume_decision.get("approval_interrupt_id") is not None
-                            and resume_decision["approval_interrupt_id"] == pending_chat.pending_action_interrupt_id(
-                                pending_gmail["name"], pending_gmail["args"])
-                            and ((decision_status.get("stage") in {"processing", "paused"}
-                                  and decision_status.get("pending_run_id") == _run.id)
-                                 or (decision_status.get("stage") == "awaiting_approval"
-                                     and decision_key == "gmail-approval:" + pending_gmail["name"] + ":"
-                                     + decision_status.get("pending_gmail_token", "")))
-                            and decision_key.startswith("gmail-approval:" + pending_gmail["name"] + ":"))
-                           or (not pending_gmail and decision_kind == "reply"
-                               and pending_chat.pending_reply())
-                           or (not pending_gmail and decision_kind == "email"
-                               and _pending_email(pending_chat)))
+                matches = (not pending_gmail and decision_kind == "reply"
+                           and pending_chat.pending_reply())
                 if not matches:
                     if _run is not None:
                         with _RUN_ADMISSION_LOCK:
@@ -3150,6 +3435,18 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                                error="Decision does not match the pending approval.")
                         _dispatch_pending_after(tid, _run.id)
                     return
+            if _run is not None and _run.approval_id is not None:
+                bound = _runs().approval(tid, _run.approval_id)
+                if bound is None or bound.blocked_reason or bound.execution_run_id != _run.id:
+                    return
+                if bound.legacy_binding and bound.interrupt_id is not None and bound.checkpoint_id is None:
+                    legacy_chat = MANAGER.get(tid, sandbox_backend=None)
+                    pending_action = legacy_chat.pending_action(bound.action["name"]) if hasattr(legacy_chat, "pending_action") else _pending_email(legacy_chat)
+                    current_interrupt = legacy_chat.pending_action_interrupt_id(bound.action["name"])
+                    if current_interrupt is not None and (current_interrupt != bound.interrupt_id or pending_action != bound.action["args"]):
+                        _runs().reconcile_approval(tid, bound.id, checkpoint_id=None,
+                            blocked_reason="Legacy decision does not match the pending approval")
+                        return
             # Snapshot pre-existing continuation entries: ones THIS turn journals
             # (the delta) have no dispatcher until the ready exit, so an error
             # exit must cancel them (not strand a visible "will follow up"
@@ -3186,12 +3483,11 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                  "approval", tid)
                     return
             if not resume and resume_decision is None:
-                if (_get_status(tid).get("pending_email_token")
-                        or _get_status(tid).get("pending_gmail_token")
-                        or (any(run.dispatch_key and run.dispatch_key.startswith("gmail-approval:")
-                                for run in _runs().list(tid))
-                            and _pending_gmail(MANAGER.get(tid, sandbox_backend=None)))):
-                    logging.info("run on %s deferred: mail is awaiting approval", tid)
+                if (_runs().pending_approval(tid) is not None
+                        or _runs().unfinished_approval_continuation(tid) is not None
+                        or _get_status(tid).get("pending_email_token")
+                        or _get_status(tid).get("pending_gmail_token")):
+                    logging.info("run on %s deferred: mail approval owns the checkpoint", tid)
                     return
             if _run is not None:
                 try:
@@ -3265,6 +3561,13 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         _cfg[SMS_SENDER_KEY] = sender
                     elif _run is not None and _run.mode == "turn" and assistant_id == "general-agent":
                         _cfg["web_run_id"] = _run.id
+                    if _run is not None:
+                        _cfg["work_id"] = _run.work_id
+                        if _run.approval_id is not None:
+                            record = _runs().approval(tid, _run.approval_id)
+                            _cfg["approval_id"] = record.id
+                            if record.decision and EMAIL_REVIEW_IDENTITY_KEY in record.decision:
+                                _cfg[EMAIL_REVIEW_IDENTITY_KEY] = record.decision[EMAIL_REVIEW_IDENTITY_KEY]
                     _cfg.update(_frequency_configurable(
                         _run, sender=sender, assistant_id=assistant_id) or {})
                     # A triage turn (sender set) gets the reduced, HITL-gated tool surface.
@@ -3280,25 +3583,47 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 except FileNotFoundError:
                     return
                 _set_status(tid, "processing", **pending_kwargs)
+                record = _runs().approval(tid, _run.approval_id) if _run and _run.approval_id else None
+                record_consumed = False
+                if record is not None:
+                    if record.blocked_reason or record.execution_run_id != _run.id:
+                        raise ValueError("Approval continuation is blocked or owned by another Run")
+                    snapshot, checkpoint_id, record_consumed = _approval_checkpoint(chat, record)
+                    record = _runs().approval(tid, record.id)
+                    if record_consumed:
+                        _runs().reconcile_approval(tid, record.id, checkpoint_id=checkpoint_id, consumed=True)
+                        resume, resume_decision = True, None
+                    elif (record.interrupt_id is None or (record.decision.get("type") != "reject"
+                            and record.action["name"] == "send_email"
+                            and record.decision.get(EMAIL_REVIEW_IDENTITY_KEY) != list(email_identity() or ("", "")))):
+                        # Unknown legacy binding or changed fixed identity requires fresh review.
+                        resume, resume_decision = False, None
+                    else:
+                        resume, resume_decision = False, record.decision
                 observed = (_run is not None
                             and RUN_STREAMS.read(tid, _run.work_id) is not None)
-                if resume and observed:
+                if record is not None and not record_consumed:
+                    if resume_decision is None:
+                        resp = ""
+                    else:
+                        resp = chat.resume_actions(list(record.decisions))
+                elif record is not None and (snapshot.interrupts or not snapshot.next):
+                    # The original decision has been consumed. A new gate or END is
+                    # reconciled below without applying any decision to its successor.
+                    resp = ""
+                elif resume and observed:
                     resp = chat.observe_resume(
                         lambda delta: _publish_phone_text(tid, _run.work_id, delta),
                         lambda _attempt: RUN_STREAMS.reset_attempt(tid, _run.work_id))
                 elif resume:
-                    # Fair-scheduling resume: continue the in-flight turn from its
+                    # Checkpoint continuation: continue the in-flight turn from its
                     # durable checkpoint (input=None). No new message, no supersede.
                     resp = chat.resume()
                 elif resume_decision is not None:
-                    # The admission key binds a decision to its action kind;
-                    # checkpoint matching was checked before any status mutation.
-                    if decision_kind == "gmail":
-                        resp = _resume_gmail(chat, resume_decision)
-                    elif decision_kind == "reply":
+                    if decision_kind == "reply":
                         resp = chat.resume_reply(resume_decision)
-                    elif decision_kind == "email":
-                        resp = chat.resume_action(resume_decision)
+                    else:
+                        resp = ""
                 else:
                     # A NEW message while a reply is still awaiting approval supersedes that
                     # draft: reject it to unblock the paused graph, then run this message so
@@ -3367,6 +3692,17 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     finally:
                         if any(browser_reset_owed(item) for item in _runs().list(tid)):
                             _queue_browser_revocation(tid)
+            if record is not None:
+                verified, checkpoint_id, consumed = _approval_checkpoint(chat, record)
+                if consumed:
+                    new_nonmail_gate = bool(verified.interrupts) and not _pending_email(chat) and not _pending_gmail(chat)
+                    completed = not verified.next and not verified.interrupts or new_nonmail_gate
+                    if completed and not new_nonmail_gate:
+                        # Save the answer before END completion; Git still owns finalization.
+                        _runs().transition(tid, _run.id, "running", result=resp)
+                    _runs().reconcile_approval(tid, record.id, checkpoint_id=checkpoint_id,
+                        consumed=True, completed=completed,
+                        outcome="new_gate" if new_nonmail_gate else "checkpoint_end" if completed else None)
             pending_gmail = _pending_gmail(chat)
             if pending_gmail:
                 try:
@@ -3374,6 +3710,13 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 except OSError:
                     logging.warning("Thread timestamp update failed for %s", tid, exc_info=True)
                 gmail_token = secrets.token_urlsafe(16)
+                if _run is not None:
+                    action_interrupt, checkpoint_id, checkpoint_ns, requests = _checkpoint_review(chat, pending_gmail)
+                    published = _runs().publish_approval(tid, _run.id, action=pending_gmail,
+                        requests=requests, proposal={"kind":pending_gmail["name"], "action":pending_gmail,
+                            "messages":[], "error":"Preparing complete Email preview.", "preview_pending":True},
+                        interrupt_id=action_interrupt, checkpoint_id=checkpoint_id, checkpoint_ns=checkpoint_ns)
+                    gmail_token = published.id
                 gmail_terminal = ("awaiting_approval", "Email action awaiting approval")
                 _terminal = gmail_terminal
                 with _RUN_ADMISSION_LOCK:
@@ -3387,8 +3730,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                 pending_gmail_token=gmail_token,
                                 pending_gmail_run_id=_run.id if _run else None,
                                 started_at=started_at)
-                    if _run is not None:
-                        _runs().transition(tid, _run.id, "awaiting_approval")
+
             if (git_lifecycle.bound and not chat.pending_reply() and not _pending_email(chat)
                     and not pending_gmail):
                 try:
@@ -3396,7 +3738,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 except GitSyncError:
                     _terminal = ("error", resp)
                     raise
-            # Git finalization ran inside workspace ownership, including no-file-change turns.
+            # Eligible Git finalization runs inside workspace ownership, including no-file-change turns.
             # Record this turn's wall-clock elapsed (submit → completion) keyed by turn ordinal,
             # for the completed-reply badge. Off-loop. Runs at BOTH success exits below (ready
             # and awaiting_approval), keyed by the turn ordinal — so a HITL turn records
@@ -3414,6 +3756,30 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             # re-journal an already-answered interjection.
             _claim_seen_interjections(tid, chat)
             _TURN_INTERJECTION.pop(tid, None)
+            pending = chat.pending_reply()
+            pending_email = _pending_email(chat)
+            if pending_email and not pending and not pending_gmail:
+                email_token = secrets.token_urlsafe(16)
+                if _run is not None:
+                    action = {"name":"send_email", "args":pending_email}
+                    action_interrupt, checkpoint_id, checkpoint_ns, requests = _checkpoint_review(chat, action)
+                    sender_identity, cc_identity = email_identity() or ("Email sender is not configured", "")
+                    published = _runs().publish_approval(tid, _run.id, action=action, requests=requests,
+                        proposal={"kind":"send_email", "action":action, "from":sender_identity, "cc":cc_identity},
+                        interrupt_id=action_interrupt, checkpoint_id=checkpoint_id, checkpoint_ns=checkpoint_ns)
+                    email_token = published.id
+                with _RUN_ADMISSION_LOCK:
+                    _set_status(tid, "awaiting_approval",
+                                pending_email_to=pending_email.get("to", ""),
+                                pending_email_subject=pending_email.get("subject", ""),
+                                pending_email_body=pending_email.get("body", ""),
+                                pending_email_token=email_token,
+                                pending_approval_id=published.id if _run else None,
+                                pending_email_review_identity=list(email_identity() or ("Email sender is not configured", "")),
+                                pending_email_interrupt_id=_email_interrupt_id(chat),
+                                pending_email_run_id=_run.id if _run else None,
+                                started_at=started_at)
+
         if gmail_terminal is not None:
             THREAD_QUEUE.pop_hold(queue_handle)
             hold_drained = True
@@ -3422,7 +3788,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             # still-pending card can receive the completed preview.
             _refresh_gmail_preview(tid, gmail_token, pending_gmail)
         else:
-            MANAGER.touch(tid)
+            try:
+                MANAGER.touch(tid)
+            except OSError:
+                logging.warning("Thread timestamp update failed for %s", tid, exc_info=True)
 
             # Generate description if there is none
             try:
@@ -3443,12 +3812,6 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                             started_at=started_at)
                 _terminal = ("awaiting_approval", pending.get("text", ""))
             elif pending_email and not pending_gmail:
-                _set_status(tid, "awaiting_approval",
-                            pending_email_to=pending_email.get("to", ""),
-                            pending_email_subject=pending_email.get("subject", ""),
-                            pending_email_body=pending_email.get("body", ""),
-                            pending_email_token=secrets.token_urlsafe(16),
-                            started_at=started_at)
                 _terminal = ("awaiting_approval", pending_email.get("body", ""))
             else:
                 _set_status(tid, "ready", mark_unseen=not _quiet_ready(_run))
@@ -3474,7 +3837,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         ticket = None
         try:
             with _RUN_ADMISSION_LOCK:
-                if _run is not None:
+                if _run is not None and _run.approval_id is not None:
+                    successor = _runs().continue_approval(tid, _run.id, active_ms=carry)
+                elif _run is not None:
                     _runs().transition(tid, _run.id, "interrupted", active_ms=carry)
                     successor = _create_run(
                         tid, None, rider=rider, sender=sender, resume=True,
@@ -3555,6 +3920,11 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 if current.status == "pending":
                     current = _runs().claim(tid, current.id)
                 if current.status == "running":
+                    if current.approval_id is not None:
+                        # Persist the unfinished Approval block with its Run error;
+                        # completed checkpoint work retains its saved result below.
+                        _runs().reconcile_approval(tid, current.approval_id,
+                                                   checkpoint_id=None, blocked_reason=message)
                     _runs().transition(tid, current.id, "error", error=message,
                                        **({"result": _terminal[1]} if _terminal is not None else {}))
                 other_running = any(candidate.id != _run.id and candidate.status == "running"
@@ -4456,31 +4826,98 @@ def email_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
                    seen_to: str = Form(default=""), seen_subject: str = Form(default=""),
                    seen_body: str = Form(default="")):
     """Approve, edit, or reject the exact pending email proposal off the event loop."""
+    run, replayed = email_decision_core(
+        tid, decision, token, to=to, subject=subject, body=body,
+        seen_to=seen_to, seen_subject=seen_subject, seen_body=seen_body)
+    if not replayed or run.status == "pending":
+        background_tasks.add_task(_execute_run, run.id, tid)
+    return RedirectResponse(url=f"/thread/{tid}", status_code=303)
+
+
+def email_approval_preview(status: dict) -> dict:
+    """Bind the complete email, including fixed delivery identity, to its preview."""
+    identity = email_identity()
+    sender, cc = identity if identity else ("Email sender is not configured", "")
+    action = {"name": "send_email", "args": {
+        "to": status.get("pending_email_to", ""),
+        "subject": status.get("pending_email_subject", ""),
+        "body": status.get("pending_email_body", "")}}
+    token = hashlib.sha256(json.dumps(
+        [status["pending_email_token"], sender, cc, action],
+        sort_keys=True).encode()).hexdigest()
+    if (status.get("pending_approval_id")
+            and status.get("pending_email_review_identity") == [sender, cc]):
+        token = status["pending_approval_id"]
+    return {"kind": "send_email", "token": token, "action": action,
+            "from": sender, "cc": cc}
+
+
+def email_decision_core(tid: str, decision: str, token: str, *,
+                        to: str = "", subject: str = "", body: str = "",
+                        seen_to: str = "", seen_subject: str = "", seen_body: str = "",
+                        phone_preview: bool = False) -> tuple[Run, bool]:
+    """Commit the exact reviewed decision and execution Run together.
+
+    Replays use the immutable review identity. Status publication is a projection;
+    checkpoint authority and the fixed delivery identity remain in the Approval.
+    """
     _existing_thread_dir(tid)
     _require_deep_thread(tid)
     if decision not in _EMAIL_DECISIONS:
         raise HTTPException(status_code=400, detail="decision must be approve, reject or edit")
-    status = _get_status(tid)
-    expected_token = status.get("pending_email_token")
-    if (status.get("stage") != "awaiting_approval" or not isinstance(expected_token, str)
-            or not hmac.compare_digest(token, expected_token)):
-        raise HTTPException(status_code=409, detail="This thread has no email awaiting approval.")
-    if decision == "approve":
-        pending = (status.get("pending_email_to", ""), status.get("pending_email_subject", ""),
-                   status.get("pending_email_body", ""))
-        seen = (seen_to, seen_subject, seen_body.replace("\r\n", "\n"))
-        current = (pending[0], pending[1], pending[2].replace("\r\n", "\n"))
-        submitted = (to, subject, body.replace("\r\n", "\n"))
-        if seen != current or submitted != current:
-            raise HTTPException(status_code=409,
-                                detail="This email was updated — reload and review it.")
-    if decision == "edit" and not valid_email_content(to, subject, body):
-        raise HTTPException(status_code=400, detail="The edited email is invalid.")
-    run = _create_run(tid, None,
-                      resume_decision=_EMAIL_DECISIONS[decision](to, subject, body),
-                      dispatch_key="email-approval:" + token)
-    background_tasks.add_task(_execute_run, run.id, tid)
-    return RedirectResponse(url=f"/thread/{tid}", status_code=303)
+    with _RUN_ADMISSION_LOCK:
+        status = approval_status(tid)
+        previous = _runs().approval(tid, token)
+        if previous is not None and previous.decision is not None:
+            if previous.legacy_binding:
+                old_status = _get_status(tid)
+                if (old_status.get("stage") != "awaiting_approval"
+                        or not old_status.get("pending_email_token")
+                        or email_approval_preview(old_status)["token"] != token):
+                    raise HTTPException(status_code=409, detail="This thread has no email awaiting approval.")
+            if previous.action["name"] != "send_email":
+                raise HTTPException(status_code=409, detail="Email action kind does not match this approval.")
+            replay_decision = _EMAIL_DECISIONS[decision](to, subject, body)
+            if previous.interrupt_id:
+                replay_decision[APPROVAL_INTERRUPT_ID_KEY] = previous.interrupt_id
+            if decision != "reject":
+                replay_decision[EMAIL_REVIEW_IDENTITY_KEY] = [previous.proposal["from"], previous.proposal["cc"]]
+            return _admit_approval(tid, token, previous.proposal, status, replay_decision)
+        expected_token = status.get("pending_email_token")
+        if status.get("stage") != "awaiting_approval" or not isinstance(expected_token, str):
+            raise HTTPException(status_code=409, detail="This thread has no email awaiting approval.")
+        proposal = email_approval_preview(status)
+        expected_token = proposal["token"]
+        if not token.isascii() or not hmac.compare_digest(token, expected_token):
+            raise HTTPException(status_code=409, detail="This email was updated; reload and review it.")
+        if decision == "approve":
+            pending = (status.get("pending_email_to", ""), status.get("pending_email_subject", ""),
+                       status.get("pending_email_body", ""))
+            current = (pending[0], pending[1], pending[2].replace("\r\n", "\n"))
+            seen = (seen_to, seen_subject, seen_body.replace("\r\n", "\n"))
+            submitted = (to, subject, body.replace("\r\n", "\n"))
+            if not phone_preview and (seen != current or submitted != current):
+                raise HTTPException(status_code=409,
+                                    detail="This email was updated — reload and review it.")
+        if decision == "edit" and not valid_email_content(to, subject, body):
+            raise HTTPException(status_code=400, detail="The edited email is invalid.")
+        resume_decision = _EMAIL_DECISIONS[decision](to, subject, body)
+        if status.get("pending_email_interrupt_id"):
+            resume_decision[APPROVAL_INTERRUPT_ID_KEY] = status["pending_email_interrupt_id"]
+        if decision != "reject":
+            resume_decision[EMAIL_REVIEW_IDENTITY_KEY] = [proposal["from"], proposal["cc"]]
+        pending = _runs().pending_approval(tid)
+        if pending is not None and pending.id != token:
+            # A fixed sender/Cc change creates another review of the same proposal.
+            _runs().publish_approval(tid, pending.owner_run_id, action=pending.action,
+                requests=list(pending.requests), proposal={key:value for key,value in proposal.items() if key != "token"},
+                interrupt_id=pending.interrupt_id, checkpoint_id=pending.checkpoint_id,
+                checkpoint_ns=pending.checkpoint_ns, approval_id=token)
+        run, replayed = _admit_approval(tid, token, proposal, status, resume_decision)
+        queued_status = {key: value for key, value in status.items() if key != "stage"}
+        queued_status["pending_run_id"] = run.id
+        _set_status(tid, "queued", **queued_status)
+        return run, replayed
 
 
 def gmail_decision_core(tid: str, decision: str, token: str, *,
@@ -4493,45 +4930,33 @@ def gmail_decision_core(tid: str, decision: str, token: str, *,
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", token):
         raise HTTPException(status_code=409, detail="Email approval is unavailable or stale.")
     with _RUN_ADMISSION_LOCK:
-        keys = {name: "gmail-approval:" + name + ":" + token for name in GMAIL_INTERRUPT_ON}
-        # A replay identifies its original resume Run, never the current successor.
-        previous = next((run for run in _runs().list(tid) if run.dispatch_key in keys.values()), None)
-        if previous is not None:
-            if expected_kind is not None and previous.dispatch_key != keys.get(expected_kind):
+        previous = _runs().approval(tid, token)
+        if previous is not None and previous.decision is not None:
+            if previous.action["name"] not in GMAIL_INTERRUPT_ON or (expected_kind is not None
+                    and expected_kind != previous.action["name"]):
                 raise HTTPException(status_code=409, detail="Email action kind does not match this approval.")
-            if previous.resume_decision.get("type") != decision:
-                raise HTTPException(status_code=409, detail="This approval was already decided.")
-            return previous, True
-        status = _get_status(tid)
+            return _admit_approval(tid, token, previous.proposal, {},
+                                  {"type":decision, APPROVAL_INTERRUPT_ID_KEY:previous.interrupt_id})
+        status = approval_status(tid)
         expected = status.get("pending_gmail_token")
+        action = status.get("pending_gmail_action", {})
         interrupt_id = status.get("pending_gmail_interrupt_id")
         if (status.get("stage") != "awaiting_approval" or not isinstance(expected, str)
-                or not hmac.compare_digest(expected, token)
-                or not isinstance(interrupt_id, str) or not interrupt_id
-                or status.get("pending_gmail_action", {}).get("name") not in GMAIL_INTERRUPT_ON):
+                or not hmac.compare_digest(expected, token) or not interrupt_id
+                or action.get("name") not in GMAIL_INTERRUPT_ON):
             raise HTTPException(status_code=409, detail="Email approval is unavailable or stale.")
-        action_kind = status["pending_gmail_action"]["name"]
-        if expected_kind is not None and expected_kind != action_kind:
+        if expected_kind is not None and action["name"] != expected_kind:
             raise HTTPException(status_code=409, detail="Email action kind does not match this approval.")
-        key = keys[action_kind]
-        if decision == "approve" and (status.get("pending_gmail_error")
-                                      or not status.get("pending_gmail_messages")):
+        if decision == "approve" and (status.get("pending_gmail_error") or not status.get("pending_gmail_messages")):
             raise HTTPException(status_code=409, detail="A complete Email preview is required.")
-        proposal_id = status.get("pending_gmail_run_id")
-        if not proposal_id:
+        if not status.get("pending_gmail_run_id"):
             raise HTTPException(status_code=409, detail="Email proposal Run is unavailable.")
-        try:
-            proposal = _runs().get(tid, proposal_id)
-        except RunNotFound:
-            raise HTTPException(status_code=409, detail="Email proposal Run is unavailable.") from None
-        if proposal.status != "awaiting_approval":
-            raise HTTPException(status_code=409, detail="Email proposal Run is not awaiting approval.")
-        run = _create_run(tid, None, resume_decision={"type": decision, "approval_interrupt_id":interrupt_id}, dispatch_key=key,
-                          work_id=proposal.work_id)
-        _set_status(tid, "processing", pending_run_id=run.id,
-                    pending_gmail_action=status["pending_gmail_action"],
-                    started_at=status.get("started_at"))
-        return run, False
+        proposal = {"kind":action["name"], "action":action, "messages":status.get("pending_gmail_messages", []),
+                    "error":status.get("pending_gmail_error", "")}
+        run, replayed = _admit_approval(tid, token, proposal, status,
+            {"type":decision, APPROVAL_INTERRUPT_ID_KEY:interrupt_id})
+        _set_status(tid, "processing", pending_run_id=run.id, started_at=status.get("started_at"))
+        return run, replayed
 
 
 @app.post("/thread/{tid}/gmail/{decision}")
@@ -4778,7 +5203,7 @@ def _location_to_fields(location: LocationSnapshot) -> dict:
             "observed_at": location.observed_at.isoformat()}
 
 
-def _recovery_decision(tid: str, pending_message: str) -> str:
+def _recovery_decision(tid: str, pending_message: str, *, continuation: bool = False) -> str:
     """Resume-vs-redispatch for one recovered thread, decided by GRAPH STATE (not
     text equality — a re-sent duplicate text or the supersede prefix would fool a
     text compare in both directions):
@@ -4790,6 +5215,8 @@ def _recovery_decision(tid: str, pending_message: str) -> str:
       crash landed in post-invoke bookkeeping) → "finalize". Exact only:
       containment/suffix would misread a short pending found inside the
       PREVIOUS turn's message as completed and silently drop it.
+    - a continuation (including an accepted approval) with no pending checkpoint
+      work is complete even when it carries no new human message.
     - otherwise the message never reached the checkpoint → "redispatch" it fresh.
     A failed state read returns "error" (the caller surfaces the restart-error
     banner rather than guessing). Built without a sandbox and without any model
@@ -4802,6 +5229,8 @@ def _recovery_decision(tid: str, pending_message: str) -> str:
         return "error"
     if (getattr(snap, "next", None) or ()) or (getattr(snap, "interrupts", None) or ()):
         return "resume"
+    if continuation:
+        return "finalize"
     latest_human = ""
     for m in reversed((snap.values or {}).get("messages", [])):
         if isinstance(m, HumanMessage):
@@ -4819,15 +5248,74 @@ def _recovery_decision(tid: str, pending_message: str) -> str:
     return "redispatch"
 
 
+def _import_legacy_approval_runs(tid: str) -> None:
+    """Use old routing prefixes only at the pre-record migration boundary.
+
+    An imported decision must bind its original interrupt and selected request.
+    Missing bindings stay blocked; newer checkpoint actions are never substituted.
+    After this one write, dispatch and recovery use only explicit Approval links.
+    """
+    service = _runs()
+    runs = service.list(tid)
+    latest_by_work = {run.work_id:run for run in runs if run.resume_decision is not None
+                      and (run.dispatch_key or "").startswith(("email-approval:", "gmail-approval:"))}
+    for accepted in runs:
+        if (latest_by_work.get(accepted.work_id) != accepted
+                or accepted.approval_id is not None or accepted.resume_decision is None):
+            continue
+        key = accepted.dispatch_key or ""
+        name = ("send_email" if key.startswith("email-approval:") else
+                key.split(":", 2)[1] if key.startswith("gmail-approval:") and key.count(":") >= 2 else None)
+        if name != "send_email" and name not in GMAIL_INTERRUPT_ON:
+            continue
+        active = next((run for run in reversed(runs) if run.work_id == accepted.work_id), None)
+        if (active is None or active.status not in {"pending", "running", "interrupted"}
+                or not (active.id == accepted.id or active.resume)):
+            continue
+        owner = next((run for run in reversed(runs[:runs.index(accepted)])
+                      if run.work_id == accepted.work_id and run.status == "awaiting_approval"), accepted)
+        interrupt_id = accepted.resume_decision.get(APPROVAL_INTERRUPT_ID_KEY)
+        checkpoint_id, namespace, blocked = None, "", None
+        action, requests = {"name":name, "args":{}}, []
+        try:
+            with THREAD_QUEUE.acquire(tid):
+                chat = MANAGER.get(tid, sandbox_backend=None)
+                snapshot = chat.agent.get_state(chat.runconfig)
+                original = next((intr for intr in snapshot.interrupts if intr.id == interrupt_id), None)
+                if original is None:
+                    raise ValueError("Legacy approval has no verifiable original interrupt")
+                requests = [dict(value) for intr in snapshot.interrupts
+                            for value in intr.value.get("action_requests", [])]
+                selected = [value for value in original.value.get("action_requests", []) if value.get("name") == name]
+                if len(selected) != 1:
+                    raise ValueError("Legacy approval has no unique reviewed request")
+                action = selected[0]
+                config = (snapshot.config or {}).get("configurable", {})
+                checkpoint_id, namespace = config.get("checkpoint_id"), config.get("checkpoint_ns", "")
+                if not checkpoint_id or config.get("thread_id") != tid:
+                    raise ValueError("Legacy approval checkpoint is unavailable")
+        except Exception as error:
+            blocked = str(error)
+        identity = accepted.resume_decision.get(EMAIL_REVIEW_IDENTITY_KEY, ["", ""])
+        proposal = {"kind":name, "action":action, "from":identity[0], "cc":identity[1]}
+        record = Approval(uuid.uuid4().hex, tid, accepted.work_id, owner.id, interrupt_id,
+            checkpoint_id, namespace, action, tuple(requests or [action]), proposal,
+            proposal_id=uuid.uuid4().hex, legacy_binding=True,
+            state="rejected" if accepted.resume_decision.get("type") == "reject" else "accepted",
+            decision=accepted.resume_decision,
+            decisions=tuple(_decision_vector(action, requests, accepted.resume_decision)) if requests else (),
+            accepted_run_id=accepted.id, execution_run_id=active.id, blocked_reason=blocked)
+        service.adopt_legacy_approval(tid, record)
+
+
 def queue_recovery_runs() -> None:
     """Import the legacy journal once, then queue durable runs in dependency order.
 
-    Runs off the asyncio loop during lifespan startup. An abandoned head is queued
-    alone; its recovery queues its successor before accepted followers. Otherwise all
-    pending runs are queued in durable creation order. Incomplete Email previews
-    requeue their original proposal for reading without resuming the agent. Legacy
-    Email cards with a pending checkpoint action receive a fresh token and
-    a new preview attempt.
+    Runs off the asyncio loop during lifespan startup. Only the latest invocation
+    of a work chain owns recovery. An abandoned head is queued alone; its recovery
+    queues its successor before accepted followers. Otherwise pending runs are
+    queued with accepted approval decisions before their fenced followers. Incomplete Email previews
+    requeue their proposal without resuming the agent.
     """
     visible = MANAGER.list()
     # ``create_thread_with_message_core`` shows an initializing status before it
@@ -4854,18 +5342,25 @@ def queue_recovery_runs() -> None:
             logging.info("recovery: imported %d legacy entries for %s",
                          len(imported), tid)
 
+    for tid in visible:
+        _import_legacy_approval_runs(tid)
     visible_runs = {tid: _runs().list(tid) for tid in visible}
     abandoned_by_tid = {}
     for tid, runs in visible_runs.items():
         abandoned = None
         for index in range(len(runs) - 1, -1, -1):
             candidate = runs[index]
+            if candidate.approval_id is not None:
+                record = _runs().approval(tid, candidate.approval_id)
+                if record is not None and (record.blocked_reason or
+                        record.state == "completed" and record.outcome != "checkpoint_end"):
+                    continue
             if candidate.status == "running":
                 abandoned = candidate
                 break
             if candidate.status == "interrupted" and not any(
                     later.work_id == candidate.work_id
-                    and later.status in {"success", "error", "timeout", "cancelled"}
+                    and later.status != "interrupted"
                     for later in runs[index + 1:]):
                 abandoned = candidate
                 break
@@ -4938,10 +5433,23 @@ def queue_recovery_runs() -> None:
             _INITIALIZATION_SCHEDULER.submit(
                 cancelled_initializer.id, tid, status.get("domain") or None)
             continue
+        continuation = _runs().unfinished_approval_continuation(tid)
+        pending_review = _runs().pending_approval(tid)
+        if continuation is not None:
+            if continuation.blocked_reason:
+                _set_status(tid, "error", error=continuation.blocked_reason,
+                            pending_run_id=continuation.execution_run_id)
+            _dispatch_pending_after(tid)
+            continue
+        if pending_review is not None:
+            projection = approval_status(tid)
+            _set_status(tid, "awaiting_approval", **{key:value for key,value in projection.items() if key != "stage"})
+            if projection.get("pending_gmail_preview_pending"):
+                _RESUME_SCHEDULER.submit(pending_review.owner_run_id, tid)
+            continue
         if ((status.get("stage") in {"initializing", "cloning"}
-             and any(run.status == "pending" for run in visible_runs[tid]))
-                or any(run.status == "pending"
-                       and run.id == status.get("pending_run_id")
+                 and any(run.status == "pending" for run in visible_runs[tid]))
+                or any(run.status == "pending" and run.id == status.get("pending_run_id")
                        for run in visible_runs[tid])):
             _dispatch_pending_after(tid)
             continue
@@ -5966,15 +6474,47 @@ async def delete_thread(tid: str):
 
 
 def _delete_thread_and_children(tid: str) -> None:
-    """Stop its browser before deleting a thread and non-running children."""
-    _PI_RUNTIME.retire(tid)
-    # A deleted Run journal cannot authorize or recover a turn browser.
-    # Wait for Docker outside the Run admission lock, but keep the browser
-    # gate through deletion so another session cannot register in between.
-    with BrowserManager.bounded_thread_gate(tid):
-        with browser_authority.generation_fence(MANAGER.root_dir, tid):
-            BrowserManager.cleanup(tid)
-            _delete_thread_after_browser_stop(tid)
+    """Fence phone Git publication and stop browsers before deleting directories."""
+    generation = None
+    with _RUN_ADMISSION_LOCK:
+        phone_thread = tid.startswith("phone-")
+        if phone_thread:
+            directory = MANAGER.thread_dir(tid)
+            try:
+                read_git_binding(directory)
+                generation = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            except (GitSyncError, OSError) as error:
+                raise HTTPException(status_code=409, detail="Thread changed during deletion") from error
+    try:
+        with ExitStack() as git_guard:
+            retired = False
+            if phone_thread:
+                git_guard.enter_context(git_workspace_lock(directory))
+                try:
+                    actual = os.stat(directory, follow_symlinks=False)
+                except OSError as error:
+                    raise HTTPException(status_code=409, detail="Thread changed during deletion") from error
+                pinned = os.fstat(generation)
+                if (actual.st_dev, actual.st_ino) != (pinned.st_dev, pinned.st_ino):
+                    raise HTTPException(status_code=409, detail="Thread changed during deletion")
+                with _RUN_ADMISSION_LOCK:
+                    if _get_status(tid).get("stage") in INIT_STAGES:
+                        _PI_RUNTIME.retire(tid)
+                        retired = True
+            if not retired:
+                _PI_RUNTIME.retire(tid)
+            # A deleted Run journal cannot authorize or recover a turn browser.
+            # Wait for Docker outside Run admission, keeping the browser and
+            # phone Git fences through deletion.
+            with BrowserManager.bounded_thread_gate(tid):
+                with browser_authority.generation_fence(MANAGER.root_dir, tid):
+                    BrowserManager.cleanup(tid)
+                    _delete_thread_after_browser_stop(tid)
+    except GitSyncError as error:
+        raise HTTPException(status_code=409, detail="Thread workspace is busy") from error
+    finally:
+        if generation is not None:
+            os.close(generation)
 
 
 def _deletion_child_ids(tid: str) -> set[str]:
@@ -6163,9 +6703,11 @@ def merge_thread(tid: str):
 
     with MERGE_LOCK, ExitStack() as merge_scope:
         try:
-            merge_scope.enter_context(GitLifecycle.acquire(
+            git_lifecycle = merge_scope.enter_context(GitLifecycle.acquire(
                 MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid)))
+            git_lifecycle.validate_merge_candidate()
             dm.merge_and_push()
+            git_lifecycle.record_merged_branch()
             _clear_conflict(tid)
             return RedirectResponse(
                 url=f"/thread/{tid}?merged=1",

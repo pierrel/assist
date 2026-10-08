@@ -1,0 +1,50 @@
+#+title: Operator recovery for a stopped post-merge Git branch
+#+date: 2026-10-06
+
+* Observed retained state
+
+The May thread completed a user-gated main merge and checked out a new branch,
+but its older Git sidecar still names the previous published branch and retains
+one preflight plus a sandbox flight fence. The matching preflight work ID maps
+to a terminal error Run. A later Run failed branch reconciliation and another
+failed at the retained fence; neither ran a model. The ordinary stopped-writer
+recovery cannot authorize this state: it requires the checkout branch to equal
+the sidecar branch and all retained preflight ancestry floors on that branch.
+
+* Numbered operator procedure
+
+1. Root selects the exact trusted configured source, old published branch/OID,
+   new checked-out branch/OID, raw sidecar SHA-256, and complete preflight work
+   ID set from private records. Independently establish that the new checkout
+   followed this thread's successful merge; current-main ancestry alone does
+   not prove that historical event.
+2. Obtain operation-long exclusion of the web writer and all old/current
+   sandbox generations. The =verify_stopped= callback must fail unless the
+   exclusion remains held through return. Independently map every retained
+   preflight work ID to a durable terminal Run, with no pending or active work;
+   =verify_terminal_runs= must recheck that exact set under the same exclusion.
+3. Under the workspace lock, verify the raw sidecar hash, old published pair,
+   absence of publication intent/quarantine, exact retained preflight set,
+   independent writable roots, private Git fsck and new checkout identity.
+   Require the new commit to be an ancestor of the current trusted source main
+   and the old published source ref to remain exact. Recheck both callbacks,
+   sidecar hash, and checkout before one atomic sidecar replacement.
+4. Replace branch/local revision, clear the proven-terminal stale preflights,
+   retained flight and old Git error, and set the nullable published pair empty.
+   Preserve the old published map, all Git refs, index, files, Runs and status.
+   Do not run a model or create a new branch. Ordinary restricted clean preflight
+   still holds the next turn if user work is dirty; later successful-turn
+   publication uses the normal FF-only path.
+
+Root owns this guarded production operation and its external receipt. No
+constructor bypass, blind fence clearing, prompt replay, reset, stash, commit,
+or source inference from mutable workspace origin is permitted. Failure before
+sidecar replacement leaves the original hold; a post-replacement durability
+failure requires inspection before retry.
+
+* Relation to prior design
+
+The 2026-10-06 post-merge handoff note covers future successful merges. This
+operator path handles only a previously stranded, terminal, explicitly
+verified thread; it does not broaden the legacy user-gated merge algorithm or
+repair its separately recorded host Git config/hooks debt.

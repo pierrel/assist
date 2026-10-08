@@ -146,6 +146,9 @@ def test_reply_approve_refuses_superseded_draft(client, monkeypatch):
 
 
 def test_email_approval_requires_its_token_and_exact_review(client, monkeypatch):
+    monkeypatch.setenv("EMAIL_FROM_ADDRESS", "assistant@example.test")
+    monkeypatch.setenv("EMAIL_FROM_NAME", "Assistant")
+    monkeypatch.setenv("EMAIL_ALWAYS_CC", "oversight@example.test")
     monkeypatch.setattr(web.MANAGER, "get", lambda tid, **k: object())
     queued = []
     monkeypatch.setattr(threads, "_execute_run", lambda *a: queued.append(a))
@@ -153,27 +156,45 @@ def test_email_approval_requires_its_token_and_exact_review(client, monkeypatch)
                 pending_email_subject="Subject", pending_email_body="Body",
                 pending_email_token="approval-token")
 
+    token = threads.email_approval_preview(threads._get_status("t-sub"))["token"]
     missing = client.post("/thread/t-sub/email/approve")
     assert missing.status_code == 409
     stale = client.post("/thread/t-sub/email/approve", data={
-        "token": "approval-token", "seen_to": "other@example.test",
+        "token": token, "seen_to": "other@example.test",
         "seen_subject": "Subject", "seen_body": "Body"})
     assert stale.status_code == 409
     changed = client.post("/thread/t-sub/email/approve", data={
-        "token": "approval-token", "to": "other@example.test", "subject": "Subject",
+        "token": token, "to": "other@example.test", "subject": "Subject",
         "body": "Body", "seen_to": "a@example.test", "seen_subject": "Subject",
         "seen_body": "Body"})
     assert changed.status_code == 409
     approved = client.post("/thread/t-sub/email/approve", data={
-        "token": "approval-token", "to": "a@example.test", "subject": "Subject",
+        "token": token, "to": "a@example.test", "subject": "Subject",
         "body": "Body", "seen_to": "a@example.test",
         "seen_subject": "Subject", "seen_body": "Body"}, follow_redirects=False)
     assert approved.status_code == 303 and len(queued) == 1
     run = threads._runs().get("t-sub", queued[0][0])
-    assert run.resume_decision == {"type": "approve"}
+    assert run.resume_decision == {"type": "approve",
+        "email_review_identity": list(threads.email_identity() or ("", ""))}
+
+
+def test_email_unicode_token_refuses_without_consuming_proposal(client):
+    _set_status("t-sub", "awaiting_approval", pending_email_to="a@example.test",
+                pending_email_subject="Subject", pending_email_body="Body",
+                pending_email_token="approval-token")
+    before = threads._get_status("t-sub")
+
+    response = client.post("/thread/t-sub/email/reject", data={"token": "é"})
+
+    assert response.status_code == 409
+    assert threads._get_status("t-sub") == before
+    assert threads._runs().list("t-sub") == []
 
 
 def test_email_edit_rewrites_only_user_editable_fields(client, monkeypatch):
+    monkeypatch.setenv("EMAIL_FROM_ADDRESS", "assistant@example.test")
+    monkeypatch.setenv("EMAIL_FROM_NAME", "Assistant")
+    monkeypatch.setenv("EMAIL_ALWAYS_CC", "oversight@example.test")
     monkeypatch.setattr(web.MANAGER, "get", lambda tid, **k: object())
     queued = []
     monkeypatch.setattr(threads, "_execute_run", lambda *a: queued.append(a))
@@ -181,15 +202,17 @@ def test_email_edit_rewrites_only_user_editable_fields(client, monkeypatch):
                 pending_email_subject="Subject", pending_email_body="Body",
                 pending_email_token="approval-token")
 
+    token = threads.email_approval_preview(threads._get_status("t-sub"))["token"]
     edited = client.post("/thread/t-sub/email/edit", data={
-        "token": "approval-token", "to": "b@example.test", "subject": "Edited",
+        "token": token, "to": "b@example.test", "subject": "Edited",
         "body": "Edited body"}, follow_redirects=False)
 
     assert edited.status_code == 303 and len(queued) == 1
     run = threads._runs().get("t-sub", queued[0][0])
     assert run.resume_decision == {
         "type": "edit", "edited_action": {"name": "send_email", "args": {
-            "to": "b@example.test", "subject": "Edited", "body": "Edited body"}}}
+            "to": "b@example.test", "subject": "Edited", "body": "Edited body"}},
+        "email_review_identity": list(threads.email_identity() or ("", ""))}
 
 
 def test_message_post_refuses_while_email_is_awaiting_approval(client):
@@ -219,4 +242,32 @@ def test_email_approval_card_renders_full_message(client, monkeypatch):
     assert "Assistant &lt;assistant@example.test&gt;" in page
     assert "oversight@example.test" in page
     assert "A full\nmessage" in page
-    assert 'name="token" value="approval-token"' in page
+    token = threads.email_approval_preview(threads._get_status("t-sub"))["token"]
+    assert f'name="token" value="{token}"' in page
+
+
+@pytest.mark.parametrize("decision", ["approve", "edit"])
+@pytest.mark.parametrize("setting", ["EMAIL_FROM_ADDRESS", "EMAIL_ALWAYS_CC"])
+def test_browser_email_rejects_identity_changed_since_render(client, monkeypatch, decision, setting):
+    import re
+    monkeypatch.setenv("EMAIL_FROM_ADDRESS", "assistant@example.test")
+    monkeypatch.setenv("EMAIL_FROM_NAME", "Assistant")
+    monkeypatch.setenv("EMAIL_ALWAYS_CC", "oversight@example.test")
+    monkeypatch.setattr(web.MANAGER, "get", lambda *a, **k: type("C", (), {
+        "get_messages": lambda self: [], "pending_reply": lambda self: None})())
+    monkeypatch.setattr(threads, "get_cached_description", lambda tid: "Thread")
+    _set_status("t-sub", "awaiting_approval", pending_email_token="stored-token",
+                pending_email_to="to@example.test", pending_email_subject="Subject",
+                pending_email_body="Body")
+    before = threads._get_status("t-sub")
+    page = client.get("/thread/t-sub").text
+    token = re.search(r'name="token" value="([A-Za-z0-9_-]+)"', page).group(1)
+    monkeypatch.setenv(setting, "changed@example.test")
+
+    response = client.post(f"/thread/t-sub/email/{decision}", data={
+        "token": token, "to": "to@example.test", "subject": "Subject", "body": "Body",
+        "seen_to": "to@example.test", "seen_subject": "Subject", "seen_body": "Body"})
+
+    assert response.status_code == 409
+    assert threads._get_status("t-sub") == before
+    assert threads._runs().list("t-sub") == []

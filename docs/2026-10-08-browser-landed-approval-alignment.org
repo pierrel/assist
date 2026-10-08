@@ -1,0 +1,48 @@
+#+title: Browser alignment with landed Git and durable approvals
+#+date: 2026-10-08
+
+* Scope
+The original browser branch incorporates landed Assist main =d312ece9=,
+including Git PR274 and durable approvals PR272. Browser =6c74ac2c= remains
+the predecessor. This resolves mechanical overlaps without changing browser
+policy, full-generation binding or model guidance. The private-service choice
+is still pending; Root owns merge, repin and live preservation.
+
+* Combined contracts
+Run records preserve both browser event/reset identity and approval identity.
+Phone admission retains browser generation fencing and confirmed stop proof,
+with Git binding and workspace locking for a reused draft. Cancellation takes
+the browser authority fence before the landed initializing-Git cancel fence.
+Thread deletion retains the pinned phone directory and Git lock while proving
+browser stop outside Run admission and rechecking child/parent Runs.
+
+The web turn preserves browser state capture, exact sandbox cleanup and owed
+reset scheduling before durable approval checkpoint reconciliation. Dispatch
+prioritizes an unfinished approval continuation before the paused-thread
+check, while retaining the browser reset eligibility boundary. The full
+Docker container ID still binds readiness and BrowserSession construction.
+
+Fixture conflicts retain both browser seams and landed checkpoint/approval
+metadata. Four new phone fixture cases align their real deterministic thread
+directory with the authority root; generation fencing and Git ownership
+assertions still execute rather than being stubbed away. The no-delete spy
+targets the actual post-browser-stop deletion entry point. The current prompt and tool declarations remain unchanged.
+
+* Comparison and verification limits
+The reviewed live reference is =f66852a0=, tree =c166d7a3=. RunService and the
+phone API match that reference byte for byte. The web module differs only in
+helper-definition placement, comments and whitespace; independent review
+checks the absence of an import-time dependency. This is a scoped source
+comparison, not a new deployment, whole-tree equality or physical browser test.
+
+Focused CPU checks pass 395/395 and strict offline census checks pass 50/50.
+The initial CPU run passed 391 and failed four phone fixture cases before
+the directory/root alignment correction. No runtime change resolved those
+fixture failures. Retained
+independent lifecycle, security and dedicated documentation review cover the
+resolved contracts. Model/provider and Docker boundaries remain mocked; no
+new model, GPU or real Docker execution is claimed. Previous evidence applies
+only within its unchanged scope.
+
+* Historical supersessions
+None. Earlier dated reports remain accurate for their candidate trees.

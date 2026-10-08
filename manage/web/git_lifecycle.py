@@ -182,6 +182,14 @@ class GitLifecycle:
         if self._owner is not None:
             _admit(self._owner)
 
+    def validate_merge_candidate(self) -> None:
+        if self._owner is not None:
+            self._owner.validate_merge_candidate()
+
+    def record_merged_branch(self) -> None:
+        if self._owner is not None:
+            self._owner.record_merged_branch()
+
     def _cleanup_git_model(self, generation) -> None:
         _cleanup(self._owner, generation)
 
