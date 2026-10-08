@@ -272,3 +272,89 @@ def test_async_summary_failure_leaves_the_durable_event_unset():
     assert state == {"messages": messages}
     assert "_summarization_event" not in state
     middleware._aoffload_to_backend.assert_awaited_once()
+
+
+def test_second_overflow_can_shrink_only_the_summary_without_losing_the_user_turn():
+    calls = []
+    summary_calls = 0
+
+    def provider(request):
+        nonlocal summary_calls
+        payload = json.loads(request.content)
+        summary = "max_completion_tokens" in payload
+        calls.append((summary, len(request.content)))
+        if len(request.content) > LIMIT:
+            return httpx.Response(400, json=_error(len(request.content)).body)
+        if summary:
+            summary_calls += 1
+            return _response("s" * 1800 if summary_calls == 1 else "brief goal")
+        return _response("continued")
+
+    model = _model(provider)
+    backend = StateBackend()
+    middleware = BoundedSummarizationMiddleware(model, backend)
+    middleware._determine_cutoff_index = lambda messages: 2
+    graph = create_deep_agent(model, backend=backend, subagents=[],
+        middleware=[middleware, BadRequestRetryMiddleware()], checkpointer=InMemorySaver())
+    messages = [HumanMessage("x" * 6000), AIMessage("previous reply"), HumanMessage("u" * 115000)]
+    config = {"configurable": {"thread_id": "summary-only-recovery"}}
+    result = graph.invoke({"messages": messages}, config)
+    state = graph.get_state(config).values
+    assert result["messages"][-1].content == "continued"
+    assert state["messages"][:3] == messages
+    event = state["_summarization_event"]
+    assert event["cutoff_index"] == 2
+    assert "brief goal" in event["summary_message"].content
+    assert event["file_path"] in state["files"]
+    assert summary_calls == 2
+    assert sum(not summary and size > LIMIT for summary, size in calls) == 2
+    assert calls[-1][1] <= LIMIT
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("shrinks", [False, True])
+def test_summary_only_recovery_requires_progress_and_preserves_raw_cutoff(asynchronous, shrinks):
+    model = _model(lambda r: _response("unused"))
+    middleware = BoundedSummarizationMiddleware(model, StateBackend())
+    path = "/conversation_history/test.md"
+    prior = middleware._event(None, 2, "previous summary" * 100, path)
+    raw = [HumanMessage("old goal"), AIMessage("old reply"), HumanMessage("latest question")]
+    state = {"messages": raw, "_summarization_event": prior}
+    new_summary = "brief" if shrinks else "previous summary" * 100
+    middleware._summary_model = SimpleNamespace(
+        invoke=lambda *args, **kwargs: AIMessage(new_summary),
+        ainvoke=AsyncMock(return_value=AIMessage(new_summary)))
+    offloads = []
+    middleware._get_backend = lambda state, runtime: StateBackend()
+    middleware._offload_to_backend = lambda *args: offloads.append(args)
+    middleware._aoffload_to_backend = AsyncMock(side_effect=AssertionError("history already offloaded"))
+    attempted = []
+
+    def handler(request):
+        attempted.append(request.messages)
+        if len(attempted) == 1:
+            raise _error()
+        return ModelResponse(result=[AIMessage("continued")])
+
+    async def async_handler(request):
+        return handler(request)
+
+    def run():
+        request = ModelRequest(model=model, messages=raw, state=state)
+        return (asyncio.run(middleware.awrap_model_call(request, async_handler))
+                if asynchronous else middleware.wrap_model_call(request, handler))
+
+    if shrinks:
+        result = run()
+        event = result.command.update["_summarization_event"]
+        assert event["cutoff_index"] == prior["cutoff_index"]
+        assert event["file_path"] == path
+        assert len(attempted) == 2
+        assert attempted[-1][-1] == raw[-1]
+    else:
+        with pytest.raises(ValueError, match="did not reduce"):
+            run()
+        assert len(attempted) == 1
+    assert state == {"messages": raw, "_summarization_event": prior}
+    assert not offloads
+    middleware._aoffload_to_backend.assert_not_awaited()

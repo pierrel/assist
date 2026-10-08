@@ -2,15 +2,15 @@
 
 Deep Agents retains the raw message log and offloads compacted history. Its
 untrimmed summary call can itself overflow; its one-shot retry can also leave
-an oversized suffix. Reduce only after an actual provider overflow, and commit
-the summary event only after the complete model request succeeds.
+an oversized suffix. Split overflowing summary inputs and keep reducing rejected
+full requests. Commit the summary event only after the complete request succeeds.
 """
 from deepagents.middleware.summarization import (
     SummarizationMiddleware, compute_summarization_defaults,
 )
 from langchain.agents.middleware.types import ExtendedModelResponse
 from langchain_core.exceptions import ContextOverflowError
-from langchain_core.messages import ToolMessage, get_buffer_string
+from langchain_core.messages import HumanMessage, ToolMessage, get_buffer_string
 from langchain_openai import ChatOpenAI
 from langgraph.types import Command
 from openai import BadRequestError
@@ -105,17 +105,23 @@ class BoundedSummarizationMiddleware(SummarizationMiddleware):
     def _cutoff(self, messages, force):
         if not force:
             return self._determine_cutoff_index(messages)
-        # Advance beyond the previous summary and retain complete AI/tool groups.
+        # Retain complete AI/tool groups when advancing through raw history.
         for candidate in range(max(2, len(messages) // 2), len(messages)):
             cutoff = self._lc_helper._find_safe_cutoff_point(messages, candidate)
             if 1 < cutoff < len(messages):
                 return cutoff
+        # Preserve the latest user turn while shrinking a remaining summary.
+        if (len(messages) == 2 and self._is_summary_message(messages[0])
+                and isinstance(messages[1], HumanMessage)):
+            return 1
         # A complete oversized final tool group can be summarized in full.
         # A single summary has no further raw suffix to reclaim.
         return len(messages) if len(messages) > 1 and isinstance(messages[-1], ToolMessage) else 0
 
     def _event(self, previous, cutoff, summary, path):
         new = self._build_new_messages_with_path(summary, path)[0]
+        if previous and cutoff == 1 and len(new.content) >= len(previous["summary_message"].content):
+            raise ValueError("Summary-only compaction did not reduce the oversized request")
         return {"cutoff_index": self._compute_state_cutoff(previous, cutoff),
                 "summary_message": new, "file_path": path}
 
@@ -141,7 +147,8 @@ class BoundedSummarizationMiddleware(SummarizationMiddleware):
                 return handler(request.override(messages=messages))
             older, recent = self._partition_messages(messages, cutoff)
             backend = self._get_backend(request.state, request.runtime)
-            path = self._offload_to_backend(backend, older)
+            path = (previous.get("file_path") if previous and cutoff == 1
+                    else self._offload_to_backend(backend, older))
             summary = self._create_summary(older)
             event = self._event(previous, cutoff, summary, path)
             messages = [event["summary_message"], *recent]
@@ -177,7 +184,8 @@ class BoundedSummarizationMiddleware(SummarizationMiddleware):
                 return await handler(request.override(messages=messages))
             older, recent = self._partition_messages(messages, cutoff)
             backend = self._get_backend(request.state, request.runtime)
-            path = await self._aoffload_to_backend(backend, older)
+            path = (previous.get("file_path") if previous and cutoff == 1
+                    else await self._aoffload_to_backend(backend, older))
             summary = await self._acreate_summary(older)
             event = self._event(previous, cutoff, summary, path)
             messages = [event["summary_message"], *recent]
