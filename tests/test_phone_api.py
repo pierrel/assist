@@ -228,6 +228,158 @@ def test_create_queues_initialization_on_the_dedicated_scheduler(monkeypatch):
     assert scheduled == [("run-a", "thread-a", "repo-a")]
 
 
+def test_phone_create_replay_wakes_only_its_pending_initializer(monkeypatch):
+    scheduled = []
+    run = SimpleNamespace(id="run-a", status="pending")
+    monkeypatch.setattr(phone_api, "_validated_body",
+                        lambda *_args: _validated_phone_create_body())
+    monkeypatch.setattr(phone_api, "_request_key", lambda _request: "a" * 16)
+    monkeypatch.setattr(phone_api, "_reserve_create",
+                        lambda *_args: ("phone-thread", run, "repo-a", True, False))
+    monkeypatch.setattr(phone_api, "_pending_initializer_needs_wake", lambda *_: True)
+    monkeypatch.setattr(phone_api.threads._INITIALIZATION_SCHEDULER, "submit",
+                        lambda run_id, tid, domain: scheduled.append((run_id, tid, domain)))
+
+    response = asyncio.run(phone_api.create_thread(SimpleNamespace()))
+
+    assert response["replayed"] is True
+    assert scheduled == [("run-a", "phone-thread", "repo-a")]
+
+
+async def _validated_phone_create_body():
+    return phone_api._CreateThread(message="start")
+
+
+def test_phone_create_terminal_replay_does_not_wake_initializer(monkeypatch):
+    scheduled = []
+    run = SimpleNamespace(id="run-a", status="error")
+    monkeypatch.setattr(phone_api, "_validated_body",
+                        lambda *_args: _validated_phone_create_body())
+    monkeypatch.setattr(phone_api, "_request_key", lambda _request: "a" * 16)
+    monkeypatch.setattr(phone_api, "_reserve_create",
+                        lambda *_args: ("phone-thread", run, "repo-a", True, False))
+    monkeypatch.setattr(phone_api, "_pending_initializer_needs_wake", lambda *_: False)
+    monkeypatch.setattr(phone_api.threads._INITIALIZATION_SCHEDULER, "submit",
+                        lambda *_: scheduled.append(True))
+
+    response = asyncio.run(phone_api.create_thread(SimpleNamespace()))
+
+    assert response["replayed"] is True
+    assert scheduled == []
+
+
+def test_phone_create_replay_keeps_original_git_source(tmp_path, monkeypatch):
+    from assist.git_sync import bind
+
+    thread_dir = tmp_path / "existing"
+    thread_dir.mkdir()
+    source = str(tmp_path / "trusted.git")
+    bind(str(thread_dir), source)
+    replay = SimpleNamespace(id="run-a", text="start", status="pending")
+    monkeypatch.setattr(phone_api, "_domain_for_key", lambda _key: source)
+    monkeypatch.setattr(state.MANAGER, "thread_dir", lambda _tid: str(thread_dir))
+    monkeypatch.setattr(phone_api, "_find_dispatch", lambda *_: replay)
+    monkeypatch.setattr(phone_api, "read_thread_engine",
+                        lambda *_: SimpleNamespace(name="deepagents"))
+    monkeypatch.setattr(state, "_get_status",
+                        lambda _tid: {"stage": "initializing", "domain": source})
+
+    _, returned, domain, repeated = phone_api._create_and_submit(
+        phone_api._CreateThread(message="start", repo_key="trusted"), "a" * 16)
+
+    assert returned is replay and repeated
+    assert domain == source
+
+
+def test_phone_create_replay_uses_binding_after_ready_status_drops_domain(tmp_path, monkeypatch):
+    from assist.git_sync import bind
+
+    thread_dir = tmp_path / "existing"
+    thread_dir.mkdir()
+    source = str(tmp_path / "trusted.git")
+    bind(str(thread_dir), source)
+    replay = SimpleNamespace(id="run-a", text="start", status="completed")
+    monkeypatch.setattr(phone_api, "_domain_for_key", lambda _key: source)
+    monkeypatch.setattr(state.MANAGER, "thread_dir", lambda _tid: str(thread_dir))
+    monkeypatch.setattr(phone_api, "_find_dispatch", lambda *_: replay)
+    monkeypatch.setattr(phone_api, "read_thread_engine",
+                        lambda *_: SimpleNamespace(name="deepagents"))
+    monkeypatch.setattr(state, "_get_status", lambda _tid: {"stage": "ready"})
+
+    _, returned, domain, repeated = phone_api._create_and_submit(
+        phone_api._CreateThread(message="start", repo_key="trusted"), "a" * 16)
+
+    assert returned is replay and repeated and domain == source
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_phone_create_retry_cannot_remove_draft_during_workspace_ownership(
+        tmp_path, monkeypatch, bound):
+    from assist.git_sync import _workspace_lock, bind
+
+    thread_dir = tmp_path / "draft"
+    thread_dir.mkdir()
+    source = str(tmp_path / "trusted.git")
+    if bound:
+        bind(str(thread_dir), source)
+    deleted = []
+    monkeypatch.setattr(phone_api, "_domain_for_key", lambda _key: source)
+    monkeypatch.setattr(state.MANAGER, "thread_dir", lambda _tid: str(thread_dir))
+    monkeypatch.setattr(state.MANAGER, "hard_delete", lambda tid: deleted.append(tid))
+    monkeypatch.setattr(phone_api, "_find_dispatch", lambda *_: None)
+    monkeypatch.setattr(phone_api.threads, "_runs", lambda: SimpleNamespace(list=lambda *_: []))
+
+    with _workspace_lock(str(thread_dir)):
+        with pytest.raises(phone_api.HTTPException) as error:
+            phone_api._create_and_submit(
+                phone_api._CreateThread(message="start", repo_key="trusted"), "a" * 16)
+
+    assert error.value.status_code == 409
+    assert deleted == []
+
+
+def test_phone_replay_wake_requires_exact_pending_initializer(monkeypatch):
+    run = SimpleNamespace(id="run-a", status="pending")
+    monkeypatch.setattr(phone_api.threads, "_runs",
+                        lambda: SimpleNamespace(get=lambda *_: run))
+    monkeypatch.setattr(state, "_get_status", lambda _tid: {
+        "stage": "cloning", "pending_run_id": "run-a"})
+    assert phone_api._pending_initializer_needs_wake("phone-thread", "run-a")
+
+    run.status = "error"
+    assert not phone_api._pending_initializer_needs_wake("phone-thread", "run-a")
+    run.status = "pending"
+    monkeypatch.setattr(state, "_get_status", lambda _tid: {
+        "stage": "ready", "pending_run_id": "run-a"})
+    assert not phone_api._pending_initializer_needs_wake("phone-thread", "run-a")
+
+
+def test_phone_replay_repairs_only_unique_pending_run_before_status_projection(monkeypatch):
+    run = SimpleNamespace(id="run-a", status="pending", text="first message")
+    runs = [run]
+    status = {"stage": "initializing", "domain": "trusted-source", "started_at": 123}
+    writes = []
+    monkeypatch.setattr(phone_api.threads, "_runs", lambda: SimpleNamespace(
+        get=lambda *_: run, list=lambda *_: runs))
+    monkeypatch.setattr(state, "_get_status", lambda _tid: status)
+    monkeypatch.setattr(phone_api.threads, "_set_status",
+                        lambda *args, **kwargs: writes.append((args, kwargs)))
+
+    assert phone_api._pending_initializer_needs_wake("phone-thread", "run-a")
+    assert writes == [(("phone-thread", "initializing"), {
+        "pending_message": "first message", "domain": "trusted-source",
+        "pending_run_id": "run-a", "started_at": 123})]
+
+    writes.clear()
+    runs.append(SimpleNamespace(id="run-b", status="pending"))
+    assert not phone_api._pending_initializer_needs_wake("phone-thread", "run-a")
+    assert writes == []
+    status["pending_run_id"] = "run-b"
+    runs.pop()
+    assert not phone_api._pending_initializer_needs_wake("phone-thread", "run-a")
+    assert writes == []
+
+
 def test_message_queues_on_the_dedicated_scheduler(monkeypatch):
     scheduled = []
     monkeypatch.setattr(phone_api, "_submit_existing",

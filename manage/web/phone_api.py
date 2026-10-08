@@ -23,6 +23,7 @@ import tarfile
 import threading
 import unicodedata
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -33,6 +34,7 @@ from langchain_core.messages import convert_to_messages
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from assist.domain_manager import current_branch
+from assist.git_sync import GitSyncError, read_state as read_git_binding
 from assist.run_service import (AWAITING_APPROVAL_STATUSES, InvalidRunTransition,
                                 ObservationToken, RunStoreUnavailable, TERMINAL_STATUSES)
 from assist.thread import _messages_to_dicts
@@ -726,17 +728,28 @@ def _create_and_submit(body: _CreateThread, key: str, *, run_id: str | None = No
             if replay is None:
                 if threads._runs().list(tid):
                     raise HTTPException(status_code=409, detail="Phone draft conflicts with an existing thread")
-                state.MANAGER.hard_delete(tid)
+                try:
+                    directory = state.MANAGER.thread_dir(tid)
+                    read_git_binding(directory)
+                    with threads.git_workspace_lock(directory):
+                        state.MANAGER.hard_delete(tid)
+                except GitSyncError as error:
+                    raise HTTPException(status_code=409, detail="Thread workspace is busy") from error
             else:
                 expected_domain = domain or (state.DOMAINS[0] if state.DOMAINS else None)
                 try:
-                    existing_engine = read_thread_engine(_thread_dir(tid)).name
+                    directory = _thread_dir(tid)
+                    existing_engine = read_thread_engine(directory).name
                 except ThreadEngineError as error:
                     raise HTTPException(status_code=409, detail="Thread harness is unavailable") from error
+                try:
+                    binding = read_git_binding(directory)
+                except GitSyncError as error:
+                    raise HTTPException(status_code=409, detail="Git source binding is unavailable") from error
                 if (replay.text != body.message or existing_engine != body.harness
-                        or state._get_status(tid).get("domain", "") != (expected_domain or "")):
+                        or (binding["source"] if binding else None) != expected_domain):
                     raise HTTPException(status_code=409, detail="Idempotency-Key conflicts with prior message")
-                return tid, replay, None, True
+                return tid, replay, expected_domain, True
         if _phone_thread_limit_reached():
             raise HTTPException(status_code=429, detail="Phone thread limit reached")
         if _phone_initialization_limit_reached():
@@ -919,9 +932,36 @@ def _reserve_create(body: _CreateThread, key: str) -> tuple[str, Any, str | None
     return tid, run, domain, False, reserved
 
 
+def _pending_initializer_needs_wake(tid: str, run_id: str) -> bool:
+    """Identify a pending initializer, repairing its missing first-Run projection."""
+    with threads._RUN_ADMISSION_LOCK:
+        run = threads._runs().get(tid, run_id)
+        status = state._get_status(tid)
+        if run.status != "pending" or status.get("stage") not in threads.INIT_STAGES:
+            return False
+        if status.get("pending_run_id") == run_id:
+            return True
+        if (status.get("stage") != "initializing" or "pending_run_id" in status
+                or [item.id for item in threads._runs().list(tid)] != [run_id]):
+            return False
+        threads._set_status(tid, "initializing", pending_message=run.text or "",
+                            domain=status.get("domain", ""), pending_run_id=run_id,
+                            started_at=status.get("started_at"))
+        return True
+
+
+def _initializing_git_cancel_fence(tid: str):
+    """Serialize initial phone cancellation with its in-flight Git publication."""
+    status = state._get_status(tid)
+    if (tid.startswith("phone-") and status.get("stage") in threads.INIT_STAGES
+            and status.get("domain")):
+        return threads.git_workspace_lock(state.MANAGER.thread_dir(tid))
+    return nullcontext()
+
+
 def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
     """Cancel one accepted logical Run and durably receipt its cleanup."""
-    with threads._RUN_ADMISSION_LOCK:
+    with threads._RUN_ADMISSION_LOCK, _initializing_git_cancel_fence(tid):
         current_status = state._get_status(tid)
         projection, runs = _logical_status_locked(
             tid, run_id, with_runs=True, include_cleanup=True)
@@ -1188,7 +1228,7 @@ async def create_thread(request: Request) -> dict[str, Any]:
             _reserve_create, body, key)
     except RunStoreUnavailable as error:
         raise HTTPException(status_code=503, detail="run-store-unavailable") from error
-    if not replay:
+    if not replay or await anyio.to_thread.run_sync(_pending_initializer_needs_wake, tid, run.id):
         await anyio.to_thread.run_sync(
             threads._INITIALIZATION_SCHEDULER.submit, run.id, tid, domain)
     return {"thread_id": tid, "run_id": run.id, "replayed": replay,
@@ -1226,6 +1266,8 @@ async def cancel_run(tid: str, run_id: str):
         code, value = await anyio.to_thread.run_sync(_cancel_logical_run, tid, run_id)
     except RunStoreUnavailable as error:
         raise HTTPException(status_code=503, detail="run-store-unavailable") from error
+    except threads.GitSyncError as error:
+        raise HTTPException(status_code=409, detail="Git workspace is busy") from error
     if code != 200:
         return JSONResponse(value, status_code=code)
     return value

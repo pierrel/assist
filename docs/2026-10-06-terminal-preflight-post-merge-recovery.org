@@ -1,0 +1,49 @@
+#+TITLE: Stopped post-merge recovery with terminal preflights
+#+DATE: 2026-10-06
+
+* Observed contract
+
+A historical user-gated merge can leave the checkout on a new thread branch
+while the private binding still names its old published branch and retains
+preflights whose Runs are terminal. In the observed case teardown had already
+completed, so =sandbox_in_flight= was false. The installed operator-only
+=recover_merged_branch_stopped= verifies stopped writers, source main
+ancestry, the old source ref, the new checkout, unchanged binding bytes, and
+terminal Runs, but rejects this state solely because it requires a retained
+flight marker.
+
+The browser merge route and ordinary turn preparation remain strict. This is
+an operator recovery of previously completed work, not a way to make a new
+merge or bypass the clean-worktree gate.
+
+* Minimal correction
+
+1. In =assist/git_sync.py=, allow =recover_merged_branch_stopped= to accept
+   either boolean flight state, while rejecting missing or malformed markers.
+   Retain the nonempty exact preflight set, the
+   stopped-writer callbacks, terminal-Run callbacks before and after private
+   source/object proof, raw sidecar hash, workspace lock, and post-checks.
+   The function still clears flight and preflights only on success.
+2. Parametrize the existing real-bare-Git recovery test for both flight
+   values. Keep its dirty untracked file and old-ref preservation assertions.
+   Parametrize the terminal-Run rejection test so a false flight cannot
+   bypass the callback, and reject a missing/nonboolean flight marker.
+   Run the focused tests and affected deterministic suite.
+3. Review the changed predicate and documentation for correctness, security,
+   concurrency, simplicity, and comment alignment. Stage only these disjoint
+   hunks in the registered effort worktree; leave the unrelated initial-branch
+   creation draft unstaged and untouched. Offer Root an exact reviewed commit,
+   not the dirty aggregate tree.
+
+* Trade-off and operator gate
+
+The flight marker describes teardown progress, not whether a historical merge
+was authorized. Requiring it to be true excludes a *safer* already-torn-down
+state while the actual recovery safety proof is the stopped-generation and
+terminal-work callback pair. Removing only that positive-flight requirement
+does not weaken source, branch, Run, dirty-file, or workspace identity checks.
+
+Root must still select and prove the exact trusted source, old/new refs and
+historical merge, exclude all writers, and call the operator API with exact
+sidecar/Run evidence. No production state change, main merge rewrite, Run
+replay, or publication is part of this code correction.

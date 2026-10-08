@@ -44,7 +44,9 @@ from assist.domain_manager import (
     MergeConflictError,
     OriginAdvancedError,
 )
-from assist.git_sync import (GitSyncError, authorize_branch, bind as bind_git,
+from assist.git_sync import (GitSyncError, _workspace_lock as git_workspace_lock,
+                             authorize_branch, bind as bind_git,
+                             publish_initial_branch,
                              read_state as read_git_binding)
 from contextlib import ExitStack
 from langgraph.errors import GraphRecursionError
@@ -1665,6 +1667,17 @@ def _settle_cancelled_initializer(tid: str, run_id: str) -> bool:
     return True
 
 
+def _verify_phone_initializer_owner(tid: str, run_id: str) -> None:
+    """Reject a deleted or replaced first Run while its Git fence is held."""
+    try:
+        current = _runs().get(tid, run_id)
+    except RunNotFound as error:
+        raise GitSyncError("Phone thread initializer was replaced") from error
+    if (current.status != "pending"
+            or _get_status(tid).get("pending_run_id") != run_id):
+        raise GitSyncError("Phone thread initializer is no longer pending")
+
+
 def _initialize_thread(
     tid: str, run_id: str, domain: str | None,
     rider: ContextRider | None = None,
@@ -1720,6 +1733,12 @@ def _initialize_thread_active(
         # A DELETE may have committed while this initializer was queued or
         # cloning.  The clone is bounded setup already owned by this worker;
         # it is never interrupted, but the cancelled Run is never executed.
+        if _settle_cancelled_initializer(tid, run_id):
+            return
+        if domain and current.dispatch_key and current.dispatch_key.startswith("phone:"):
+            publish_initial_branch(MANAGER.thread_dir(tid),
+                                   MANAGER.thread_default_working_dir(tid),
+                                   lambda: _verify_phone_initializer_owner(tid, run_id))
         if _settle_cancelled_initializer(tid, run_id):
             return
         _execute_run(run_id, tid)
@@ -6048,29 +6067,67 @@ async def delete_thread(tid: str):
 
 def _delete_thread_and_children(tid: str) -> None:
     """Delete a visible thread and each non-running hidden task directory."""
+    with _RUN_ADMISSION_LOCK:
+        phone_thread = tid.startswith("phone-")
+        if phone_thread:
+            directory = MANAGER.thread_dir(tid)
+            try:
+                read_git_binding(directory)
+                generation = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            except (GitSyncError, OSError) as error:
+                raise HTTPException(status_code=409, detail="Thread changed during deletion") from error
+    if phone_thread:
+        try:
+            with git_workspace_lock(directory):
+                try:
+                    actual = os.stat(directory, follow_symlinks=False)
+                except OSError as error:
+                    raise HTTPException(status_code=409, detail="Thread changed during deletion") from error
+                pinned = os.fstat(generation)
+                if (actual.st_dev, actual.st_ino) != (pinned.st_dev, pinned.st_ino):
+                    raise HTTPException(status_code=409, detail="Thread changed during deletion")
+                with _RUN_ADMISSION_LOCK:
+                    initializing = _get_status(tid).get("stage") in INIT_STAGES
+                    if initializing:
+                        _PI_RUNTIME.retire(tid)
+                        _delete_thread_and_children_locked(tid)
+                        return
+                _PI_RUNTIME.retire(tid)
+                with _RUN_ADMISSION_LOCK:
+                    _delete_thread_and_children_locked(tid)
+        except GitSyncError as error:
+            raise HTTPException(status_code=409, detail="Thread workspace is busy") from error
+        finally:
+            os.close(generation)
+        return
     _PI_RUNTIME.retire(tid)
     with _RUN_ADMISSION_LOCK:
-        child_ids = {
-            child.thread_id for child in _runs().scan_children()
-            if child.mode == "child" and child.parent_thread_id == tid
-        }
-        for child_tid in os.listdir(MANAGER.root_dir):
-            marker = os.path.join(MANAGER.thread_dir(child_tid), ".subagent")
-            try:
-                with open(marker) as stream:
-                    metadata = json.load(stream)
-            except (FileNotFoundError, json.JSONDecodeError, OSError):
-                continue
-            if metadata.get("parent_thread_id") == tid:
-                child_ids.add(child_tid)
-        for child_tid in child_ids:
-            child_runs = _runs().list(child_tid)
-            if any(child.status == "running" for child in child_runs):
-                continue
-            MANAGER.hard_delete(child_tid)
-            RUN_STREAMS.mark_thread_gone(child_tid)
-        MANAGER.hard_delete(tid, on_delete=[_evict_caches, _evict_egress])
-        RUN_STREAMS.mark_thread_gone(tid)
+        _delete_thread_and_children_locked(tid)
+
+
+def _delete_thread_and_children_locked(tid: str) -> None:
+    """Remove a thread while the admission lock and any required Git fence are held."""
+    child_ids = {
+        child.thread_id for child in _runs().scan_children()
+        if child.mode == "child" and child.parent_thread_id == tid
+    }
+    for child_tid in os.listdir(MANAGER.root_dir):
+        marker = os.path.join(MANAGER.thread_dir(child_tid), ".subagent")
+        try:
+            with open(marker) as stream:
+                metadata = json.load(stream)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            continue
+        if metadata.get("parent_thread_id") == tid:
+            child_ids.add(child_tid)
+    for child_tid in child_ids:
+        child_runs = _runs().list(child_tid)
+        if any(child.status == "running" for child in child_runs):
+            continue
+        MANAGER.hard_delete(child_tid)
+        RUN_STREAMS.mark_thread_gone(child_tid)
+    MANAGER.hard_delete(tid, on_delete=[_evict_caches, _evict_egress])
+    RUN_STREAMS.mark_thread_gone(tid)
 
 
 @app.post("/thread/{tid}/rename")
@@ -6207,9 +6264,11 @@ def merge_thread(tid: str):
 
     with MERGE_LOCK, ExitStack() as merge_scope:
         try:
-            merge_scope.enter_context(GitLifecycle.acquire(
+            git_lifecycle = merge_scope.enter_context(GitLifecycle.acquire(
                 MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid)))
+            git_lifecycle.validate_merge_candidate()
             dm.merge_and_push()
+            git_lifecycle.record_merged_branch()
             _clear_conflict(tid)
             return RedirectResponse(
                 url=f"/thread/{tid}?merged=1",
