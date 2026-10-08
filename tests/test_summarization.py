@@ -358,3 +358,41 @@ def test_summary_only_recovery_requires_progress_and_preserves_raw_cutoff(asynch
     assert state == {"messages": raw, "_summarization_event": prior}
     assert not offloads
     middleware._aoffload_to_backend.assert_not_awaited()
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("write_raises", [False, True])
+def test_failed_history_offload_preserves_raw_state_without_model_calls(asynchronous, write_raises):
+    class FailingBackend(StateBackend):
+        def write(self, path, content):
+            if write_raises:
+                raise OSError("history storage unavailable")
+            return None
+
+        async def awrite(self, path, content):
+            return self.write(path, content)
+
+    provider_calls = []
+    def provider(request):
+        provider_calls.append(request)
+        return _response("brief summary")
+
+    model = _model(provider)
+    backend = FailingBackend()
+    with patch("assist.middleware.summarization.compute_summarization_defaults",
+               return_value={"trigger": ("messages", 3), "keep": ("messages", 1)}):
+        middleware = BoundedSummarizationMiddleware(model, backend)
+    graph = create_deep_agent(model, backend=backend, subagents=[],
+        middleware=[middleware], checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "failed-history-offload"}}
+    messages = [HumanMessage("old goal"), AIMessage("old reply"), HumanMessage("latest question")]
+    with pytest.raises(RuntimeError, match="Failed to offload conversation history"):
+        if asynchronous:
+            asyncio.run(graph.ainvoke({"messages": messages}, config, durability="sync"))
+        else:
+            graph.invoke({"messages": messages}, config, durability="sync")
+    state = graph.get_state(config).values
+    assert state["messages"] == messages
+    assert "_summarization_event" not in state
+    assert not state["files"]
+    assert not provider_calls

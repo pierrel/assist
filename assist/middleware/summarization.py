@@ -3,7 +3,8 @@
 Deep Agents retains the raw message log and offloads compacted history. Its
 untrimmed summary call can itself overflow; its one-shot retry can also leave
 an oversized suffix. Split overflowing summary inputs and keep reducing rejected
-full requests. Commit the summary event only after the complete request succeeds.
+full requests. Require a recoverable history path before summarizing, and commit
+the summary event only after the complete request succeeds.
 """
 from deepagents.middleware.summarization import (
     SummarizationMiddleware, compute_summarization_defaults,
@@ -149,6 +150,8 @@ class BoundedSummarizationMiddleware(SummarizationMiddleware):
             backend = self._get_backend(request.state, request.runtime)
             path = (previous.get("file_path") if previous and cutoff == 1
                     else self._offload_to_backend(backend, older))
+            if path is None:
+                raise RuntimeError("Failed to offload conversation history")
             summary = self._create_summary(older)
             event = self._event(previous, cutoff, summary, path)
             messages = [event["summary_message"], *recent]
@@ -186,6 +189,8 @@ class BoundedSummarizationMiddleware(SummarizationMiddleware):
             backend = self._get_backend(request.state, request.runtime)
             path = (previous.get("file_path") if previous and cutoff == 1
                     else await self._aoffload_to_backend(backend, older))
+            if path is None:
+                raise RuntimeError("Failed to offload conversation history")
             summary = await self._acreate_summary(older)
             event = self._event(previous, cutoff, summary, path)
             messages = [event["summary_message"], *recent]
