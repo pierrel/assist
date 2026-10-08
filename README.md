@@ -82,7 +82,11 @@ where reliability is harder than with frontier APIs.
 - **Git domain integration.** Each thread works in its own git branch
   of a configured "domain" repo (your life repo, your work repo, etc.)
   with edits isolated until you choose to merge. Multiple domains
-  coexist. Old local clones with shared Git object inodes need an
+  coexist. When Merge & Push creates a fresh branch, the thread records that
+  local branch; it remains unpublished until a later successful
+  turn, while the previous published ref remains intact. Dirty files still
+  block the next turn rather than being committed by the merge handoff.
+  Old local clones with shared Git object inodes need an
   [operator-verified detachment](docs/2026-10-01-legacy-git-object-detachment.org)
   before source enrollment; the helper does not infer a source or change work.
 
@@ -193,13 +197,19 @@ Mis-classification was an issue early on; the table above is the rule.
 
 **Unit/Integration Tests** (`tests/`):
 ```bash
-# Run all tests
+# Run the default offline tests (no live Docker egress integration)
 make test
 
 # Run specific test file
 .venv/bin/pytest tests/test_domain_manager.py -v
 .venv/bin/pytest tests/middleware/test_loop_detection.py -v
 ```
+
+`pytest.ini` excludes the live Docker egress integration module and real
+per-turn teardown test from a default `pytest tests/` run. Run
+`make sandbox-smoke` only when live Docker testing is authorized; that explicit
+target builds the sandbox and proxy, runs the shell probes, and selects both
+live Python tests. CI runs this smoke separately from its unit-test invocation.
 
 **Agent Evaluations** (`edd/eval/`):
 
@@ -1008,6 +1018,11 @@ changes attempt a commit inside the restricted sandbox and the server attempts p
 of only that thread branch. No-file-change turns also attempt publication; main
 and tags are not automatically pushed. Dirty, divergent, rewritten, or unavailable
 Git state holds for explicit reconciliation while preserving work and saved answers.
+For an uncancelled authenticated phone-created Git thread, successful initial
+publication makes its branch fetchable before the first model turn, even when
+that branch still points at main's commit. A later model failure does not
+undo that publication. Clone or publication failure can still leave no remote
+branch. Browser-created threads do not use this early publication path.
 When a clean preflight positively finds uncommitted work and its exact sandbox
 teardown is verified, the turn ends with a dirty-worktree hold, not a teardown
 uncertainty. Later queued turns check that work independently; none replays the
