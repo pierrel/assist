@@ -577,6 +577,9 @@ class TestPromptRewriteScheduleOutcome(TestCase):
                     spec=prompt_rewrite_web_main_spec(
                         tools=tuple(schedule_tools(store)))),
                     thread_id=thread_id)
+                # This neutral orienting turn establishes prior conversation only.
+                # Routing scheduling here is covered by retained-skill rows elsewhere;
+                # this row accepts any route that obtains the real list after compaction.
                 agent.message("What reminders do I have set up?")
                 initial_calls = agent_tool_calls(agent)
                 before = len(initial_calls)
@@ -593,12 +596,6 @@ class TestPromptRewriteScheduleOutcome(TestCase):
                        "summary": state.get("_summarization_event")}
         self.assertIsNotNone(state.get("_summarization_event"), diagnostics)
         self.assertEqual(summary_model.summary_calls, 1, diagnostics)
-        self.assertTrue(any(
-            call.get("name") == "load_skill"
-            and (call.get("args") or {}).get("name") == "schedule"
-            for call in initial_calls), diagnostics)
-        self.assertTrue(any(call.get("name") == "list_schedules"
-                            for call in initial_calls), diagnostics)
         self.assertTrue(any(call.get("name") == "list_schedules" for call in calls),
                         diagnostics)
         self.assertTrue(any(call.get("name") == "delete_schedule"
