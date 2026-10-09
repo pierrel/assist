@@ -409,13 +409,15 @@ class TestPromptRewriteScheduleOutcome(TestCase):
         self.assertRegex(reply.lower(), r"paus", diagnostics)
 
     def test_different_skill_tool_after_forced_compaction(self):
-        """Compaction leaves the native scheduling outcome available.
+        """Compaction leaves the native scheduling outcome and its contract available.
 
         The natural two-turn request is the same as the prior test. The harness
         forces one real-model summary immediately before turn two so this covers
         the boundary where the full ``load_skill`` ToolMessage has disappeared.
         Reloading operating guidance is an internal model choice; the behavioral
-        contract is that the intended schedule is paused accurately.
+        contract is that the intended schedule is paused accurately. The captured
+        post-compaction native-schema assertions below are a capability diagnostic,
+        not a restriction on the model's route to that outcome.
         """
         from deepagents.middleware.summarization import SummarizationMiddleware
 
@@ -443,6 +445,20 @@ class TestPromptRewriteScheduleOutcome(TestCase):
                         item["function"]["name"] if isinstance(item, dict)
                         else item.name for item in modified.tools
                     ],
+                    "tool_descriptions": {
+                        (item["function"]["name"] if isinstance(item, dict)
+                         else item.name): (item["function"].get("description")
+                                           if isinstance(item, dict)
+                                           else item.description)
+                        for item in modified.tools
+                    },
+                    "tool_parameters": {
+                        (item["function"]["name"] if isinstance(item, dict)
+                         else item.name): (item["function"].get("parameters", {})
+                                           if isinstance(item, dict)
+                                           else {"properties": item.args})
+                        for item in modified.tools
+                    },
                     "has_load_result": any(
                         isinstance(message, ToolMessage)
                         and message.name == "load_skill"
@@ -499,11 +515,180 @@ class TestPromptRewriteScheduleOutcome(TestCase):
         self.assertFalse(boundary["has_load_result"], diagnostics)
         self.assertFalse(boundary["has_tool_contract"], diagnostics)
         self.assertIn("pause_schedule", boundary["tool_names"], diagnostics)
+        self.assertTrue(boundary["tool_descriptions"].get("pause_schedule"), diagnostics)
+        self.assertTrue(boundary["tool_descriptions"].get("create_schedule"), diagnostics)
+        self.assertIn("timezone", boundary["tool_parameters"]["create_schedule"]
+                      .get("properties", {}), diagnostics)
         self.assertTrue(any(call.get("name") == "pause_schedule"
                             for call in followup_calls), diagnostics)
         self.assertEqual(len(saved), 1, diagnostics)
         self.assertFalse(saved[0].enabled, diagnostics)
         self.assertRegex(reply.lower(), r"paus", diagnostics)
+
+    def test_replaces_broadened_reminder_after_forced_compaction(self):
+        """A riderless compacted follow-up preserves a listed schedule's timezone.
+
+        Reloading the schedule skill is valid. The natural acceptance condition is
+        the persisted replacement, not which available guidance route the model uses.
+        """
+        from deepagents.middleware.summarization import SummarizationMiddleware
+
+        thread_id = "schedule-replace-after-compaction-eval"
+        replace_prompt = "Make that reminder run every day at 7 AM instead."
+        # Deliberately omit the id and zone. After compaction the model must reread the
+        # actual listed schedule to identify it and preserve its timezone.
+        summary_model = _CountingSummaryModel(responses=[AIMessage(content=(
+            "The user has one weekday 7 AM reminder to take vitamins and wants to "
+            "change it to every day at the same time."))])
+
+        class ReplaceTurnSummarizationMiddleware(SummarizationMiddleware):
+            def _should_summarize(self, messages, _total_tokens):
+                return bool(messages and isinstance(messages[-1], HumanMessage)
+                            and messages[-1].content == replace_prompt)
+
+        def replace_turn_summary(_model, backend):
+            return ReplaceTurnSummarizationMiddleware(
+                summary_model, backend=backend, keep=("messages", 1))
+
+        prior = Schedule(
+            id="weekday-vitamins",
+            thread_id=thread_id,
+            prompt="Take vitamins.",
+            cadence=Cadence(hour=7, minute=0, weekdays=(0, 1, 2, 3, 4)),
+            tz="America/Los_Angeles",
+            next_fire_at="2030-01-01T15:00:00+00:00",
+            created_at="2026-10-01T15:00:00+00:00",
+        )
+        with tempfile.TemporaryDirectory(prefix="schedule_replace_store_") as store_root, \
+                tempfile.TemporaryDirectory(prefix="schedule_replace_workspace_") as root:
+            os.makedirs(os.path.join(store_root, thread_id))
+            create_filesystem(root, {"README.org": "Personal workspace."})
+            store = ScheduleStore(store_root)
+            store.add(prior)
+            config = {"configurable": {"thread_id": thread_id}}
+            with mock.patch("assist.schedule.tools.get_config", return_value=config), \
+                 mock.patch("assist.tools.requests.get", side_effect=AssertionError(
+                     "schedule eval must not fetch URLs")) as get, \
+                 mock.patch("deepagents.graph.create_summarization_middleware",
+                            side_effect=replace_turn_summary), \
+                 stub_research_subagent():
+                agent = AgentHarness(create_agent(
+                    self.model, root,
+                    spec=prompt_rewrite_web_main_spec(
+                        tools=tuple(schedule_tools(store)))),
+                    thread_id=thread_id)
+                # This neutral orienting turn establishes prior conversation only.
+                # Routing scheduling here is covered by retained-skill rows elsewhere;
+                # this row accepts any route that obtains the real list after compaction.
+                agent.message("What reminders do I have set up?")
+                initial_calls = agent_tool_calls(agent)
+                before = len(initial_calls)
+                reply = str(agent.message(replace_prompt))
+                state = agent.agent.get_state({
+                    "configurable": {"thread_id": thread_id},
+                }).values
+            get.assert_not_called()
+            saved = store.for_thread(thread_id)
+
+        calls = agent_tool_calls(agent)[before:]
+        diagnostics = {"initial_calls": initial_calls, "calls": calls,
+                       "saved": saved, "reply": reply,
+                       "summary": state.get("_summarization_event")}
+        self.assertIsNotNone(state.get("_summarization_event"), diagnostics)
+        self.assertEqual(summary_model.summary_calls, 1, diagnostics)
+        self.assertTrue(any(call.get("name") == "list_schedules" for call in calls),
+                        diagnostics)
+        self.assertTrue(any(call.get("name") == "delete_schedule"
+                            and (call.get("args") or {}).get("schedule_id") == prior.id
+                            for call in calls), diagnostics)
+        self.assertTrue(any(
+            call.get("name") == "create_schedule"
+            and (call.get("args") or {}).get("timezone") == "America/Los_Angeles"
+            for call in calls), diagnostics)
+        self.assertEqual(len(saved), 1, diagnostics)
+        self.assertEqual(saved[0].tz, "America/Los_Angeles", diagnostics)
+        self.assertEqual(saved[0].cadence.hour, 7, diagnostics)
+        self.assertIsNone(saved[0].cadence.weekdays, diagnostics)
+        self.assertIn("vitamin", saved[0].prompt.lower(), diagnostics)
+
+    def test_no_rider_asks_then_user_timezone_recovers_without_duplicate(self):
+        """A phone-like turn never guesses a zone and can recover once the user supplies one."""
+        thread_id = "schedule-timezone-clarification-eval"
+        with tempfile.TemporaryDirectory(prefix="schedule_timezone_store_") as store_root, \
+                tempfile.TemporaryDirectory(prefix="schedule_timezone_workspace_") as root:
+            os.makedirs(os.path.join(store_root, thread_id))
+            create_filesystem(root, {"README.org": "Personal workspace."})
+            store = ScheduleStore(store_root)
+            config = {"configurable": {"thread_id": thread_id}}
+            with mock.patch("assist.schedule.tools.get_config", return_value=config), \
+                 mock.patch("assist.tools.requests.get", side_effect=AssertionError(
+                     "schedule eval must not fetch URLs")) as get, \
+                 stub_research_subagent():
+                agent = AgentHarness(create_agent(
+                    self.model, root,
+                    spec=prompt_rewrite_web_main_spec(
+                        tools=tuple(schedule_tools(store)))),
+                    thread_id=thread_id)
+                first_reply = str(agent.message(
+                    "Remind me every weekday at 7 AM to take my vitamins."))
+                first_saved = store.for_thread(thread_id)
+                before = len(agent_tool_calls(agent))
+                reply = str(agent.message(
+                    "I'm in Los Angeles. Please set that reminder up now."))
+            get.assert_not_called()
+            saved = store.for_thread(thread_id)
+
+        followup_calls = agent_tool_calls(agent)[before:]
+        diagnostics = {
+            "first_reply": first_reply,
+            "first_saved": first_saved,
+            "followup_calls": followup_calls,
+            "saved": saved,
+            "reply": reply,
+        }
+        self.assertEqual(first_saved, [], diagnostics)
+        self.assertEqual(len(saved), 1, diagnostics)
+        self.assertEqual(saved[0].tz, "America/Los_Angeles", diagnostics)
+        self.assertEqual(saved[0].cadence.weekdays, (0, 1, 2, 3, 4), diagnostics)
+        self.assertTrue(any(call.get("name") == "create_schedule"
+                            for call in followup_calls), diagnostics)
+        self.assertNotIn("scheduled.", first_reply.lower(), diagnostics)
+        self.assertRegex(first_reply.lower(), r"time ?zone", diagnostics)
+        self.assertRegex(reply.lower(), r"(scheduled|reminder|next run)", diagnostics)
+
+    def test_explicit_alternate_timezone_overrides_the_message_rider(self):
+        """A user can deliberately schedule in another zone without changing their rider."""
+        thread_id = "schedule-alternate-timezone-eval"
+        with tempfile.TemporaryDirectory(prefix="schedule_alternate_store_") as store_root, \
+                tempfile.TemporaryDirectory(prefix="schedule_alternate_workspace_") as root:
+            os.makedirs(os.path.join(store_root, thread_id))
+            create_filesystem(root, {"README.org": "Personal workspace."})
+            store = ScheduleStore(store_root)
+            config = {"configurable": {
+                "thread_id": thread_id,
+                CONTEXT_RIDER_KEY: SimpleNamespace(tz="America/Los_Angeles"),
+            }}
+            with mock.patch("assist.schedule.tools.get_config", return_value=config), \
+                 mock.patch("assist.tools.requests.get", side_effect=AssertionError(
+                     "schedule eval must not fetch URLs")) as get, \
+                 stub_research_subagent():
+                agent = AgentHarness(create_agent(
+                    self.model, root,
+                    spec=prompt_rewrite_web_main_spec(
+                        tools=tuple(schedule_tools(store)))),
+                    thread_id=thread_id)
+                reply = str(agent.message(
+                    "Every day at 7 AM Paris time, remind me to review the handoff."))
+            get.assert_not_called()
+            saved = store.for_thread(thread_id)
+
+        diagnostics = {"calls": agent_tool_calls(agent), "saved": saved, "reply": reply}
+        self.assertEqual(len(saved), 1, diagnostics)
+        self.assertEqual(saved[0].tz, "Europe/Paris", diagnostics)
+        self.assertTrue(any(
+            call.get("name") == "create_schedule"
+            and (call.get("args") or {}).get("timezone") == "Europe/Paris"
+            for call in agent_tool_calls(agent)), diagnostics)
 
     def test_deletes_named_recurring_reminder(self):
         """A natural removal request loads scheduling and changes persisted state."""

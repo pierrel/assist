@@ -117,6 +117,12 @@ where reliability is harder than with frontier APIs.
 - **Multiple frontends, one Deep Agents core.** Web UI, CLI, and an Emacs
   integration share the standard agent runtime, memory, and domain repos.
 
+- **Thread schedules.** Recurring prompts are stored on their conversation.
+  A message-local timezone is the default, but an explicitly requested IANA
+  timezone takes precedence. Schedule listings include the stored timezone so
+  a later replacement can preserve it; Assist asks rather than guessing when
+  no timezone is known.
+
 - **Pi web preview.** A new web thread can explicitly select a bounded Pi
   preview; Deep Agents remains the default. Pi threads are visibly labelled,
   run only ordinary manual web turns, and can start a new Deep Agents thread

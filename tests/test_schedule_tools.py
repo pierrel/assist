@@ -23,7 +23,9 @@ def tools(tmp_path, monkeypatch):
 def test_create_then_list(tools):
     out = tools.create_schedule("morning review", hour=7, minute=0)
     assert "Scheduled" in out and "every day at 7:00 AM" in out
-    assert "morning review" in tools.list_schedules()
+    listing = tools.list_schedules()
+    assert "morning review" in listing
+    assert "timezone: America/Los_Angeles" in listing
 
 
 def test_modify_is_sparse_delta(tools):
@@ -83,6 +85,48 @@ def test_no_timezone_declines(tools, monkeypatch):
     monkeypatch.setattr(tools_mod, "get_config",
                         lambda: {"configurable": {"thread_id": "t1"}})   # no rider/tz
     assert "timezone" in tools.create_schedule("x", hour=7)
+
+
+def test_explicit_timezone_recovers_when_the_message_has_no_rider(tools, monkeypatch):
+    monkeypatch.setattr(tools_mod, "get_config",
+                        lambda: {"configurable": {"thread_id": "t1"}})
+
+    out = tools.create_schedule("morning review", hour=7,
+                                timezone="America/Los_Angeles")
+
+    assert out.startswith("Scheduled.")
+    assert tools.store.for_thread("t1")[0].tz == "America/Los_Angeles"
+
+
+def test_explicit_timezone_overrides_the_message_rider(tools):
+    out = tools.create_schedule("morning review", hour=7, timezone="Europe/Paris")
+
+    assert out.startswith("Scheduled.")
+    assert tools.store.for_thread("t1")[0].tz == "Europe/Paris"
+
+
+def test_invalid_explicit_timezone_is_corrective(tools):
+    out = tools.create_schedule("morning review", hour=7, timezone="not-a-zone")
+
+    assert out == "Couldn't schedule: unknown timezone 'not-a-zone'."
+
+
+@pytest.mark.parametrize("has_rider", [True, False])
+def test_empty_explicit_timezone_never_falls_back_or_saves(tools, monkeypatch, has_rider):
+    if not has_rider:
+        monkeypatch.setattr(tools_mod, "get_config",
+                            lambda: {"configurable": {"thread_id": "t1"}})
+
+    out = tools.create_schedule("morning review", hour=7, timezone="")
+
+    assert out == "Couldn't schedule: unknown timezone ''."
+    assert tools.store.for_thread("t1") == []
+
+
+def test_invalid_timezone_path_is_corrective(tools):
+    out = tools.create_schedule("morning review", hour=7, timezone="../not-a-zone")
+
+    assert out == "Couldn't schedule: unknown timezone '../not-a-zone'."
 
 
 def test_create_monthly_defaults_anchor_to_current_month(tools):

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timezone as utc_timezone
 
 from langgraph.config import get_config
 
@@ -41,7 +41,8 @@ def _tz() -> str | None:
 def _line(s: Schedule) -> str:
     return (f"[{s.id}] {cadence.describe(s.cadence)} — \"{s.prompt}\""
             f"{'' if s.enabled else ' (paused)'}; "
-            f"next: {cadence.fmt_instant(s.next_fire_at, s.tz, empty='not scheduled')}")
+            f"next: {cadence.fmt_instant(s.next_fire_at, s.tz, empty='not scheduled')}; "
+            f"timezone: {s.tz}")
 
 
 def schedule_tools(store) -> list:
@@ -51,7 +52,8 @@ def schedule_tools(store) -> list:
                         weekdays: list[int] | None = None,
                         every_n_minutes: int | None = None,
                         day_of_month: int | None = None, month_interval: int = 1,
-                        anchor_month: str | None = None) -> str:
+                        anchor_month: str | None = None,
+                        timezone: str | None = None) -> str:
         """Schedule PROMPT to run automatically on a recurring cadence, in THIS thread.
 
         Use ONE cadence shape:
@@ -64,14 +66,23 @@ def schedule_tools(store) -> list:
           THIS month by default; pass anchor_month="2026-03" to start in a specific month.
         A monthly schedule needs an explicit hour (else it fires at midnight) — ask the
         user for a time if they didn't give one.
-        Times are in the user's local timezone. Returns the saved schedule + next run.
+        Times use the message's local timezone by default. Pass ``timezone`` only when
+        the user explicitly supplies their timezone or location, or when recreating an
+        existing listed schedule whose timezone must be preserved. Use an IANA timezone
+        name. Returns the saved schedule + next run.
         """
         tid = _thread_id()
         if not tid:
             return "Couldn't schedule: no active thread."
-        tz = _tz()
+        tz = _tz() if timezone is None else timezone
+        if timezone == "":
+            return "Couldn't schedule: unknown timezone ''."
         if not tz:
             return "Couldn't schedule: I don't know your timezone for this message."
+        try:
+            ZoneInfo(tz)
+        except (ValueError, ZoneInfoNotFoundError):
+            return f"Couldn't schedule: unknown timezone {tz!r}."
         # A monthly schedule always has an anchor — default it to the current month (user
         # tz) when the agent didn't set one, so "every N months" starts now.
         if day_of_month is not None and anchor_month is None:
@@ -89,9 +100,10 @@ def schedule_tools(store) -> list:
         except InvalidCadence as e:
             return f"Couldn't schedule: {e}"
         sched = Schedule(id=os.urandom(6).hex(), thread_id=tid, prompt=prompt, cadence=cad,
-                         tz=tz, created_at=datetime.now(timezone.utc).isoformat())
+                         tz=tz, created_at=datetime.now(utc_timezone.utc).isoformat())
         try:
-            sched = sched.with_next_fire(cadence.next_after(sched, datetime.now(timezone.utc)).isoformat())
+            sched = sched.with_next_fire(
+                cadence.next_after(sched, datetime.now(utc_timezone.utc)).isoformat())
         except InvalidCadence as e:
             return f"Couldn't schedule: {e}"
         try:
@@ -101,7 +113,7 @@ def schedule_tools(store) -> list:
         return f"Scheduled. {_line(sched)}"
 
     def list_schedules() -> str:
-        """List THIS thread's schedules (id, cadence, prompt, next run, paused state)."""
+        """List THIS thread's schedules (id, cadence, prompt, next run, timezone, paused state)."""
         tid = _thread_id()
         if not tid:
             return "No active thread."
@@ -145,7 +157,7 @@ def schedule_tools(store) -> list:
                 return f"No schedule {schedule_id} on this thread."
             patched = cadence.apply_patch(current, **delta)
             patched = patched.with_next_fire(
-                cadence.next_after(patched, datetime.now(timezone.utc)).isoformat())
+                cadence.next_after(patched, datetime.now(utc_timezone.utc)).isoformat())
             saved = store.update(tid, schedule_id, lambda _s: patched)
         except InvalidCadence as e:
             return f"Couldn't change it: {e}"
@@ -162,7 +174,8 @@ def schedule_tools(store) -> list:
             s = replace(s, enabled=enabled)
             if enabled:  # resume: recompute forward so a long-paused schedule doesn't
                 # fire immediately for missed windows (the no-catch-up guarantee).
-                s = s.with_next_fire(cadence.next_after(s, datetime.now(timezone.utc)).isoformat())
+                s = s.with_next_fire(
+                    cadence.next_after(s, datetime.now(utc_timezone.utc)).isoformat())
             return s
         try:
             saved = store.update(tid, schedule_id, _apply)

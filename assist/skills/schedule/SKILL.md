@@ -18,7 +18,8 @@ accumulate here. Use the schedule tools — do not try to keep time yourself.
 - `delete_schedule(id)` — remove one permanently.
 
 ## Cadence — pick ONE shape and fill its fields
-Times are in the user's local timezone. `weekdays` is `0=Mon … 6=Sun`.
+By default, times use the message's local timezone; an explicitly requested
+timezone takes precedence. `weekdays` is `0=Mon … 6=Sun`.
 - daily at a time → `hour=7, minute=0`
 - specific weekdays → `hour=7, minute=0, weekdays=[0,1,2,3,4]`
 - hourly at a given minute → `minute=30` (omit `hour`)
@@ -36,6 +37,10 @@ else stays as it is. "Change it to fire at 5am" → `modify_schedule(id, hour=5)
 `list_schedules()` first. `modify` shifts or narrows existing fields; to **broaden**
 a schedule (specific weekdays → every day, a fixed hour → hourly) or switch between a
 clock schedule and an every-N-minutes one, **delete it and create a new one**.
+When recreating a listed schedule, preserve its listed timezone by passing it to
+`create_schedule(timezone=...)`. If `create_schedule` says it does not know the
+timezone, do not guess: ask the user where they are or for their timezone, then pass
+the corresponding IANA timezone when creating it.
 
 ## After any change
 Relay back the schedule's cadence and **next run time** exactly as the tool
