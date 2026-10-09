@@ -15,6 +15,9 @@ from manage.web.state import _get_status, _set_status
 @pytest.fixture
 def client(tmp_path,monkeypatch):
     (tmp_path/"mail-thread").mkdir()
+    # Match new-thread browser authority before the mocked resume scheduler runs.
+    from assist.browser.authority import mark_new_thread
+    mark_new_thread(str(tmp_path), "mail-thread")
     monkeypatch.setattr(web.MANAGER,"root_dir",str(tmp_path))
     monkeypatch.setattr(web.MANAGER,"thread_dir",lambda tid:str(tmp_path/tid))
     monkeypatch.setattr(web.MANAGER,"get",lambda *a,**k:SimpleNamespace(
@@ -132,6 +135,8 @@ def test_worker_gmail_proposal_and_approval_resume(client,monkeypatch,preview_wr
             return "Archived"
         def get_messages(self):
             return [{"role":"user","content":"Archive this"},{"role":"assistant","content":"Approval required"}]
+        def get_raw_messages(self):
+            return self.get_messages()
     chat=Chat()
     monkeypatch.setattr(web.MANAGER,"get",lambda *a,**k:checkpoint_chat(chat, k.get("configurable")))
     def touch(*args):
@@ -142,6 +147,13 @@ def test_worker_gmail_proposal_and_approval_resume(client,monkeypatch,preview_wr
     monkeypatch.setattr(threads,"_get_domain_manager",lambda *a,**k:None)
     scheduled=[]
     monkeypatch.setattr(threads._RESUME_SCHEDULER,"submit",lambda *a,**k:scheduled.append(a))
+    # Drive the real browser reset synchronously after this mocked turn closes.
+    monkeypatch.setattr(threads,"_queue_browser_revocation",lambda *_:None)
+    def no_sidecars(command, **_kwargs):
+        assert command[:4] == ["docker", "ps", "--all", "--no-trunc"]
+        return b""
+    monkeypatch.setattr("assist.browser.manager._bounded_cli",no_sidecars)
+    monkeypatch.setattr("assist.browser.manager.configured_directory",lambda:None)
     import threading
     preview_started=threading.Event()
     release_preview=threading.Event()
@@ -177,6 +189,8 @@ def test_worker_gmail_proposal_and_approval_resume(client,monkeypatch,preview_wr
             release_preview.set()
         assert request.result(2).status_code==303
         continuation.result(2)
+    assert threads._runs().get("mail-thread",chat.follower.id).status=="revocation_pending"
+    assert threads._drain_held_browser_events("mail-thread")
     status=_get_status("mail-thread")
     assert status["stage"]=="awaiting_approval"
     assert status["pending_gmail_action"]["name"]=="email_archive"

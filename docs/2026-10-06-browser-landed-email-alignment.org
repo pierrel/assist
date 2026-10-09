@@ -1,0 +1,51 @@
+#+title: Browser branch alignment with landed Email
+#+date: 2026-10-06
+
+* Scope and construction
+The original browser branch incorporates landed main =6f1f0976=, retaining
+browser =0dffed1f= and Email =82084115=. This is a mechanical branch advancement,
+not a policy change. It does not copy the live integration or absorb unmerged
+phone or Git successors.
+
+Both browser and Email configuration exports and packaged skill trees remain.
+The web path retains full container generation binding, browser state capture
+before exact sandbox cleanup, and owed revocation. Email approval staging and
+provider preview remain after that cleanup; preview occurs outside the queue.
+A pending Email proposal blocks Git finalization, and admission honors both
+outbound-email and mailbox approval tokens.
+
+* Deterministic fixture alignment
+The mailbox fixture now marks its newly created thread's browser authority,
+matching production new-thread creation. The worker test drives the real
+browser reset synchronously after the mocked model turn closes, proving the
+held follower becomes pending before testing the existing Email gate. Docker
+creation and the empty legacy-sidecar scan, the provider and model remain
+mocked; approval, checkpoint identity, follower exclusion, queue release and
+logical-result assertions remain intact.
+The fake chat supplies raw messages for the real terminal interjection sweep.
+
+The combined core prompt is 27,403 characters; schemas are 18,735 characters.
+Measured prompt block chain:
+=f9aa79912dc7cae2110bbb9d1ac2a52da15d3d2673208b0cdb9a6c05b6117230=.
+Measured ToolNode history:
+=0d3f084d253d4728020d81a16c42b4da91b21463f7751d298c74ab218d443317=. Historical census rows and dated reports remain unchanged.
+The tests retain strict source/provenance validation; a synthetic local ASGI
+exchange requires the test environment's local transport access.
+
+* Evidence and limits
+The affected CPU selection passed 202 tests; strict offline census passed 50.
+Both report one upstream Python/Pydantic warning. These checks cover the
+composition seams. Existing
+Chromium/model evidence applies only to unchanged runner, storage, policy and
+behavior bytes; it does not become a fresh Docker or behavioral run. Root owns
+live composition, private-service policy disposition, merge and repin. The
+original PR remains separate from the live release.
+
+The independent review identified an inherited ordinary reply duplicate-click
+concern outside this mechanical alignment. Root routed it to the existing HITL
+owner; it is not silently repaired or claimed resolved here. An initial
+outbound-email duplicate concern was rejected because its token dispatch key
+is already deduplicated by RunService.
+
+* Historical supersessions
+None. Earlier dated records remain accurate for their candidate trees.

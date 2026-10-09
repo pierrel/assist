@@ -1,0 +1,17 @@
+#+title: Browser V1 shared-policy proxy refresh
+#+date: 2026-10-01
+
+* Deployment correction
+
+The browser-generation successor changes the shared proxy's browser policy,
+but an already-running proxy is reused when its configuration fingerprint is
+unchanged. Increment the fingerprint version to =v9-shared-browser-policy= so
+the next sandbox admission uses the existing guarded retirement and replacement
+path before it can rely on that policy. An armed browser client-map record
+still blocks replacement, and ordinary shell proxy admission keeps its
+existing checks.
+
+* Historical supersessions
+
+No earlier dated document asserted the proxy fingerprint for the composed
+tree. The prior composition record remains an accurate point-in-time check.

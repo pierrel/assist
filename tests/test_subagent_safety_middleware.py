@@ -151,7 +151,7 @@ class TestSubagentSafetyMiddleware(TestCase):
         with TemporaryDirectory() as egress_dir, \
              patch("assist.agent.create_deep_agent") as create, \
              patch("assist.agent.supports_execution", return_value=True):
-            request, _, _ = egress_tools(EgressStore(egress_dir), frozenset())
+            request, _, _, _ = egress_tools(EgressStore(egress_dir), frozenset())
             create.return_value = MagicMock()
             create_research_agent(
                 MagicMock(), working_dir="/tmp/x", leaf=True,
@@ -175,7 +175,7 @@ class TestSubagentSafetyMiddleware(TestCase):
         with TemporaryDirectory() as egress_dir, \
              patch("assist.agent.create_deep_agent") as create, \
              patch("assist.agent.supports_execution", return_value=True):
-            request, _, _ = egress_tools(EgressStore(egress_dir), frozenset())
+            request, _, _, _ = egress_tools(EgressStore(egress_dir), frozenset())
             create.return_value = MagicMock()
             create_research_agent(
                 MagicMock(), working_dir="/tmp/x", egress_tools=(request,))
@@ -198,7 +198,7 @@ class TestSubagentSafetyMiddleware(TestCase):
         from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 
         with TemporaryDirectory() as egress_dir:
-            request, listing, remove = egress_tools(
+            request, listing, remove, _batch = egress_tools(
                 EgressStore(egress_dir), frozenset())
             backend = create_composite_backend("/tmp/x")
             middleware = SmallModelSkillsMiddleware(

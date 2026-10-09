@@ -1,10 +1,16 @@
 import hashlib
+import ipaddress
 import logging
 import os
 import re
 import subprocess
 import threading
 import time
+import fcntl
+from contextlib import contextmanager
+from uuid import uuid4
+
+from assist.egress import runtime_state
 
 logger = logging.getLogger(__name__)
 _ANY_CONTAINER = object()
@@ -84,9 +90,13 @@ SANDBOX_IMAGE = "assist-sandbox"
 # Egress allowlist layer.  See docs/2026-05-08-sandbox-network-allowlist.org
 # for the threat model and design.
 EGRESS_NETWORK = "assist-egress-network"
+BROWSER_NETWORK = "assist-browser-network"
 EGRESS_PROXY_NAME = "assist-egress-proxy"
 EGRESS_PROXY_IMAGE = "assist-egress-proxy"
 EGRESS_PROXY_PORT = 8888
+BROWSER_PROXY_PORT = 8889
+BROWSER_SECCOMP_PROFILE = os.path.join(
+    os.path.dirname(__file__), "..", "dockerfiles", "browser-seccomp.json")
 EGRESS_ALLOWLIST_FILE = os.path.join(
     os.path.dirname(__file__), "..", "dockerfiles", "egress-allowlist.conf"
 )
@@ -108,18 +118,72 @@ def _load_egress_allowlist() -> list[str]:
         })
 
 
-def _egress_proxy_config_hash(allowlist_csv: str, approvals_dir: str | None) -> str:
+def _egress_proxy_config_hash(allowlist_csv: str, approvals_dir: str | None,
+                              network_ref: str = "", map_dir: str | None = None) -> str:
     """The proxy's config fingerprint (a container label): allowlist content
     plus the approvals-mount schema/path and proxy-policy schema, so a change
     to any of them recreates the proxy on the next sandbox start. The version
-    marker makes containers with an earlier approval or throttle policy
-    recreate once and gain the current behavior."""
+    marker makes containers with an earlier approval, throttle or browser
+    destination policy recreate once and gain the current behavior. The
+    service UID/GID binds proxy read access to host-only map mounts."""
     return hashlib.sha256(
-        (allowlist_csv + "|v5-read-only-mounts:" + (approvals_dir or "")).encode()
+        (allowlist_csv + "|v10-read-only-proxy-mounts:"
+         + f"{os.getuid()}:{os.getgid()}|" + (approvals_dir or "")
+         + "|" + (map_dir or "") + "|" + network_ref).encode()
     ).hexdigest()[:16]
 
 
+def _network_identity(network, *, isolated: bool) -> tuple[str, str]:
+    """Verify Docker's live bridge settings before admitting a client."""
+    network.reload()
+    attrs = network.attrs
+    options = attrs.get("Options") or {}
+    configs = (attrs.get("IPAM") or {}).get("Config") or []
+    if attrs.get("Internal") is not True:
+        raise RuntimeError("egress network is not internal")
+    if (attrs.get("Driver") != "bridge" or attrs.get("EnableIPv6") is not False
+            or len(configs) != 1):
+        raise RuntimeError("egress network has unsupported routing settings")
+    if isolated and (options.get("com.docker.network.bridge.gateway_mode_ipv4") != "isolated"
+                     or configs[0].get("Gateway")):
+        raise RuntimeError("browser network lacks isolated gateway mode")
+    subnet = str(ipaddress.ip_network(configs[0]["Subnet"], strict=True))
+    if not isinstance(attrs.get("Id"), str) or not attrs["Id"]:
+        raise RuntimeError("egress network lacks identity")
+    return attrs["Id"], subnet
+
+
+def _settle_rejected_create(error, kind: str, name: str, token: str) -> None:
+    """A daemon 400/404 rejects create before an object exists; timeouts do not."""
+    if error.status_code in (400, 404):
+        runtime_state.settle_creation(kind, name, token)
+
+
+@contextmanager
+def _proxy_setup_lock():
+    """Serialize shared Docker egress setup independently of optional grants/map."""
+    with open(os.path.join(runtime_state.runtime_directory(),
+                           ".proxy-setup.lock"), "a+b") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def _bounded_egress_worker(argv: list[str], timeout: float = 20):
+    """A timeout kills the process that owns SDK calls and setup locks."""
+    import subprocess
+    try:
+        return subprocess.run(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("egress Docker setup timed out; generation retired") from error
+
+
 def _egress_proxy_mounts(approvals_dir: str | None, map_dir: str | None = None):
+    """Keep both read-only targets when approvals and map share one source."""
     from docker.types import Mount
 
     return [
@@ -152,39 +216,40 @@ class SandboxManager:
         """Lazily create and cache a Docker client."""
         if cls._docker_client is None:
             import docker
-            cls._docker_client = docker.from_env()
+            cls._docker_client = docker.from_env(timeout=5)
         return cls._docker_client
 
     @classmethod
     def _ensure_egress_proxy_running(cls, client) -> str:
-        """Idempotent: bring up the egress allowlist proxy + isolated network.
+        """Verify live network identities and serve both isolated client kinds."""
+        import docker
+        if isinstance(client, docker.DockerClient):
+            return cls._ensure_egress_proxy_bounded()
+        return cls._ensure_egress_proxy_running_direct(client)
 
-        - Network ``assist-egress-network`` is internal=True (no host
-          gateway, no NAT) — the only way out for a sandbox attached to
-          this network is the proxy container.
-        - Proxy container ``assist-egress-proxy`` is dual-homed: it
-          starts on the default bridge (so it has internet access) and
-          is then connected to the egress network (so sandboxes can
-          reach it as ``assist-egress-proxy:8888``).
-        - The current allowlist (from ``egress-allowlist.conf``) is
-          hashed and stamped on the container as a label.  When the
-          file changes, the proxy is recreated on the next call.
+    @classmethod
+    def _ensure_egress_proxy_bounded(cls) -> str:
+        """Kill a stalled SDK worker without leaving its host locks held."""
+        import sys
+        result = _bounded_egress_worker(
+            [sys.executable, "-m", "assist.egress.runtime_worker", "proxy"])
+        if result.returncode or result.stdout.strip() != EGRESS_PROXY_NAME.encode():
+            raise RuntimeError(
+                "egress Docker setup failed: "
+                + result.stderr.decode("utf-8", errors="replace")[-1000:])
+        return EGRESS_PROXY_NAME
 
-        Fails closed: if the proxy can't be brought up, callers see the
-        exception and the sandbox start fails — which is the correct
-        behavior (no fallback to direct egress).
-        """
+    @classmethod
+    def _ensure_egress_proxy_running_direct(cls, client) -> str:
+        """Run inside the killable worker, or with a deterministic test double."""
         from docker.errors import APIError, NotFound
+        from assist.egress.client_map import configured_directory
 
         allowlist = _load_egress_allowlist()
         allowlist_csv = ",".join(allowlist)
-        # The approvals mount (user-approved egress grants — docs/
-        # 2026-07-21-egress-approval-hitl.org): a read-only mount of the
-        # approvals SUBDIR only (projection + client map; proposal state and
-        # agent free text stay host-side). Unset env ⇒ no mount ⇒ the
-        # feature is dormant and the proxy runs exactly as before. The
-        # schema marker rides the hash so an already-running proxy from
-        # before this feature is recreated once and gains the mount.
+        # Approved-host grants and client attribution use distinct read-only
+        # proxy mounts. Browser attribution remains available when the
+        # optional grants projection is disabled.
         approvals_dir = os.environ.get("ASSIST_EGRESS_APPROVALS_DIR") or None
         if approvals_dir:
             from assist.egress.store import APPROVALS_SUBDIR, approvals_dir_is_safe
@@ -202,32 +267,148 @@ class SandboxManager:
             else:
                 approvals_dir = os.path.join(approvals_dir, APPROVALS_SUBDIR)
                 os.makedirs(approvals_dir, exist_ok=True)
-        allowlist_hash = _egress_proxy_config_hash(allowlist_csv, approvals_dir)
+        try:
+            map_dir = configured_directory()
+        except (OSError, RuntimeError) as error:
+            # Client attribution is optional for an ordinary shell sandbox.
+            # A bad client map must not remove its base-list egress.
+            logger.warning("browser client map unavailable: %s", error)
+            map_dir = None
 
-        with cls._egress_lock:
+        with cls._egress_lock, _proxy_setup_lock():
+            browser_armed = False
+            if map_dir:
+                from assist.egress.client_map import sandbox_browser_records
+                browser_armed = bool(sandbox_browser_records(map_dir))
+            if browser_armed and any(runtime_state.pending_creation(kind, name)
+                                     for kind, name in (
+                                         ("network", EGRESS_NETWORK),
+                                         ("network", BROWSER_NETWORK),
+                                         ("proxy", EGRESS_PROXY_NAME))):
+                raise RuntimeError(
+                    "browser turn still pins the egress proxy endpoint")
+            ordinary_creation_token = None
+            browser_creation_token = None
+            for name in ((EGRESS_NETWORK, BROWSER_NETWORK)
+                         if map_dir is not None else (EGRESS_NETWORK,)):
+                pending = runtime_state.pending_creation("network", name)
+                if pending:
+                    try:
+                        candidate = client.networks.get(name)
+                    except NotFound:
+                        raise RuntimeError(
+                            f"{name} creation outcome is uncertain; retry after recovery")
+                    candidate.reload()
+                    label = (candidate.attrs.get("Labels") or {}).get(
+                        "assist.egress-generation")
+                    if label == pending:
+                        runtime_state.retire("network", candidate.id,
+                                             "incomplete create")
+                        client.networks.get(candidate.id).remove()
+                        try:
+                            client.networks.get(candidate.id)
+                        except NotFound:
+                            runtime_state.settle_creation("network", name, pending)
+                        else:
+                            raise RuntimeError(f"{name} removal is unconfirmed")
+                    elif label:
+                        # A distinct labelled successor occupies the immutable
+                        # name; the old late create cannot replace it.
+                        runtime_state.settle_creation("network", name, pending)
+                    else:
+                        raise RuntimeError(f"{name} creation outcome is uncertain")
+            pending_proxy = runtime_state.pending_creation("proxy", EGRESS_PROXY_NAME)
+            if pending_proxy:
+                try:
+                    candidate = client.containers.get(EGRESS_PROXY_NAME)
+                    candidate.reload()
+                except NotFound:
+                    raise RuntimeError("egress proxy creation outcome is uncertain")
+                label = candidate.labels.get("assist.egress-generation")
+                if label == pending_proxy:
+                    runtime_state.retire("proxy", candidate.id,
+                                         "incomplete create")
+                    client.containers.get(candidate.id).remove(force=True)
+                    try:
+                        client.containers.get(candidate.id)
+                    except NotFound:
+                        runtime_state.settle_creation("proxy", EGRESS_PROXY_NAME,
+                                                      pending_proxy)
+                    else:
+                        raise RuntimeError("egress proxy removal is unconfirmed")
+                elif label:
+                    runtime_state.settle_creation("proxy", EGRESS_PROXY_NAME,
+                                                  pending_proxy)
+                else:
+                    raise RuntimeError("egress proxy creation outcome is uncertain")
             try:
                 egress_net = client.networks.get(EGRESS_NETWORK)
             except NotFound:
-                egress_net = client.networks.create(
-                    EGRESS_NETWORK, driver="bridge", internal=True,
-                )
-                logger.info("Created egress network %s (internal)", EGRESS_NETWORK)
-            else:
-                # An attacker (or a hand-rolled docker network create that
-                # forgot --internal) could leave a same-named network that
-                # has a default gateway, re-opening unrestricted egress.
-                # Fail closed — refuse to attach a sandbox to a non-internal
-                # network of this name.  Operator fix: `docker network rm
-                # assist-egress-network`; SandboxManager recreates it
-                # correctly on the next sandbox start.
-                if not egress_net.attrs.get("Internal", False):
+                if browser_armed:
                     raise RuntimeError(
-                        f"Egress network {EGRESS_NETWORK!r} exists but is "
-                        "not internal=True.  Refusing to attach the "
-                        "sandbox — that would bypass the allowlist layer.  "
-                        f"Fix: `docker network rm {EGRESS_NETWORK}` and "
-                        "the next sandbox start will recreate it."
+                        "browser turn still pins the egress proxy endpoint")
+                ordinary_creation_token = uuid4().hex
+                runtime_state.begin_creation("network", EGRESS_NETWORK,
+                                             ordinary_creation_token)
+                try:
+                    response = client.api.create_network(
+                        EGRESS_NETWORK, driver="bridge", internal=True,
+                        labels={"assist.egress-generation": ordinary_creation_token},
                     )
+                except APIError as error:
+                    _settle_rejected_create(
+                        error, "network", EGRESS_NETWORK, ordinary_creation_token)
+                    raise
+                egress_net = client.networks.get(response["Id"])
+                logger.info("Created egress network %s (internal)", EGRESS_NETWORK)
+            ordinary_id, ordinary_cidr = _network_identity(
+                egress_net, isolated=False)
+            if ordinary_creation_token:
+                if (egress_net.attrs.get("Labels") or {}).get(
+                        "assist.egress-generation") != ordinary_creation_token:
+                    raise RuntimeError("new egress network generation changed")
+                runtime_state.settle_creation("network", EGRESS_NETWORK,
+                                              ordinary_creation_token)
+            runtime_state.assert_admissible("network", ordinary_id)
+            browser_net = None
+            browser_id = browser_cidr = ""
+            if map_dir is not None:
+                try:
+                    browser_net = client.networks.get(BROWSER_NETWORK)
+                except NotFound:
+                    if browser_armed:
+                        raise RuntimeError(
+                            "browser turn still pins the egress proxy endpoint")
+                    browser_creation_token = uuid4().hex
+                    runtime_state.begin_creation("network", BROWSER_NETWORK,
+                                                 browser_creation_token)
+                    try:
+                        response = client.api.create_network(
+                            BROWSER_NETWORK, driver="bridge", internal=True,
+                            enable_ipv6=False,
+                            options={"com.docker.network.bridge.gateway_mode_ipv4":
+                                     "isolated"},
+                            labels={"assist.egress-generation": browser_creation_token})
+                    except APIError as error:
+                        _settle_rejected_create(
+                            error, "network", BROWSER_NETWORK, browser_creation_token)
+                        raise
+                    browser_net = client.networks.get(response["Id"])
+                browser_id, browser_cidr = _network_identity(
+                    browser_net, isolated=True)
+                if browser_creation_token:
+                    if (browser_net.attrs.get("Labels") or {}).get(
+                            "assist.egress-generation") != browser_creation_token:
+                        raise RuntimeError("new browser network generation changed")
+                    runtime_state.settle_creation("network", BROWSER_NETWORK,
+                                                  browser_creation_token)
+                runtime_state.assert_admissible("network", browser_id)
+                if ipaddress.ip_network(ordinary_cidr).overlaps(
+                        ipaddress.ip_network(browser_cidr)):
+                    raise RuntimeError("browser and sandbox networks overlap")
+            network_ref = f"{ordinary_id}:{ordinary_cidr}|{browser_id}:{browser_cidr}"
+            allowlist_hash = _egress_proxy_config_hash(
+                allowlist_csv, approvals_dir, network_ref, map_dir)
 
             existing = None
             try:
@@ -235,49 +416,122 @@ class SandboxManager:
                 existing.reload()
             except NotFound:
                 pass
+            prior_retirement = (runtime_state.retirement("proxy", existing.id)
+                                if existing is not None else None)
+            if prior_retirement not in (None, "remove"):
+                raise RuntimeError("egress proxy generation is retired")
 
             needs_recreate = (
                 existing is None
+                or prior_retirement is not None
                 or existing.status != "running"
                 or existing.labels.get("assist.egress-allowlist-hash") != allowlist_hash
             )
             if not needs_recreate:
+                attached = existing.attrs.get("NetworkSettings", {}).get("Networks", {})
+                needs_recreate = (
+                    attached.get(EGRESS_NETWORK, {}).get("NetworkID") != ordinary_id
+                    or (browser_net is not None and
+                        attached.get(BROWSER_NETWORK, {}).get("NetworkID") != browser_id)
+                )
+            if not needs_recreate:
                 return EGRESS_PROXY_NAME
 
+            if browser_armed:
+                raise RuntimeError(
+                    "browser turn still pins the egress proxy endpoint")
+
+            if os.getuid() == 0:
+                raise RuntimeError("egress proxy cannot run as root")
+            # A missing image is a definitive prerequisite failure. Check it
+            # before removing the old proxy or journaling an uncertain create.
+            client.images.get(EGRESS_PROXY_IMAGE)
+            old_attached = (existing.attrs.get("NetworkSettings", {}).get("Networks", {})
+                            if existing is not None else {})
+            old_mounts = (existing.attrs.get("Mounts")
+                          if existing is not None else None)
+            old_map = ([mount.get("Source") for mount in old_mounts
+                        if mount.get("Destination") == "/client-map"]
+                       if isinstance(old_mounts, list) else [])
+            preserve_map = bool(
+                map_dir and existing is not None
+                and old_map == [map_dir]
+                and existing.attrs.get("Config", {}).get("User")
+                == f"{os.getuid()}:{os.getgid()}"
+                and old_attached.get(EGRESS_NETWORK, {}).get("NetworkID") == ordinary_id
+                and (browser_net is None or
+                     old_attached.get(BROWSER_NETWORK, {}).get("NetworkID") == browser_id))
             if existing is not None:
                 try:
-                    existing.remove(force=True)
+                    runtime_state.retire("proxy", existing.id, "remove")
+                    client.containers.get(existing.id).remove(force=True)
                     logger.info("Removed stale egress proxy %s", existing.id[:12])
                 except APIError as e:
-                    logger.warning("Could not remove existing egress proxy: %s", e)
+                    raise RuntimeError("old egress proxy removal is unconfirmed") from e
+            if map_dir is not None and not preserve_map:
+                from assist.egress.client_map import clear_clients
+                # A changed map/network may hold stale attribution. Revoke
+                # only after old-proxy removal is confirmed; a same-map,
+                # same-network replacement keeps active clients usable.
+                clear_clients(map_dir)
 
             from assist.egress.guidance import EGRESS_DENY_BODY, EGRESS_THROTTLE_BODY
-            proxy = client.containers.run(
-                EGRESS_PROXY_IMAGE,
-                name=EGRESS_PROXY_NAME,
-                detach=True,
-                restart_policy={"Name": "unless-stopped"},
-                extra_hosts={"host.docker.internal": "host-gateway"},
-                # EGRESS_DENY_BODY / EGRESS_THROTTLE_BODY: the proxy response
-                # text, centralized in
-                # assist/egress/guidance.py and delivered here so no
-                # guidance prose lives in proxy code (Pierre, PR #200).
-                environment={"EGRESS_ALLOWLIST": allowlist_csv,
-                             "EGRESS_DENY_BODY": EGRESS_DENY_BODY,
-                             "EGRESS_THROTTLE_BODY": EGRESS_THROTTLE_BODY},
-                labels={
+            token = uuid4().hex
+            from docker.models.containers import _create_container_args
+            create_kwargs = _create_container_args({
+                "image": EGRESS_PROXY_IMAGE,
+                "command": None,
+                "version": client.api._version,
+                "name": EGRESS_PROXY_NAME,
+                "restart_policy": {"Name": "unless-stopped"},
+                "extra_hosts": {"host.docker.internal": "host-gateway"},
+                "environment": {"EGRESS_ALLOWLIST": allowlist_csv,
+                                "EGRESS_SANDBOX_CIDR": ordinary_cidr,
+                                "EGRESS_BROWSER_CIDR": browser_cidr,
+                                "EGRESS_DENY_BODY": EGRESS_DENY_BODY,
+                                "EGRESS_THROTTLE_BODY": EGRESS_THROTTLE_BODY},
+                "labels": {
                     "assist.egress-proxy": "true",
                     "assist.egress-allowlist-hash": allowlist_hash,
+                    "assist.egress-generation": token,
                 },
-                **({"mounts": _egress_proxy_mounts(approvals_dir)}
-                   if approvals_dir else {}),
-            )
+                "user": f"{os.getuid()}:{os.getgid()}",
+                "mounts": _egress_proxy_mounts(approvals_dir, map_dir),
+            })
+            runtime_state.begin_creation("proxy", EGRESS_PROXY_NAME, token)
+            try:
+                response = client.api.create_container(**create_kwargs)
+            except APIError as error:
+                _settle_rejected_create(error, "proxy", EGRESS_PROXY_NAME, token)
+                raise
+            proxy = client.containers.get(response["Id"])
+            proxy.start()
+            runtime_state.retire("network", ordinary_id, "connect:" + proxy.id)
             try:
                 egress_net.connect(proxy)
             except APIError as e:
                 if "already exists" not in str(e).lower():
                     raise
+            proxy.reload()
+            attached = proxy.attrs.get("NetworkSettings", {}).get("Networks", {})
+            if attached.get(EGRESS_NETWORK, {}).get("NetworkID") != ordinary_id:
+                raise RuntimeError("egress proxy ordinary attachment differs from policy")
+            runtime_state.settle_retirement("network", ordinary_id,
+                                            "connect:" + proxy.id)
+            if browser_net is not None:
+                runtime_state.retire("network", browser_id, "connect:" + proxy.id)
+                browser_net.connect(proxy)
+            proxy.reload()
+            attached = proxy.attrs.get("NetworkSettings", {}).get("Networks", {})
+            if (attached.get(EGRESS_NETWORK, {}).get("NetworkID") != ordinary_id
+                    or (browser_net is not None and
+                        attached.get(BROWSER_NETWORK, {}).get("NetworkID") != browser_id)):
+                raise RuntimeError("egress proxy network attachment differs from policy")
+            if browser_net is not None:
+                runtime_state.settle_retirement("network", browser_id,
+                                                "connect:" + proxy.id)
             cls._wait_for_egress_proxy_ready(proxy)
+            runtime_state.settle_creation("proxy", EGRESS_PROXY_NAME, token)
             logger.info(
                 "Started egress proxy %s with %d allowlist entries (hash=%s)",
                 proxy.id[:12], len(allowlist), allowlist_hash,
@@ -286,9 +540,9 @@ class SandboxManager:
 
     @classmethod
     def _wait_for_egress_proxy_ready(cls, proxy, timeout: float = 10.0) -> None:
-        """Block until the proxy logs 'listening on'.
+        """Block until both ordinary and browser proxy listeners are bound.
 
-        The proxy's TCP listener is bound only after Python startup +
+        The proxy's TCP listeners are bound only after Python startup +
         allowlist parse + ``socket.bind`` — typically <100ms but not
         instant.  Without this, the very first sandbox launched
         immediately after a proxy recreate can hit connection-refused
@@ -302,20 +556,56 @@ class SandboxManager:
                 logs = proxy.logs().decode("utf-8", errors="replace")
             except Exception:
                 logs = ""
-            if "listening on" in logs:
+            if (f"listening on 0.0.0.0:{EGRESS_PROXY_PORT}" in logs
+                    and f"listening on 0.0.0.0:{BROWSER_PROXY_PORT}" in logs):
                 return
             time.sleep(0.1)
         raise RuntimeError(
-            f"Egress proxy {proxy.id[:12]} did not report 'listening on' "
+            f"Egress proxy {proxy.id[:12]} did not report both listeners "
             f"within {timeout}s.  Last logs: {logs[-500:]!r}"
         )
 
     @classmethod
     def _get_sandbox_backend(cls, work_dir: str, tz: str | None,
                              agent_dir: str | None, include_assist_env: bool,
-                             include_egress_approvals: bool, before_start=None,
-                             readonly_workspace=False):
-        """Create a sandbox generation from a named authority profile.
+                             include_egress_approvals: bool,
+                             before_start=None, readonly_workspace=False,
+                             browser_capable: bool = False,
+                             thread_scope: tuple[str, str] | None = None,
+                             owner_run_id: str | None = None):
+        if thread_scope is None:
+            return cls._create_sandbox_backend(
+                work_dir, tz, agent_dir, include_assist_env,
+                include_egress_approvals, before_start=before_start,
+                readonly_workspace=readonly_workspace,
+                browser_capable=browser_capable, thread_scope=thread_scope,
+                owner_run_id=owner_run_id)
+        from assist.browser import authority
+        from assist.browser.manager import BrowserManager
+        threads_root, thread_id = thread_scope
+        authority._thread_dir(threads_root, thread_id)
+        expected = os.path.join(os.path.realpath(threads_root), thread_id, "domain")
+        if os.path.realpath(work_dir) != expected:
+            raise RuntimeError("sandbox workspace does not match thread authority")
+        if not BrowserManager.reconcile_startup(threads_root):
+            raise RuntimeError("sandbox startup reconciliation is incomplete")
+        with authority.generation_fence(threads_root, thread_id):
+            return cls._create_sandbox_backend(
+                work_dir, tz, agent_dir, include_assist_env,
+                include_egress_approvals, before_start=before_start,
+                readonly_workspace=readonly_workspace,
+                browser_capable=browser_capable, thread_scope=thread_scope,
+                owner_run_id=owner_run_id)
+
+    @classmethod
+    def _create_sandbox_backend(cls, work_dir: str, tz: str | None,
+                                agent_dir: str | None, include_assist_env: bool,
+                                include_egress_approvals: bool,
+                                before_start=None, readonly_workspace=False,
+                                browser_capable: bool = False,
+                                thread_scope: tuple[str, str] | None = None,
+                                owner_run_id: str | None = None):
+        """Create one per-turn sandbox from a named authority profile.
 
         ``include_assist_env`` is the line between ordinary Deep Agents work and
         Pi preview work.  A Pi sandbox retains Docker's workspace and egress
@@ -325,6 +615,8 @@ class SandboxManager:
         A preceding Git generation's retained fence is cleared only after verification.
         Read-only Git verification omits persistent scratch/private mounts, so
         configured filters cannot mutate the checked worktree through an alias.
+        ``thread_scope`` binds managed web/Pi callers to their
+        exact thread workspace; generic callers never infer authority from a path.
         """
         # Never reuse container generations. The web layer tears each down at
         # its phase boundary (manage/web/threads.py); a registry entry here
@@ -333,6 +625,20 @@ class SandboxManager:
         # keyed by work_dir, so creating without reaping would overwrite the
         # reference and orphan it (the 3h backstop TTL would eventually catch
         # it, but reaping now is immediate).
+        from assist.browser import authority
+        from assist.browser.manager import BrowserManager
+
+        if browser_capable and thread_scope is None:
+            raise RuntimeError("browser sandbox requires explicit thread authority")
+        if thread_scope is not None:
+            threads_root, thread_id = thread_scope
+            expected = os.path.join(os.path.realpath(threads_root), thread_id, "domain")
+            if os.path.realpath(work_dir) != expected:
+                raise RuntimeError("sandbox workspace does not match thread authority")
+            # The scoped Docker scan also covers pre-journal generations whose
+            # host registry disappeared with a former web worker.
+            BrowserManager.confirm_owner_stopped(
+                threads_root, thread_id, None, before_replacement=True)
         if work_dir in cls._containers:
             cls.cleanup(work_dir)
 
@@ -376,16 +682,20 @@ class SandboxManager:
                 "whole threads dir at once, $ASSIST_THREADS_DIR).  "
                 "See docs/2026-05-08-restrict-git-real-via-non-root-sandbox.org."
             )
+        if browser_capable and st.st_uid == 10001:
+            raise RuntimeError(
+                "Workspace owner conflicts with the reserved browser identity")
         # SINGLE SOURCE OF TRUTH for the sandbox run user.  This one value
         # (the workspace owner) is applied via `containers.run(user=...)`
-        # below and governs everything downstream: every `exec_run` inherits
-        # it (no call passes `user=`), and `DockerSandboxBackend.upload_files`
+        # below and governs agent tool execution; DockerSandboxBackend.upload_files
         # reads it back off the container (`_run_uid_gid`) to stamp uploaded
-        # files with the same ownership — otherwise put_archive's root default
-        # leaves write_file output un-editable.  New features must NOT pass a
-        # different `user=` to `exec_run` or hardcode a uid; derive from the
-        # container's run user so ownership and execution stay aligned.
+        # files with the same ownership. The host-controlled browser launcher
+        # is the deliberate exception: it uses a separate fixed UID and a
+        # private runtime tmpfs so Chromium cannot inherit the agent identity.
         user_arg = f"{st.st_uid}:{st.st_gid}"
+
+        runtime_state.assert_outside_mounts(
+            work_dir, os.path.join(os.path.dirname(work_dir), "tmp"), agent_dir)
 
         # Egress proxy bring-up runs OUTSIDE the broad-except below.
         # If the allowlist file is missing, or the egress network
@@ -406,17 +716,14 @@ class SandboxManager:
 
         try:
             proxy_url = f"http://{EGRESS_PROXY_NAME}:{EGRESS_PROXY_PORT}"
-            # The sandbox is on an internal Docker network — no host-gateway
-            # route, no NAT.  The only reachable name on this network is
-            # ``assist-egress-proxy``, which terminates allowlisted CONNECT
-            # tunnels and forwards allowlisted HTTP requests.
+            # This ordinary shell sandbox is on an internal Docker network;
+            # its configured HTTP(S) clients use the shared egress proxy.
+            # A separate browser UID uses a kernel OUTPUT fence and its own
+            # proxy listener; shell traffic keeps this ordinary route.
             #
-            # NO_PROXY is *not* set: with internal=True there is no direct
-            # path to bypass even for localhost references — every byte
-            # must traverse the proxy.  ASSIST_MODEL_URL (rewritten to
-            # host.docker.internal) reaches the host via the proxy's
-            # bridge-side connection; ``host.docker.internal`` is in the
-            # default allowlist for that reason.
+            # NO_PROXY is not set: configured HTTP(S) client traffic uses
+            # the proxy. ASSIST_MODEL_URL (rewritten to host.docker.internal)
+            # reaches the host through that proxy when allowlisted.
             sandbox_env = {
                 "HTTPS_PROXY": proxy_url,
                 "HTTP_PROXY": proxy_url,
@@ -462,12 +769,39 @@ class SandboxManager:
                     "mode": "rw",
                 }
 
-            if before_start is not None:
-                before_start()
+            browser_options = {}
+            if browser_capable:
+                with open(BROWSER_SECCOMP_PROFILE, encoding="utf-8") as profile:
+                    browser_options = {
+                        "tmpfs": {"/run/assist-browser":
+                                  "rw,nosuid,nodev,size=134217728,uid=10001,gid=10001,mode=0700"},
+                        "security_opt": ["seccomp=" + profile.read()],
+                    }
+            owner = owner_run_id or uuid4().hex
+            if thread_scope is not None:
+                from assist.run_service import RunService
+                runs = RunService(threads_root).list(thread_id)
+                sequence = max((run.admission_sequence for run in runs
+                                if run.user_event_id == run.id), default=0)
+                with authority.fence(threads_root, thread_id) as state:
+                    state.begin(owner, sequence)
+            try:
+                if before_start is not None:
+                    before_start()
+            except Exception:
+                # No Docker generation exists yet. Do not strand a browser
+                # authority lease when the Git pre-create fence refuses.
+                if thread_scope is not None:
+                    with authority.fence(threads_root, thread_id) as state:
+                        state.clear(owner)
+                raise
             container = client.containers.run(
                 SANDBOX_IMAGE,
                 detach=True,
                 remove=True,
+                **({"name": "assist-turn-" + hashlib.sha256(
+                    (os.path.realpath(threads_root) + "\0" + thread_id).encode()
+                ).hexdigest()[:32]} if thread_scope is not None else {}),
                 user=user_arg,
                 volumes=volumes,
                 working_dir="/workspace",
@@ -476,11 +810,21 @@ class SandboxManager:
                 labels={"assist.sandbox": "true"},
                 network=EGRESS_NETWORK,
                 environment=sandbox_env,
+                **browser_options,
             )
+            if thread_scope is not None:
+                with authority.fence(threads_root, thread_id) as state:
+                    state.add_generation(owner, container.id)
+                cls._generation_owners[container.id] = (threads_root, thread_id, owner)
             logger.info("Started sandbox container %s for %s", container.id[:12], work_dir)
             cls._containers[work_dir] = container
-            if include_egress_approvals:
-                cls._record_egress_client(container, work_dir)
+            try:
+                cls._record_egress_client(
+                    client, container, work_dir,
+                    kind="sandbox" if include_egress_approvals else "pi")
+            except Exception:
+                cls.cleanup(work_dir, container)
+                raise
             from assist.sandbox import DockerSandboxBackend
             return DockerSandboxBackend(
                 container, native_agent_dir=agent_dir is not None)
@@ -490,66 +834,119 @@ class SandboxManager:
 
     @classmethod
     def get_sandbox_backend(cls, work_dir: str, tz: str | None = None,
-                            agent_dir: str | None = None, before_start=None):
-        """Return the ordinary Docker sandbox, including its established app env."""
+                            agent_dir: str | None = None,
+                            before_start=None, browser_capable: bool = False,
+                            thread_scope: tuple[str, str] | None = None,
+                            owner_run_id: str | None = None):
+        """Return the ordinary sandbox; managed callers bind its thread authority."""
         return cls._get_sandbox_backend(
-            work_dir, tz, agent_dir, include_assist_env=True, include_egress_approvals=True,
-            before_start=before_start)
+            work_dir, tz, agent_dir, include_assist_env=True,
+            include_egress_approvals=True, before_start=before_start,
+            browser_capable=browser_capable,
+            thread_scope=thread_scope, owner_run_id=owner_run_id)
 
     @classmethod
-    def get_pi_sandbox_backend(cls, work_dir: str, tz: str | None = None, before_start=None):
+    def get_pi_sandbox_backend(cls, work_dir: str, tz: str | None = None, *,
+                               before_start=None,
+                               thread_scope: tuple[str, str] | None = None,
+                               owner_run_id: str | None = None):
         """Return Pi's workspace-only Docker sandbox, without app secrets or `/agent`."""
         return cls._get_sandbox_backend(
-            work_dir, tz, None, include_assist_env=False, include_egress_approvals=False,
-            before_start=before_start)
+            work_dir, tz, None, include_assist_env=False,
+            include_egress_approvals=False, before_start=before_start,
+            thread_scope=thread_scope,
+            owner_run_id=owner_run_id)
 
     @classmethod
-    def get_git_verification_backend(cls, work_dir: str, tz: str | None = None, before_start=None):
+    def get_git_verification_backend(cls, work_dir: str, tz: str | None = None,
+                                     before_start=None):
         """Credential-free read-only worktree, with ephemeral scratch and no `/agent`."""
         return cls._get_sandbox_backend(
-            work_dir, tz, None, include_assist_env=False, include_egress_approvals=False,
-            before_start=before_start, readonly_workspace=True)
+            work_dir, tz, None, include_assist_env=False,
+            include_egress_approvals=False, before_start=before_start,
+            readonly_workspace=True)
 
-    # work_dir -> egress-network IP for the client-attribution map (thread-
-    # scoped egress grants; docs/2026-07-21-egress-approval-hitl.org).
-    _egress_client_ips: dict[str, str] = {}
+    # work_dir -> (map directory, egress-network IP, container generation)
+    # for shell attribution or an explicit Pi no-grant marker.
+    _egress_client_ips: dict[str, tuple[str, str, str]] = {}
+    _generation_owners: dict[str, tuple[str, str, str]] = {}
 
     @classmethod
-    def _record_egress_client(cls, container, work_dir: str) -> None:
-        """Map this sandbox's egress-network IP to its thread in the proxy's
-        client-map. Best-effort by contract: a failure only costs this turn
-        its thread-scoped grants (the proxy denies fail-closed on an unknown
-        IP) — it must never fail the sandbox start. Dormant when the
-        approvals dir env is unset. The thread id is work_dir's parent dir
-        name (work_dir is ``<root>/<tid>/<subdir>`` — the
-        ``thread_default_working_dir`` layout)."""
-        egress_dir = os.environ.get("ASSIST_EGRESS_APPROVALS_DIR")
-        if not egress_dir:
-            return
-        from assist.egress.store import approvals_dir_is_safe
-        if not approvals_dir_is_safe(egress_dir):
-            return   # same refusal as the mount — never write under a sandbox-reachable dir
+    def _record_egress_client(cls, client, container, work_dir: str,
+                              *, kind: str) -> None:
+        """Use a bounded worker for production attribution, or verify base-only mode."""
+        import docker
+        if isinstance(client, docker.DockerClient):
+            import json
+            import sys
+            result = _bounded_egress_worker([
+                sys.executable, "-m", "assist.egress.runtime_worker", "record",
+                container.id, work_dir, kind])
+            if result.returncode:
+                raise RuntimeError(
+                    "egress client attribution failed: "
+                    + result.stderr.decode("utf-8", errors="replace")[-1000:])
+            identity = json.loads(result.stdout)
+        else:
+            identity = cls._record_egress_client_direct(
+                client, container, work_dir, kind=kind)
+        if identity is not None:
+            cls._egress_client_ips[work_dir] = tuple(identity)
+
+    @classmethod
+    def _record_egress_client_direct(cls, client, container, work_dir: str,
+                                     *, kind: str) -> tuple[str, str, str] | None:
+        """Publish under the setup fence, or prove a base-only no-map proxy."""
+        from assist.egress.client_map import ClientRecord, configured_directory, record_client
         try:
+            directory = configured_directory()
+        except (OSError, RuntimeError):
+            directory = None
+        # The same interprocess lock protects proxy replacement. Without it,
+        # A could be inspected, then replaced by B before attribution writes
+        # to A's map, exposing a recycled IP under B's stale grant.
+        with _proxy_setup_lock():
+            proxy = client.containers.get(EGRESS_PROXY_NAME)
+            proxy.reload()
+            mounts = proxy.attrs.get("Mounts")
+            if proxy.status != "running" or not isinstance(mounts, list):
+                raise RuntimeError("proxy client-map mode is unconfirmed")
+            map_mounts = [mount.get("Source") for mount in mounts
+                          if mount.get("Destination") == "/client-map"]
+            if directory is None:
+                # A missing optional map is safe only with a base-only proxy.
+                if map_mounts:
+                    raise RuntimeError("proxy client-map mode is unconfirmed")
+                return
+            if map_mounts != [directory]:
+                raise RuntimeError("proxy client-map mode is unconfirmed")
             container.reload()
+            if (container.status != "running"
+                    or (container.attrs["NetworkSettings"]["Networks"]
+                        [EGRESS_NETWORK]["NetworkID"])
+                    != (proxy.attrs["NetworkSettings"]["Networks"]
+                        [EGRESS_NETWORK]["NetworkID"])):
+                raise RuntimeError("sandbox proxy network identity changed")
+            runtime_state.assert_admissible("proxy", proxy.id)
+            runtime_state.assert_admissible(
+                "network", proxy.attrs["NetworkSettings"]["Networks"]
+                [EGRESS_NETWORK]["NetworkID"])
             ip = (container.attrs["NetworkSettings"]["Networks"]
                   [EGRESS_NETWORK]["IPAddress"])
             tid = os.path.basename(os.path.dirname(work_dir))
-            if ip and tid:
-                from assist.egress.client_map import record_client
-                record_client(egress_dir, ip, tid)
-                cls._egress_client_ips[work_dir] = ip
-        except Exception:
-            logger.warning("egress client-map record failed for %s (thread-"
-                           "scoped grants deny this turn)", work_dir,
-                           exc_info=True)
+            if not ip or not tid:
+                raise RuntimeError("sandbox has no proxy client identity")
+            record_client(directory, ip, ClientRecord(tid, container.id, kind))
+            return directory, ip, container.id
 
     @classmethod
-    def _forget_egress_client(cls, work_dir: str) -> None:
-        egress_dir = os.environ.get("ASSIST_EGRESS_APPROVALS_DIR")
-        ip = cls._egress_client_ips.pop(work_dir, None)
-        if egress_dir and ip:
+    def _forget_egress_client(cls, work_dir: str, generation: str | None = None) -> None:
+        identity = cls._egress_client_ips.get(work_dir)
+        if identity and (generation is None or identity[2] == generation):
             from assist.egress.client_map import forget_client
-            forget_client(egress_dir, ip)
+            forget_client(*identity)
+            if cls._egress_client_ips.get(work_dir) == identity:
+                cls._egress_client_ips.pop(work_dir, None)
 
     @classmethod
     def current_container(cls, work_dir: str):
@@ -573,24 +970,47 @@ class SandboxManager:
             pass  # Auto-removal is also proof that this exact generation exited.
         if cls._containers.get(work_dir) is not expected_container:
             raise RuntimeError("Git sandbox generation changed during teardown")
+        scoped_owner = cls._generation_owners.get(expected_container.id)
+        if scoped_owner is not None:
+            from assist.browser import authority
+            threads_root, thread_id, owner = scoped_owner
+            if os.path.isdir(os.path.join(threads_root, thread_id)):
+                with authority.fence(threads_root, thread_id) as state:
+                    if (state.lease is not None
+                            and state.lease["owner_run_id"] == owner):
+                        state.remove_generation(owner, expected_container.id)
+                        state.clear(owner)
         cls._containers.pop(work_dir)
         cls._forget_egress_client(work_dir)
+        cls._generation_owners.pop(expected_container.id, None)
+
 
     @classmethod
     def cleanup(cls, work_dir: str, expected_container=_ANY_CONTAINER) -> None:
-        """Confirm the captured generation stopped before releasing its identity.
+        """Prove the captured generation stopped before releasing its identity.
 
-        A stale caller may stop its own captured container, but cannot remove a
-        replacement registered for the same workspace.
+        A stale caller may still stop its own captured container, but cannot
+        remove a newer registry entry or proxy attribution for the workspace.
         """
         container = (cls._containers.get(work_dir)
                      if expected_container is _ANY_CONTAINER else expected_container)
         if container is None:
             return
         confirm_generation_stopped(container.id)
+        scoped_owner = cls._generation_owners.get(container.id)
+        if scoped_owner is not None:
+            from assist.browser import authority
+            threads_root, thread_id, owner = scoped_owner
+            if os.path.isdir(os.path.join(threads_root, thread_id)):
+                with authority.fence(threads_root, thread_id) as state:
+                    if (state.lease is not None
+                            and state.lease["owner_run_id"] == owner):
+                        state.remove_generation(owner, container.id)
+                        state.clear(owner)
         if cls._containers.get(work_dir) is container:
-            cls._forget_egress_client(work_dir)
+            cls._forget_egress_client(work_dir, container.id)
             cls._containers.pop(work_dir, None)
+        cls._generation_owners.pop(container.id, None)
         logger.info("Cleaned up container %s for %s", container.id[:12], work_dir)
 
     @classmethod

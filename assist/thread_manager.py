@@ -52,11 +52,14 @@ logger = logging.getLogger(__name__)
 # route keeps its historical render-skill name.
 _RENDER_SKILL_ROUTE = "/render-skill/"
 _RENDER_SKILLS_DIR = os.path.join(os.path.dirname(__file__), "web_skills")
+_BROWSER_SKILL_ROUTE = "/browser-skill/"
+_BROWSER_SKILLS_DIR = os.path.join(os.path.dirname(__file__), "browser", "skills")
 _render_skill_sources = None
+_browser_skill_source = None
 _triage_skill_sources_cache = None
 
 
-def web_main_skill_sources() -> dict:
+def web_main_skill_sources(*, browser: bool = False) -> dict:
     """Route -> backend for the web AgentSpec's web-only skills.
 
     The route keeps its historical ``render-skill`` name while serving all
@@ -64,13 +67,18 @@ def web_main_skill_sources() -> dict:
     construction and deepagents' transitive imports stay off module load (same
     pattern as emacsos-server's ``_skill_sources``).
     """
-    global _render_skill_sources
+    global _render_skill_sources, _browser_skill_source
     if _render_skill_sources is None:
         from assist.backends import create_bundled_skills_backend
         _render_skill_sources = {
             _RENDER_SKILL_ROUTE: create_bundled_skills_backend(_RENDER_SKILLS_DIR)
         }
-    return _render_skill_sources
+    if not browser:
+        return _render_skill_sources
+    if _browser_skill_source is None:
+        from assist.backends import create_bundled_skills_backend
+        _browser_skill_source = create_bundled_skills_backend(_BROWSER_SKILLS_DIR)
+    return {**_render_skill_sources, _BROWSER_SKILL_ROUTE: _browser_skill_source}
 
 
 # Compatibility for focused middleware fixtures; new callers use the explicit
@@ -208,7 +216,25 @@ class ThreadManager:
         tid: str,
         on_delete: List[Callable[[str], None]] | None = None,
     ) -> None:
-        """Permanently delete a thread: sandbox container, DB rows, dir.
+        """Stop any browser before permanently deleting a thread."""
+        from contextlib import nullcontext
+        from assist.browser import authority
+        from assist.browser.manager import BrowserManager
+
+        with BrowserManager.bounded_thread_gate(tid):
+            generation_guard = (authority.generation_fence(self.root_dir, tid)
+                                if os.path.isdir(self.thread_dir(tid)) else nullcontext())
+            with generation_guard:
+                BrowserManager.cleanup(tid)
+                BrowserManager.confirm_owner_stopped(self.root_dir, tid, None)
+                self._hard_delete_after_browser_stop(tid, on_delete)
+
+    def _hard_delete_after_browser_stop(
+        self,
+        tid: str,
+        on_delete: List[Callable[[str], None]] | None = None,
+    ) -> None:
+        """Permanently delete the sandbox container, DB rows and directory.
 
         Layer 0 of the threads.db growth plan
         (docs/2026-05-04-threads-db-layer-0-thread-retention.org).
@@ -216,6 +242,11 @@ class ThreadManager:
         The order of operations is load-bearing.  See the design doc
         "Approach" section for why each step happens before the next.
         Briefly:
+
+        The caller proves browser teardown while holding its thread gate and
+        exact generation fence
+        before these steps. ``hard_delete`` does both for direct callers;
+        web deletion proves the stop outside its global Run admission lock.
 
         1. ``SandboxManager.cleanup`` first so any in-flight agent run
            hits the existing ``SandboxContainerLostError`` path
@@ -313,7 +344,8 @@ class ThreadManager:
             on_queue_state: Callable[[str], None] | None = None,
             configurable: dict | None = None,
             triage: bool = False,
-            assistant_id: str = "general-agent") -> Thread:
+            assistant_id: str = "general-agent",
+            browser_tools: tuple = ()) -> Thread:
         tdir = self.thread_dir(thread_id)
         if not os.path.isdir(tdir):
             raise FileNotFoundError(f"thread directory not found: {thread_id}, {tdir}")
@@ -322,7 +354,8 @@ class ThreadManager:
 
         # A triage turn (untrusted inbound message) gets the reduced reply-only tool set +
         # its distinct reply HITL gate; normal turns get the full web tools and mail HITL.
-        tools = _web_triage_tools if triage else _web_tools
+        tools = (_web_triage_tools if triage else
+                 _web_tools + (browser_tools if assistant_id == "general-agent" else ()))
         interrupt_on = _web_triage_interrupt_on if triage else _web_interrupt_on
         specialized = None
         if assistant_id == "context-agent":
@@ -370,7 +403,7 @@ class ThreadManager:
             working_dir, **thread_kwargs,
             spec=AgentSpec(
                 skill_sources=(_triage_skill_sources() if triage
-                               else web_main_skill_sources()),
+                               else web_main_skill_sources(browser=bool(browser_tools))),
                 tools=tools,
                 async_subagent_tools=async_tools,
                 web_main=(assistant_id == "general-agent" and not triage),
@@ -378,24 +411,8 @@ class ThreadManager:
                 interrupt_on=interrupt_on))
 
     def remove(self, thread_id: str) -> None:
-        tdir = self.thread_dir(thread_id)
-        if os.path.isdir(tdir):
-            # Best-effort delete
-            for root, dirs, files in os.walk(tdir, topdown=False):
-                for f in files:
-                    try:
-                        os.remove(os.path.join(root, f))
-                    except Exception:
-                        pass
-                for d in dirs:
-                    try:
-                        os.rmdir(os.path.join(root, d))
-                    except Exception:
-                        pass
-            try:
-                os.rmdir(tdir)
-            except Exception:
-                pass
+        """Remove a thread only after the common durable browser stop proof."""
+        self.hard_delete(thread_id)
 
     def new(self, working_dir: str|None = None, sandbox_backend=None,
             on_queue_state: Callable[[str], None] | None = None) -> Thread:
@@ -434,6 +451,8 @@ class ThreadManager:
                     json.dump(hidden, stream)
                     stream.flush()
                     os.fsync(stream.fileno())
+                from assist.browser.authority import mark_new_thread
+                mark_new_thread(self.root_dir, os.path.basename(pending))
                 directory_fd = os.open(pending, os.O_RDONLY)
                 try:
                     os.fsync(directory_fd)
@@ -449,7 +468,18 @@ class ThreadManager:
                 if os.path.isdir(pending):
                     shutil.rmtree(pending)
             return tid
-        os.makedirs(tdir, exist_ok=True)
+        try:
+            os.mkdir(tdir)
+        except FileExistsError:
+            if not os.path.isdir(tdir):
+                raise
+        else:
+            from assist.browser.authority import mark_new_thread
+            try:
+                mark_new_thread(self.root_dir, tid)
+            except Exception:
+                shutil.rmtree(tdir)
+                raise
         return tid
 
     def reserve_visible(self, engine: EngineName,
@@ -477,6 +507,8 @@ class ThreadManager:
             pending = tempfile.mkdtemp(prefix=".thread-", dir=self.root_dir)
             try:
                 write_new_thread_engine(pending, engine)
+                from assist.browser.authority import mark_new_thread
+                mark_new_thread(self.root_dir, os.path.basename(pending))
                 os.rename(pending, tdir)
                 root_fd = os.open(self.root_dir, os.O_RDONLY | os.O_DIRECTORY)
                 try:

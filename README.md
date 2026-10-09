@@ -44,6 +44,30 @@ where reliability is harder than with frontier APIs.
   instead fail closed without the restricted sandbox; broader cross-surface
   isolation remains planned rather than shipped.
 
+- **Website browser.** Ordinary web main-agent turns can render and interact
+  with JavaScript pages. Chromium starts lazily inside that turn's sandbox and
+  stops when the sandbox ends, including an approval or clarification pause.
+  A separate browser UID can reach only its attributed listener on the
+  existing egress proxy. Browser and shell destinations follow the same
+  operator allowlist (any port) and exact thread/host/port grants; page content
+  cannot approve access. A policy-only browser preflight checks a top-level
+  origin without contacting it and can annotate origins observed from an open
+  page. Those dependencies may be incomplete or incidental; the agent can
+  request up to three needed hosts through ordinary individual approval cards.
+  Browser tools do not return non-HTTP(S)
+  page content. An empty new popup can be reused for an HTTP(S) visit.
+  Deleting a thread proves its browser sandbox stopped before removing thread
+  state. A private, size-limited Playwright snapshot can restore cookies and
+  local storage on a later turn. Live tabs, DOM form inputs, page IDs and
+  observed targets do not survive; a site's stored values may reappear, so
+  the agent reopens and observes the page.
+  A short `/agent/browser-recovery.md` note may describe non-sensitive progress.
+  Chromium has its own PID namespace inside the turn sandbox. Its processes
+  stop when that exact sandbox generation stops; during a host outage without
+  restart, the sandbox's common three-hour PID 1 expiry bounds their lifetime.
+  On restart, a new managed generation waits for confirmed cleanup. Browser
+  and shell share the sandbox's network and mounts.
+
 - **Specialized agents and skills out of the box.**
   - **Research agent** rigorous fact-checking and critiquing with
     internet search (`search_internet`) and URL fetch (`read_url`).
@@ -995,13 +1019,15 @@ assist/
 │   │   ├── dev/SKILL.md     # TDD workflow + code-task routing
 │   │   ├── org-format/SKILL.md
 │   │   └── …
+│   ├── browser/             # Turn-scoped Chromium runner and browser skill
 │   ├── main_skills/         # Supervisor-only skills for the async main
 │   │   └── complex-request/SKILL.md
 │   └── templates/           # Jinja prompt templates
 │       ├── deepagents/      # Per-agent system prompts
 │       └── reference/       # Inline references (legacy; being moved into skills)
 ├── dockerfiles/             # Docker images
-│   └── Dockerfile.sandbox   # Sandbox container (Arch-based, with git/python/emacs)
+│   ├── Dockerfile.sandbox   # Sandbox container (Arch-based, with git/python/emacs)
+│   └── Dockerfile.browser   # Legacy separate Chromium image
 ├── edd/                     # Agent evaluations (LLM-driven, network-bound)
 │   ├── eval/                # Evaluation test suite — anything that calls the real model
 │   └── history/             # Test results history (JUnit XML)
@@ -1114,10 +1140,20 @@ is reported through bounded `workspace.sync_error` metadata.
 
 On the web path, the agent executes shell commands inside a Docker container rather than on the host. Each turn gets a fresh container with the domain repository bind-mounted at `/workspace`, also exposed as `/user`; persistent thread scratch at `/tmp`; and, for ordinary visible Deep main-agent turns, private state at `/agent`. Ordinary Deep sandboxes inherit the configured `ASSIST_*` environment, so that profile is not yet a credential-free boundary. Pi and Git preparation/commit profiles omit the generic application environment and private agent mount. The CLI path remains host-backed.
 
-The sandbox image is built automatically by `make web` (and `make deploy`). To build it manually:
+The sandbox and browser images are built automatically by `make web` (and `make deploy`). To build them manually:
 ```bash
-make sandbox-build
+make sandbox-build browser-build
 ```
+
+Browser use also needs a proxy-only client-map directory outside the thread
+workspaces. Set `ASSIST_EGRESS_CLIENT_MAP_DIR` to an absolute directory owned
+by the web user and not group/world writable. If safe egress approvals are
+already configured, their proxy-mounted directory supplies the map by default.
+The browser tool is unavailable when neither directory is configured.
+Shared proxy/network retirement uses a separate host-only ledger outside the
+thread workspaces (`ASSIST_EGRESS_RUNTIME_DIR`, or a private sibling directory
+by default). It must remain writable even when browser attribution is disabled;
+if it cannot be read safely, new egress setup fails closed.
 
 If Docker is unavailable, non-Git work can retain the established host fallback.
 Git-bound web turns fail closed instead of running unsafe host worktree commands.

@@ -1,0 +1,30 @@
+#+title: Browser full-generation web binding correction
+#+date: 2026-10-03
+
+* Observed failure
+The user explicitly requested browser use. The first model call tried to load
+=browse-website=, but the skill was absent. The web turn then used static tools.
+This was a capability binding failure rather than failure to select the skill.
+
+=DockerSandboxBackend.id= is a twelve-character presentation ID. The sandbox
+authority journal stores the full container ID. The web layer passed the short
+ID to exact-generation readiness and session construction, so readiness failed
+and the browser tools and skill route were omitted.
+
+* Correction and verification
+Both bindings now use the captured Docker container's full ID. The backend's
+presentation ID and exact lease checks remain unchanged. Static routing and
+private-host policy are unchanged; the policy choice remains pending.
+
+The deterministic web-path regression uses the real backend ID property,
+authority readiness, session registration and ThreadManager tool/skill
+composition. Docker creation and model graph construction are stubbed. It
+checks matching full-generation attachment, mismatched-generation refusal,
+the session command fence, and turn-end session closure. It reproduced the
+missing capability before the correction. This proves host binding, not real
+Chromium execution or completion of the user's shopping task.
+
+* Historical supersessions
+No dated design is rewritten. Prior isolated runtime checks remain valid for
+unchanged runtime bytes; the new web-path regression supplies the missing
+caller identity evidence.

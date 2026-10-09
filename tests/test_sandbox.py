@@ -27,7 +27,7 @@ def test_stop_proof_waits_for_auto_removed_name_release():
 
     responses = [
         MagicMock(returncode=0, stdout=b"", stderr=b""),
-        MagicMock(returncode=0, stdout=b"false", stderr=b""),
+        MagicMock(returncode=0, stdout=b"false\n", stderr=b""),
         MagicMock(returncode=0, stdout=b"", stderr=b""),
         MagicMock(returncode=1, stdout=b"", stderr=b"No such container"),
     ]
@@ -595,15 +595,35 @@ class TestDockerSandboxBackendPathPrefixing(TestCase):
 class TestSandboxManager(TestCase):
     """Test SandboxManager Docker lifecycle with mocked Docker client."""
 
+    @staticmethod
+    def _attached_proxy(container, client):
+        container.status = "running"
+        container.attrs = {"Mounts": [], "NetworkSettings": {"Networks": {
+            "assist-egress-network": {"NetworkID": "ordinary-net"}}}}
+        client.api._version = "1.43"
+        client.api.create_container.return_value = {"Id": container.id}
+        client.containers.get.return_value = container
+
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         # Clear class-level state between tests
         SandboxManager._docker_client = None
         SandboxManager._containers.clear()
+        SandboxManager._generation_owners.clear()
+        # These lifecycle mocks have no Docker network attributes; live
+        # routing validation is covered by the real browser Docker tests.
+        self.network_identity = patch(
+            'assist.sandbox_manager._network_identity',
+            side_effect=lambda _network, *, isolated:
+                ('browser-net', '172.31.0.0/16') if isolated
+                else ('ordinary-net', '172.30.0.0/16'))
+        self.network_identity.start()
 
     def tearDown(self):
+        self.network_identity.stop()
         SandboxManager._docker_client = None
         SandboxManager._containers.clear()
+        SandboxManager._generation_owners.clear()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
@@ -618,15 +638,16 @@ class TestSandboxManager(TestCase):
         mock_container.status = "running"
         # Doubles as the egress-proxy container too — _wait_for_egress_proxy_ready
         # polls .logs() looking for "listening on" before returning.
-        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n" + \
+            b"egress-proxy: listening on 0.0.0.0:8889\n"
+        self._attached_proxy(mock_container, mock_client)
         mock_client.containers.run.return_value = mock_container
 
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
             sandbox = SandboxManager.get_sandbox_backend(test_path)
 
         self.assertIsNotNone(sandbox)
-        # Two containers.run calls: the egress proxy (idempotent setup)
-        # and the sandbox itself.  Find the sandbox call specifically.
+        # The proxy uses create/start; the shell uses containers.run.
         sandbox_calls = [
             c for c in mock_client.containers.run.call_args_list
             if c.args and c.args[0] == "assist-sandbox"
@@ -637,6 +658,207 @@ class TestSandboxManager(TestCase):
         self.assertIn(test_path, SandboxManager._containers)
 
     @patch('assist.sandbox.DockerSandboxBackend')
+    def test_browser_capable_turn_gets_private_tmpfs_and_seccomp(self, _backend):
+        from assist.browser.authority import mark_new_thread
+        from assist.browser.manager import BrowserManager
+        test_path = os.path.join(self.temp_dir, "browser-turn", "domain")
+        os.makedirs(test_path)
+        mark_new_thread(self.temp_dir, "browser-turn")
+        client = MagicMock()
+        container = MagicMock()
+        container.id = "browser-turn-generation"
+        container.status = "running"
+        container.logs.return_value = (
+            b"egress-proxy: listening on 0.0.0.0:8888\n"
+            b"egress-proxy: listening on 0.0.0.0:8889\n")
+        self._attached_proxy(container, client)
+        client.containers.run.return_value = container
+        with patch.object(SandboxManager, '_get_docker_client', return_value=client), \
+             patch.object(BrowserManager, 'reconcile_startup', return_value=True), \
+             patch.object(BrowserManager, 'confirm_owner_stopped', return_value=False):
+            SandboxManager.get_sandbox_backend(
+                test_path, browser_capable=True,
+                thread_scope=(self.temp_dir, "browser-turn"))
+        options = client.containers.run.call_args.kwargs
+        assert options["tmpfs"]["/run/assist-browser"].endswith(
+            "uid=10001,gid=10001,mode=0700")
+        assert options["security_opt"][0].startswith("seccomp={")
+
+    @patch('assist.sandbox.DockerSandboxBackend')
+    def test_managed_shell_generation_is_journaled_and_cleared(self, _backend):
+        from assist.browser import authority
+        from assist.browser.manager import BrowserManager
+
+        test_path = os.path.join(self.temp_dir, "managed-turn", "domain")
+        os.makedirs(test_path)
+        authority.mark_new_thread(self.temp_dir, "managed-turn")
+        client = MagicMock()
+        container = MagicMock()
+        container.id = "managed-generation"
+        container.status = "running"
+        container.logs.return_value = (
+            b"egress-proxy: listening on 0.0.0.0:8888\n"
+            b"egress-proxy: listening on 0.0.0.0:8889\n")
+        self._attached_proxy(container, client)
+        client.containers.run.return_value = container
+        with patch.object(SandboxManager, '_get_docker_client', return_value=client), \
+             patch.object(BrowserManager, 'reconcile_startup', return_value=True), \
+             patch.object(BrowserManager, 'confirm_owner_stopped', return_value=False):
+            SandboxManager.get_sandbox_backend(
+                test_path, thread_scope=(self.temp_dir, "managed-turn"),
+                owner_run_id="claimed-run")
+        with authority.fence(self.temp_dir, "managed-turn") as state:
+            self.assertEqual(state.lease["owner_run_id"], "claimed-run")
+            self.assertEqual(state.lease["generations"], [container.id])
+        with patch('assist.sandbox_manager.confirm_generation_stopped') as stopped:
+            SandboxManager.cleanup(test_path, container)
+        stopped.assert_called_once_with(container.id)
+        with authority.fence(self.temp_dir, "managed-turn") as state:
+            self.assertIsNone(state.lease)
+
+    def test_git_verified_cleanup_also_clears_managed_generation(self):
+        from assist.browser import authority
+
+        test_path = os.path.join(self.temp_dir, "git-turn", "domain")
+        os.makedirs(test_path)
+        authority.mark_new_thread(self.temp_dir, "git-turn")
+        container = MagicMock()
+        container.id = "git-generation"
+        SandboxManager._containers[test_path] = container
+        SandboxManager._generation_owners[container.id] = (
+            self.temp_dir, "git-turn", "claimed-run")
+        with authority.fence(self.temp_dir, "git-turn") as state:
+            state.begin("claimed-run", 1)
+            state.add_generation("claimed-run", container.id)
+
+        SandboxManager.cleanup_verified(test_path, container)
+
+        container.kill.assert_called_once_with()
+        container.wait.assert_called_once_with(timeout=10)
+        self.assertNotIn(test_path, SandboxManager._containers)
+        self.assertNotIn(container.id, SandboxManager._generation_owners)
+        with authority.fence(self.temp_dir, "git-turn") as state:
+            self.assertIsNone(state.lease)
+
+    def test_git_failed_stop_retains_managed_generation(self):
+        from assist.browser import authority
+
+        test_path = os.path.join(self.temp_dir, "git-turn", "domain")
+        os.makedirs(test_path)
+        authority.mark_new_thread(self.temp_dir, "git-turn")
+        container = MagicMock()
+        container.id = "git-generation"
+        container.kill.side_effect = RuntimeError("stop unconfirmed")
+        SandboxManager._containers[test_path] = container
+        SandboxManager._generation_owners[container.id] = (
+            self.temp_dir, "git-turn", "claimed-run")
+        with authority.fence(self.temp_dir, "git-turn") as state:
+            state.begin("claimed-run", 1)
+            state.add_generation("claimed-run", container.id)
+
+        with self.assertRaisesRegex(RuntimeError, "stop unconfirmed"):
+            SandboxManager.cleanup_verified(test_path, container)
+
+        self.assertIs(SandboxManager._containers[test_path], container)
+        self.assertIn(container.id, SandboxManager._generation_owners)
+        with authority.fence(self.temp_dir, "git-turn") as state:
+            self.assertEqual(state.lease["generations"], [container.id])
+
+    def test_generic_workspaces_do_not_access_browser_authority(self):
+        from docker.errors import DockerException
+        from assist.browser import authority
+
+        work_dirs = [self.temp_dir, os.path.join(self.temp_dir, "scratch"),
+                     os.path.join(self.temp_dir, "other"),
+                     os.path.join(self.temp_dir, "domain")]
+        for work_dir in work_dirs:
+            os.makedirs(work_dir, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="sandbox-scope-ledger-") as ledger:
+            with patch.dict(os.environ, {"ASSIST_EGRESS_RUNTIME_DIR": ledger}), \
+                 patch.object(authority, "fence", side_effect=AssertionError(
+                     "generic workspace must not access thread authority")) as fence, \
+                 patch.object(SandboxManager, "_get_docker_client",
+                              side_effect=DockerException("no Docker in regression")):
+                for work_dir in work_dirs:
+                    self.assertIsNone(SandboxManager.get_sandbox_backend(work_dir))
+        fence.assert_not_called()
+
+    def test_browser_sandbox_requires_explicit_scope_before_docker(self):
+        with patch.object(SandboxManager, "_get_docker_client") as docker_client:
+            with self.assertRaisesRegex(RuntimeError, "explicit thread authority"):
+                SandboxManager.get_sandbox_backend(self.temp_dir, browser_capable=True)
+        docker_client.assert_not_called()
+
+    def test_cross_thread_workspace_alias_is_rejected_before_authority(self):
+        from assist.browser import authority
+
+        first = os.path.join(self.temp_dir, "first")
+        second = os.path.join(self.temp_dir, "second", "domain")
+        os.makedirs(first)
+        os.makedirs(second)
+        alias = os.path.join(first, "domain")
+        os.symlink(second, alias)
+        with patch.object(authority, "fence") as fence, \
+             patch.object(SandboxManager, "_get_docker_client") as docker_client:
+            for browser_capable in (False, True):
+                with self.assertRaisesRegex(RuntimeError, "does not match thread authority"):
+                    SandboxManager.get_sandbox_backend(
+                        alias, browser_capable=browser_capable,
+                        thread_scope=(self.temp_dir, "first"))
+            with self.assertRaisesRegex(RuntimeError, "does not match thread authority"):
+                SandboxManager.get_pi_sandbox_backend(
+                    alias, thread_scope=(self.temp_dir, "first"))
+        fence.assert_not_called()
+        docker_client.assert_not_called()
+
+    def test_browser_lease_requires_stop_proof_before_any_replacement(self):
+        from assist.browser import authority
+        from assist.browser.manager import BrowserManager, BrowserUnavailable
+
+        test_path = os.path.join(self.temp_dir, "browser-turn", "domain")
+        os.makedirs(test_path)
+        authority.mark_new_thread(self.temp_dir, "browser-turn")
+        with authority.fence(self.temp_dir, "browser-turn") as state:
+            state.begin("prior-run", 1)
+            state.add_generation("prior-run", "prior-generation")
+        stale = MagicMock(id="prior-generation")
+        stale.kill.side_effect = RuntimeError("Docker kill uncertain")
+        SandboxManager._containers[test_path] = stale
+
+        with patch.object(BrowserManager, "reconcile_startup", return_value=True), \
+             patch.object(BrowserManager, "confirm_owner_stopped",
+                          side_effect=BrowserUnavailable("stop unconfirmed")) as proof:
+            with self.assertRaisesRegex(BrowserUnavailable, "stop unconfirmed"):
+                SandboxManager.get_sandbox_backend(
+                    test_path, browser_capable=False,
+                    thread_scope=(self.temp_dir, "browser-turn"))
+            with self.assertRaisesRegex(BrowserUnavailable, "stop unconfirmed"):
+                SandboxManager.get_pi_sandbox_backend(
+                    test_path, thread_scope=(self.temp_dir, "browser-turn"))
+        stale.kill.assert_not_called()
+        self.assertIs(SandboxManager._containers[test_path], stale)
+        self.assertEqual(proof.call_count, 2)
+        self.assertEqual(proof.call_args_list[0], proof.call_args_list[1])
+        proof.assert_called_with(
+            self.temp_dir, "browser-turn", None, before_replacement=True)
+
+    def test_covered_prejournal_thread_still_requires_scoped_stop_proof(self):
+        from assist.browser import authority
+        from assist.browser.manager import BrowserManager, BrowserUnavailable
+
+        test_path = os.path.join(self.temp_dir, "covered-thread", "domain")
+        os.makedirs(test_path)
+        authority.mark_new_thread(self.temp_dir, "covered-thread")
+        with patch.object(BrowserManager, "reconcile_startup", return_value=True), \
+             patch.object(BrowserManager, "confirm_owner_stopped",
+                          side_effect=BrowserUnavailable("old generation unconfirmed")) as proof:
+            with self.assertRaisesRegex(BrowserUnavailable, "old generation unconfirmed"):
+                SandboxManager.get_sandbox_backend(
+                    test_path, thread_scope=(self.temp_dir, "covered-thread"))
+        proof.assert_called_once_with(
+            self.temp_dir, "covered-thread", None, before_replacement=True)
+
+    @patch('assist.sandbox.DockerSandboxBackend')
     def test_agent_dir_is_created_mounted_and_enables_native_paths(self,
                                                                   mock_backend_cls):
         test_path = os.path.join(self.temp_dir, "thread", "domain")
@@ -645,7 +867,9 @@ class TestSandboxManager(TestCase):
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.id = "test123456ab"
-        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n" + \
+            b"egress-proxy: listening on 0.0.0.0:8889\n"
+        self._attached_proxy(mock_container, mock_client)
         mock_client.containers.run.return_value = mock_container
 
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
@@ -666,7 +890,9 @@ class TestSandboxManager(TestCase):
         os.makedirs(test_path)
         mock_client = MagicMock()
         mock_container = MagicMock(id="test123456ab", status="running")
-        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n" + \
+            b"egress-proxy: listening on 0.0.0.0:8889\n"
+        self._attached_proxy(mock_container, mock_client)
         mock_client.containers.run.return_value = mock_container
 
         with patch.dict(os.environ, {
@@ -694,14 +920,17 @@ class TestSandboxManager(TestCase):
         os.makedirs(test_path)
         mock_client = MagicMock()
         mock_container = MagicMock(id="test123456ab", status="running")
-        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n" + \
+            b"egress-proxy: listening on 0.0.0.0:8889\n"
+        self._attached_proxy(mock_container, mock_client)
         mock_client.containers.run.return_value = mock_container
 
         with patch.dict(os.environ, {"ASSIST_MODEL_URL": "http://model.example.test"}):
             with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
                 with patch.object(SandboxManager, '_record_egress_client') as enroll:
                     SandboxManager.get_pi_sandbox_backend(test_path)
-        enroll.assert_not_called()
+        enroll.assert_called_once_with(
+            mock_client, mock_container, test_path, kind="pi")
 
         sandbox_call = next(c for c in mock_client.containers.run.call_args_list
                             if c.args and c.args[0] == "assist-sandbox")
@@ -724,7 +953,9 @@ class TestSandboxManager(TestCase):
         mock_container = MagicMock()
         mock_container.id = "test123456ab"
         mock_container.status = "running"
-        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n" + \
+            b"egress-proxy: listening on 0.0.0.0:8889\n"
+        self._attached_proxy(mock_container, mock_client)
         mock_client.containers.run.return_value = mock_container
 
         host_st = os.stat(test_path)
@@ -800,7 +1031,9 @@ class TestSandboxManager(TestCase):
         fresh = MagicMock()
         fresh.id = "fresh1234567"
         fresh.status = "running"
-        fresh.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        fresh.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n" + \
+            b"egress-proxy: listening on 0.0.0.0:8889\n"
+        self._attached_proxy(fresh, mock_client)
         mock_client.containers.run.return_value = fresh
 
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client), \
@@ -828,7 +1061,7 @@ class TestSandboxManager(TestCase):
         mock_client = MagicMock()
         # Has to be a DockerException subclass now that the catch is
         # narrowed; a bare Exception would propagate (correctly).
-        mock_client.containers.run.side_effect = DockerException("Docker not running")
+        mock_client.api.create_container.side_effect = DockerException("Docker not running")
 
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
             sandbox = SandboxManager.get_sandbox_backend(test_path)
@@ -875,6 +1108,28 @@ class TestSandboxManager(TestCase):
                 SandboxManager.cleanup(test_path, container)
             SandboxManager.cleanup_all()
         self.assertIs(SandboxManager._containers[test_path], container)
+
+    def test_stale_cleanup_stops_only_captured_generation(self):
+        from assist.browser import authority
+
+        test_path = os.path.join(self.temp_dir, "thread", "domain")
+        os.makedirs(test_path)
+        authority.mark_new_thread(self.temp_dir, "thread")
+        old = MagicMock(id="old-generation")
+        new = MagicMock(id="new-generation")
+        SandboxManager._containers[test_path] = new
+        SandboxManager._generation_owners[old.id] = (
+            self.temp_dir, "thread", "old-owner")
+        with authority.fence(self.temp_dir, "thread") as state:
+            state.begin("new-owner", 2)
+            state.add_generation("new-owner", new.id)
+        with patch('assist.sandbox_manager.confirm_generation_stopped') as stopped:
+            SandboxManager.cleanup(test_path, old)
+        stopped.assert_called_once_with("old-generation")
+        self.assertIs(SandboxManager._containers[test_path], new)
+        with authority.fence(self.temp_dir, "thread") as state:
+            self.assertEqual(state.lease["owner_run_id"], "new-owner")
+            self.assertEqual(state.lease["generations"], [new.id])
 
     def test_domain_manager_without_git(self):
         """Test that DomainManager works without git remote."""

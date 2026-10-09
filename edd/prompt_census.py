@@ -1698,6 +1698,7 @@ _TOOL_ORIGINS = {
     "read_url": "assist.tools",
     "remove_allowed_host": "assist.egress.tools",
     "request_egress": "assist.egress.tools",
+    "request_egress_batch": "assist.egress.tools",
     "resume_schedule": "assist.schedule.tools",
     "search_internet": "assist.tools",
     "send_email": "assist.events.email",
@@ -1715,6 +1716,9 @@ _TOOL_ORIGINS = {
 
 _DECLARED_TEMPLATE_RENDER_HASHES = {
     "assist/templates/deepagents/assist_core.md.j2": {
+        "b1c0d98c75c412efb574a32146abc3f06c78e60b1344bff5d589350423bf9285",
+        "a225e7ff34ceea8981ffacfa40fc6424d94739bcb8bfcbd231245e7036a1975a",
+        "c2bf45bb658da376155de7bcd91a6f36dea61a6dd73999721513cd4b62c91527",
         "995fceed6c9786dc6a48e1d44a4fd2b4db7aadc82bb1297c0d7298f2394dcd7b",
         "18d57020fae23ba1cc93aed0b0cca265a89891e66708619f9f28adfefb257adb",
         "d0bf608e2e7b8c0b5bad52e2dd87fe17b91f357d06bb449742406f08230eb32d",
@@ -2130,9 +2134,9 @@ _TOOL_RESULT_METADATA = {
 }
 
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "e0900ef5753a28b196509ea1d8cc9336e9eb5ad5c13f52d81c1dc20577462e49"
+    "0d3f084d253d4728020d81a16c42b4da91b21463f7751d298c74ab218d443317"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "3609ffcb79c436bed132dc3accfae6a7d5ec72a13b7cb513524cd72f1bee877e"
+    "f9aa79912dc7cae2110bbb9d1ac2a52da15d3d2673208b0cdb9a6c05b6117230"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
@@ -2789,7 +2793,8 @@ def _assert_source_links(artifact: dict[str, Any]) -> None:
                     or source["rendered_sha256"] not in \
                     _DECLARED_TEMPLATE_RENDER_HASHES[source["locator"]]:
                 raise AssertionError(
-                    f"template source hash drifted: {source['locator']}")
+                    f"template source hash drifted: {source['locator']} "
+                    f"(rendered {source['rendered_sha256']})")
         if source["kind"] == "synthetic-fixture" \
                 and (source["scenario"] not in EXPECTED_CALL_COUNTS
                      or source["value_sha256"] != _sha(source["value"])
@@ -3288,8 +3293,10 @@ def _assert_semantic_views(artifact: dict[str, Any]) -> None:
             f"{node['scenario']}:tool-node:{node['index']}",
             node["candidates"],
         )
-    if _sha(nodes) != _DECLARED_TOOL_NODE_HISTORY_SHA256:
-        raise AssertionError("construction-time ToolNode history drifted")
+    node_history_sha = _sha(nodes)
+    if node_history_sha != _DECLARED_TOOL_NODE_HISTORY_SHA256:
+        raise AssertionError(
+            f"construction-time ToolNode history drifted: {node_history_sha}")
     if [node["index"] for node in nodes] != list(range(len(nodes))):
         raise AssertionError("tool node indices drifted")
     for node in nodes:

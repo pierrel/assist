@@ -1,0 +1,405 @@
+#+title: Design — Headless website use inside the Assist sandbox
+#+date: <2026-09-24>
+#+status: design candidate v3, revised after affected-lens review; no product code
+
+* Objective and acceptance
+
+An ordinary web turn can visit a user-named website that the sandbox's existing
+exact-host egress policy already permits, see JavaScript-rendered content,
+follow links, click a named control, fill a nonsecret field, use a popup, and
+save a user-requested download. The main agent sees the actual active page URL
+and a current observation after each short action group, then verifies the
+outcome. A blocked redirect or required subresource goes through the existing
+exact host-and-port approval card; a denial never silently becomes permission.
+Browser support must also work for non-download tasks. No new base allowlist
+entry, host-network browser, shared browser profile or general code-execution
+endpoint is part of this change.
+
+The browser is a fallback when =read_url= cannot expose rendered state, and a
+first-class option when the user's task requires interaction. Ordinary static
+page reading remains =read_url=. The CLI/host-backed profile does not claim the
+sandbox boundary and must not advertise this capability until it has one.
+
+* Agentic-practice evidence and options
+
+The current [[https://developers.openai.com/api/docs/guides/tools-computer-use][OpenAI computer-use guidance]] describes code-driven browser use in an
+isolated environment, a browser session that survives model calls, current
+observations after short action groups, limits/cancellation, verification of
+the actual outcome, and user confirmation for consequential actions. These are
+general integration practices, not a claim that Assist runs an OpenAI
+computer-use model. Playwright's [[https://playwright.dev/python/docs/locators][locators]] provide auto-waiting for
+semantic actions; the actual browser and model behavior still require Assist
+evals.
+
+| Option | Fit | Failure/cost |
+|-
+| One Playwright script per =execute= | Reuses the existing tool and sandbox. | Closing each script loses reactive JS state between inspect and act. A browser in the existing unconstrained sandbox lacks browser-specific hard resource and download bounds. Replaying clicks is not equivalent to a persistent UI. |
+| Long-lived helper in the existing sandbox | Keeps browser state and avoids a new container. | Docker memory/PID/CPU limits would apply to unrelated shell work; the sandbox currently inherits =ASSIST_*= values and mounts the thread workspace. The browser shares that exposure. |
+| Lazy per-Run browser sidecar on a dedicated internal network served by the existing proxy, with a narrow browser tool | Keeps state while giving Chromium its own hard limits, no app secrets or thread workspace mount, and deterministic browser request policy. | Adds one image, lifecycle manager, narrow command protocol and bounded artifact transfer. Chosen because the verified constraints need them. |
+
+The visible main agent remains the browser decision maker. A new subagent
+would add an asynchronous handoff and still need the same sidecar, proxy,
+resource limits and user confirmation; no measured Assist behavior currently
+shows that the handoff improves site interaction. The implementation evals
+will compare the main-agent path against its matched baseline and revisit
+delegation only for a demonstrated failure.
+
+* Existing Assist contracts
+
+- =assist/skills/explore-website/SKILL.md= already puts site navigation and file
+  discovery on the visible main agent: =read_url= supplies readable text and
+  links, while its =execute= downloads with =curl= in the sandbox. It currently
+  tells the user JS-only pages need a browser.
+- =assist/agent.py= gives the visible main =read_url=, skills and execution-
+  coupled egress tools; =assist/async_subagents.py= adds a durable child
+  lifecycle for delegated tasks. The ordinary web-main =AgentSpec= already
+  receives web-only skills through =assist/thread_manager.py=. A browser tool
+  and skill can be scoped to that construction when a sandbox is available.
+- =assist/sandbox_manager.py= creates one nonroot sandbox per web turn on an
+  =internal=True= Docker network. =dockerfiles/egress-proxy.py= is the only
+  internet path and admits exact base hosts or thread-scoped exact host:port
+  grants. Each redirect and subresource request is independently checked there.
+  =assist/sandbox.py= bounds one =execute= to 600 seconds and offloads large
+  results. =read_url= itself is host-side and cannot render JavaScript.
+- =requirements.txt= pins Playwright 1.58.0 for the host Python environment.
+  The Arch =dockerfiles/Dockerfile.sandbox= installs neither the Python package
+  nor Chromium. The browser sidecar needs its own pinned package and matching
+  headless binary, validated in its actual runtime image.
+- =manage/web/threads.py= already calls =SandboxManager.cleanup= in a
+  =finally= while holding the turn's queue slot. The browser sidecar must join
+  that same cleanup boundary, with its own exact container generation, so
+  success, error, cancellation and approval suspension reap it.
+
+* User flow
+
+1. The user gives a URL or a site and an outcome, such as finding information,
+   opening a JS-only panel, or downloading a document. The agent uses =read_url=
+   for static content; it loads =browse-website= for rendered content or actions.
+   The web-only =browser_open(url)= tool lazily creates one bounded sidecar for
+   this Run and returns a current observation. No browser tool is exposed when
+   Docker sandbox acquisition failed, on CLI, or to triage/research workers.
+2. =browser_open= navigates with =wait_until="domcontentloaded"=. The returned
+   observation identifies the active page and every open page by opaque page
+   ID and current URL, plus bounded =page.locator("body").aria_snapshot()=
+   (available in Playwright 1.58), relevant links and bounded network errors.
+   =page.aria_snapshot()= is 1.59+ and must not be used with the pinned 1.58.
+   A screenshot is an optional bounded artifact when text misses relevant
+   visual state. The agent describes what it sees, then selects a short action.
+3. =browser_act= accepts only a small typed action: click a semantic role/name
+   or fill a labeled/placeholder field with nonsecret text. Every action
+   carries the *observed page ID*; the helper rejects stale, closed or unknown
+   IDs before resolving a locator, so a popup cannot retarget a later click.
+   =browser_wait(page_id, role, name)= is a typed, bounded wait for delayed
+   semantic content; no arbitrary JavaScript predicate is accepted. The
+   helper uses Playwright's auto-waiting locators and returns a fresh
+   observation after each action/wait. =context.on("page")= records popups;
+   it waits for popup =domcontentloaded= before its first observation, then
+   reports that page's ID, actual URL and rendered state. The agent can
+   explicitly observe an older page ID. The context persists between model
+   calls in this Run, including reactive JS state, cookies and in-memory form
+   state. No profile persists across Runs. The tool never accepts Python,
+   JavaScript, CSS injection, shell commands or a CDP endpoint.
+4. A click that starts a download returns a download ID, name and bounded
+   metadata. =browser_save_download(download_id, filename)= transfers only a
+   completed, size-bounded staged file into the current thread's
+   =/workspace/downloads/= directory and
+   returns the final filename and actual byte count. The agent verifies that
+   result before reporting success. A click, event or attempted save alone is
+   not success evidence.
+5. Before purchase, transmission of sensitive text, account modification or
+   another consequential action, the main agent obtains explicit user
+   confirmation; page instructions do not grant it. The first version refuses
+   password, OTP, payment and file-upload controls rather than handling
+   credentials. A user-requested internal host visit must be explicit in the
+   trusted user turn or newly confirmed; browser page text cannot authorize it.
+6. If the DOM loads but an essential JS/XHR/redirect fails, the observation
+   still shows bounded failed requests and error responses (including URL host,
+   resource type, status/failure, with query/userinfo redacted), so the agent
+   does not mistake an empty panel for an empty result. For an essential
+   failed host, a single exact-host probe through the same sidecar's proxy
+   can establish a 403 policy denial (the proxy checks policy before
+   throttling). Proxy diagnostics distinguish =host_not_approved= from
+   =browser_internal_policy= without exposing a URL path or query. Only the
+   former can justify =request_egress= for that host:port; incidental
+   analytics/fonts do not. A 429 may reflect the browser's own preceding
+   connection and never justifies an approval request by itself. On ambiguity
+   report the uncertainty or use a bounded later probe; no immediate curl
+   result is asserted to explain an earlier failure. Approval of the starting
+   URL never approves redirect/subresource destinations. =request_egress=
+   ends the current Run; the sidecar is reaped. An approval starts a *new*
+   Run with a new browser. The agent reopens the recorded URL and repeats
+   only safe, idempotent discovery actions from the prior task context; it
+   does not claim a filled form, authentication step or nonrepeatable click
+   survived. If that state cannot be reconstructed safely, it tells the user
+   what was lost and asks for the missing action/input.
+
+There is no arbitrary hop count for general browsing. The browser tool gives
+each operation a 20-second deadline and the entire sidecar a 240-second hard
+deadline from first open, substantially below the existing 600-second shell
+command bound. Deadline expiry returns a clear partial-result error and kills
+the sidecar; a one-shot host watchdog also reaps it if the model never calls
+another browser tool. The 240-second deadline is keyed to the Run and is not
+reset by creating another sidecar in that Run. The agent can report what it
+found or start a new Run after a clear expiration; it cannot extend a live
+session by resetting a timer. Cancellation and normal
+Run exit always reap it.
+
+* Runtime and policy boundary
+
+The sidecar is a separate nonroot container, created lazily by a host-side
+=BrowserManager= for an accepted web Run. It has no thread workspace, =/agent=,
+=/tmp= host mount, Docker socket, =ASSIST_*= environment, browser profile or
+published TCP port. Only the host web worker can send typed commands over a
+private Docker exec channel; the browser helper keeps its Playwright objects
+between calls behind a Unix socket inside the container. The socket accepts
+one command at a time, carries an unguessable session ID tied host-side to the
+Run, and is never mounted into the ordinary shell sandbox. The tool checks
+thread ID, Run ID, sidecar generation and deadline before each command. A
+stale/resumed Run cannot command another Run's browser. A narrow JSON command
+protocol caps request and response bytes. URLs and field text travel as data,
+never shell text or process arguments, and are omitted from routine logs.
+Docker calls execute in the existing synchronous Run worker, not on the web
+event-loop thread. Each Docker exec/wait is supervised by a monotonic 20-second
+host deadline outside the manager registry lock; cancellation kills the exact
+sidecar generation and releases the blocked Run worker even if the helper
+stops responding. No arbitrary code evaluation or general purpose
+remote-debugging listener exists.
+
+The sidecar joins only a *new browser-only internal Docker network*. The
+existing egress proxy is also attached to that network, while ordinary shell
+sandboxes remain on =assist-egress-network=. Both networks are verified
+=internal=True= and have no direct gateway. The same proxy process, permanent
+allowlist, approved-host projection and host throttle still serve both paths;
+no new remote route or host entry is added. Browser launch sets Playwright's
+explicit proxy to =assist-egress-proxy:8888= with no bypass list. The proxy
+identifies browser-origin traffic by the browser network's configured source
+CIDR *before* consulting the client map, so a missing/malformed browser map
+entry denies every destination rather than falling back to base hosts.
+The browser container has no route to the ordinary sandbox network, so it
+cannot reach an unclassified proxy ingress. The manager validates both network
+subnets are distinct and that the proxy is attached to the intended networks;
+its configuration fingerprint forces recreation when this policy is installed.
+
+The client map becomes one atomic IP→record projection for both sandbox types:
+={thread_id, container_generation, kind, browser_mode, internal_host}=.
+The proxy accepts only the new validated object schema for thread grants; a
+legacy string or malformed record grants nothing. =SandboxManager= and
+=BrowserManager= use the same record/compare-delete functions and ownership
+lock. Each registers its actual container generation *successfully before*
+returning a backend/browser tool that can issue network commands; a failed
+record kills that container and surfaces an error. A stale record plus an
+IP reuse cannot authorize a new container whose registration failed, because
+that container is never exposed for execution. Compare-delete removes only a
+matching generation; a delayed cleanup cannot remove a successor's record.
+The host maintains this client map in one always-mounted, read-only proxy
+projection outside all sandbox and browser mounts, even when the optional
+approved-hosts projection is disabled. The manager validates its safe host
+location at startup; no safe location means no browser sidecar. One atomic
+per-client record contains both mode and thread attribution, so the proxy
+cannot pair a new mode with an old thread. Ordinary shell access without
+approvals retains base-only behavior; browser admission always needs a valid
+record.
+
+The proxy applies a browser-specific destination rule to *every* CONNECT and
+HTTP absolute-target request, before its existing base-list/grant check and
+host throttle. Public mode rejects all operator internal base hosts, including
+=host.docker.internal= and the allowlisted LAN host. An explicit internal
+visit uses a new sidecar/context in internal mode: the proxy admits *only*
+the exact user-authorized internal host, still subject to the existing base
+allowlist. It denies all public hosts and other internal hosts for that
+sidecar. No public document, popup or opener is present in its context. Mode
+is immutable for that container; changing mode requires closing it and
+starting another generation under the same Run deadline. The trusted user
+message or explicit new confirmation, not a model flag or page text, selects
+the internal host. Thus a public page 302→internal, form POST, worker
+WebSocket, popup or fetch cannot reach an internal base host even if
+Playwright misses the target: the proxy sees each new destination itself.
+Existing thread grants still work for public destinations in public mode;
+an internal-mode browser cannot use them to reach a public site.
+For public mode the proxy also rejects literal private/link-local/loopback
+addresses and any hostname whose selected dial address is in those ranges.
+It resolves and checks the address once, then connects to that vetted address
+without a second DNS lookup; a public allowed hostname resolving to an
+internal endpoint must not bypass the rule. Internal mode may dial only the
+approved exact internal host's vetted address. Rejection diagnostics identify
+client IP, host:port and reason code, never HTTP path or query; browser policy
+denial cannot be mistaken for a missing exact-host approval.
+
+The helper still parses only =http:=/=https:= top-level URLs and blocks
+=file:= or =data:= navigation; it may register =context.route= and block
+Service Workers to reduce incidental traffic and improve observations. This
+is defense in depth only. Playwright documents that a route handler can see
+only the first URL of a redirect, and routing coverage is insufficient for
+worker WebSockets; neither route nor Proxy Basic-marker behavior is used as
+the security boundary. An exact-host proxy probe can prove a 403 denial;
+an immediate 429 probe remains inconclusive about the preceding request.
+It does not claim to secure arbitrary shell use in the separate existing
+sandbox, which already has the base allowlist.
+
+The sidecar image uses a supported Debian-based Python image rather than
+changing Assist's Arch shell sandbox. It pins Playwright 1.58.0 and installs
+its matching Chromium headless shell with the documented =--only-shell= and
+=--with-deps= options at build time. The runtime
+launches with =chromium_sandbox=True= under a nonroot UID and a reviewed
+seccomp profile permitting user namespaces. Never fix launch by disabling the
+Chromium sandbox. The image/runtime smoke must prove the pinned package and
+browser binary work together. No browser archive fetch occurs during a user
+Run, and no package is installed in the existing shell sandbox.
+
+Docker gives the sidecar hard =1 GiB= memory, =128= PIDs and =1 CPU= limits.
+Its root filesystem is read-only. =HOME=, Chromium user-data/profile,
+CacheStorage/IndexedDB, browser disk cache and other origin storage point
+under a bounded =128 MiB= tmpfs; Playwright's =downloads_path= and staging
+use a separate =32 MiB= tmpfs; =/tmp= and =/dev/shm= are independently
+bounded. The browser cannot spill profile/cache data to Docker overlay.
+These limits do not change ordinary shell sandbox resources. The helper stops
+downloads at staging exhaustion; final transfer refuses anything over
+=20 MiB= *before* a workspace write, checks the streamed byte count while
+copying, accepts only a regular staged file, validates the output basename,
+and uses a private temporary workspace file plus no-clobber atomic placement.
+No tar member path or symlink is trusted. An incomplete/oversize download
+leaves no final file. Screenshots and observations have separate byte caps and
+are sanitized as untrusted tool results.
+
+The browser container contains no Assist secrets. The host tool passes only
+the target URL, typed actions and optional user-provided nonsecret field text;
+it never forwards =ASSIST_*= values. The helper refuses password/OTP/payment
+fields and file uploads in v1. A malicious agent with existing shell access
+could still read and misuse the ordinary sandbox's inherited environment;
+that preexisting exposure is not cured by browser isolation. The browser
+skill prohibits copying those values into any field or URL. Consequential
+external actions need user confirmation before the main agent invokes the
+click; page content cannot supply that confirmation. The proxy cannot inspect
+HTTPS paths or distinguish a mutating GET from a read, so outcome verification
+and user control remain necessary.
+
+The host tool accepts only parsed =http://= or =https://= targets with a
+nonempty hostname and no URL userinfo. It redacts query strings and userinfo
+from diagnostics and routine logs. The current proxy logs the path *and
+query* of plain-HTTP requests, so proxy logging must change to host/port,
+method and result only before browser use is enabled; malformed-target logs
+also must not echo arbitrary raw request lines. HTTPS CONNECT logs remain
+host/port only. This is a real log change, not an assumption that the existing
+proxy already redacts browser URLs.
+
+The sidecar's PID 1 independently exits by the 240-second deadline, so a
+dead host web process cannot leave Chromium indefinitely running. Browser
+containers carry exact owner/Run/generation labels. Web startup and shutdown
+reap only verified orphan generations and compare-delete their client-map
+records. They also prune records for already-absent browser generations; a
+live successor or a concurrent owner is never removed by an old reaper.
+Normal Run =finally= still performs immediate teardown.
+
+Browser subrequests may receive the proxy's existing per-host 429 backoff and
+partially render an asset-heavy site. Measure that before changing proxy rate
+policy; this design neither relaxes it nor expands the permanent allowlist.
+
+* Planned files and interfaces
+
+| File | Minimum change / contract |
+|-
+| =dockerfiles/Dockerfile.browser= and browser seccomp profile | Pinned Playwright 1.58, matching headless shell, nonroot runtime and reviewed Chromium sandbox launch. Separate image so ordinary sandbox does not grow or take browser resource limits. |
+| =assist/browser/= | Small sidecar manager, trusted Playwright runner and typed host-side tool. Own per-Run/session identity, restricted actions, live page state, resource limits, diagnostics and bounded download transfer. No general code execution or TCP/CDP listener. |
+| =assist/sandbox_manager.py= and =assist/egress/client_map.py= | Create/verify the separate internal browser network, attach the existing proxy, and use one generation-aware client-map record/compare-delete contract for both sandbox types. Require successful attribution before any grant-capable container is exposed. |
+| =dockerfiles/egress-proxy.py= | Classify browser-network ingress before map lookup; enforce immutable public/internal destination mode for every CONNECT/HTTP request and vetted dial address, then existing exact-host policy and throttle. Parse new client-map schema; emit bounded reason-coded denials and redact plain-HTTP path/query in logs. No egress expansion. |
+| =Makefile= | Build/deploy the browser image and run its smoke with the existing sandbox build gates. |
+| =assist/thread_manager.py=, =assist/agent.py= and =manage/web/threads.py= | Expose the browser tool and web-only skill only for ordinary sandbox-backed main Runs; pass trusted Run/user URL context; reap exact sidecar generation in the existing Run =finally=. |
+| =assist/web_browser_skills/browse-website/SKILL.md= | Describe when to browse, semantic inspection/action, stateful observation, approvals, outcome and consequential-action checks. |
+| =assist/skills/explore-website/SKILL.md= | Replace the obsolete “browser unavailable” stop with a pointer to the browser fallback while keeping =read_url= first for static file discovery. |
+| =README.md= | User-facing browser capability and sandbox scope/limits. |
+| =tests/=, =edd/eval/= | Focused runtime/egress tests and natural/explicit behavioral rows below. |
+
+No change is planned to =dockerfiles/egress-allowlist.conf=,
+=assist/egress/tools.py= or =assist/tools.py=.
+The browser tool runs on the host only to control the constrained sidecar and
+transfer bounded artifacts; Playwright and all page network traffic run in the
+sidecar through the existing proxy. If wiring exposes a host-backed browser on
+Docker failure, that is a design violation. The existing shell sandbox and
+its proxy behavior stay unchanged.
+
+* Verification and decision gates
+
+- Image smoke: build the browser image; import pinned Playwright in it; launch
+  bundled headless Chromium as the runtime nonroot uid with
+  =chromium_sandbox=True= and the reviewed seccomp settings. Verify JS changes
+  visible page text, a semantic locator click and field fill *across separate
+  tool calls in one session*, a popup with active URL, a staged download, and
+  cleanup. No browser archive fetch occurs on a user turn.
+- Real network-boundary integration through =BrowserManager= and the proxy:
+  an allowed host loads through the configured browser proxy; an exact-host
+  miss, lookalike host, direct IP and an off-list redirect fail. A page with an
+  off-list frame/script/XHR cannot reach that destination; an approved
+  thread-scoped destination works only in that thread by the sidecar's own IP
+  map. A public allowed page's *302 redirect* to an internal base host is
+  denied at the proxy, as are popup, form POST, fetch and worker WebSocket
+  attempts. An explicitly user-requested internal-mode visit reaches only its
+  exact internal host and cannot load a public document, even in a popup.
+  A public allowlisted hostname resolving to a private address is denied
+  before connection, including on DNS answer change. Test denial reason codes
+  for browser-internal policy versus missing exact-host approval.
+  Verify 403 versus ambiguous 429 handling,
+  including DOM-success/essential-XHR-failure. Use deterministic local
+  fixtures and the proxy's actual connect path, not a mocked =page.goto=.
+- Resource/ownership tests: large download exceeds the staging tmpfs or the
+  20 MiB transfer cap without a final file; a tampered/symlink/tar path is
+  rejected; memory, PID, CPU and 240-second caps are present and observable.
+  Stale Run/session/page IDs fail, including a popup appearing between
+  observation and action. Success, exception, cancellation, HITL
+  suspension and thread deletion kill the correct sidecar and remove only its
+  matching client-map entry. A stale IP record, Docker IP reuse and a failed
+  replacement registration cannot grant the wrong thread; test both sandbox
+  types. A host-process crash leaves a sidecar that self-exits by TTL; startup
+  and shutdown reapers preserve live generations. Confirm the 20-second
+  transport deadline releases a hung Docker exec without holding the registry
+  lock. Browser process receives no =ASSIST_*= variable or thread mount.
+  IndexedDB/cache/profile fills hit a tmpfs bound, not overlay. Secret-field
+  fill and file upload are refused. Download placement is fixed under
+  =/workspace/downloads/= and cannot create =AGENTS.md= or clobber a file.
+- Existing sandbox tests remain green, especially the shim, proxy and
+  per-turn cleanup tests. Run the repo's Python checks for changed Python
+  files and the sandbox smoke for Docker behavior.
+- Behavioral panel: a natural JS-only file request, a natural non-download
+  task requiring inspect → click → inspect on one reactive page across calls,
+  a popup task, a delayed-content wait, a static-page task that should still
+  use =read_url=, and a blocked necessary redirect. Add a multi-turn approval
+  scenario in which a fill/click precedes the denied host and the new Run
+  safely reopens or truthfully reports lost state. Add an explicit capability
+  probe for locator interaction/download and an adjacent research row so the
+  browser skill does not hijack broad research. Use the project's matched
+  baseline N=3, candidate N=3, confidence N=5 and stability N=10 cadence;
+  require no adjacent regression, at least 70% on new natural rows and complete
+  deterministic/explicit capability checks. Prompt wording describes user
+  outcomes, not Playwright or the expected tool path.
+
+If the model repeatedly misuses the typed browser surface or cannot recover
+after a normal interaction, improve general guidance and remeasure before
+reconsidering a bounded subagent. The implementation must not claim that all websites render: a site
+may require login, a blocked essential third-party host, unsupported media or
+anti-bot interaction. Report that concrete condition to the user.
+
+* Sources and lineage
+
+Primary Playwright documentation checked for APIs present by Python 1.58:
+[[https://playwright.dev/python/docs/network][network and proxy]],
+[[https://playwright.dev/python/docs/browser-contexts][isolated contexts]],
+[[https://playwright.dev/python/docs/locators][locators]],
+[[https://playwright.dev/python/docs/service-workers][Service Workers]],
+[[https://playwright.dev/python/docs/browsers][versioned browser binaries]],
+[[https://playwright.dev/python/docs/docker][Docker and untrusted-site guidance]],
+[[https://playwright.dev/python/docs/api/class-browsertype][launch options]],
+and [[https://playwright.dev/python/docs/api/class-page#route][the first-URL redirect routing caveat]].
+[[https://playwright.dev/python/docs/api/class-locator][Locator API]] documents
+=locator.aria_snapshot()= in v1.49; the
+[[https://playwright.dev/python/docs/api/class-page][Page API]] documents
+=page.aria_snapshot()= only from v1.59. The current
+[[https://developers.openai.com/api/docs/guides/tools-computer-use][OpenAI computer-use guide]] supplies the persistent-state, short-action,
+verification and confirmation practices above. These sources do not prove
+that Assist's browser image runs Chromium; the required image smoke does.
+
+* Historical supersessions
+
+None. The implementation will revise the current “When a site needs
+JavaScript” section in =assist/skills/explore-website/SKILL.md=. The dated
+=docs/2026-05-08-sandbox-network-allowlist.org= and
+=docs/2026-07-21-egress-approval-hitl.org= remain historical descriptions of
+their respective decisions; their proxy and approval boundaries stay active.

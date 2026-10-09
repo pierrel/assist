@@ -25,7 +25,7 @@ def wired(tmp_path, monkeypatch):
                         lambda t: str(tmp_path / t))
     monkeypatch.setattr(web.MANAGER, "touch", lambda t: None)
     monkeypatch.setattr("manage.web.threads._get_sandbox_backend",
-                        lambda t, tz=None: None)
+                        lambda t, tz=None, **_kwargs: None)
     monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda t: None)
     monkeypatch.setattr("manage.web.threads.get_cached_description",
                         lambda t: "real description")

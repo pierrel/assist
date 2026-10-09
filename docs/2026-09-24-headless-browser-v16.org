@@ -1,0 +1,47 @@
+#+title: Headless browser v16 — exact internal port and map-disabled reset
+#+date: <2026-09-24>
+#+status: deployment-review correction
+
+* Decision
+
+A fresh affirmative direct-user request for an internal host authorizes one
+effective destination port, not every service on that host. An explicit
+=http://H:5050=, =https://H:5050= or =H:5050= authorizes only 5050. A scheme
+without a port uses its HTTP 80 or HTTPS 443 default. A bare host without a
+scheme or port permits only those two web defaults; the first browser open
+binds one exact =(host, port)= to its sidecar, and switching defaults creates
+a new sidecar/map record. A nondefault port requires an explicit user request.
+The proxy checks both fields on every CONNECT and HTTP request, including
+redirects, subresources and WebSockets. An old portless internal record is
+proxy-denied, ignored by host recovery and dropped on the next map write. A
+proxy policy fingerprint change
+forces replacement of a running host-only proxy during deployment.
+
+An unavailable browser-only client map does not permanently hold an ordinary
+web Run that has durable covered/no-lease proof that no browser launched.
+Where a lease exists, the reset worker scans and kills the exact owner-labelled
+sidecar, then requires a bounded, independently fenced base-only proxy
+replacement before clearing the lease or promoting the held event. Failed or
+uncertain teardown/replacement keeps the event held for retry.
+
+* Verification
+
+Test explicit and default port parsing, other-port agent opens, raw proxy
+CONNECT/HTTP, and real Chromium redirects/subresources. Verify old portless
+records grant nothing, a running old-fingerprint proxy is recreated, and
+missing/invalid map configurations allow only the clean no-lease path or an
+exact confirmed owner teardown plus base-only proxy replacement. Failed scans
+must keep held events queued.
+
+* Historical supersessions
+
+This document directly narrows
+=docs/2026-09-24-headless-browser-v5.org='s “Active-request internal
+authorization” from exact host to exact effective host and port, and extends
+=docs/2026-09-24-headless-browser.org='s “Runtime and policy boundary”
+client-map record with =internal_port=. It refines
+=docs/2026-09-24-headless-browser-v12.org='s “Bounded reset work and one
+first-open deadline”: an unavailable map is not by itself a permanent hold
+when a covered/no-lease proof or exact owner teardown plus base-only proxy
+replacement establishes safety. V15's running-endpoint reconciliation is
+unchanged.

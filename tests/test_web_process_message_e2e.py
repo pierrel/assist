@@ -19,13 +19,16 @@ What this test runs FOR REAL (catches regressions in):
   - The `THREAD_QUEUE.acquire(...)` block (catches missing-import
     and contextvar-handling regressions)
   - The post-acquire status sequence
+  - Browser generation readiness and ThreadManager skill/tool composition
+    in the full-ID binding regression
 
 What is STUBBED (NOT exercised here — would need an integration test
 with real Docker + a real LLM):
-  - `_get_sandbox_backend` — stubbed to None (the same shape it
-    returns when Docker is unavailable)
-  - `MANAGER.get` — returns a `_FakeChat` (Thread / agent / LLM stack
-    is not exercised)
+  - `_get_sandbox_backend` — stubbed at the external Docker boundary,
+    usually to None (Docker unavailable), or to raise after registration
+    in the creation-failure regression
+  - The model/graph construction — usually `MANAGER.get` returns a fake
+    chat; the full-ID regression runs it and stubs the Thread constructor
   - The domain-manager sync and description-generation paths
 """
 import os
@@ -53,6 +56,8 @@ def client(tmp_path, monkeypatch):
     """
     tdir = tmp_path / "thread-e2e"
     tdir.mkdir()
+    from assist.browser.authority import mark_new_thread
+    mark_new_thread(str(tmp_path), "thread-e2e")
     monkeypatch.setattr(web.MANAGER, "root_dir", str(tmp_path))
     monkeypatch.setattr(
         web.MANAGER, "thread_dir", lambda tid: str(tmp_path / tid)
@@ -103,10 +108,10 @@ def test_post_message_runs_process_message_without_crashing(
     # AND the threads-module's already-imported reference; _process_message
     # calls the latter.
     monkeypatch.setattr(
-        "manage.web.state._get_sandbox_backend", lambda tid, tz=None: None,
+        "manage.web.state._get_sandbox_backend", lambda tid, tz=None, **_kwargs: None,
     )
     monkeypatch.setattr(
-        "manage.web.threads._get_sandbox_backend", lambda tid, tz=None: None,
+        "manage.web.threads._get_sandbox_backend", lambda tid, tz=None, **_kwargs: None,
     )
 
     # Stub MANAGER.get to return a minimal fake chat whose `.message()`
@@ -180,8 +185,8 @@ from tests.approval_helpers import checkpoint_chat
 def _stub_happy_path(monkeypatch, chat):
     """Stub the sandbox lookup, MANAGER.get, and the post-message hooks so
     _process_message runs end-to-end against `chat`."""
-    monkeypatch.setattr("manage.web.state._get_sandbox_backend", lambda tid, tz=None: None)
-    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None: None)
+    monkeypatch.setattr("manage.web.state._get_sandbox_backend", lambda tid, tz=None, **_kwargs: None)
+    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None, **_kwargs: None)
     chat.thread_id = "thread-e2e"
     monkeypatch.setattr(
         web.MANAGER, "get",
@@ -199,6 +204,83 @@ def _spy_cleanup(monkeypatch):
         classmethod(lambda cls, work_dir, expected=None: calls.append(work_dir)),
     )
     return calls
+
+
+@pytest.mark.parametrize("matching_generation", [True, False])
+def test_browser_binding_uses_full_sandbox_generation(
+    client, monkeypatch, tmp_path, matching_generation,
+):
+    """Real web admission and skill composition use the journal's full ID."""
+    from types import SimpleNamespace
+    from assist.browser import authority, manager as browser
+    from assist.sandbox import DockerSandboxBackend
+    from assist.thread_manager import ThreadManager
+
+    tid = "thread-e2e"
+    generation = "a" * 64
+    sandbox = DockerSandboxBackend(SimpleNamespace(id=generation))
+    captured = {}
+
+    class _Chat:
+        def message(self, text):
+            session = browser.BrowserManager._sessions.get(tid)
+            captured["session"] = session
+            if session is not None:
+                session._fence_command()
+            return "ok"
+
+        def pending_reply(self):
+            return None
+
+        def get_messages(self):
+            return []
+
+        def get_raw_messages(self):
+            return []
+
+    chat = _Chat()
+    _stub_happy_path(monkeypatch, chat)
+    _spy_cleanup(monkeypatch)
+    monkeypatch.setattr(web.MANAGER, "_model", object())
+    monkeypatch.setattr(
+        web.MANAGER, "get",
+        lambda thread_id, **kwargs: ThreadManager.get(web.MANAGER, thread_id, **kwargs),
+    )
+
+    def construct_thread(*_args, **kwargs):
+        captured["spec"] = kwargs["spec"]
+        return chat
+
+    monkeypatch.setattr("assist.thread_manager.Thread", construct_thread)
+    monkeypatch.setattr(browser.BrowserManager, "_sessions", {})
+    monkeypatch.setattr(browser.BrowserManager, "_reconciled_roots", {str(tmp_path)})
+    monkeypatch.setattr(browser, "configured_directory", lambda: str(tmp_path))
+    monkeypatch.setattr(browser, "browser_records", lambda *_args: {})
+
+    def create_sandbox(_tid, *, owner_run_id, browser_capable, **_kwargs):
+        assert browser_capable
+        run = threads._runs().get(tid, owner_run_id)
+        with authority.fence(str(tmp_path), tid) as state:
+            state.begin(owner_run_id, run.admission_sequence)
+            state.add_generation(owner_run_id, generation if matching_generation else "b" * 64)
+        return sandbox
+
+    monkeypatch.setattr(threads, "_get_sandbox_backend", create_sandbox)
+    response = client.post(f"/thread/{tid}/message", data={"text": "Use the browser"},
+                           follow_redirects=False)
+    assert response.status_code == 303
+    assert _wait_for_terminal_status(tid).get("stage") == "ready"
+    assert sandbox.id == generation[:12]
+    tool_names = {getattr(tool, "name", getattr(tool, "__name__", ""))
+                  for tool in captured["spec"].tools}
+    assert ("browser_open" in tool_names) is matching_generation
+    assert ("/browser-skill/" in captured["spec"].skill_sources) is matching_generation
+    if matching_generation:
+        assert captured["session"].sandbox_generation == generation
+        assert captured["session"].closed
+    else:
+        assert captured["session"] is None
+    assert not browser.BrowserManager._sessions
 
 
 def test_process_message_kills_container_at_turn_end_on_success(client, monkeypatch):
@@ -302,6 +384,28 @@ def test_process_message_kills_container_even_when_turn_errors(client, monkeypat
     assert len(calls) == 1, f"erroring turn must still tear down its container, got {calls}"
 
 
+def test_browser_cleanup_failure_still_reaps_shell_container(client, monkeypatch):
+    class _Chat:
+        def message(self, text):
+            return "ok"
+
+        def pending_reply(self):
+            return None
+
+    _stub_happy_path(monkeypatch, _Chat())
+    calls = _spy_cleanup(monkeypatch)
+    monkeypatch.setattr(
+        threads.BrowserManager, "cleanup",
+        classmethod(lambda cls, tid, expected=None: (_ for _ in ()).throw(
+            threads.BrowserUnavailable("browser stop unconfirmed"))))
+
+    response = client.post("/thread/thread-e2e/message", data={"text": "hi"},
+                           follow_redirects=False)
+    assert response.status_code == 303
+    assert _wait_for_terminal_status("thread-e2e").get("stage") == "error"
+    assert len(calls) == 1
+
+
 def test_recursion_limit_sets_error_status(client, monkeypatch):
     """The prod symptom pin: when the runaway backstop fires (GraphRecursionError,
     now terminal), the turn must reach a TERMINAL error status with narrow/split
@@ -329,26 +433,31 @@ def test_recursion_limit_sets_error_status(client, monkeypatch):
 def test_process_message_reaps_registered_container_when_creation_then_raises(
         client, monkeypatch, tmp_path):
     """The exact round-1 gap: sandbox creation registers a container and THEN
-    raises.  Because the creation is inside the try, the teardown `finally`
-    runs, and because cleanup keys on work_dir (not the `sandbox` handle that
-    was never returned), the registered container is reaped — no leak until the
-    backstop TTL.  (Copilot review, PR #139.)
+    raises. The error path captures the registered generation even though no
+    backend was returned, and the teardown `finally` proves it stopped before
+    dropping the registry entry. (Copilot review, PR #139.)
 
-    The cleanup path is real, with only exact Docker stop confirmation stubbed.
-    A synthetic container stands in for creation before it raises; the turn
-    must remove its tracked generation."""
+    Cleanup is real; only its external generation-stop boundary is mocked.
+    This CPU test asserts exact stop proof precedes releasing registration."""
     from unittest.mock import MagicMock
     from assist.sandbox_manager import SandboxManager
 
     work_dir = str(tmp_path / "thread-e2e")  # == MANAGER.thread_default_working_dir
     registered = MagicMock()
-    registered.id = "synthetic-generation"
+    registered.id = "creation-failure-generation"
     SandboxManager._containers[work_dir] = registered
-    confirmed = []
-    monkeypatch.setattr("assist.sandbox_manager.confirm_generation_stopped",
-                        confirmed.append)
+    stopped = []
 
-    def _register_then_boom(tid, tz=None):
+    def confirm_stopped(generation):
+        assert SandboxManager.current_container(work_dir) is registered
+        stopped.append(generation)
+
+    monkeypatch.setattr(
+        "assist.sandbox_manager.confirm_generation_stopped", confirm_stopped)
+    monkeypatch.setattr(threads.BrowserManager, "reconcile_startup",
+                        lambda _root: True)
+
+    def _register_then_boom(tid, tz=None, **_kwargs):
         # The container is already in the registry (as get_sandbox_backend
         # leaves it); creation now fails before returning a usable backend.
         raise RuntimeError("sandbox creation failed after registering a container")
@@ -364,7 +473,7 @@ def test_process_message_reaps_registered_container_when_creation_then_raises(
         assert r.status_code == 303, r.text
         assert _wait_for_terminal_status("thread-e2e").get("stage") == "error"
 
-        assert confirmed == [registered.id]
+        assert stopped == [registered.id]
         assert work_dir not in SandboxManager._containers
     finally:
         SandboxManager._containers.pop(work_dir, None)
@@ -506,7 +615,7 @@ def test_rider_flows_to_sandbox_tz_and_private_location_config(client, monkeypat
     from assist.context_rider import CONTEXT_RIDER_KEY
     captured = {}
     monkeypatch.setattr("manage.web.threads._get_sandbox_backend",
-                        lambda tid, tz=None: captured.update(tz=tz) or None)
+                        lambda tid, tz=None, **_kwargs: captured.update(tz=tz) or None)
 
     class _FakeChat:
         def message(self, text):
@@ -588,7 +697,7 @@ def test_child_turn_never_receives_global_location(client, monkeypatch):
         def get_messages(self):
             return [{"role": "user", "content": "child"}]
 
-    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None: None)
+    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None, **_kwargs: None)
     monkeypatch.setattr(
         web.MANAGER, "get",
         lambda *args, **kwargs: captured.update(configurable=kwargs.get("configurable")) or _FakeChat())
@@ -613,7 +722,7 @@ def test_direct_main_turn_never_receives_global_location(client, monkeypatch):
         def get_messages(self):
             return [{"role": "user", "content": "continuation"}]
 
-    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None: None)
+    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None, **_kwargs: None)
     monkeypatch.setattr(
         web.MANAGER, "get",
         lambda *args, **kwargs: captured.update(configurable=kwargs.get("configurable")) or _FakeChat())

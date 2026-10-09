@@ -1,0 +1,87 @@
+#+title: Headless browser v17 — deployment and egress-generation recovery
+#+date: <2026-09-25>
+#+status: review correction
+
+* Decision
+
+The service-install path carries =ASSIST_EGRESS_CLIENT_MAP_DIR= and
+=ASSIST_EGRESS_RUNTIME_DIR= from Make through the remote relay into the
+systemd unit. Changing either override requires reinstalling the unit;
+copying application code alone does not change a running service's environment.
+
+Historical IP-to-thread string entries in a client map have no generation or
+policy authority. Host reads ignore only those known legacy values, and the
+next atomic map write drops them. Malformed other entries still fail closed.
+
+The shared egress proxy is created separately from starting it. A definitive
+daemon rejection of the *low-level POST create request* (HTTP 400/404) clears
+its durable pending-create token. A timeout, post-create inspect failure,
+failed start, or other uncertain response retains the token for
+exact-generation recovery. Missing image preflight occurs before removing the
+old proxy or journaling a new create. The same terminal POST rule applies to
+the two egress networks; the high-level SDK create method cannot provide this
+proof because it performs a subsequent inspect before returning.
+
+Ordinary shell setup may continue without the optional browser client map only
+when the exact running proxy has no =/client-map= mount. When a map is
+configured, its host path must match the proxy's actual mount before the new
+sandbox is exposed. A mismatch kills that sandbox. The proxy runs as the
+nonroot service UID/GID, included in its configuration fingerprint, so a
+non-1000 deploy user can read private host-only map files without making them
+world-readable. UID 0 never becomes the proxy's container user. All proxy
+inspect and map publication work under the interprocess setup fence runs in a
+killable worker, so a stalled Docker operation cannot pin a web Run forever.
+
+After confirmed removal of an old proxy, a replacement with a different map,
+network or service UID atomically clears its target map before serving.
+Existing clients on a changed network cannot use the replacement; they must
+restart/re-register. A failed old-proxy removal leaves the map untouched.
+When the same map, both network identities and UID/GID remain unchanged,
+existing exact records are preserved, so active browser sessions keep working.
+On a configured map, an ordinary shell or Pi sandbox publishes its
+exact running generation and bridge IP before any agent command. With a
+verified base-only proxy there is no map publication. Pi publishes
+=kind=pi=, a no-grant tombstone: the ordinary-network proxy expects
+=kind=sandbox= for thread-scoped approvals, so a recycled IP cannot inherit
+an old shell grant. A base-only proxy remains usable without a map.
+
+A browser registration runs in a killable worker. It first takes the proxy
+setup fence and verifies the sidecar's exact running bridge IP and network
+generation against the current proxy. Only then does it enter the short
+per-thread authority fence to recheck the latest direct-user event and lease,
+record the generation, and atomically publish the browser map entry with a
+one-second map-lock budget. The web thread never waits for Docker/setup while
+holding the authority fence, so a newer direct message can be durably held.
+A conflicting previous browser record is removed only after exact Docker
+absence/stopped/moved proof. If A pauses before publication and B acquires
+and reports the recycled IP first, late A is killed rather than changing B's
+authorization. A failed publication never exposes the sidecar to the agent.
+
+* Verification
+
+Exercise Make/relay/unit environment transport, mixed legacy/current map
+recovery, direct-create rejection versus uncertain timeout and post-create
+inspect failure, invalid-map base-only shell versus map-mounted denial,
+failed-remove map preservation, same-map active-session continuity, changed-
+map clearance, Pi recycled-IP denial, late A/B browser publication ordering,
+stale-A-after-prune recovery, and direct-message admission during a setup wait,
+and a nondefault service UID. Run
+deterministic and real Docker proxy/browser smoke on the exact candidate.
+
+* Historical supersessions
+
+This document directly refines
+=docs/2026-09-24-headless-browser-v16.org='s “Decision” map-disabled
+assumption: an ordinary shell is admitted with no optional map
+only after verifying the running proxy's map mount mode, and a proxy rebuilt
+for a different service UID is required to read the private host map. It
+refines =docs/2026-09-24-headless-browser-v10.org='s “Retire the exact target
+before dispatch” durable creation fence:
+a definitive rejection of the direct create endpoint may settle its pending
+token, while a combined or uncertain create/start outcome may not.
+It refines =docs/2026-09-24-headless-browser-v15.org='s “Running endpoint
+reconciliation”: Pi sandboxes on the ordinary bridge must replace any stale
+IP attribution with an exact no-grant marker before command admission, and
+proxy replacement clears the target map before serving new requests only
+when its map, network or service UID identity changes; same-topology
+replacement preserves valid records even if the old proxy had stopped.
