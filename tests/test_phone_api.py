@@ -168,7 +168,7 @@ def test_thread_list_uses_stored_titles_and_supplies_chooser_metadata(tmp_path, 
     monkeypatch.setattr(state, "_get_domain_manager",
                         lambda tid: (_ for _ in ()).throw(AssertionError("no mutable origin")))
     monkeypatch.setattr(state, "_has_urgent", lambda tid: False)
-    monkeypatch.setattr(state, "_has_unmerged_changes", lambda tid: False)
+    monkeypatch.setattr(state, "_has_unmerged_changes", lambda tid: "no")
     monkeypatch.setattr(phone_api, "_thread_workspace",
                         lambda tid: (_ for _ in ()).throw(AssertionError("no Git worktree scan")))
 
@@ -191,11 +191,11 @@ def test_thread_list_exposes_urgent_and_unmerged_from_state(tmp_path, monkeypatc
     monkeypatch.setattr(state.MANAGER, "list", lambda: ["thread-a"])
     monkeypatch.setattr(state, "_get_status", lambda tid: {"stage": "ready"})
 
-    # A settled (ready, no urgent/new) thread runs the git check: dirty -> "yes".
+    # A settled (ready, no urgent/new) thread runs the git check: "yes" -> "yes".
     monkeypatch.setattr(state, "_has_urgent", lambda tid: False)
     monkeypatch.setattr(state, "_has_unseen_response", lambda tid: False)
     monkeypatch.setattr(
-        state, "_has_unmerged_changes", lambda tid: True)
+        state, "_has_unmerged_changes", lambda tid: "yes")
 
     thread = _client(monkeypatch).get(
         "/api/v1/phone/threads", headers=_auth()).json()["threads"][0]
@@ -203,11 +203,20 @@ def test_thread_list_exposes_urgent_and_unmerged_from_state(tmp_path, monkeypatc
     assert thread["unmerged"] == "yes"
 
     # Same settled thread, clean working tree -> "no" (checked, confirmed clean).
-    monkeypatch.setattr(state, "_has_unmerged_changes", lambda tid: False)
+    monkeypatch.setattr(state, "_has_unmerged_changes", lambda tid: "no")
     thread = _client(monkeypatch).get(
         "/api/v1/phone/threads", headers=_auth()).json()["threads"][0]
     assert thread["urgent"] is False
     assert thread["unmerged"] == "no"
+
+    # A settled thread whose check could not run (no repo / git failure) ->
+    # "unknown".  Distinct from "no": the phone must not present a broken
+    # check as a confirmed-clean tree.
+    monkeypatch.setattr(state, "_has_unmerged_changes", lambda tid: "unknown")
+    thread = _client(monkeypatch).get(
+        "/api/v1/phone/threads", headers=_auth()).json()["threads"][0]
+    assert thread["urgent"] is False
+    assert thread["unmerged"] == "unknown"
 
 
 def test_thread_list_short_circuits_unmerged_behind_a_stronger_pill(tmp_path, monkeypatch):
@@ -217,7 +226,7 @@ def test_thread_list_short_circuits_unmerged_behind_a_stronger_pill(tmp_path, mo
     monkeypatch.setattr(state.MANAGER, "list", lambda: ["thread-a"])
     calls = []
     monkeypatch.setattr(state, "_has_unmerged_changes",
-                        lambda tid: calls.append(tid) or True)
+                        lambda tid: calls.append(tid) or "yes")
 
     # URGENT is a stronger pill than unmerged: the git check must be skipped,
     # and the wire says "not checked" ("unknown"), NOT "confirmed clean" ("no").
@@ -325,7 +334,7 @@ def test_thread_list_uses_setup_domain_without_caching_an_empty_manager(tmp_path
         lambda tid: (_ for _ in ()).throw(AssertionError("no pre-clone manager")),
     )
     monkeypatch.setattr(state, "_has_urgent", lambda tid: False)
-    monkeypatch.setattr(state, "_has_unmerged_changes", lambda tid: False)
+    monkeypatch.setattr(state, "_has_unmerged_changes", lambda tid: "no")
 
     response = _client(monkeypatch).get("/api/v1/phone/threads", headers=_auth())
 

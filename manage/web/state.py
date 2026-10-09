@@ -312,17 +312,22 @@ def _get_sandbox_backend(tid: str, tz: str | None = None, *,
         **({"before_start": before_start} if before_start is not None else {}))
 
 
-def _has_unmerged_changes(tid: str) -> bool:
-    """True if this thread's working tree has unmerged work vs main.
+def _has_unmerged_changes(tid: str) -> str:
+    """Tri-state: does this thread's working tree have unmerged work vs main?
 
-    Used by the index page to surface an "unmerged" badge on threads
-    that finished a turn but haven't been merged yet.  Wraps
-    ``DomainManager.has_changes_vs_main`` and swallows any exception
-    (a transient git error here mustn't 500 the index page).
+    Used by the index page and phone catalog to surface an "unmerged"
+    badge on threads that finished a turn but haven't been merged yet.
+    Returns one of ``"yes"`` (dirty), ``"no"`` (confirmed clean), or
+    ``"unknown"`` (no check ran — no bound repo, not a git repo, or a
+    git error).  Wraps
+    ``DomainManager.has_changes_vs_main`` (already tri-state) and maps
+    any unexpected exception to ``"unknown"`` — a transient git error
+    here mustn't 500 the index page, and it must not masquerade as a
+    confirmed-clean ``"no"``.
     """
     dm = _get_domain_manager(tid)
     if not dm:
-        return False
+        return "unknown"
     try:
         return dm.has_changes_vs_main()
     except Exception as e:
@@ -331,7 +336,7 @@ def _has_unmerged_changes(tid: str) -> bool:
         logging.getLogger(__name__).debug(
             "has_changes_vs_main failed for %s: %s", tid, e,
         )
-        return False
+        return "unknown"
 
 
 def _unmerged_state(tid: str, stage: str, urgent: bool, unseen: bool) -> str:
@@ -340,24 +345,27 @@ def _unmerged_state(tid: str, stage: str, urgent: bool, unseen: bool) -> str:
     Returns one of:
       ``"yes"``     — a git check ran and found unmerged work vs main;
       ``"no"``      — a git check ran and the working tree is confirmed clean;
-      ``"unknown"`` — the git check was NOT run because a higher-priority
-                     indicator (a live busy stage, an error, an urgent flag, or
-                     an unseen reply) is already present.
+      ``"unknown"`` — the git check was NOT run, either because a
+                     higher-priority indicator (a live busy stage, an error,
+                     an urgent flag, or an unseen reply) is already present
+                     and the check is deliberately skipped, or because the
+                     check itself could not run (no repo / git failure).
 
-    ``unknown`` is distinct from ``"no"`` on purpose: it means "not checked",
-    not "confirmed clean".  This is the web's render_index short-circuit made
-    explicit and shared with the phone: neither surface burns the (expensive,
-    git-subprocess) unmerged check when a stronger pill is already showing, so
-    a busy thread's unmerged-ness is "unknown", not "known-clean".  Both the
-    badge logic and the catalog call the same helper, so the two surfaces can't
-    disagree about when the check is skipped.
+    ``unknown`` is distinct from ``"no"`` on purpose: it means "not checked"
+    or "couldn't check", not "confirmed clean".  This is the web's
+    render_index short-circuit made explicit and shared with the phone:
+    neither surface burns the (expensive, git-subprocess) unmerged check when
+    a stronger pill is already showing, so a busy thread's unmerged-ness is
+    "unknown", not "known-clean".  Both the badge logic and the catalog call
+    the same helper, so the two surfaces can't disagree about when the check
+    is skipped.
     """
     if (stage in BUSY_STAGES) or (stage == "error") or urgent or unseen:
         # A stronger pill is already present.  Do not burn the git check: the
         # unmerged pill would be masked anyway, so the honest answer is
         # "not checked", not "confirmed clean".
         return "unknown"
-    return "yes" if _has_unmerged_changes(tid) else "no"
+    return _has_unmerged_changes(tid)
 
 
 def _conflict_path(tid: str) -> str:

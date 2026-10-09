@@ -295,11 +295,11 @@ class TestHasChangesVsMain(TestCase):
     def _dm(self):
         return DomainManager(repo_path=self.repo_path, repo="origin")
 
-    def test_returns_false_for_clean_tree_freshly_branched(self):
-        # No diff vs main, no untracked files.
-        self.assertFalse(self._dm().has_changes_vs_main())
+    def test_returns_no_for_clean_tree_freshly_branched(self):
+        # No diff vs main, no untracked files: a check ran and is clean.
+        self.assertEqual(self._dm().has_changes_vs_main(), "no")
 
-    def test_returns_true_for_committed_tracked_diff(self):
+    def test_returns_yes_for_committed_tracked_diff(self):
         import subprocess
         with open(os.path.join(self.repo_path, "seed.txt"), "w") as f:
             f.write("modified\n")
@@ -311,30 +311,57 @@ class TestHasChangesVsMain(TestCase):
             ["git", "commit", "-q", "-m", "edit"], cwd=self.repo_path, check=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        self.assertTrue(self._dm().has_changes_vs_main())
+        self.assertEqual(self._dm().has_changes_vs_main(), "yes")
 
-    def test_returns_true_for_uncommitted_tracked_diff(self):
+    def test_returns_yes_for_uncommitted_tracked_diff(self):
         # The realistic mid-turn case: agent edited a file but hasn't
         # hit ``dm.sync()`` yet.  ``git diff main...`` only compares
         # committed branch state to the merge-base and would miss
         # this — must also check the working tree against HEAD.
         with open(os.path.join(self.repo_path, "seed.txt"), "w") as f:
             f.write("uncommitted edit\n")
-        self.assertTrue(self._dm().has_changes_vs_main())
+        self.assertEqual(self._dm().has_changes_vs_main(), "yes")
 
-    def test_returns_true_for_untracked_file_only(self):
+    def test_returns_yes_for_untracked_file_only(self):
         # Tracked tree matches main, but a new file sits on disk
         # uncommitted.  The user has work to ship — badge it.
         with open(os.path.join(self.repo_path, "new.txt"), "w") as f:
             f.write("untracked\n")
-        self.assertTrue(self._dm().has_changes_vs_main())
+        self.assertEqual(self._dm().has_changes_vs_main(), "yes")
 
-    def test_returns_false_when_self_repo_is_none(self):
-        # DomainManager with no remote: nothing to compare against.
-        # Suppress clone_repo so the constructor does not try to clone.
+    def test_returns_unknown_when_self_repo_is_none(self):
+        # DomainManager with no remote: nothing to compare against —
+        # the check cannot run, so it is "unknown", NOT a false "no".
         with patch("assist.domain_manager.clone_repo"):
             dm = DomainManager(repo_path=self.repo_path, repo=None)
         # Sanity: the constructor should have nulled-out repo via
         # git_repo() returning None on a repo with no `origin` remote.
         self.assertIsNone(dm.repo)
-        self.assertFalse(dm.has_changes_vs_main())
+        self.assertEqual(dm.has_changes_vs_main(), "unknown")
+
+    @patch('assist.domain_manager.clone_repo')
+    def test_returns_unknown_when_the_path_is_not_a_git_repo(self, mock_clone):
+        # A bound repo whose path is not a git working tree cannot be
+        # checked — "unknown", not a false "no" that hides the problem.
+        # This is the prod regression shape (thread 20260504091127-183e8f35):
+        # ``self.repo`` set but no ``.git/`` on disk — a clone that didn't
+        # take or a sandbox tool that wiped it.  ``clone_repo`` is mocked so
+        # the constructor reaches that post-init state without touching git.
+        plain_dir = os.path.join(self.temp_dir, "not-a-repo")
+        os.makedirs(plain_dir)
+        dm = DomainManager(repo_path=plain_dir, repo="https://example.com/repo.git")
+        self.assertEqual(dm.has_changes_vs_main(), "unknown")
+
+    def test_returns_unknown_when_git_fails_on_a_bare_like_repo(self):
+        # A repo with no commits: ``git diff --quiet HEAD`` has no HEAD
+        # to diff against (non-zero exit), so the check is inconclusive.
+        # It must surface "unknown", not masquerade as a clean tree.
+        import subprocess
+        empty_repo = os.path.join(self.temp_dir, "empty")
+        os.makedirs(empty_repo)
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main"], cwd=empty_repo, check=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        dm = DomainManager(repo_path=empty_repo, repo="origin")
+        self.assertEqual(dm.has_changes_vs_main(), "unknown")

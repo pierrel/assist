@@ -19,7 +19,7 @@ from assist.events import notify as notify_mod
 @pytest.fixture
 def threads_root(tmp_path, monkeypatch):
     monkeypatch.setattr(web.MANAGER, "root_dir", str(tmp_path))
-    monkeypatch.setattr("manage.web.threads._has_unmerged_changes", lambda tid: False)
+    monkeypatch.setattr("manage.web.state._has_unmerged_changes", lambda tid: "no")
     state.DESCRIPTION_CACHE.clear()
     state._UNSEEN.clear()
     state._URGENT.clear()
@@ -178,7 +178,7 @@ class TestUrgentBadge:
 
 class TestPrecedence:
     def test_urgent_beats_new_and_unmerged(self, threads_root, monkeypatch):
-        monkeypatch.setattr("manage.web.threads._has_unmerged_changes", lambda tid: True)
+        monkeypatch.setattr("manage.web.state._has_unmerged_changes", lambda tid: "yes")
         _make_thread(threads_root, "t1", "Coffee")
         state._mark_unseen_response("t1")   # also "new"
         state._mark_urgent("t1")
