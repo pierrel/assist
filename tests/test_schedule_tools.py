@@ -111,6 +111,18 @@ def test_invalid_explicit_timezone_is_corrective(tools):
     assert out == "Couldn't schedule: unknown timezone 'not-a-zone'."
 
 
+@pytest.mark.parametrize("has_rider", [True, False])
+def test_empty_explicit_timezone_never_falls_back_or_saves(tools, monkeypatch, has_rider):
+    if not has_rider:
+        monkeypatch.setattr(tools_mod, "get_config",
+                            lambda: {"configurable": {"thread_id": "t1"}})
+
+    out = tools.create_schedule("morning review", hour=7, timezone="")
+
+    assert out == "Couldn't schedule: unknown timezone ''."
+    assert tools.store.for_thread("t1") == []
+
+
 def test_invalid_timezone_path_is_corrective(tools):
     out = tools.create_schedule("morning review", hour=7, timezone="../not-a-zone")
 

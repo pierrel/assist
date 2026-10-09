@@ -74,7 +74,9 @@ def schedule_tools(store) -> list:
         tid = _thread_id()
         if not tid:
             return "Couldn't schedule: no active thread."
-        tz = timezone or _tz()
+        tz = _tz() if timezone is None else timezone
+        if timezone == "":
+            return "Couldn't schedule: unknown timezone ''."
         if not tz:
             return "Couldn't schedule: I don't know your timezone for this message."
         try:
