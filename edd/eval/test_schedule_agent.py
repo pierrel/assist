@@ -535,10 +535,11 @@ class TestPromptRewriteScheduleOutcome(TestCase):
 
         thread_id = "schedule-replace-after-compaction-eval"
         replace_prompt = "Make that reminder run every day at 7 AM instead."
+        # Deliberately omit the id and zone. After compaction the model must reread the
+        # actual listed schedule to identify it and preserve its timezone.
         summary_model = _CountingSummaryModel(responses=[AIMessage(content=(
-            "The user has one weekday 7 AM reminder to take vitamins, id "
-            "weekday-vitamins, in America/Los_Angeles, and wants to change it to "
-            "every day at the same time."))])
+            "The user has one weekday 7 AM reminder to take vitamins and wants to "
+            "change it to every day at the same time."))])
 
         class ReplaceTurnSummarizationMiddleware(SummarizationMiddleware):
             def _should_summarize(self, messages, _total_tokens):
@@ -598,6 +599,8 @@ class TestPromptRewriteScheduleOutcome(TestCase):
             for call in initial_calls), diagnostics)
         self.assertTrue(any(call.get("name") == "list_schedules"
                             for call in initial_calls), diagnostics)
+        self.assertTrue(any(call.get("name") == "list_schedules" for call in calls),
+                        diagnostics)
         self.assertTrue(any(call.get("name") == "delete_schedule"
                             and (call.get("args") or {}).get("schedule_id") == prior.id
                             for call in calls), diagnostics)

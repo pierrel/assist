@@ -23,7 +23,9 @@ def tools(tmp_path, monkeypatch):
 def test_create_then_list(tools):
     out = tools.create_schedule("morning review", hour=7, minute=0)
     assert "Scheduled" in out and "every day at 7:00 AM" in out
-    assert "morning review" in tools.list_schedules()
+    listing = tools.list_schedules()
+    assert "morning review" in listing
+    assert "timezone: America/Los_Angeles" in listing
 
 
 def test_modify_is_sparse_delta(tools):

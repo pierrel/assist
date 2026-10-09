@@ -41,7 +41,8 @@ def _tz() -> str | None:
 def _line(s: Schedule) -> str:
     return (f"[{s.id}] {cadence.describe(s.cadence)} — \"{s.prompt}\""
             f"{'' if s.enabled else ' (paused)'}; "
-            f"next: {cadence.fmt_instant(s.next_fire_at, s.tz, empty='not scheduled')}")
+            f"next: {cadence.fmt_instant(s.next_fire_at, s.tz, empty='not scheduled')}; "
+            f"timezone: {s.tz}")
 
 
 def schedule_tools(store) -> list:
@@ -110,7 +111,7 @@ def schedule_tools(store) -> list:
         return f"Scheduled. {_line(sched)}"
 
     def list_schedules() -> str:
-        """List THIS thread's schedules (id, cadence, prompt, next run, paused state)."""
+        """List THIS thread's schedules (id, cadence, prompt, next run, timezone, paused state)."""
         tid = _thread_id()
         if not tid:
             return "No active thread."
