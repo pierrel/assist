@@ -1,5 +1,6 @@
 """Offline regressions for real serialized requests and durable compaction."""
 import asyncio
+import copy
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -396,3 +397,53 @@ def test_failed_history_offload_preserves_raw_state_without_model_calls(asynchro
     assert "_summarization_event" not in state
     assert not state["files"]
     assert not provider_calls
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("parent_thinking", [None, True])
+def test_bounded_summary_disables_thinking_without_changing_the_parent_model(asynchronous, parent_thinking):
+    requests = []
+    def provider(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if "max_completion_tokens" not in payload:
+            return _response("continued")
+        if payload.get("chat_template_kwargs", {}).get("enable_thinking") is not False:
+            data = _response("").json()
+            data["choices"][0]["message"]["reasoning_content"] = "hidden reasoning " * 2048
+            data["choices"][0]["finish_reason"] = "length"
+            data["usage"] = {"prompt_tokens": 103080, "completion_tokens": 2048, "total_tokens": 105128}
+            return httpx.Response(200, json=data)
+        return _response("Retain the synthetic goal.")
+
+    model = _model(provider)
+    if parent_thinking is not None:
+        model.extra_body = {"seed": 17, "chat_template_kwargs": {
+            "enable_thinking": parent_thinking, "reasoning_effort": "xhigh"}}
+    original = copy.deepcopy(model.extra_body)
+    backend = StateBackend()
+    with patch("assist.middleware.summarization.compute_summarization_defaults",
+               return_value={"trigger": ("messages", 5), "keep": ("messages", 2)}):
+        middleware = BoundedSummarizationMiddleware(model, backend)
+    graph = create_deep_agent(model, backend=backend, subagents=[],
+        middleware=[middleware], checkpointer=InMemorySaver())
+    messages = [HumanMessage("old goal"), AIMessage("old reply"),
+                HumanMessage("middle"), AIMessage("middle reply"), HumanMessage("continue")]
+    config = {"configurable": {"thread_id": "summary-thinking-budget"}}
+    result = (asyncio.run(graph.ainvoke({"messages": messages}, config, durability="sync"))
+              if asynchronous else graph.invoke({"messages": messages}, config, durability="sync"))
+    state = graph.get_state(config).values
+    assert result["messages"][-1].content == "continued"
+    assert state["messages"][:5] == messages
+    event = state["_summarization_event"]
+    assert event["cutoff_index"] == 3
+    assert event["file_path"] in state["files"]
+    assert "Retain the synthetic goal" in event["summary_message"].content
+    summary = requests[0]
+    assert summary["max_tokens"] == summary["max_completion_tokens"] == 2048
+    assert summary["chat_template_kwargs"]["enable_thinking"] is False
+    if original:
+        assert summary["seed"] == original["seed"]
+        assert summary["chat_template_kwargs"]["reasoning_effort"] == "xhigh"
+    assert model.extra_body == original
+    assert requests[-1].get("chat_template_kwargs") == (original or {}).get("chat_template_kwargs")

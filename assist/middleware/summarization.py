@@ -32,8 +32,12 @@ class BoundedSummarizationMiddleware(SummarizationMiddleware):
         settings = {"max_tokens": output_limit}
         if isinstance(model, ChatOpenAI):
             # LangChain sends max_completion_tokens, while the serving llama.cpp
-            # reads max_tokens. Preserve chat-template settings and send both.
-            settings["extra_body"] = {**(model.extra_body or {}), "max_tokens": output_limit}
+            # reads max_tokens. Keep bounded summaries out of hidden reasoning
+            # so their output budget is available for the visible summary.
+            extra_body = model.extra_body or {}
+            settings["extra_body"] = {**extra_body, "max_tokens": output_limit,
+                "chat_template_kwargs": {**extra_body.get("chat_template_kwargs", {}),
+                                         "enable_thinking": False}}
         self._summary_model = model.bind(**settings)
 
     def _summary_prompt(self, text):

@@ -97,7 +97,9 @@ where reliability is harder than with frontier APIs.
 - **Resilient context handling.** Large tool results are evicted to
   disk before overflowing context, context-overflow errors are caught
   and retried, and failed turns roll back to a checkpoint instead of
-  ending the thread.
+  ending the thread. Bounded conversation summaries disable hidden reasoning
+  so the output budget is available for the summary; failed summaries preserve
+  the raw history.
 
 - **Loop and stall guards.** Repeating tool calls and empty model
   responses are detected and recovered automatically — keeps small
