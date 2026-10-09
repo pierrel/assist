@@ -3,8 +3,8 @@
 The model always sees the skill catalog and ``load_skill``. In normal
 progressive compositions, tools declared by the winning skill from any
 mounted source are withheld until that exact skill loads successfully. Their
-compact callable schemas remain available until the catalog changes. Inbound
-SMS triage deliberately retains its legacy composition.
+native schemas remain available until the catalog changes. Inbound SMS triage
+deliberately retains its legacy composition.
 """
 from __future__ import annotations
 
@@ -402,25 +402,6 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
         return _sha256(json.dumps(
             schemas, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
 
-    @staticmethod
-    def _compact_schema(
-            tool_value: BaseTool | dict[str, Any] | Callable) -> dict[str, Any]:
-        """Keep the native callable shape while moving explanatory prose to history."""
-        schema = json.loads(json.dumps(_openai_tool_schema(tool_value)))
-
-        def strip(node):
-            if isinstance(node, dict):
-                for key in ("description", "title", "examples", "default"):
-                    node.pop(key, None)
-                for value in node.values():
-                    strip(value)
-            elif isinstance(node, list):
-                for value in node:
-                    strip(value)
-
-        strip(schema)
-        return schema
-
     def _format_skills_list(self, skills):
         """Render only name and description; declarations remain undisclosed."""
         if not skills:
@@ -461,19 +442,10 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
 
     def modify_request(self, request: ModelRequest) -> ModelRequest:
         """Add the catalog and expose exactly the tools allowed for this request."""
-        active_tools = frozenset(
-            tool for activation in _state_value(
-                request.state, "active_skills", {}).values()
-            for tool in activation["tools"])
         retained = [
             tool_value for tool_value in request.tools
             if (name := _tool_name(tool_value)) is None
             or self._tool_is_allowed(request.state, name)
-        ]
-        retained = [
-            (self._compact_schema(tool_value)
-             if _tool_name(tool_value) in active_tools else tool_value)
-            for tool_value in retained
         ]
         names = [name for tool_value in retained
                  if (name := _tool_name(tool_value)) is not None]

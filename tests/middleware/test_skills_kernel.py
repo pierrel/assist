@@ -435,7 +435,7 @@ def test_successful_load_returns_state_command_and_exact_closed_evidence():
     assert [item.name for item in visible.tools] == ["kernel_tool", "travel"]
 
 
-def test_retained_active_tool_uses_a_compact_native_schema_without_replay():
+def test_retained_active_tool_keeps_its_native_schema_without_replay():
     middleware = SmallModelSkillsMiddleware(
         backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"],
         tool_definitions=(travel,))
@@ -461,13 +461,12 @@ def test_retained_active_tool_uses_a_compact_native_schema_without_replay():
 
     assert updated.messages == [original]
     assert len(updated.tools) == 1
-    schema = updated.tools[0]
-    assert schema["function"]["name"] == "travel"
-    assert "description" not in schema["function"]
-    assert schema["function"]["parameters"]["required"] == ["origin", "destination"]
+    assert updated.tools[0].name == "travel"
+    assert updated.tools[0].description == "A bundled skill-owned tool."
+    assert updated.tools[0].args["origin"]["type"] == "string"
 
 
-def test_runtime_injected_callable_has_a_load_contract_and_compact_schema():
+def test_runtime_injected_callable_has_a_load_contract():
     def send_email(to: str, subject: str, runtime: ToolRuntime) -> str:
         """Send a message after approval."""
         return f"{to}:{subject}:{runtime.tool_call_id}"
@@ -477,13 +476,10 @@ def test_runtime_injected_callable_has_a_load_contract_and_compact_schema():
         tool_definitions=(send_email,))
 
     contract = middleware._tool_contract({"send_email"})
-    compact = middleware._compact_schema(send_email)
 
     assert contract is not None
     assert '"name": "send_email"' in contract
     assert '"runtime"' not in contract
-    assert compact["function"]["parameters"]["required"] == ["to", "subject"]
-    assert "runtime" not in compact["function"]["parameters"]["properties"]
 
 
 def test_disclosure_intersects_declarations_with_this_agent_tools():

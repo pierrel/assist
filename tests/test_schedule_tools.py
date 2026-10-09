@@ -85,6 +85,36 @@ def test_no_timezone_declines(tools, monkeypatch):
     assert "timezone" in tools.create_schedule("x", hour=7)
 
 
+def test_explicit_timezone_recovers_when_the_message_has_no_rider(tools, monkeypatch):
+    monkeypatch.setattr(tools_mod, "get_config",
+                        lambda: {"configurable": {"thread_id": "t1"}})
+
+    out = tools.create_schedule("morning review", hour=7,
+                                timezone="America/Los_Angeles")
+
+    assert out.startswith("Scheduled.")
+    assert tools.store.for_thread("t1")[0].tz == "America/Los_Angeles"
+
+
+def test_explicit_timezone_overrides_the_message_rider(tools):
+    out = tools.create_schedule("morning review", hour=7, timezone="Europe/Paris")
+
+    assert out.startswith("Scheduled.")
+    assert tools.store.for_thread("t1")[0].tz == "Europe/Paris"
+
+
+def test_invalid_explicit_timezone_is_corrective(tools):
+    out = tools.create_schedule("morning review", hour=7, timezone="not-a-zone")
+
+    assert out == "Couldn't schedule: unknown timezone 'not-a-zone'."
+
+
+def test_invalid_timezone_path_is_corrective(tools):
+    out = tools.create_schedule("morning review", hour=7, timezone="../not-a-zone")
+
+    assert out == "Couldn't schedule: unknown timezone '../not-a-zone'."
+
+
 def test_create_monthly_defaults_anchor_to_current_month(tools):
     from datetime import datetime
     from zoneinfo import ZoneInfo
