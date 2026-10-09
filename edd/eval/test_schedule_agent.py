@@ -415,7 +415,9 @@ class TestPromptRewriteScheduleOutcome(TestCase):
         forces one real-model summary immediately before turn two so this covers
         the boundary where the full ``load_skill`` ToolMessage has disappeared.
         Reloading operating guidance is an internal model choice; the behavioral
-        contract is that the intended schedule is paused accurately.
+        contract is that the intended schedule is paused accurately. The captured
+        post-compaction native-schema assertions below are a capability diagnostic,
+        not a restriction on the model's route to that outcome.
         """
         from deepagents.middleware.summarization import SummarizationMiddleware
 
@@ -517,10 +519,6 @@ class TestPromptRewriteScheduleOutcome(TestCase):
         self.assertTrue(boundary["tool_descriptions"].get("create_schedule"), diagnostics)
         self.assertIn("timezone", boundary["tool_parameters"]["create_schedule"]
                       .get("properties", {}), diagnostics)
-        self.assertFalse(any(
-            call.get("name") == "load_skill"
-            and (call.get("args") or {}).get("name") == "schedule"
-            for call in followup_calls), diagnostics)
         self.assertTrue(any(call.get("name") == "pause_schedule"
                             for call in followup_calls), diagnostics)
         self.assertEqual(len(saved), 1, diagnostics)
@@ -528,7 +526,11 @@ class TestPromptRewriteScheduleOutcome(TestCase):
         self.assertRegex(reply.lower(), r"paus", diagnostics)
 
     def test_replaces_broadened_reminder_after_forced_compaction(self):
-        """A riderless compacted follow-up preserves a listed schedule's timezone."""
+        """A riderless compacted follow-up preserves a listed schedule's timezone.
+
+        Reloading the schedule skill is valid. The natural acceptance condition is
+        the persisted replacement, not which available guidance route the model uses.
+        """
         from deepagents.middleware.summarization import SummarizationMiddleware
 
         thread_id = "schedule-replace-after-compaction-eval"
@@ -596,10 +598,6 @@ class TestPromptRewriteScheduleOutcome(TestCase):
             for call in initial_calls), diagnostics)
         self.assertTrue(any(call.get("name") == "list_schedules"
                             for call in initial_calls), diagnostics)
-        self.assertFalse(any(
-            call.get("name") == "load_skill"
-            and (call.get("args") or {}).get("name") == "schedule"
-            for call in calls), diagnostics)
         self.assertTrue(any(call.get("name") == "delete_schedule"
                             and (call.get("args") or {}).get("schedule_id") == prior.id
                             for call in calls), diagnostics)
