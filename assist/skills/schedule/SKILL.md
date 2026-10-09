@@ -18,7 +18,8 @@ accumulate here. Use the schedule tools — do not try to keep time yourself.
 - `delete_schedule(id)` — remove one permanently.
 
 ## Cadence — pick ONE shape and fill its fields
-Times use the message's local timezone. `weekdays` is `0=Mon … 6=Sun`.
+By default, times use the message's local timezone; an explicitly requested
+timezone takes precedence. `weekdays` is `0=Mon … 6=Sun`.
 - daily at a time → `hour=7, minute=0`
 - specific weekdays → `hour=7, minute=0, weekdays=[0,1,2,3,4]`
 - hourly at a given minute → `minute=30` (omit `hour`)
