@@ -1022,6 +1022,19 @@ def render_thread(
             '<span style="margin-left:.5rem; color:#9ca3af; font-size:.75rem;'
             f'font-weight:normal;">{badge}</span></div><div class="content">'
             f'{html.escape(r.text).replace(chr(10), "<br/>")}</div>{detail}</div>'))
+    # The accepted redirect clears the browser draft. A queued follower may
+    # replace status before the owner sees a stale review error, so project its
+    # durable Run text independently of the current status.
+    failed_reviews = [run for run in _visible_runs
+                      if (run.status == "error" and run.review_snapshot is not None
+                          and run.text and (run.error or "").startswith((
+                              "Review changed while queued", "Review base is unavailable",
+                              "Review cannot run while")))]
+    for run in failed_reviews[-3:]:
+        rendered.insert(0, (
+            '<div class="msg user"><div class="role">user · review not delivered</div>'
+            f'<div class="content">{render_markdown(run.text, extensions=_MD_EXTENSIONS)}</div>'
+            f'<div class="content">{html.escape(run.error or "")}</div></div>'))
     notices = [run for run in _visible_runs if run.browser_reset_notice]
     if notices:
         latest = notices[-1]
@@ -2029,6 +2042,7 @@ def _pending_run_records(tid: str) -> list[PendingMessage]:
         rider=run.rider, enqueued_at=run.created_at, origin=run.origin, id=run.id)
         for run in eligible
         if (run.status == "pending" and run.mode == "turn" and run.text
+            and run.review_snapshot is None
             and run.assistant_id == "general-agent")]
 
 
@@ -2497,7 +2511,8 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 delegate_user_urls=(), location: LocationSnapshot | None = None,
                 user_origin: bool = False, user_event_id: str | None = None,
                 revocation_pending: bool = False,
-                browser_reset_run_id: str | None = None) -> Run:
+                browser_reset_run_id: str | None = None,
+                review_snapshot: dict | None = None) -> Run:
     """Commit one web turn before placing its id on a dispatch queue."""
     with RUN_GATE.active() as accepted:
         if not accepted:
@@ -2515,7 +2530,8 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
             location=_location_to_fields(location) if location else None,
             user_origin=user_origin, user_event_id=user_event_id,
             revocation_pending=revocation_pending,
-            browser_reset_run_id=browser_reset_run_id)
+            browser_reset_run_id=browser_reset_run_id,
+            review_snapshot=review_snapshot)
 
 
 def _publish_phone_text(tid: str, work_id: str, text: str) -> None:
@@ -3264,6 +3280,7 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
         pending_text=pending_text if decision == "resume" else None,
         origin=run.origin, work_id=run.work_id,
         user_event_id=run.user_event_id,
+        review_snapshot=run.review_snapshot if decision != "resume" else None,
         location=_location_from_fields(run.location))
     _RESUME_SCHEDULER.submit(successor.id, tid, user_priority=user_priority)
 
@@ -3551,6 +3568,19 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 git_lifecycle.handoff(rider.tz if rider else None)
             else:
                 git_lifecycle.resume()
+            if _run is not None and _run.review_snapshot is not None and not resume:
+                # A queued review cannot interject. Recheck the exact displayed
+                # diff after preflight; bound Git reads keep the global queue live.
+                from manage.web.review import _review_snapshot
+                try:
+                    current_review, _changes = _review_snapshot(
+                        tid, None)
+                except (GitSyncError, OSError, RuntimeError) as error:
+                    raise GitSyncError("Review base is unavailable; refresh and re-anchor. "
+                                       "Your comments remain in the saved review Run.") from error
+                if current_review != _run.review_snapshot:
+                    raise GitSyncError("Review changed while queued; refresh and re-anchor. "
+                                       "Your comments remain in the saved review Run.")
             sandbox = None
             sandbox_generation = None
             browser_session = None
@@ -3628,6 +3658,15 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                        **assistant_kwargs)
                 except FileNotFoundError:
                     return
+                if (_run is not None and _run.review_snapshot is not None
+                        and (chat.pending_reply() or _pending_email(chat)
+                             or _pending_gmail(chat))):
+                    # Ordinary new messages may run a model-backed reject turn to
+                    # supersede an interrupted reply. A line review must not:
+                    # that turn could change the checkout after its diff check.
+                    raise GitSyncError("Review cannot run while an earlier reply awaits "
+                                       "approval; refresh and re-anchor. Your comments "
+                                       "remain in the saved review Run.")
                 _set_status(tid, "processing", **pending_kwargs)
                 record = _runs().approval(tid, _run.approval_id) if _run and _run.approval_id else None
                 record_consumed = False
@@ -4571,7 +4610,8 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
                                run_id: str | None = None,
                                work_id: str | None = None,
                                browser_state=None,
-                               browser_map_record: bool = False) -> tuple[Run, bool]:
+                               browser_map_record: bool = False,
+                               review_snapshot: dict | None = None) -> tuple[Run, bool]:
     """Admit one message under the short browser fence and Run lock."""
     if (_get_status(tid).get("pending_email_token")
             or _get_status(tid).get("pending_gmail_token")):
@@ -4605,6 +4645,7 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
                       dispatch_key=dispatch_key,
                       max_pending=max_pending, user_origin=True,
                       revocation_pending=browser_hold and not pi_thread,
+                      review_snapshot=review_snapshot,
                       browser_reset_run_id=(
                           lease["owner_run_id"] if lease is not None else
                           session.run_id if session is not None else
@@ -4632,7 +4673,8 @@ def _accept_message_run(tid: str, text: str, rider=None,
                         dispatch_key: str | None = None,
                         max_pending: int | None = None,
                         run_id: str | None = None,
-                        work_id: str | None = None) -> tuple[Run, bool]:
+                        work_id: str | None = None,
+                        review_snapshot: dict | None = None) -> tuple[Run, bool]:
     """Persist one web submission and return whether earlier work owns the thread."""
     with browser_authority.fence(MANAGER.root_dir, tid) as browser_state:
         map_record = False
@@ -4648,7 +4690,7 @@ def _accept_message_run(tid: str, text: str, rider=None,
         with _RUN_ADMISSION_LOCK:
             run, busy = _accept_message_run_locked(
                 tid, text, rider, location, dispatch_key, max_pending,
-                run_id, work_id, browser_state, map_record)
+                run_id, work_id, browser_state, map_record, review_snapshot)
     if run.status == "revocation_pending":
         _queue_browser_revocation(tid)
     return run, busy

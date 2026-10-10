@@ -12,6 +12,7 @@ from assist.git_sync import (GitSyncError, _initial_binding, _write_state, autho
                              bind, identity, publish_initial_branch)
 from assist.domain_manager import git_diff_main
 from assist.thread_git import ThreadGit
+from manage.web import review
 from manage.web.thread_git_lifecycle import ThreadGitLifecycle
 from tests.test_local_git import commit, git, repositories  # noqa: F401
 
@@ -267,6 +268,53 @@ def test_merge_uses_published_history_only_and_preserves_checkout(
     assert git("cat-file", "-e", merged + "^{commit}", cwd=server) == ""
     assert [change.path for change in git_diff_main(str(server), merged)] == [
         "uncommitted.txt"]
+
+
+def test_bound_review_diff_rechecks_metadata_without_external_helper(repositories, tmp_path):
+    _source, server, _phone = repositories
+    base = git("rev-parse", "main", cwd=server)
+    head = commit(server, "README", "changed\n")
+    initial = git_diff_main(str(server), base, head)
+    assert any("+changed" in change.diff for change in initial)
+
+    marker = tmp_path / "external-helper-ran"
+    git("config", "diff.external", f"sh -c 'touch {marker}'", cwd=server)
+    attributes = server / ".git" / "info" / "attributes"
+    attributes.write_text("README -diff\n")
+    changed = git_diff_main(str(server), base, head)
+    assert changed != initial
+    assert not marker.exists()
+    assert git("status", "--porcelain", cwd=server) == ""
+
+
+def test_bound_review_diff_has_output_cap(repositories, monkeypatch):
+    _source, server, _phone = repositories
+    base = git("rev-parse", "main", cwd=server)
+    head = commit(server, "README", "changed\n")
+    monkeypatch.setattr("assist.domain_manager._REVIEW_DIFF_BYTES", 64)
+
+    with pytest.raises(RuntimeError, match="Git review diff"):
+        git_diff_main(str(server), base, head)
+
+
+def test_bound_review_snapshot_rechecks_same_oid_metadata_without_domain_manager(
+        bound_thread, monkeypatch):
+    _owner, _source, server, _phone = bound_thread
+    base = git("rev-parse", "main", cwd=server)
+    head = commit(server, "README", "changed\n")
+    monkeypatch.setattr(review.MANAGER, "thread_dir",
+                        lambda _tid: str(server.parent / "thread"))
+    monkeypatch.setattr(review.MANAGER, "thread_default_working_dir",
+                        lambda _tid: str(server))
+    monkeypatch.setattr(review, "_review_base", lambda _tid: base)
+
+    original, _changes = review._review_snapshot("thread", None)
+    (server / ".git" / "info" / "attributes").write_text("README -diff\n")
+    changed, _changes = review._review_snapshot("thread", None)
+
+    assert original["base_oid"] == changed["base_oid"] == base
+    assert original["head_oid"] == changed["head_oid"] == head
+    assert original["diff_digest"] != changed["diff_digest"]
 
 
 def test_merge_conflict_leaves_main_and_thread_unchanged(bound_thread, tmp_path):

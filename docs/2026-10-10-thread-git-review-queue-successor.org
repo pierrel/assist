@@ -1,0 +1,31 @@
+#+title: Queued thread Git review validation
+#+date: 2026-10-10
+
+* Outcome
+
+A bound web review saves its accepted base OID, checkout head OID, and diff
+digest as a bounded field on its durable Run. Review Runs cannot interject
+into an active turn. When the review's own turn owns the queue and Git
+workspace, it completes Git preflight and recomputes all three values with
+bounded, external-helper-free Git reads before creating a model sandbox or
+sending the comments to the model. The bound diff is limited to 100 files,
+2 MiB of output, and one 10-second operation budget. An earlier turn or the
+review's own preflight may have
+changed the checkout; either change stops a stale review as an error. The
+formatted line comments remain in the failed Run. The three most recent
+failed reviews show their saved text and a refresh/re-anchor instruction even
+if a later Run replaces the status banner. If an older reply
+still awaits approval, review delivery stops instead of running a model-backed
+supersede that could change the diff after validation. A crash that redispatches
+the original pre-model message carries
+the same snapshot; a genuine paused model resume does not restart that check.
+
+The existing submit-time 409 remains. This guards the later dispatch window
+without claiming the browser localStorage draft survives an accepted redirect.
+
+* Historical supersessions
+
+This note directly supersedes the =Outcome= review-validation paragraph in
+=docs/2026-10-10-thread-git-boundary-successor.org= as a complete review
+delivery guarantee. Submit-time comparison alone cannot guard a queued Run
+or an own-preflight fast-forward.

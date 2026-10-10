@@ -1124,6 +1124,12 @@ Merge & Push privately merges only published main and thread histories; it
 imports the merged objects for immediate web review but does not move either
 working checkout or the thread branch. Conflicts and
 competing main advances are visible failures for manual resolution.
+Web diff reviews bind their line comments to the displayed Git base, head,
+and diff. A queued review rechecks all three after its own Git preflight using
+bounded, helper-free Git reads; a diff above 100 files or 2 MiB is unavailable
+for review. If any identity changed, no model sees stale comments. The three
+most recent failed reviews show their saved text for refreshing and
+re-anchoring, even when a later turn replaces the error banner.
 
 ## Docker Sandbox
 

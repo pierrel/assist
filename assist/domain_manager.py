@@ -1,8 +1,10 @@
 import logging
 import os
 import re
+import signal
 import subprocess
 import tempfile
+import time
 from typing import List
 from pydantic import BaseModel
 from datetime import datetime
@@ -37,6 +39,43 @@ class OriginAdvancedError(Exception):
 class Change(BaseModel):
     path: str
     diff: str
+
+
+_REVIEW_DIFF_SECONDS = 10
+_REVIEW_DIFF_BYTES = 2 * 1024 * 1024
+_REVIEW_DIFF_FILES = 100
+
+
+def _bounded_review_git(repo_dir: str, arguments: list[str], deadline: float):
+    """Run a bound review read without agent-selected helpers or unbounded output."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("Git review diff timed out")
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith("GIT_")}
+    environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
+                       GIT_NO_REPLACE_OBJECTS="1", GIT_TERMINAL_PROMPT="0")
+    command = ["prlimit", "--as=2147483648", "--cpu=10",
+               f"--fsize={_REVIEW_DIFF_BYTES}", "--", "git", "-C", repo_dir,
+               "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+               *arguments]
+    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(command, stdout=output, stderr=errors,
+                                   env=environment, start_new_session=True)
+        try:
+            process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as error:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            raise RuntimeError("Git review diff timed out") from error
+        output.seek(0)
+        data = output.read(_REVIEW_DIFF_BYTES + 1)
+        if len(data) > _REVIEW_DIFF_BYTES:
+            raise RuntimeError("Git review diff is too large")
+        if process.returncode not in (0, 1):
+            raise RuntimeError("Git review diff is unavailable or too large")
+        return subprocess.CompletedProcess(command, process.returncode,
+                                           data.decode("utf-8", "replace"), "")
 
 
 def current_branch(repo_dir: str) -> str:
@@ -207,63 +246,61 @@ def git_diff_main(repo_dir: str, base_oid: str | None = None,
     """Return thread changes against an immutable base when one is supplied.
 
     Bound web callers pass the exact configured-source main and displayed head
-    OIDs. Legacy callers without them still compare local ``main...HEAD``.
-    Untracked files appear as additions in either case.
+    OIDs through bounded, helper-free Git reads. Legacy callers without both
+    revisions still compare local ``main...HEAD``. Untracked files appear as
+    additions in either case.
     """
     for oid in (base_oid, head_oid):
         if oid is not None and not re.fullmatch(r"[0-9a-f]{40}", oid):
             raise ValueError("Invalid Git review revision")
     comparison = (base_oid or "main") + "..." + (head_oid or "HEAD")
     changes: List[Change] = []
+    bounded = base_oid is not None and head_oid is not None
+    deadline = time.monotonic() + _REVIEW_DIFF_SECONDS
+
+    def run(arguments: list[str]):
+        if bounded:
+            return _bounded_review_git(repo_dir, arguments, deadline)
+        return subprocess.run(['git', '-C', repo_dir, *arguments],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, errors='replace', check=False)
 
     # Files changed relative to the selected comparison base.
-    names = subprocess.run(
-        ['git', '-C', repo_dir, 'diff', '--name-only', comparison],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
+    diff_options = ['--no-ext-diff', '--no-textconv'] if bounded else []
+    names = run(['diff', *diff_options, '--name-only', comparison])
     if names.returncode not in (0, 1):
         raise RuntimeError(f"git diff --name-only {comparison} failed: {names.stderr.strip()}")
 
-    for path in [l.strip() for l in names.stdout.splitlines() if l.strip()]:
-        d = subprocess.run(
-            ['git', '-C', repo_dir, 'diff', '--no-color', comparison, '--', path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            encoding='utf-8',
-            errors='replace',
-            check=False,
-        )
+    paths = [line.strip() for line in names.stdout.splitlines() if line.strip()]
+    if bounded and len(paths) > _REVIEW_DIFF_FILES:
+        raise RuntimeError("Git review diff has too many files")
+    total_bytes = 0
+    for path in paths:
+        d = run(['diff', *diff_options, '--no-color', comparison, '--', path])
         if d.returncode not in (0, 1):
             raise RuntimeError(f"git diff {comparison} failed for {path}: {d.stderr.strip()}")
         if d.stdout:
+            total_bytes += len(d.stdout.encode('utf-8'))
+            if bounded and total_bytes > _REVIEW_DIFF_BYTES:
+                raise RuntimeError("Git review diff is too large")
             changes.append(Change(path=path, diff=d.stdout))
 
     # Untracked files: show as diff from /dev/null
-    ls = subprocess.run(
-        ['git', '-C', repo_dir, 'ls-files', '--others', '--exclude-standard'],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
+    ls = run(['ls-files', '--others', '--exclude-standard'])
     if ls.returncode != 0:
         raise RuntimeError(f"git ls-files failed: {ls.stderr.strip()}")
 
-    for path in [line.strip() for line in ls.stdout.splitlines() if line.strip()]:
-        d = subprocess.run(
-            ['git', '-C', repo_dir, 'diff', '--no-index', '--no-color', '--', '/dev/null', path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            encoding='utf-8',
-            errors='replace',
-            check=False,
-        )
+    untracked = [line.strip() for line in ls.stdout.splitlines() if line.strip()]
+    if bounded and len(paths) + len(untracked) > _REVIEW_DIFF_FILES:
+        raise RuntimeError("Git review diff has too many files")
+    for path in untracked:
+        d = run(['diff', *diff_options, '--no-index', '--no-color', '--', '/dev/null', path])
         if d.returncode not in (0, 1):
             raise RuntimeError(f"git diff --no-index failed for {path}: {d.stderr.strip()}")
         if d.stdout:
+            total_bytes += len(d.stdout.encode('utf-8'))
+            if bounded and total_bytes > _REVIEW_DIFF_BYTES:
+                raise RuntimeError("Git review diff is too large")
             changes.append(Change(path=path, diff=d.stdout))
 
     return changes

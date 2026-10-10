@@ -225,6 +225,27 @@ def test_recovery_dispatches_committed_pending_run_without_status_duplicate(
     assert queued["run_id"] == run.id
 
 
+def test_pre_model_review_redispatch_keeps_accepted_snapshot(wired, monkeypatch):
+    tid, _ = wired
+    snapshot = {"base_oid": "a" * 40, "head_oid": "b" * 40,
+                "diff_digest": "c" * 64}
+    run = threads._create_run(tid, "## Change review\nimportant line",
+                              review_snapshot=snapshot)
+    run = threads._runs().claim(tid, run.id)
+    monkeypatch.setattr(threads, "_recovery_decision", lambda *_args: "redispatch")
+    submitted = []
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
+                        lambda run_id, _tid, **_kwargs: submitted.append(run_id))
+
+    threads._recover_run(run)
+
+    assert len(submitted) == 1
+    successor = threads._runs().get(tid, submitted[0])
+    assert successor.text == run.text
+    assert successor.review_snapshot == snapshot
+    assert not successor.resume
+
+
 @pytest.mark.parametrize("stage,fenced", [
     ("starting_sandbox", False), ("starting_sandbox", True), ("error", True),
 ])

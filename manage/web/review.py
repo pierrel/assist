@@ -21,7 +21,7 @@ from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
-from assist.domain_manager import Change
+from assist.domain_manager import Change, git_diff_main
 from assist.git_sync import GitSyncError, identity, read_state
 from assist.thread import Thread
 
@@ -47,18 +47,17 @@ _REVIEW_OPENER = "I've reviewed the changes and have some comments. Please addre
 
 
 def _review_snapshot(tid: str, dm) -> tuple[dict | None, list[Change]]:
-    """Return one bound source/checkout/diff observation for display or submit."""
+    """Return review changes; bound reviews include exact base/head/diff identity."""
     base = _review_base(tid)
     if base is None:
         return None, dm.main_diff() if dm else []
-    if dm is None:
-        raise GitSyncError("Bound Git review checkout is unavailable")
     binding = read_state(MANAGER.thread_dir(tid))
-    branch, head = identity(dm.repo_path)
+    worktree = MANAGER.thread_default_working_dir(tid)
+    branch, head = identity(worktree)
     if binding is None or branch != binding["branch"]:
         raise GitSyncError("Thread review branch is unavailable")
-    changes = dm.main_diff(base, head)
-    if identity(dm.repo_path) != (branch, head):
+    changes = git_diff_main(worktree, base, head)
+    if identity(worktree) != (branch, head):
         raise GitSyncError("Thread review changed while the diff was read")
     canonical = json.dumps([(change.path, change.diff) for change in changes],
                            ensure_ascii=False, separators=(",", ":")).encode()
@@ -427,8 +426,8 @@ async def post_review(tid: str, request: Request,
                       background_tasks: BackgroundTasks):
     """Accept the localStorage payload, format it as a thread message, queue it.
 
-    Uses the same durable run acceptance + serial executor as a regular
-    ``/message`` post.
+    Persists the accepted diff identity on the Run for a second check after
+    its own Git preflight, before any queued review reaches the model.
     """
     tdir = MANAGER.thread_dir(tid)
     if not os.path.isdir(tdir):
@@ -467,7 +466,8 @@ async def post_review(tid: str, request: Request,
             if snapshot and any(data.get(field) != value for field, value in snapshot.items()):
                 raise HTTPException(status_code=409, detail="Review changed; refresh and re-anchor comments")
             message = _format_review_message(overall, comments, changes)
-            return _threads._accept_message_run(tid, message)
+            return _threads._accept_message_run(
+                tid, message, review_snapshot=snapshot)
 
         run, busy = await anyio.to_thread.run_sync(
             format_and_accept, limiter=_threads._get_run_admission_limiter())

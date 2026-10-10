@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import stat
 import threading
@@ -178,6 +179,8 @@ class Run:
     quiet_requested: bool = False
     approval_id: str | None = None
     approvals: tuple[Approval, ...] = ()
+    # The exact diff accepted by a web review, checked again after Git preflight.
+    review_snapshot: dict | None = None
 
     _MAX_OPAQUE_ID_CHARS = 256
 
@@ -214,6 +217,19 @@ class Run:
             raise ValueError(f"invalid {name}")
         return dict(value)
 
+    @staticmethod
+    def _validated_review_snapshot(value: object) -> dict:
+        """Reject a corrupt review identity instead of silently losing its fence."""
+        if (not isinstance(value, dict)
+                or set(value) != {"base_oid", "head_oid", "diff_digest"}):
+            raise ValueError("invalid review snapshot")
+        for name, length in (("base_oid", 40), ("head_oid", 40),
+                             ("diff_digest", 64)):
+            item = value[name]
+            if not isinstance(item, str) or re.fullmatch(rf"[0-9a-f]{{{length}}}", item) is None:
+                raise ValueError("invalid review snapshot")
+        return dict(value)
+
     def to_dict(self) -> dict:
         value = asdict(self)
         if not self.delegate_user_urls:
@@ -238,6 +254,8 @@ class Run:
             value.pop("quiet_requested")
         if self.approval_id is None:
             value.pop("approval_id")
+        if self.review_snapshot is None:
+            value.pop("review_snapshot")
         if not self.approvals:
             value.pop("approvals")
         return value
@@ -320,6 +338,8 @@ class Run:
             quiet_requested=quiet_requested,
             approval_id=Run._optional_opaque_id(value.get("approval_id"), "approval id"),
             approvals=tuple(Approval.from_dict(item) for item in value.get("approvals", ())),
+            review_snapshot=(Run._validated_review_snapshot(value["review_snapshot"])
+                             if "review_snapshot" in value else None),
         )
 
 
@@ -491,6 +511,7 @@ class RunService(PerThreadJsonStore[Run]):
         revocation_pending: bool = False,
         browser_reset_run_id: str | None = None,
         approval_id: str | None = None,
+        review_snapshot: dict | None = None,
     ) -> Run:
         """Persist a direct held event or a dispatchable pending Run."""
         if not assistant_id:
@@ -532,6 +553,8 @@ class RunService(PerThreadJsonStore[Run]):
             user_event_id=user_event_id,
             browser_reset_run_id=browser_reset_run_id,
             approval_id=approval_id,
+            review_snapshot=(Run._validated_review_snapshot(review_snapshot)
+                             if review_snapshot is not None else None),
         )
         with self._lock:
             if mode == "child":
