@@ -34,4 +34,9 @@ jobs:
       # so keep that local-only rather than let the module's 60s per-test cap race
       # CI scheduling.
       - name: Unit tests
-        run: .venv/bin/pytest tests/ -vv --ignore=tests/test_sandbox_egress_integration.py --deselect=tests/test_prompt_census.py::test_two_fresh_process_captures_are_byte_stable
+        run: |
+          timeout --signal=TERM --kill-after=10s 300s \
+            .venv/bin/pytest tests/ -vv \
+            --ignore=tests/test_sandbox_egress_integration.py \
+            --deselect=tests/test_prompt_census.py::test_two_fresh_process_captures_are_byte_stable \
+            -o faulthandler_timeout=30
