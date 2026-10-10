@@ -50,67 +50,34 @@ Run the Web UI
 python -m manage.web
 #+end_src
 ** Thread Git sync
-New Git-backed web threads bind a configured repository and a non-main thread
-branch outside the agent workspace. Before a fresh Deep or Pi turn, clean
-phone-pushed commits are incorporated by fast-forward. Successful changed turns
-attempt a commit inside the restricted sandbox and publication of only that thread
-branch. No-file-change turns also attempt publication. Main is never automatically pushed.
-If a hidden child yields its fair-scheduling slot, a new parent message waits
-until the child's sandbox teardown and Git workspace lock release. After safe
-teardown, it runs normally instead of failing on a transient lock.
+Git-backed threads use an approved repository and a non-main thread branch.
+Before a new visible Deep or Pi turn, the server fetches that branch and
+fast-forwards a clean checkout to commits pushed by the user. Hidden resumes
+and child handoffs keep their admitted base. After successful work, the
+credential-free sandbox commits the changed files; a private host Git process
+publishes with a normal non-force push. The server never rewrites a phone
+commit. A competing phone push leaves the server's completed commit on
+=assist-result/<commit>= and the Run names that branch for a local merge.
+New threads publish their branch before the first model turn, even when it
+initially points at main. No-change turns also verify publication.
 
-The phone uses normal Git with its own credentials, not a web Git-object proxy.
-Its repository-key mapping must point to the approved remote; server-local
-repositories need their approved WireGuard/SSH endpoint. A busy phone diff can
-show the latest published commits with a may-change warning, without waiting.
+The phone has its own Git credential and ordinary persistent checkout. Sending
+a message neither commits nor pulls phone files. A fresh phone fetch after a
+successful Run fast-forwards only a clean checkout; dirty files and unpushed
+commits remain untouched. The published branch remains fetchable during a busy
+turn and may change when the turn finishes. Merge & Push privately merges only
+published thread and main commits; it changes neither working checkout nor the
+thread branch. A conflict or competing main push needs manual resolution.
 
-Dirty worktrees, divergent or rewritten history, missing legacy source bindings,
-and uncertain publication or sandbox teardown hold for explicit reconciliation.
-A positively dirty clean preflight with verified exact sandbox teardown leaves
-only the dirty-worktree hold, not a teardown-uncertainty fence. Later queued
-turns check the work independently; none replays the failed prompt. Unverified
-cleanup retains the stronger teardown fence.
-Local commit or verified teardown failure reports a turn error with the saved
-answer retained. Remote-only publication failure remains best-effort and does
-not discard a finalized local answer; pending Git error/fences remain.
-After restart, a saved reply alone is not Git finalization proof. Completed
-visible Git-bound Deep/Pi recovery reports an explicit reconciliation error, preserves the
-answer/work/fences, and does not replay the model or reconstruct the commit.
-Saved answers and work are preserved; =workspace.sync_error= explains pending
-Git sync. Legacy threads require an operator-verified binding. An operator can
-use =assist.git_sync.enroll_legacy= with a verified configured source and exact
-branch/commit pair after stopping legacy writers. Enrollment preserves files,
-index, history and dirty work; it does not infer =origin= or bypass clean
-admission. Failed setup Runs remain failed; send a new message after enrollment
-and reconciliation. Snapshots omit standard multi-pack-index and cruft =.mtimes=
-metadata, while verifying imported objects. For bound threads with retained
-teardown fences, =assist.git_sync.recover_stopped= is operator-only: exact
-source/state/branch approval, stopped writers, authenticated history/floors and
-read-only clean verification with exact verifier teardown are required. It clears
-only the teardown fence/error, preserving work, saved answers and suspended
-preflights. Dirty, divergent or unknown publication state remains held; no failed
-prompt replay or commit is performed. Git snapshots retain a 128 MiB
-per-file and authenticated-object cap, with at most 256 MiB of raw staging for
-duplicate packs. Oversized staging is rejected; authenticated duplicate packs
-are compacted only in the private disposable store, retaining unreachable
-objects. The final 128 MiB and 10,000 scanned-entry bounds remain enforced.
-Incoming bundles exclude verified existing history; no new objects means no
-bundle import. Oversized repositories fail explicitly rather than exporting
-partial state. See =docs/2026-09-27-duplicate-pack-runtime.org=.
-Authorization separately caps the metadata-only scan of workspace, scratch and
-private-agent roots at 10,000 total entries to prove independent storage.
-For an old local clone whose only shared inodes are standard =.git/objects=
-files, an operator may first use =detach_legacy_object_hardlinks= under one
-verified write exclusion covering every alias root and the selected source
-through enrollment. It copies only local Git object paths, leaves dirty files
-and the index untouched, and does not select a source or enroll automatically.
-See =docs/2026-10-01-legacy-git-object-detachment.org= for the guarded sequence.
-
-This per-turn path does not repair the existing user-gated main merge/rebranch
-or older host-Git rendering paths. See
-=docs/2026-09-26-direct-thread-git-sync.org= for the original boundary and
-=docs/2026-09-27-thread-git-compatibility.org= for enrollment and
-=docs/2026-09-27-web-git-operator-recovery.org= for stopped-writer recovery.
+Dirty or divergent server work, missing operator-verified legacy binding,
+unverified sandbox teardown, and uncertain publication stop before another
+model turn. Saved answers and files are preserved; failed prompts are not
+replayed merely to repair Git. =workspace.sync_error= reports the hold.
+Operator-only legacy enrollment and stopped-writer recovery remain available
+with their exact source, history and writer-exclusion proofs; neither infers a
+source from the checkout's mutable =origin= nor discards dirty work. Their
+historical procedures are in =docs/2026-09-27-thread-git-compatibility.org=
+and =docs/2026-09-27-web-git-operator-recovery.org=.
 
 ** Developing
 Install the package in editable mode so Emacs/Elpy can discover the modules:

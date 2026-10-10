@@ -1,0 +1,24 @@
+#+title: Thread Git merge-handoff ref guard
+#+date: 2026-10-10
+
+* Correction
+
+The authenticated turn lifecycle does not change the existing user-gated main
+merge algorithm. It must still preserve the earlier post-merge check that the
+old remote thread ref matches the tip validated before the merge. Otherwise a
+phone push during the merge can be silently left behind when the new branch is
+authorized.
+
+The same in-memory lifecycle retains the exact validated old branch and tip.
+After the existing merge/rebranch operation, it checks the configured source's
+old ref before recording the new branch binding. A mismatch leaves the binding
+unchanged and reports a visible reconciliation error. It does not undo the
+already-completed main push or claim an atomic lease across that operation; the
+pre-existing host Git config/hooks issue in the main merge remains separate.
+
+* Historical supersessions
+
+- =2026-10-10-thread-git-simplification.org=, “Boundary” and “Numbered
+  construction” item 1: the statement that existing merge/rebranch mechanics
+  are not rewritten remains true for the main merge algorithm, but its new
+  lifecycle handoff now explicitly restores the old remote-thread-ref check.

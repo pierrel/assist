@@ -603,6 +603,7 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
             "status": status.get("stage", "ready"),
             "error": ("Thread failed; inspect Assist Web for details."
                       if status.get("error") else None),
+            "publication_notice": status.get("git_notice"),
             "workspace": _thread_workspace(tid),
             "revision": revision,
         },

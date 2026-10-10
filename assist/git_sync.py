@@ -74,24 +74,6 @@ def _branch(value: str) -> str:
     return value
 
 
-def _known_main(worktree: str) -> str | None:
-    """Read only a fixed tracking hint; its objects must be verified separately."""
-    try:
-        with _directory(worktree) as root, _directory(".git", parent=root) as git:
-            try:
-                with _directory("refs", parent=git) as refs, \
-                        _directory("remotes", parent=refs) as remotes, \
-                        _directory("origin", parent=remotes) as origin:
-                    revision = _read_at(origin, "main", 128).strip()
-            except FileNotFoundError:
-                packed = _read_at(git, "packed-refs", 512 * 1024)
-                revision = next((line.split(b" ", 1)[0] for line in packed.splitlines()
-                                 if line.endswith(b" refs/remotes/origin/main")), b"")
-    except (OSError, GitSyncError):
-        return None  # An unavailable optional hint cannot authorize or block a snapshot.
-    return revision.decode("ascii") if re.fullmatch(rb"[0-9a-f]{40}", revision) else None
-
-
 def identity(worktree: str) -> tuple[str, str]:
     """Read a stable loose/packed SHA-1 branch identity without invoking Git."""
     with _directory(worktree) as root, _directory(".git", parent=root) as git:
@@ -134,6 +116,19 @@ def read_state(thread_dir: str) -> dict | None:
         return None
     except (OSError, ValueError, UnicodeError) as error:
         raise GitSyncError("Git source binding is unavailable") from error
+    if isinstance(value, dict) and value.get("version") == 2:
+        source, branch, floor = (value.get("source"), value.get("branch"),
+                                 value.get("floor"))
+        if (set(value) != {"version", "source", "branch", "floor"}
+                or not isinstance(source, str) or not source or len(source) > 2048
+                or source.startswith("-") or "::" in source or "\n" in source
+                or "\0" in source or (branch is None) != (floor is None)):
+            raise GitSyncError("Git source binding is unavailable")
+        if branch is not None:
+            if not isinstance(branch, str) or not isinstance(floor, str) or not _OID.fullmatch(floor):
+                raise GitSyncError("Git source binding is unavailable")
+            _branch(branch)
+        return value
     if (not isinstance(value, dict) or value.get("version") != 1
             or not isinstance(value.get("source"), str)
             or not isinstance(value.get("published"), dict)
@@ -214,10 +209,7 @@ def _initial_binding(source: str) -> dict:
     if (parsed.password or parsed.query or parsed.fragment
             or (parsed.scheme in {"http", "https"} and parsed.username)):
         raise GitSyncError("Use Git credentials rather than secrets in the source URL")
-    return {"version": 1, "source": source, "published": {},
-            "published_branch": None, "published_revision": None,
-            "branch": None, "local_revision": None,
-            "intent": None, "preflights": {}, "error": None}
+    return {"version": 2, "source": source, "branch": None, "floor": None}
 
 
 def bind(thread_dir: str, source: str) -> None:
@@ -240,17 +232,21 @@ def enroll_legacy(thread_dir: str, worktree: str, source: str,
     sandbox writers, which predate the shared fence. Dirty files remain dirty;
     ordinary model admission still requires a clean worktree.
     """
+    from assist.local_git import LocalGit
     initial = _initial_binding(source)
     with _workspace_lock(thread_dir):
         current = _enrollable_state(thread_dir, source)
         _independent_roots((worktree, os.path.join(os.path.dirname(worktree), "tmp"),
                             os.path.join(thread_dir, "agent")))
-        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
-            branch, revision = _Store(path).snapshot(worktree)
+        with LocalGit(source, worktree) as repository:
+            branch, revision = repository.same_tip()
         if (branch, revision) != expected:
             raise GitSyncError("Legacy Git branch identity changed; verify before enrollment")
         state = current if current is not None else initial
-        state.update(branch=branch, local_revision=revision, error=None)
+        if state["version"] == 2:
+            state.update(branch=branch, floor=revision)
+        else:
+            state.update(branch=branch, local_revision=revision, error=None)
         _write_state(thread_dir, state)
 
 
@@ -417,6 +413,7 @@ def detach_legacy_object_hardlinks(thread_dir: str, worktree: str, *, source: st
     of every alias-root and source writer until the separate enrollment finishes.
     This never writes a source binding or executes workspace Git configuration.
     """
+    from assist.local_git import LocalGit
     _initial_binding(source)
     if (not isinstance(expected, tuple) or len(expected) != 2
             or not isinstance(expected[0], str) or not isinstance(expected[1], str)
@@ -431,8 +428,8 @@ def detach_legacy_object_hardlinks(thread_dir: str, worktree: str, *, source: st
         before_state = _enrollable_state(thread_dir, source)
         if identity(worktree) != expected:
             raise GitSyncError("Legacy Git branch identity changed; verify before enrollment")
-        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
-            remote = _Store(path).fetch(source, branch)
+        with LocalGit(source) as repository:
+            _, remote = repository.fetch(branch)
         if remote != expected_remote:
             raise GitSyncError("Approved remote Git branch changed")
         linked = _linked_legacy_objects(thread_dir, worktree)
@@ -443,16 +440,14 @@ def detach_legacy_object_hardlinks(thread_dir: str, worktree: str, *, source: st
             _copy_legacy_object(thread_dir, worktree, parts, deadline)
         _independent_roots((worktree, os.path.join(os.path.dirname(worktree), "tmp"),
                             os.path.join(thread_dir, "agent")))
-        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
-            store = _Store(path)
-            if store.snapshot(worktree) != expected:
+        with LocalGit(source, worktree) as repository:
+            if repository.same_tip() != expected:
                 raise GitSyncError("Legacy Git branch identity changed; verify before enrollment")
-            remote = store.fetch(source, branch)
-            main = store.git("rev-parse", "refs/remotes/origin/main")
+            main, remote = repository.fetch(branch)
             if (remote != expected_remote
-                    or not store.git("merge-base", main, expected[1], allowed=(0, 1))
-                    or (remote and not (store.ancestor(expected[1], remote)
-                                       or store.ancestor(remote, expected[1])))):
+                    or not repository.git("merge-base", main, expected[1], allowed=(0, 1))
+                    or (remote and not (repository.ancestor(expected[1], remote)
+                                       or repository.ancestor(remote, expected[1])))):
                 raise GitSyncError("Approved remote Git history changed")
         if (identity(worktree) != expected or read_state(thread_dir) != before_state
                 or verify_stopped() is not None):
@@ -470,6 +465,7 @@ def recover_stopped(thread_dir: str, worktree: str, *, source: str,
     clean verification and exact verifier teardown respectively. Container
     absence alone is not writer-exit proof. No prompt/result is replayed.
     """
+    from assist.local_git import LocalGit
     _initial_binding(source)
     with _workspace_lock(thread_dir):
         if verify_stopped() is not None:
@@ -486,24 +482,24 @@ def recover_stopped(thread_dir: str, worktree: str, *, source: str,
             raise GitSyncError("Previous publication outcome is unknown; reconcile explicitly")
         _independent_roots((worktree, os.path.join(os.path.dirname(worktree), "tmp"),
                             os.path.join(thread_dir, "agent")))
-        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
-            store = _Store(path)
-            branch, local = store.snapshot(worktree)
+        with LocalGit(source, worktree) as repository:
+            branch, local = repository.same_tip()
             if (branch, local) != expected or branch != state.get("branch"):
                 raise GitSyncError("Approved Git recovery branch identity changed")
             floors = {local, state.get("local_revision"), state["published"].get(branch)}
             for pending in state["preflights"].values():
                 floors.update((pending["base"], pending["expected"]))
             floors.discard(None)
-            if store.git("merge-base", "--independent", *sorted(floors)) != local:
+            if repository.git("merge-base", "--independent", *sorted(floors)) != local:
                 raise GitSyncError("Retained local Git history changed; reconcile explicitly")
-            remote = store.fetch(source, branch)
+            _, remote = repository.fetch(branch)
             published = state["published"].get(branch)
             observed = published or any(pending["expected"] for pending in state["preflights"].values())
             if ((observed and remote is None)
-                    or (published and not store.ancestor(published, remote))):
+                    or (published and not repository.ancestor(published, remote))):
                 raise GitSyncError("Remote thread branch was deleted or rewritten; reconcile explicitly")
-            if remote and not (store.ancestor(local, remote) or store.ancestor(remote, local)):
+            if remote and not (repository.ancestor(local, remote)
+                               or repository.ancestor(remote, local)):
                 raise GitSyncError("Local and remote thread branches diverged; reconcile explicitly")
         if verify_clean() is not None or verify_stopped() is not None:
             raise GitSyncError("Git recovery verification is unavailable")
@@ -527,6 +523,7 @@ def recover_merged_branch_stopped(thread_dir: str, worktree: str, *, source: str
     from independent records. Callbacks must hold all writer exclusion through
     return and prove every named Run terminal without replaying it.
     """
+    from assist.local_git import LocalGit
     _initial_binding(source)
     old_branch, old_revision = _branch(expected_old[0]), expected_old[1]
     new_branch, new_revision = _branch(expected_new[0]), expected_new[1]
@@ -553,13 +550,12 @@ def recover_merged_branch_stopped(thread_dir: str, worktree: str, *, source: str
             raise GitSyncError("Retained Git work is not terminal")
         _independent_roots((worktree, os.path.join(os.path.dirname(worktree), "tmp"),
                             os.path.join(thread_dir, "agent")))
-        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
-            store = _Store(path)
-            if store.snapshot(worktree) != expected_new:
+        with LocalGit(source, worktree) as repository:
+            if repository.same_tip() != expected_new:
                 raise GitSyncError("Approved post-merge branch identity changed")
-            main = store.fetch(source, "main")
-            if (main is None or not store.ancestor(new_revision, main)
-                    or store.remote_ref(source, old_branch) != old_revision):
+            main, _ = repository.fetch("main")
+            if (main is None or not repository.ancestor(new_revision, main)
+                    or repository.remote_ref(old_branch) != old_revision):
                 raise GitSyncError("Approved post-merge source history changed")
         if verify_terminal_runs(expected_work_ids) is not None or verify_stopped() is not None:
             raise GitSyncError("Post-merge recovery proof changed")
@@ -575,70 +571,62 @@ def recover_merged_branch_stopped(thread_dir: str, worktree: str, *, source: str
 
 def authorize_branch(thread_dir: str, worktree: str) -> None:
     """Authorize an independent clone without rebinding an existing thread branch."""
+    from assist.local_git import LocalGit
+    from assist.browser import authority
+    from assist.browser.manager import BrowserManager
     state = read_state(thread_dir)
     if state is None:
         raise GitSyncError("Git source binding is unavailable")
-    _independent_roots((worktree, os.path.join(os.path.dirname(worktree), "tmp"),
-                        os.path.join(thread_dir, "agent")))
-    with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
-        branch, revision = _Store(path).snapshot(worktree)
+    root, tid = os.path.dirname(thread_dir), os.path.basename(thread_dir)
+    with authority.generation_fence(root, tid):
+        BrowserManager.confirm_owner_stopped(root, tid, None, before_replacement=True)
+        _independent_roots((worktree, os.path.join(os.path.dirname(worktree), "tmp"),
+                            os.path.join(thread_dir, "agent")))
+        with LocalGit(state["source"], worktree) as repository:
+            branch, revision = repository.same_tip()
+            main, _ = repository.fetch("main")
+            if not repository.ancestor(revision, main):
+                raise GitSyncError("New Git thread branch is not in trusted main history")
     if state["branch"] is not None and state["branch"] != branch:
         raise GitSyncError("Thread branch changed; explicit branch reconciliation is required")
-    state.update(branch=branch, local_revision=revision, preflights={})
+    if state["version"] == 2:
+        state.update(branch=branch, floor=revision)
+    else:
+        state.update(branch=branch, local_revision=revision, preflights={})
     _write_state(thread_dir, state)
 
 
 def publish_initial_branch(thread_dir: str, worktree: str,
                            verify_owner: Callable[[], None] | None = None) -> None:
-    """Publish a newly authorized thread branch before its first model turn."""
+    """Ensure an authorized new thread ref exists without rewriting a remote tip."""
+    from assist.local_git import LocalGit
+    from assist.browser import authority
+    from assist.browser.manager import BrowserManager
     with _workspace_lock(thread_dir):
         if verify_owner is not None:
             verify_owner()
         state = read_state(thread_dir)
-        if state is None or not state.get("branch") or not state.get("local_revision"):
+        if state is None or not state.get("branch") or not (state.get("floor") or state.get("local_revision")):
             raise GitSyncError("New Git thread branch is unavailable")
-        branch, revision = state["branch"], state["local_revision"]
-        if (state.get("sandbox_in_flight") or state.get("quarantine")
-                or state["preflights"]):
+        branch, revision = state["branch"], state.get("floor") or state.get("local_revision")
+        sources = tuple(source.strip() for source in os.getenv("ASSIST_DOMAINS", "").split(",")
+                        if source.strip())
+        if state["source"] not in sources:
+            raise GitSyncError("Configured Git source is unavailable")
+        if state.get("sandbox_in_flight") or state.get("quarantine"):
             raise GitSyncError("New Git thread has retained work; reconcile before publication")
-        if state["published"]:
-            if (state["published"].get(branch) == revision
-                    and (state.get("published_branch"), state.get("published_revision"))
-                    == (branch, revision) and state.get("intent") is None):
-                return
-            raise GitSyncError("New Git thread publication needs operator reconciliation")
-        intent = state.get("intent")
-        expected_intent = {"kind": "initial", "branch": branch,
-                           "expected": None, "desired": revision}
-        if intent is not None and intent != expected_intent:
-            raise GitSyncError("New Git thread publication outcome is unknown")
-        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
-            store = _Store(path)
-            if store.snapshot(worktree) != (branch, revision):
-                raise GitSyncError("New Git thread branch changed before publication")
-            main = store.fetch(state["source"], "main")
-            if main is None or not store.ancestor(revision, main):
-                raise GitSyncError("New Git thread branch is not in trusted main history")
-            remote = store.remote_ref(state["source"], branch)
-            if remote is not None and (intent is None or remote != revision):
-                raise GitSyncError("New Git thread branch already exists remotely")
-            if remote is None:
-                if intent is None:
-                    state["intent"] = expected_intent
-                    _write_state(thread_dir, state)
-                store.git("push", "--porcelain", "--no-verify",
-                          "--force-with-lease=refs/heads/" + branch + ":",
-                          state["source"], revision + ":refs/heads/" + branch,
-                          allowed=(0, 1))
-                remote = store.remote_ref(state["source"], branch)
-            if remote != revision:
-                raise GitSyncError("New Git thread publication is pending verification")
-        if identity(worktree) != (branch, revision):
-            raise GitSyncError("New Git thread checkout changed during publication")
-        state["published"][branch] = revision
-        state.update(published_branch=branch, published_revision=revision,
-                     intent=None, error=None)
-        _write_state(thread_dir, state)
+        root, tid = os.path.dirname(thread_dir), os.path.basename(thread_dir)
+        with authority.generation_fence(root, tid):
+            BrowserManager.confirm_owner_stopped(root, tid, None, before_replacement=True)
+            with LocalGit(state["source"], worktree) as repository:
+                if repository.same_tip() != (branch, revision):
+                    raise GitSyncError("New Git thread branch changed before publication")
+                main, _ = repository.fetch("main")
+                if not repository.ancestor(revision, main):
+                    raise GitSyncError("New Git thread branch is not in trusted main history")
+                repository.publish(branch, revision)
+            if identity(worktree) != (branch, revision):
+                raise GitSyncError("New Git thread checkout changed during publication")
 
 
 def _independent_roots(roots) -> None:
@@ -672,19 +660,6 @@ def _independent_roots(roots) -> None:
 
 
 @contextmanager
-def ownership(thread_dir: str, worktree: str):
-    """Nonblocking workspace fence, including hidden writers and queue-expired turns."""
-    state = read_state(thread_dir)
-    if state is None:
-        if os.path.lexists(os.path.join(worktree, ".git")):
-            raise GitSyncError("Existing Git repository needs an operator-verified source binding")
-        yield None
-        return
-    with _workspace_lock(thread_dir):
-        yield GitSync(thread_dir, worktree)
-
-
-@contextmanager
 def _workspace_lock(thread_dir: str):
     """Share the same nonblocking fence with explicit legacy enrollment."""
     try:
@@ -705,131 +680,6 @@ def _workspace_lock(thread_dir: str):
         yield
     finally:
         os.close(fd)
-
-
-class _Store:
-    """One private packed-object store; no workspace config is copied or parsed."""
-
-    def __init__(self, path: str):
-        self.path = path
-        self.git("init", "--bare", path, repository=False)
-
-    def git(self, *arguments: str, repository: bool = True, allowed=(0,)) -> str:
-        environment = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        environment.update(GIT_TERMINAL_PROMPT="0", GIT_NO_REPLACE_OBJECTS="1")
-        command = ["prlimit", "--as=2147483648", "--cpu=30", f"--fsize={MAX_BYTES}",
-                   "--", "git"]
-        if repository:
-            command += ["--git-dir", self.path]
-        command += ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-                    "-c", "gc.auto=0", "-c", "maintenance.auto=false",
-                    "-c", "fetch.unpackLimit=0", "-c", "transfer.unpackLimit=0",
-                    "-c", "protocol.ext.allow=never", "-c", "push.followTags=false",
-                    "-c", "fetch.fsckObjects=true", *arguments]
-        with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-            process = subprocess.Popen(command, cwd=self.path, env=environment,
-                                       stdout=out, stderr=err, start_new_session=True)
-            try:
-                process.wait(timeout=GIT_TIMEOUT)
-            except subprocess.TimeoutExpired as error:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-                raise GitSyncError("Git operation timed out") from error
-            out.seek(0)
-            output = out.read(1024 * 1024 + 1)
-            if len(output) > 1024 * 1024 or process.returncode not in allowed:
-                raise GitSyncError("Git operation failed; branch sync is pending")
-            return output.decode("utf-8", "strict").strip()
-
-    def snapshot(self, worktree: str) -> tuple[str, str]:
-        before = identity(worktree)
-        copied = count = 0
-        deadline = time.monotonic() + GIT_TIMEOUT
-        with _directory(worktree) as root, _directory(".git", parent=root) as git, \
-                _directory("objects", parent=git) as objects:
-            for entry in os.scandir(objects):
-                count += 1
-                if count > MAX_OBJECT_FILES or time.monotonic() > deadline:
-                    raise GitSyncError("Git object snapshot exceeds its bound")
-                directory = entry.name
-                if directory != "pack" and not re.fullmatch(r"[0-9a-f]{2}", directory):
-                    continue  # Never import objects/info/alternates or other execution metadata.
-                with _directory(directory, parent=objects) as entries:
-                    target = Path(self.path, "objects", directory)
-                    target.mkdir(exist_ok=True)
-                    for entry in os.scandir(entries):
-                        name = entry.name
-                        count += 1
-                        if count > MAX_OBJECT_FILES or time.monotonic() > deadline:
-                            raise GitSyncError("Git object snapshot exceeds its bound")
-                        if directory == "pack" and (name == "multi-pack-index" or re.fullmatch(
-                                r"pack-[0-9a-f]{40}\.(?:bitmap|keep|mtimes)", name)):
-                            continue  # Inert pack indexes, pins and cruft ages are never imported.
-                        if not _OBJECT.fullmatch(name):
-                            raise GitSyncError("Unsupported Git object entry")
-                        # Staging may contain duplicate packs; each file stays bounded.
-                        data = _read_at(entries, name, min(MAX_BYTES, 2 * MAX_BYTES - copied),
-                                        independent=True)
-                        copied += len(data)
-                        (target / name).write_bytes(data)
-        if identity(worktree) != before:
-            raise GitSyncError("Git branch changed during snapshot")
-        branch, revision = before
-        self.git("cat-file", "-e", revision + "^{commit}")
-        # Filenames alone do not authenticate agent-writable ancestry. Verify the
-        # copied objects' hashes before a force-with-lease can rely on their graph.
-        self.git("fsck", "--strict", "--no-reflogs", "--no-dangling", revision)
-        self.git("update-ref", "refs/heads/" + branch, revision)
-        if copied > MAX_BYTES:
-            # Authenticate before private-only deduplication; retain unreachable objects.
-            self.git("repack", "-a", "-d", "--keep-unreachable", "--threads=1")
-            total = entries = 0
-            deadline = time.monotonic() + GIT_TIMEOUT
-            for file in Path(self.path, "objects").rglob("*"):
-                entries += 1
-                if entries > MAX_OBJECT_FILES or time.monotonic() > deadline:
-                    raise GitSyncError("Git object snapshot exceeds its bound")
-                if file.is_file():
-                    total += file.stat().st_size
-                    if total > MAX_BYTES:
-                        raise GitSyncError("Git object snapshot is too large")
-            self.git("fsck", "--strict", "--no-reflogs", "--no-dangling", revision)
-        main = _known_main(worktree)
-        if main and self.git("rev-parse", "--verify", "--quiet", main + "^{commit}",
-                             allowed=(0, 1, 128)) == main:
-            self.git("update-ref", "refs/assist/snapshot-main", main)
-        return before
-
-    def remote_ref(self, source: str, branch: str) -> str | None:
-        """Read one exact source ref without accepting a wildcard selector."""
-        listing = self.git("ls-remote", "--refs", source, "refs/heads/" + branch)
-        remote = None
-        if listing:
-            fields = listing.split()
-            if len(fields) != 2 or fields[1] != "refs/heads/" + branch or not _OID.fullmatch(fields[0]):
-                raise GitSyncError("Remote branch identity is invalid")
-            remote = fields[0]
-        return remote
-
-    def fetch(self, source: str, branch: str) -> str | None:
-        # Wildcard-free branch selector; absent branch is distinct from failed auth/fetch.
-        remote = self.remote_ref(source, branch)
-        refs = ["refs/heads/main:refs/remotes/origin/main"]
-        if remote is not None:
-            refs.append("refs/heads/" + branch + ":refs/remotes/origin/thread")
-        self.git("fetch", "--no-tags", "--no-auto-maintenance", source, *refs)
-        if remote is not None:
-            fetched = self.git("rev-parse", "refs/remotes/origin/thread")
-            if fetched != remote:
-                raise GitSyncError("Remote branch moved during fetch; retry before the turn")
-        return remote
-
-    def ancestor(self, older: str, newer: str) -> bool:
-        try:
-            self.git("merge-base", "--is-ancestor", older, newer)
-            return True
-        except GitSyncError:
-            return False
 
 
 def _sandbox_git(sandbox, command: str) -> None:
@@ -899,263 +749,6 @@ if dirty:
         raise GitSyncError("Git clean verification failed in the restricted sandbox")
 
 
-class GitSync:
-    """Preflight and publication for one bound thread, called under workspace ownership."""
-
-    def __init__(self, thread_dir: str, worktree: str):
-        self.thread_dir, self.worktree = thread_dir, worktree
-        self.work_id = None
-        self.state = read_state(thread_dir)
-        if self.state is None:
-            raise GitSyncError("Existing Git repository needs an operator-verified source binding")
-        if self.state.get("quarantine") or self.state.get("sandbox_in_flight"):
-            raise GitSyncError("Previous Git teardown or commit finalization needs operator verification")
-
-    def sandbox_started(self) -> None:
-        self.state["sandbox_in_flight"] = True
-        _write_state(self.thread_dir, self.state)
-
-    def select_work(self, work_id: str) -> None:
-        """Select only this durable work's preflight, including resumed slices."""
-        if not isinstance(work_id, str) or not work_id or len(work_id) > 256:
-            raise GitSyncError("Git work identity is unavailable")
-        self.work_id = work_id
-
-    def receipt(self, child_thread_dir: str) -> None:
-        """Durable proof of local child commit/teardown before its terminal handoff."""
-        branch, revision = self._branch()
-        _write_state(child_thread_dir, {"work_id": self.work_id, "branch": branch,
-                                       "revision": revision}, "git-commit-receipt.json")
-
-    def admit(self) -> tuple[str, str]:
-        """Authenticate retained local work before model admission, including resumes."""
-        if self.state.get("intent"):
-            raise GitSyncError("Previous publication outcome is unknown; reconcile before resuming")
-        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
-            store = _Store(path)
-            branch, revision = store.snapshot(self.worktree)
-            pending = self.state["preflights"].get(self.work_id)
-            floor = self.state.get("local_revision")
-            if (branch != self.state.get("branch") or not pending
-                    or not store.ancestor(pending["base"], revision)
-                    or (floor and not store.ancestor(floor, revision))):
-                raise GitSyncError("Retained local Git history changed; reconcile before resuming")
-            return branch, revision
-
-    def verified_receipt(self, child_thread_dir: str) -> bool:
-        """A child's exact receipt commit must remain in authenticated local history."""
-        receipt = read_commit_receipt(child_thread_dir, self.work_id)
-        if receipt is None:
-            return False
-        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
-            store = _Store(path)
-            branch, revision = store.snapshot(self.worktree)
-            floor = self.state.get("local_revision")
-            if (branch != self.state.get("branch") or branch != receipt["branch"]
-                    or not store.ancestor(receipt["revision"], revision)
-                    or (floor and not store.ancestor(floor, revision))):
-                raise GitSyncError("Child commit left the thread history; retain result and reconcile")
-        return True
-
-    def forget_work(self) -> None:
-        """Drop only an already terminal child's retained preflight."""
-        if self.state["preflights"].pop(self.work_id, None) is not None:
-            _write_state(self.thread_dir, self.state)
-
-    def sandbox_stopped(self) -> None:
-        self.state["sandbox_in_flight"] = False
-        _write_state(self.thread_dir, self.state)
-
-    def validate_merge_candidate(self) -> None:
-        """Refuse an unsafe handoff before the user-gated main merge has effects."""
-        branch, revision = self.state["branch"], self.state["local_revision"]
-        if (not branch or not revision or self.state.get("sandbox_in_flight")
-                or self.state.get("quarantine") or self.state.get("intent")
-                or self.state["preflights"]
-                or self.state["published"].get(branch) != revision
-                or (self.state.get("published_branch"), self.state.get("published_revision"))
-                != (branch, revision)):
-            raise GitSyncError("Thread merge needs Git branch reconciliation")
-        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
-            store = _Store(path)
-            if (store.snapshot(self.worktree) != (branch, revision)
-                    or store.remote_ref(self.state["source"], branch) != revision):
-                raise GitSyncError("Thread branch changed before merge")
-
-    def record_merged_branch(self) -> None:
-        """Follow a successful user-gated main merge without publishing its new branch."""
-        old_branch, old_revision = self.state["branch"], self.state["local_revision"]
-        branch, revision = identity(self.worktree)
-        if branch == old_branch:
-            if revision != old_revision:
-                raise GitSyncError("Thread branch changed during merge")
-            return  # A pending main push did not rebranch this thread.
-        if (self.state.get("sandbox_in_flight") or self.state.get("quarantine")
-                or self.state.get("intent") or self.state["preflights"]
-                or self.state["published"].get(old_branch) != old_revision
-                or (self.state.get("published_branch"), self.state.get("published_revision"))
-                != (old_branch, old_revision)):
-            raise GitSyncError("Post-merge thread branch needs operator reconciliation")
-        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
-            store = _Store(path)
-            if (store.snapshot(self.worktree) != (branch, revision)
-                    or store.fetch(self.state["source"], "main") != revision
-                    or store.remote_ref(self.state["source"], old_branch) != old_revision):
-                raise GitSyncError("Post-merge Git source or branch changed")
-        if identity(self.worktree) != (branch, revision):
-            raise GitSyncError("Post-merge thread branch changed during verification")
-        self.state.update(branch=branch, local_revision=revision,
-                          published_branch=None, published_revision=None, error=None)
-        _write_state(self.thread_dir, self.state)
-
-    def _branch(self) -> tuple[str, str]:
-        branch, revision = identity(self.worktree)
-        if branch != self.state.get("branch"):
-            raise GitSyncError("Thread branch changed; explicit branch reconciliation is required")
-        return branch, revision
-
-    def quarantine(self) -> None:
-        self.state["quarantine"] = True
-        _write_state(self.thread_dir, self.state)
-
-    def prepare(self, sandbox, work_id: str) -> None:
-        """Fetch and reconcile before a fresh Git-backed writer, never mid-resume."""
-        self.select_work(work_id)
-        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
-            store = _Store(path)
-            branch, local = store.snapshot(self.worktree)
-            if (branch, local) != self._branch():
-                raise GitSyncError("Thread branch changed during preflight")
-            if self.state.get("local_revision") and not store.ancestor(self.state["local_revision"], local):
-                raise GitSyncError("Retained local Git history changed; reconcile explicitly")
-            remote = store.fetch(self.state["source"], branch)
-            intent = self.state.get("intent")
-            if intent:
-                if intent.get("kind") == "initial":
-                    raise GitSyncError("Initial thread publication needs exact verification")
-                if (intent["branch"] != branch or not remote
-                        or not store.ancestor(intent["desired"], remote)):
-                    raise GitSyncError("Previous publication outcome is unknown; reconcile explicitly")
-                self.state["published"][branch] = intent["desired"]
-                for record in self.state["preflights"].values():
-                    if record["branch"] == branch and record["expected"] == intent["expected"]:
-                        record["expected"] = intent["desired"]
-                self.state.update(published_branch=branch, published_revision=intent["desired"], intent=None)
-                _write_state(self.thread_dir, self.state)
-            floor = self.state["published"].get(branch)
-            if floor and (remote is None or not store.ancestor(floor, remote)):
-                raise GitSyncError("Remote thread branch was deleted or rewritten; reconcile explicitly")
-            require_clean(sandbox)
-            if remote and local != remote and not (store.ancestor(local, remote) or store.ancestor(remote, local)):
-                raise GitSyncError("Local and remote thread branches diverged; reconcile explicitly")
-            heads = ["refs/remotes/origin/main", *(["refs/remotes/origin/thread"] if remote else [])]
-            known = [local]
-            main_hint = store.git("rev-parse", "--verify", "--quiet", "refs/assist/snapshot-main",
-                                 allowed=(0, 1, 128))
-            if main_hint:
-                known.append(main_hint)
-            commands = []
-            if int(store.git("rev-list", "--count", *heads, "--not", *known)):
-                bundle = os.path.join(path, "incoming.bundle")
-                store.git("bundle", "create", bundle, *heads, "--not", *known)
-                data = Path(bundle).read_bytes()
-                if len(data) > MAX_BYTES:
-                    raise GitSyncError("Incoming Git bundle is too large")
-                transfer = "/tmp/assist-git-" + os.path.basename(path) + ".bundle"
-                response = sandbox.upload_files([(transfer, data)])[0]
-                if response.error:
-                    raise GitSyncError("Could not import remote Git objects")
-                commands.extend([_WORKTREE_GIT + " bundle unbundle " + shlex.quote(transfer),
-                                 "rm -- " + shlex.quote(transfer)])
-            main = store.git("rev-parse", "refs/remotes/origin/main")
-            commands.append(_WORKTREE_GIT + " update-ref refs/remotes/origin/main " + main)
-            if remote:
-                commands.append(_WORKTREE_GIT + " update-ref "
-                                + shlex.quote("refs/remotes/origin/" + branch) + " " + remote)
-                if local != remote and store.ancestor(local, remote):
-                    commands.append(_WORKTREE_GIT + " merge --ff-only --no-overwrite-ignore --no-autostash " + remote)
-            _sandbox_git(sandbox, " && ".join(commands))
-            expected_local = remote if remote and store.ancestor(local, remote) else local
-            if self._branch() != (branch, expected_local):
-                raise GitSyncError("Git preflight did not leave the expected clean thread checkout")
-            require_clean(sandbox)
-            self.state["preflights"][work_id] = {"branch": branch,
-                                                "expected": remote, "base": self._branch()[1]}
-            self.state["error"] = None
-            self.state["local_revision"] = self._branch()[1]
-            _write_state(self.thread_dir, self.state)
-
-    def commit(self, sandbox, message: str) -> None:
-        """Commit inside a fresh restricted Git-only generation after model teardown."""
-        branch, _ = self._branch()
-        pending = self.state["preflights"].get(self.work_id)
-        if not pending or pending["branch"] != branch:
-            raise GitSyncError("Thread branch changed; reconcile before publication")
-        _sandbox_git(sandbox, _WORKTREE_GIT + " add -A && { " + _WORKTREE_GIT
-                     + " diff --cached --quiet; code=$?; if [ \"$code\" = 1 ]; then "
-                     + "GIT_AUTHOR_NAME=Assist GIT_AUTHOR_EMAIL=assist@localhost "
-                     + "GIT_COMMITTER_NAME=Assist GIT_COMMITTER_EMAIL=assist@localhost "
-                     + _WORKTREE_GIT + " -c commit.gpgSign=false commit -m "
-                     + shlex.quote(message[:4096] or "assistant update")
-                     + "; else exit \"$code\"; fi; }")
-        require_clean(sandbox)
-
-    def publish(self, *, on_committed=None) -> None:
-        """Publish exact FF branch only; callers have already verified sandbox teardown."""
-        pending = self.state["preflights"].get(self.work_id)
-        if not pending:
-            raise GitSyncError("Git turn has no verified remote preflight")
-        if self.state.get("intent"):
-            raise GitSyncError("Previous publication outcome is unknown; reconcile before publication")
-        with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
-            store = _Store(path)
-            branch, desired = store.snapshot(self.worktree)
-            if (branch, desired) != self._branch():
-                raise GitSyncError("Thread branch changed during publication")
-            if branch != pending["branch"]:
-                raise GitSyncError("Thread branch changed; reconcile before publication")
-            floor = self.state.get("local_revision")
-            if (not store.ancestor(pending["base"], desired)
-                    or (floor and not store.ancestor(floor, desired))):
-                raise GitSyncError("Local thread history changed; sync is pending")
-            self.state["local_revision"] = desired
-            _write_state(self.thread_dir, self.state)
-            if on_committed is not None:
-                on_committed()
-            remote = store.fetch(self.state["source"], branch)
-            expected = pending["expected"]
-            if remote != expected or (remote and not store.ancestor(remote, desired)):
-                raise GitSyncError("Remote thread branch advanced or local history changed; sync is pending")
-            if desired != remote:
-                self.state["intent"] = {"branch": branch, "expected": expected, "desired": desired}
-                _write_state(self.thread_dir, self.state)
-                receipt = store.git("push", "--porcelain", "--no-verify",
-                          "--force-with-lease=refs/heads/" + branch + ":" + (expected or ""),
-                          self.state["source"], desired + ":refs/heads/" + branch, allowed=(0, 1))
-                if any(line.startswith("!\t") for line in receipt.splitlines()):
-                    self.state["intent"] = None
-                    _write_state(self.thread_dir, self.state)
-                    raise GitSyncError("Remote rejected publication; retry on a later successful turn")
-            listing = store.git("ls-remote", "--refs", self.state["source"], "refs/heads/" + branch)
-            if listing.split() != [desired, "refs/heads/" + branch]:
-                raise GitSyncError("Remote publication is not yet verified; sync is pending")
-            self.state["published"][branch] = desired
-            del self.state["preflights"][self.work_id]
-            # Other suspended work shares this thread branch. Advance its exact
-            # expectation only across our own verified FF publication, never a
-            # merely observed user move. Keep its original ancestry floor.
-            for record in self.state["preflights"].values():
-                if record["branch"] == branch and record["expected"] == expected:
-                    record["expected"] = desired
-            self.state.update(published_branch=branch, published_revision=desired,
-                              intent=None, error=None)
-            _write_state(self.thread_dir, self.state)
-
-    def failed(self, error: Exception) -> None:
-        self.state["error"] = str(error)[:256]
-        _write_state(self.thread_dir, self.state)
-
-
 def source_label(source: str) -> str:
     """Only a repository basename, including scp-style SSH sources."""
     path = urlsplit(source).path if "://" in source else source.split(":", 1)[-1]
@@ -1180,9 +773,9 @@ def read_commit_receipt(child_thread_dir: str, work_id: str) -> dict | None:
 
 
 def workspace(thread_dir: str, worktree: str) -> dict:
-    """Bound phone metadata; no remote URL, dirty probe or host Git invocation."""
+    """Bound phone identity; remote Git, not old publication records, is current."""
     value = {"repo_key": None, "repo_label": "No repository", "branch": None,
-             "revision": None, "published_branch": None, "published_revision": None,
+             "revision": None, "thread_branch": None,
              "sync_error": None}
     try:
         state = read_state(thread_dir)
@@ -1194,11 +787,18 @@ def workspace(thread_dir: str, worktree: str) -> dict:
         source = state["source"]
         value.update(repo_key=hashlib.sha256(source.encode()).hexdigest()[:20],
                      repo_label=source_label(source),
-                     published_branch=state.get("published_branch"),
-                     published_revision=state.get("published_revision"),
-                     sync_error=state.get("error"))
-        branch, revision = identity(worktree)
-        value.update(branch=branch, revision=revision)
+                     thread_branch=state.get("branch"))
+        try:
+            branch, revision = identity(worktree)
+        except GitSyncError:
+            # A busy merge may transiently check out main. The bound thread
+            # branch remains a selector for an ordinary remote fetch, not a
+            # claim that the checkout or remote has a particular revision.
+            value["sync_error"] = "Thread checkout branch is unavailable"
+        else:
+            if branch != state.get("branch"):
+                raise GitSyncError("Thread branch needs operator verification")
+            value.update(branch=branch, revision=revision)
     except (GitSyncError, OSError, UnicodeError):
         value["repo_label"] = "Repository unavailable"
         value["sync_error"] = "Git workspace metadata is unavailable"

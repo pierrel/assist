@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -374,6 +375,44 @@ class TestPostReviewRoute:
         r = client.post("/thread/thread-1/review",
                         data={"payload": json.dumps({"overall": "", "lines": []})})
         assert r.status_code == 400
+
+    def test_stale_review_snapshot_is_rejected_before_run_acceptance(self, client, monkeypatch):
+        snapshot = {"base_oid": "a" * 40, "head_oid": "b" * 40,
+                    "diff_digest": "c" * 64}
+        monkeypatch.setattr("manage.web.review._get_domain_manager",
+                            lambda _tid: SimpleNamespace())
+        monkeypatch.setattr("manage.web.review._review_snapshot",
+                            lambda _tid, _dm: (snapshot, [Change(path="a.py", diff=_basic_diff())]))
+        monkeypatch.setattr("manage.web.threads._accept_message_run",
+                            lambda *_args: pytest.fail("stale review accepted a Run"))
+        payload = {"overall": "older review", "lines": [], **snapshot}
+        payload["base_oid"] = "d" * 40
+        result = client.post("/thread/thread-1/review",
+                             data={"payload": json.dumps(payload)}, follow_redirects=False)
+        assert result.status_code == 409
+
+    def test_bound_review_cannot_accept_when_domain_manager_is_unavailable(self, client, monkeypatch):
+        monkeypatch.setattr("manage.web.review._get_domain_manager", lambda _tid: None)
+        monkeypatch.setattr("manage.web.review._review_base", lambda _tid: "a" * 40)
+        monkeypatch.setattr("manage.web.threads._accept_message_run",
+                            lambda *_args: pytest.fail("unavailable bound review accepted a Run"))
+        result = client.post("/thread/thread-1/review",
+                             data={"payload": json.dumps({"overall": "review", "lines": []})},
+                             follow_redirects=False)
+        assert result.status_code == 409
+
+    def test_matching_review_snapshot_accepts_one_run(self, client, monkeypatch):
+        snapshot = {"base_oid": "a" * 40, "head_oid": "b" * 40,
+                    "diff_digest": "c" * 64}
+        monkeypatch.setattr("manage.web.review._get_domain_manager",
+                            lambda _tid: SimpleNamespace())
+        monkeypatch.setattr("manage.web.review._review_snapshot",
+                            lambda _tid, _dm: (snapshot, [Change(path="a.py", diff=_basic_diff())]))
+        monkeypatch.setattr("manage.web.threads._execute_run", lambda *_args: None)
+        payload = {"overall": "current review", "lines": [], **snapshot}
+        result = client.post("/thread/thread-1/review",
+                             data={"payload": json.dumps(payload)}, follow_redirects=False)
+        assert result.status_code == 303
 
     def test_303_and_schedules_background_task(self, client, monkeypatch):
         scheduled: list[tuple[str, str]] = []

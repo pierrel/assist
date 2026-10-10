@@ -268,7 +268,7 @@ def test_sqlite_approval_end_waits_for_git_finalization(sqlite_approval, monkeyp
     lifecycle = SimpleNamespace(bound=True, resume=lambda:None,
         require_sandbox=lambda value:None, cleanup_model=lambda value:None,
         model_starting=lambda:None, finish_visible=finish)
-    monkeypatch.setattr(threads.GitLifecycle, "acquire", lambda *args:nullcontext(lifecycle))
+    monkeypatch.setattr(threads.GitLifecycle, "acquire", lambda *args, **kwargs:nullcontext(lifecycle))
     try:
         threads._execute_run(accepted.id, tid)
         saved = RunService(service.root_dir).get(tid, accepted.id)
@@ -375,7 +375,7 @@ def test_precompletion_git_error_is_atomically_repairable(sqlite_approval, monke
     lifecycle = SimpleNamespace(bound=True, resume=lambda:boundary("resume"),
         require_sandbox=lambda value:boundary("sandbox"), cleanup_model=lambda value:None,
         model_starting=lambda:None, finish_visible=lambda *args:None)
-    def acquire(*args):
+    def acquire(*args, **kwargs):
         boundary("ownership")
         return nullcontext(lifecycle)
     monkeypatch.setattr(threads.GitLifecycle, "acquire", acquire)
