@@ -19,6 +19,19 @@ def git(path, *arguments):
         ["git", "-C", str(path), *arguments], stderr=subprocess.PIPE, text=True).strip()
 
 
+def advance_remote_thread(repos):
+    """Give a dirty checkout a real remote-ahead conflict without touching it."""
+    remote, thread, phone, _ = repos
+    git(thread, "push", "origin", "HEAD:refs/heads/thread/test")
+    git(phone, "fetch", "origin", "thread/test")
+    git(phone, "checkout", "-b", "thread/test", "FETCH_HEAD")
+    (phone / "phone").write_text("remote user commit\n")
+    git(phone, "add", "phone")
+    git(phone, "commit", "-m", "phone")
+    git(phone, "push", "origin", "thread/test")
+    return git(remote, "rev-parse", "refs/heads/thread/test")
+
+
 class LocalBackend:
     def __init__(self, path):
         self.path = path
@@ -38,8 +51,9 @@ class LocalBackend:
 
 
 @pytest.fixture
-def repos(tmp_path):
+def repos(tmp_path, monkeypatch):
     remote, seed, thread, phone = [tmp_path / name for name in ("remote", "seed", "thread", "phone")]
+    monkeypatch.setenv("ASSIST_DOMAINS", str(remote))
     subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(remote)], check=True,
                    stdout=subprocess.DEVNULL)
     subprocess.run(["git", "clone", str(remote), str(seed)], check=True, capture_output=True)
@@ -91,23 +105,29 @@ def turn(repos):
 def test_initial_thread_branch_is_remote_before_first_turn_even_at_main(repos):
     remote, thread, _, binding = repos
     branch, revision = sync.identity(str(thread))
+    state_before = sync.read_state(str(binding))
     assert git(thread, "rev-parse", "main") == revision
     assert subprocess.run(["git", "-C", str(remote), "show-ref", "--verify", "--quiet",
                            "refs/heads/" + branch]).returncode != 0
 
     sync.publish_initial_branch(str(binding), str(thread))
 
-    state = sync.read_state(str(binding))
     assert git(remote, "rev-parse", "refs/heads/" + branch) == revision
-    assert state["published"][branch] == revision
-    assert (state["published_branch"], state["published_revision"]) == (branch, revision)
-    assert state["preflights"] == {} and state["intent"] is None
+    assert sync.read_state(str(binding)) == state_before
     assert sync.identity(str(thread)) == (branch, revision)
 
 
-def test_initial_thread_branch_ref_collision_cannot_rewrite_remote(repos):
+def test_initial_thread_branch_divergent_ref_cannot_rewrite_remote(repos):
     remote, thread, phone, binding = repos
-    branch, revision = sync.identity(str(thread))
+    branch, _ = sync.identity(str(thread))
+    (thread / "local").write_text("trusted main advanced\n")
+    git(thread, "add", "local")
+    git(thread, "commit", "-m", "trusted main")
+    revision = git(thread, "rev-parse", "HEAD")
+    git(thread, "push", "origin", "HEAD:refs/heads/main")
+    state = sync.read_state(str(binding))
+    state["local_revision"] = revision
+    sync._write_state(str(binding), state)
     git(phone, "checkout", "-b", branch)
     (phone / "other").write_text("another owner's commit\n")
     git(phone, "add", "other")
@@ -116,7 +136,7 @@ def test_initial_thread_branch_ref_collision_cannot_rewrite_remote(repos):
     remote_before = git(remote, "rev-parse", "refs/heads/" + branch)
     state_before = sync.read_state(str(binding))
 
-    with pytest.raises(sync.GitSyncError, match="already exists"):
+    with pytest.raises(sync.GitSyncError, match="already exists|branch sync is pending"):
         sync.publish_initial_branch(str(binding), str(thread))
 
     assert git(remote, "rev-parse", "refs/heads/" + branch) == remote_before
@@ -141,19 +161,46 @@ def test_initial_branch_absent_ref_lease_rejects_concurrent_creation(repos, monk
 
     with monkeypatch.context() as patch:
         patch.setattr(sync._Store, "git", create_ref_before_push)
-        with pytest.raises(sync.GitSyncError, match="pending verification"):
+        with pytest.raises(sync.GitSyncError, match="pending"):
             sync.publish_initial_branch(str(binding), str(thread))
 
     state = sync.read_state(str(binding))
     assert git(remote, "rev-parse", "refs/heads/" + branch) == competitor
     assert competitor != revision
     assert state["published"] == {}
-    assert state["intent"] == {"kind": "initial", "branch": branch,
-                               "expected": None, "desired": revision}
+    assert state["intent"] is None
     assert sync.identity(str(thread)) == (branch, revision)
 
 
-def test_initial_thread_branch_exact_intent_recovers_after_remote_acceptance(repos):
+def test_initial_branch_absent_ref_lease_rejects_concurrent_ancestor(repos, monkeypatch):
+    remote, thread, phone, binding = repos
+    branch, ancestor = sync.identity(str(thread))
+    (thread / "second").write_text("new trusted main commit\n")
+    git(thread, "add", "second")
+    git(thread, "commit", "-m", "second")
+    revision = git(thread, "rev-parse", "HEAD")
+    git(thread, "push", "origin", "HEAD:refs/heads/main")
+    state = sync.read_state(str(binding))
+    state["local_revision"] = revision
+    sync._write_state(str(binding), state)
+    original_git = sync._Store.git
+
+    def create_ancestor_before_push(store, *arguments, **kwargs):
+        if arguments[0] == "push":
+            git(phone, "push", "origin", ancestor + ":refs/heads/" + branch)
+        return original_git(store, *arguments, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sync._Store, "git", create_ancestor_before_push)
+        with pytest.raises(sync.GitSyncError, match="pending"):
+            sync.publish_initial_branch(str(binding), str(thread))
+
+    assert git(remote, "rev-parse", "refs/heads/" + branch) == ancestor
+    assert git(thread, "rev-parse", "HEAD") == revision
+    assert sync.read_state(str(binding)) == state
+
+
+def test_initial_thread_branch_uses_exact_ref_after_old_intent_or_host_crash(repos):
     remote, thread, _, binding = repos
     branch, revision = sync.identity(str(thread))
     state = sync.read_state(str(binding))
@@ -164,13 +211,11 @@ def test_initial_thread_branch_exact_intent_recovers_after_remote_acceptance(rep
 
     sync.publish_initial_branch(str(binding), str(thread))
 
-    state = sync.read_state(str(binding))
     assert git(remote, "rev-parse", "refs/heads/" + branch) == revision
-    assert state["intent"] is None
-    assert state["published"][branch] == revision
+    assert sync.read_state(str(binding))["intent"] is None
 
 
-def test_initial_thread_branch_retries_exact_intent_after_pre_push_failure(repos, monkeypatch):
+def test_initial_thread_branch_retries_after_pre_push_failure(repos, monkeypatch):
     remote, thread, _, binding = repos
     branch, revision = sync.identity(str(thread))
     original_git = sync._Store.git
@@ -185,15 +230,14 @@ def test_initial_thread_branch_retries_exact_intent_after_pre_push_failure(repos
         with pytest.raises(sync.GitSyncError, match="timed out"):
             sync.publish_initial_branch(str(binding), str(thread))
     pending = sync.read_state(str(binding))
-    assert pending["intent"] == {"kind": "initial", "branch": branch,
-                                 "expected": None, "desired": revision}
+    assert pending["intent"] is None
     assert pending["published"] == {}
     assert subprocess.run(["git", "-C", str(remote), "show-ref", "--verify", "--quiet",
                            "refs/heads/" + branch]).returncode != 0
 
     sync.publish_initial_branch(str(binding), str(thread))
     assert git(remote, "rev-parse", "refs/heads/" + branch) == revision
-    assert sync.read_state(str(binding))["intent"] is None
+    assert sync.read_state(str(binding)) == pending
 
 
 def test_initial_branch_accepts_trusted_main_fast_forward_during_clone(repos):
@@ -209,10 +253,10 @@ def test_initial_branch_accepts_trusted_main_fast_forward_during_clone(repos):
     sync.publish_initial_branch(str(binding), str(thread))
 
     assert git(remote, "rev-parse", "refs/heads/" + branch) == revision
-    assert sync.read_state(str(binding))["published_revision"] == revision
+    assert sync.read_state(str(binding))["published_revision"] is None
 
 
-def test_initial_intent_does_not_use_descendant_tolerant_turn_reconciliation(repos):
+def test_initial_intent_reconciles_phone_descendant_before_first_turn(repos):
     remote, thread, phone, binding = repos
     branch, revision = sync.identity(str(thread))
     state = sync.read_state(str(binding))
@@ -227,13 +271,13 @@ def test_initial_intent_does_not_use_descendant_tolerant_turn_reconciliation(rep
     git(phone, "commit", "-m", "phone")
     git(phone, "push", "origin", "HEAD:refs/heads/" + branch)
 
-    owner = sync.GitSync(str(binding), str(thread))
-    with pytest.raises(sync.GitSyncError, match="exact verification"):
-        owner.prepare(LocalBackend(thread), "first-work")
-    with pytest.raises(sync.GitSyncError, match="already exists"):
-        sync.publish_initial_branch(str(binding), str(thread))
-    assert sync.read_state(str(binding)) == state
-    assert git(remote, "rev-parse", "refs/heads/" + branch) != revision
+    sync.publish_initial_branch(str(binding), str(thread))
+    assert sync.read_state(str(binding))["intent"] is None
+    from assist.thread_git import ThreadGit
+    owner = ThreadGit(str(binding), str(thread), (str(remote),))
+    assert owner.prepare(LocalBackend(thread)) is False
+    assert git(thread, "rev-parse", "HEAD") == git(remote, "rev-parse", "refs/heads/" + branch)
+    assert git(thread, "rev-parse", "HEAD") != revision
 
 
 def test_unknown_publication_intent_kind_fails_closed(repos):
@@ -250,6 +294,7 @@ def test_unknown_publication_intent_kind_fails_closed(repos):
 
 def test_settled_initial_publication_allows_later_phone_fast_forward(repos):
     remote, thread, phone, binding = repos
+    from assist.thread_git import ThreadGit
     sync.publish_initial_branch(str(binding), str(thread))
     state = sync.read_state(str(binding))
     branch, revision = sync.identity(str(thread))
@@ -262,10 +307,69 @@ def test_settled_initial_publication_allows_later_phone_fast_forward(repos):
 
     sync.publish_initial_branch(str(binding), str(thread))
     assert sync.read_state(str(binding)) == state
-    owner = sync.GitSync(str(binding), str(thread))
-    owner.prepare(LocalBackend(thread), "first-work")
+    owner = ThreadGit(str(binding), str(thread), (str(remote),))
+    assert owner.prepare(LocalBackend(thread)) is False
     assert sync.identity(str(thread)) == (branch, git(remote, "rev-parse", "refs/heads/" + branch))
-    assert owner.state["published"][branch] == revision
+    assert sync.read_state(str(binding)) == state
+
+
+def test_initial_branch_recreates_deleted_ref_for_still_authorized_first_run(repos):
+    remote, thread, _, binding = repos
+    branch, revision = sync.identity(str(thread))
+    sync.publish_initial_branch(str(binding), str(thread))
+    git(remote, "update-ref", "-d", "refs/heads/" + branch)
+
+    sync.publish_initial_branch(str(binding), str(thread))
+
+    assert git(remote, "rev-parse", "refs/heads/" + branch) == revision
+
+
+def test_full_thread_ids_keep_same_second_suffix_collision_separate(repos, monkeypatch):
+    from datetime import datetime as RealDateTime, timezone
+    from assist import domain_manager
+
+    remote, _, _, binding = repos
+    ids = ("20261009123456-deadbeef", "20261009123456-feedbeef")
+
+    class FixedDateTime:
+        @staticmethod
+        def now(zone):
+            return RealDateTime(2026, 10, 9, 12, 34, 56, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(domain_manager, "datetime", FixedDateTime)
+    branches = []
+    for thread_id in ids:
+        worktree = binding.parent / thread_id
+        subprocess.run(["git", "clone", "--no-hardlinks", str(remote), str(worktree)],
+                       check=True, capture_output=True)
+        branch = domain_manager.create_timestamped_branch(str(worktree), suffix=thread_id)
+        state_dir = binding.parent / ("state-" + thread_id)
+        state_dir.mkdir()
+        sync.bind(str(state_dir), str(remote))
+        sync.authorize_branch(str(state_dir), str(worktree))
+        sync.publish_initial_branch(str(state_dir), str(worktree))
+        branches.append(branch)
+
+    assert branches[0] != branches[1]
+    assert all(thread_id in branch for thread_id, branch in zip(ids, branches))
+    assert all(git(remote, "rev-parse", "refs/heads/" + branch) ==
+               git(remote, "rev-parse", "main") for branch in branches)
+
+
+def test_initial_branch_rejects_nonmatching_legacy_intent(repos):
+    remote, thread, _, binding = repos
+    branch, revision = sync.identity(str(thread))
+    state = sync.read_state(str(binding))
+    state["intent"] = {"kind": "initial", "branch": branch,
+                       "expected": None, "desired": "0" * 40}
+    sync._write_state(str(binding), state)
+
+    with pytest.raises(sync.GitSyncError, match="unresolved publication intent"):
+        sync.publish_initial_branch(str(binding), str(thread))
+
+    assert subprocess.run(["git", "-C", str(remote), "show-ref", "--verify", "--quiet",
+                           "refs/heads/" + branch]).returncode != 0
+    assert sync.read_state(str(binding)) == state
 
 
 def test_web_lifecycle_keeps_non_git_cleanup_and_noop_turn_contract(tmp_path, monkeypatch):
@@ -445,7 +549,10 @@ def test_first_noop_publishes_only_thread_branch(repos):
     head = git(thread, "rev-parse", "HEAD")
     assert git(remote, "rev-parse", "thread/test") == head == main
     assert git(remote, "for-each-ref", "--format=%(refname)") == "refs/heads/main\nrefs/heads/thread/test"
-    assert sync.workspace(str(binding), str(thread))["published_revision"] == head
+    metadata = sync.workspace(str(binding), str(thread))
+    assert (metadata["thread_branch"], metadata["branch"], metadata["revision"]) == (
+        "thread/test", "thread/test", head)
+    assert "published_revision" not in metadata
 
 
 def test_changed_and_staged_only_turn(repos):
@@ -1249,7 +1356,25 @@ def test_deep_turn_noop_publishes_before_releasing_workspace(repos, monkeypatch)
     assert [event[0] for event in events] == ["start", "exit"] * 5
     assert len({event[1] for event in events}) == 5
     assert git(repos[0], "rev-parse", "thread/test") == git(repos[1], "rev-parse", "HEAD")
-    assert not sync.read_state(str(repos[3]))["sandbox_in_flight"]
+    assert not sync.read_state(str(repos[3])).get("sandbox_in_flight")
+
+
+def test_deep_turn_keeps_and_commits_prior_untracked_work_at_equal_remote_tip(repos, monkeypatch):
+    remote, thread, _, binding = repos
+    initial = sync.GitSync(str(binding), str(thread))
+    initial.prepare(LocalBackend(thread), "initial")
+    initial.publish()
+    (thread / "prior-output").write_bytes(b"retained prior work\x00")
+
+    def model():
+        assert (thread / "prior-output").read_bytes() == b"retained prior work\x00"
+        return "new answer"
+
+    threads, _, outcomes = web_turn(repos, monkeypatch, model)
+    threads._process_message("state", "new request")
+    assert outcomes[-1][1:4] == ("ready", None, "new answer")
+    assert (thread / "prior-output").read_bytes() == b"retained prior work\x00"
+    assert git(remote, "show", "refs/heads/thread/test:prior-output") == "retained prior work\x00"
 
 
 def test_enrollment_allows_legacy_message_without_host_workspace_git(repos, monkeypatch):
@@ -1309,7 +1434,7 @@ def test_deep_missing_sandbox_never_runs_model_or_host_sync(repos, monkeypatch):
     assert git(repos[0], "for-each-ref", "--format=%(refname)") == "refs/heads/main"
 
 
-def test_failed_model_teardown_preserves_answer_and_quarantines(repos, monkeypatch):
+def test_failed_model_teardown_preserves_answer_and_blocks_publication(repos, monkeypatch):
     threads, events, outcomes = web_turn(repos, monkeypatch, lambda: "saved answer")
     original = threads.SandboxManager.cleanup_verified
 
@@ -1321,7 +1446,8 @@ def test_failed_model_teardown_preserves_answer_and_quarantines(repos, monkeypat
     monkeypatch.setattr(threads.SandboxManager, "cleanup_verified", fail_model_cleanup)
     threads._process_message("state", "probe")
     assert outcomes[-1][1:4] == ("error", None, "saved answer")
-    assert sync.read_state(str(repos[3]))["quarantine"]
+    assert not sync.read_state(str(repos[3])).get("quarantine")
+    assert threads.SandboxManager.current_container(str(repos[1])) is not None
     assert len(events) == 5  # No Git-only generation or host publication after failed exit.
     assert git(repos[0], "for-each-ref", "--format=%(refname)") == "refs/heads/main"
     # Test double has no actual container; remove only its private registry entry.
@@ -1338,8 +1464,8 @@ def test_pi_turn_uses_same_preflight_commit_and_publication(repos, monkeypatch):
     result = PiRuntimeResult("saved Pi answer", 1)
 
     def runtime(**kwargs):
-        pending = next(iter(sync.read_state(str(repos[3]))["preflights"].values()))
-        assert pending["base"] == git(repos[1], "rev-parse", "HEAD")
+        assert sync.identity(str(repos[1]))[1] == git(repos[1], "rev-parse", "HEAD")
+        assert sync.read_state(str(repos[3]))["preflights"] == {}
         model = threads._get_sandbox_backend("state", before_start=kwargs["sandbox_starting"])
         (repos[1] / "pi").write_text("Pi committed change\n")
         kwargs["commit"](result)
@@ -1354,6 +1480,34 @@ def test_pi_turn_uses_same_preflight_commit_and_publication(repos, monkeypatch):
     assert [event[0] for event in events] == ["start", "exit"] * 5
     saved = threads._PI_CONVERSATIONS.completed_reply(str(repos[3]), run.id)
     assert saved.text == "saved Pi answer"
+
+
+def test_pi_dirty_remote_advance_preserves_work_before_model(repos, monkeypatch):
+    threads, _, _ = web_turn(repos, monkeypatch, lambda: pytest.fail("Deep model ran"))
+    monkeypatch.setattr(threads, "PI_PREVIEW", SimpleNamespace(admits=lambda _engine: True))
+    monkeypatch.setattr(threads, "_PI_RUNTIME", SimpleNamespace(
+        run=lambda **_kwargs: pytest.fail("Pi model ran on a dirty divergent checkout")))
+    remote, thread, phone, binding = repos
+    git(thread, "push", "origin", "HEAD:refs/heads/thread/test")
+    git(phone, "fetch", "origin", "thread/test")
+    git(phone, "checkout", "-b", "thread/test", "FETCH_HEAD")
+    (phone / "phone").write_text("user commit\n")
+    git(phone, "add", "phone")
+    git(phone, "commit", "-m", "user")
+    git(phone, "push", "origin", "thread/test")
+    remote_tip = git(remote, "rev-parse", "refs/heads/thread/test")
+    (thread / "dirty").write_bytes(b"preserve\x00")
+    before = git(thread, "rev-parse", "HEAD"), (thread / ".git" / "index").read_bytes()
+
+    run = threads._create_run("state", "probe")
+    threads._execute_pi_run(run, user_priority=False)
+
+    saved = threads._runs().get("state", run.id)
+    assert saved.status == "error" and "uncommitted" in saved.error
+    assert (git(thread, "rev-parse", "HEAD"), (thread / ".git" / "index").read_bytes()) == before
+    assert (thread / "dirty").read_bytes() == b"preserve\x00"
+    assert git(remote, "rev-parse", "refs/heads/thread/test") == remote_tip
+    assert not sync.read_state(str(binding)).get("sandbox_in_flight")
 
 
 def test_verified_cleanup_keeps_generation_on_failure(monkeypatch):
@@ -1484,68 +1638,76 @@ def test_pi_preflight_fault_terminalizes_and_exposes_reason(repos, monkeypatch, 
     if fault == "missing-git":
         (repos[1] / ".git").rename(repos[1] / "preserved-git")
     elif fault == "lost-sandbox":
-        monkeypatch.setattr(sync, "require_clean", lambda _backend: (
+        from assist.sandbox_manager import SandboxManager
+        monkeypatch.setattr(SandboxManager, "cleanup_verified", lambda *_args: (
             _ for _ in ()).throw(SandboxContainerLostError("lost sandbox")))
     else:
+        advance_remote_thread(repos)
         (repos[1] / "dirty").write_text("preserve\n")
     run = threads._create_run("state", "probe")
     if fault == "dirty":
         from manage.web.state import _get_status
-        original_clean = sync.require_clean
+        from assist import thread_git
+        from assist.sandbox_manager import SandboxManager
+        original_clean = thread_git.require_clean
 
         def check_busy_identity(backend):
             assert _get_status("state")["pending_run_id"] == run.id
             return original_clean(backend)
 
-        original_stopped = sync.GitSync.sandbox_stopped
+        original_cleanup = SandboxManager.cleanup_verified
 
-        def check_terminal_identity(owner):
+        def check_terminal_identity(worktree, generation):
             status = _get_status("state")
             assert status["stage"] == "error" and status["pending_run_id"] == run.id
-            return original_stopped(owner)
+            return original_cleanup(worktree, generation)
 
-        monkeypatch.setattr(sync, "require_clean", check_busy_identity)
-        monkeypatch.setattr(sync.GitSync, "sandbox_stopped", check_terminal_identity)
+        monkeypatch.setattr(thread_git, "require_clean", check_busy_identity)
+        monkeypatch.setattr(SandboxManager, "cleanup_verified", check_terminal_identity)
     threads._execute_pi_run(run, user_priority=False)
-    assert threads._runs().get("state", run.id).status == "error"
-    assert sync.workspace(str(repos[3]), str(repos[1]))["sync_error"]
+    saved = threads._runs().get("state", run.id)
+    assert saved.status == "error" and saved.error
     state = sync.read_state(str(repos[3]))
     if fault == "dirty":
         assert not state.get("sandbox_in_flight")
-        assert "uncommitted changes" in state["error"]
+        assert "uncommitted" in saved.error
         assert (repos[1] / "dirty").read_text() == "preserve\n"
+    elif fault == "lost-sandbox":
+        assert not state.get("sandbox_in_flight")
+        assert "teardown" in saved.error
     else:
-        assert state.get("sandbox_in_flight")
-        with pytest.raises(sync.GitSyncError, match="verification"):
-            sync.GitSync(str(repos[3]), str(repos[1]))
+        assert not state.get("sandbox_in_flight")
+        assert (repos[1] / "preserved-git").is_dir()
 
 
 def test_dirty_preflight_terminalizes_each_queued_deep_run_after_verified_cleanup(
         repos, monkeypatch):
     from manage.web.state import _get_status
+    from assist import thread_git
 
     calls = []
     threads, events, _ = web_turn(repos, monkeypatch, lambda: calls.append(True))
+    advance_tip = advance_remote_thread(repos)
     tracked = repos[1] / "tracked"
     tracked.write_text("unfinished user edit\n")
     before_index = (repos[1] / ".git" / "index").read_bytes()
     before_head = git(repos[1], "rev-parse", "HEAD")
     runs = [threads._create_run("state", f"queued {number}") for number in range(3)]
     observed_ids = []
-    original_clean = sync.require_clean
+    original_clean = thread_git.require_clean
 
     def check_busy_identity(backend):
         observed_ids.append(_get_status("state")["pending_run_id"])
         return original_clean(backend)
 
-    monkeypatch.setattr(sync, "require_clean", check_busy_identity)
+    monkeypatch.setattr(thread_git, "require_clean", check_busy_identity)
 
     for run in runs:
         threads._process_message("state", run.text, _run=run)
         saved = threads._runs().get("state", run.id)
         assert saved.status == "error"
-        assert "uncommitted changes" in saved.error
-        assert not sync.read_state(str(repos[3]))["sandbox_in_flight"]
+        assert "uncommitted" in saved.error
+        assert not sync.read_state(str(repos[3])).get("sandbox_in_flight")
         assert _get_status("state")["stage"] == "error"
 
     assert not calls
@@ -1554,28 +1716,31 @@ def test_dirty_preflight_terminalizes_each_queued_deep_run_after_verified_cleanu
     assert tracked.read_text() == "unfinished user edit\n"
     assert (repos[1] / ".git" / "index").read_bytes() == before_index
     assert git(repos[1], "rev-parse", "HEAD") == before_head
-    assert git(repos[0], "for-each-ref", "--format=%(refname)") == "refs/heads/main"
+    assert git(repos[0], "rev-parse", "refs/heads/thread/test") == advance_tip
 
 
-def test_dirty_preflight_cleanup_failure_retains_stronger_fence(repos, monkeypatch):
+def test_dirty_preflight_cleanup_failure_preserves_work_and_error(repos, monkeypatch):
     threads, _, _ = web_turn(repos, monkeypatch, lambda: pytest.fail("model ran"))
+    advance_remote_thread(repos)
     (repos[1] / "tracked").write_text("preserve incomplete work\n")
     run = threads._create_run("state", "probe")
     monkeypatch.setattr(threads.SandboxManager, "cleanup_verified",
                         lambda *_: (_ for _ in ()).throw(RuntimeError("teardown uncertain")))
     try:
         threads._process_message("state", "probe", _run=run)
+        assert threads.SandboxManager.current_container(str(repos[1])) is not None
     finally:
         threads.SandboxManager._containers.pop(str(repos[1]), None)
     state = sync.read_state(str(repos[3]))
-    assert state["sandbox_in_flight"] and state["quarantine"]
-    assert "teardown" in state["error"]
+    assert not state.get("sandbox_in_flight") and not state.get("quarantine")
+    assert "uncommitted" in threads._runs().get("state", run.id).error
     assert threads._runs().get("state", run.id).status == "error"
     assert (repos[1] / "tracked").read_text() == "preserve incomplete work\n"
 
 
-def test_dirty_preflight_run_store_failure_keeps_flight_fenced(repos, monkeypatch):
+def test_dirty_preflight_run_store_failure_preserves_pending_run(repos, monkeypatch):
     threads, _, _ = web_turn(repos, monkeypatch, lambda: pytest.fail("model ran"))
+    advance_remote_thread(repos)
     (repos[1] / "tracked").write_text("preserve incomplete work\n")
     run = threads._create_run("state", "probe")
     monkeypatch.setattr(threads, "_terminalize_dirty_run", lambda *_: (
@@ -1584,15 +1749,15 @@ def test_dirty_preflight_run_store_failure_keeps_flight_fenced(repos, monkeypatc
     threads._process_message("state", "probe", _run=run)
 
     state = sync.read_state(str(repos[3]))
-    assert state["sandbox_in_flight"]
-    assert "outcome needs operator verification" in state["error"]
-    assert threads._runs().get("state", run.id).status == "error"
+    assert not state.get("sandbox_in_flight")
+    assert threads._runs().get("state", run.id).status == "running"
     assert (repos[1] / "tracked").read_text() == "preserve incomplete work\n"
 
 
 def test_dirty_child_preflight_finishes_exact_run_without_model_or_parent_replay(
         repos, monkeypatch, tmp_path):
     threads, _, _ = web_turn(repos, monkeypatch, lambda: pytest.fail("child model ran"))
+    advance_remote_thread(repos)
     child_dir = tmp_path / "sub-child"
     child_dir.mkdir()
     monkeypatch.setattr(threads.MANAGER, "thread_dir",
@@ -1607,14 +1772,14 @@ def test_dirty_child_preflight_finishes_exact_run_without_model_or_parent_replay
     threads._execute_child_run(run)
 
     saved = threads._runs().get("sub-child", run.id)
-    assert saved.status == "error" and "uncommitted changes" in saved.error
+    assert saved.status == "error" and "uncommitted" in saved.error
     assert handoffs and handoffs[-1].id == run.id
-    assert not sync.read_state(str(repos[3]))["sandbox_in_flight"]
+    assert not sync.read_state(str(repos[3])).get("sandbox_in_flight")
     assert (repos[1] / "tracked").read_text() == "preserve parent edit\n"
 
 
 def test_dirty_readonly_verification_after_writer_teardown_is_terminal(repos, monkeypatch):
-    from manage.web import git_lifecycle
+    from manage.web import thread_git_lifecycle as git_lifecycle
 
     threads, events, _ = web_turn(repos, monkeypatch, lambda: pytest.fail("model ran"))
     original_clean = sync.require_clean
@@ -1634,10 +1799,10 @@ def test_dirty_readonly_verification_after_writer_teardown_is_terminal(repos, mo
     run = threads._create_run("state", "probe")
     threads._process_message("state", "probe", _run=run)
 
-    assert len(probes) == 3
+    assert len(probes) == 1
     assert [event[0] for event in events] == ["start", "exit"] * 2
     assert threads._runs().get("state", run.id).status == "error"
-    assert not sync.read_state(str(repos[3]))["sandbox_in_flight"]
+    assert not sync.read_state(str(repos[3])).get("sandbox_in_flight")
     assert (repos[1] / "tracked").read_text() == "preserve late edit\n"
 
 
@@ -1934,7 +2099,7 @@ def test_child_git_failure_preserves_result_without_success_wake(repos, monkeypa
     threads.SandboxManager._containers.pop(str(repos[1]), None)
 
 
-def test_child_crash_after_commit_recovers_saved_result_without_model_replay(repos, monkeypatch, tmp_path):
+def test_child_crash_after_commit_keeps_saved_result_without_model_replay(repos, monkeypatch, tmp_path):
     calls = []
 
     def model():
@@ -1951,34 +2116,27 @@ def test_child_crash_after_commit_recovers_saved_result_without_model_replay(rep
     wakes = []
 
     def wake(run):
-        assert run.status == "success"
-        owner = sync.GitSync(str(repos[3]), str(repos[1]))
-        owner.prepare(LocalBackend(repos[1]), "parent-wake")
-        owner.publish()
-        wakes.append(run.result)
+        wakes.append((run.status, run.result, run.error))
 
     monkeypatch.setattr(threads, "_complete_child_handoff", wake)
     run = threads._create_run("sub-child", "probe", mode="child", parent_thread_id="state",
                               parent_run_id="parent", dispatch_key="crash-child",
                               assistant_id="delegate-agent")
     with monkeypatch.context() as patch:
-        original = sync._Store.fetch
-
-        def crash_after_receipt(store, *args):
-            if (child_dir / "git-commit-receipt.json").exists():
-                raise SystemExit("crash")
-            return original(store, *args)
-
-        patch.setattr(sync._Store, "fetch", crash_after_receipt)
+        from assist.thread_git import ThreadGit
+        patch.setattr(ThreadGit, "publish", lambda _owner: (
+            _ for _ in ()).throw(SystemExit("crash after local commit")))
         with pytest.raises(SystemExit, match="crash"):
             threads._execute_child_run(run)
     saved = threads._runs().get("sub-child", run.id)
     assert saved.status == "running" and saved.result == "saved child result"
-    assert sync.read_commit_receipt(str(child_dir), run.work_id)
+    assert not sync.read_state(str(repos[3])).get("sandbox_in_flight")
     threads._recover_child_run(saved)
     assert calls == [None]
-    assert wakes == ["saved child result"]
-    assert git(repos[0], "show", "thread/test:child") == "committed child"
+    assert wakes == [("error", "saved child result",
+                      "Child Git publication after restart needs verification")]
+    assert (repos[1] / "child").read_text() == "committed child\n"
+    assert git(repos[0], "for-each-ref", "--format=%(refname)") == "refs/heads/main"
 
 
 def test_pi_lock_io_error_terminalizes_exact_pending_ticket(repos, monkeypatch):
@@ -2083,7 +2241,7 @@ def test_stale_child_receipt_cannot_certify_dropped_commit(repos, tmp_path):
     assert sync.read_commit_receipt(str(child_dir), "work-1")["revision"] != base
 
 
-def test_child_crash_after_teardown_before_floor_keeps_parent_fenced(repos, monkeypatch, tmp_path):
+def test_child_crash_after_teardown_reports_saved_result_without_replay(repos, monkeypatch, tmp_path):
     def model():
         (repos[1] / "child").write_text("keep committed child\n")
         return "saved child result"
@@ -2100,16 +2258,15 @@ def test_child_crash_after_teardown_before_floor_keeps_parent_fenced(repos, monk
                               parent_run_id="parent", dispatch_key="gap-child",
                               assistant_id="delegate-agent")
     with monkeypatch.context() as patch:
-        patch.setattr(sync.GitSync, "publish", lambda _owner, **_kw: (
+        from assist.thread_git import ThreadGit
+        patch.setattr(ThreadGit, "publish", lambda _owner: (
             _ for _ in ()).throw(SystemExit("after teardown")))
         with pytest.raises(SystemExit, match="after teardown"):
             threads._execute_child_run(run)
     saved = threads._runs().get("sub-child", run.id)
     assert saved.status == "running" and saved.result == "saved child result"
-    assert sync.read_state(str(repos[3]))["sandbox_in_flight"]
+    assert not sync.read_state(str(repos[3])).get("sandbox_in_flight")
     assert not sync.read_commit_receipt(str(child_dir), run.work_id)
-    with pytest.raises(sync.GitSyncError, match="verification"):
-        sync.GitSync(str(repos[3]), str(repos[1]))
     threads._recover_child_run(saved)
     assert outcomes[-1].status == "error" and outcomes[-1].result == "saved child result"
     assert (repos[1] / "child").read_text() == "keep committed child\n"
@@ -2237,7 +2394,8 @@ def test_authenticated_phone_initial_branch_is_fetchable_before_model_wait(repos
         assert sync.identity(str(thread)) == (branch, revision)
         assert (thread / "tracked").read_text() == "base\n"
         state = sync.read_state(str(binding))
-        assert (state["published_branch"], state["published_revision"]) == (branch, revision)
+        assert state["branch"] == branch
+        assert state["intent"] is None and state["published"] == {}
     finally:
         release.set()
         worker.join(timeout=5)
@@ -2269,9 +2427,9 @@ def test_phone_create_core_publishes_branch_before_first_run_dispatch(repos, mon
     threads._initialize_thread(tid, run.id, source)
 
     state = sync.read_state(threads.MANAGER.thread_dir(tid))
-    assert dispatched == [(run.id, state["published_revision"])]
-    assert state["published_branch"] == state["branch"]
-    assert git(remote, "rev-parse", "refs/heads/main") == state["published_revision"]
+    assert dispatched == [(run.id, state["local_revision"])]
+    assert state["intent"] is None and state["published"] == {}
+    assert git(remote, "rev-parse", "refs/heads/main") == state["local_revision"]
 
 
 def test_phone_initial_branch_remains_fetchable_after_first_run_fails(repos, monkeypatch):
@@ -2289,7 +2447,7 @@ def test_phone_initial_branch_remains_fetchable_after_first_run_fails(repos, mon
 
     assert threads._runs().get("state", run.id).status == "error"
     assert git(remote, "rev-parse", "refs/heads/" + branch) == revision
-    assert sync.read_state(str(binding))["published_revision"] == revision
+    assert sync.read_state(str(binding))["published_revision"] is None
 
 
 def test_browser_initializer_does_not_publish_initial_branch(repos, monkeypatch):
@@ -2487,7 +2645,8 @@ def test_visible_commit_failure_preserves_answer_and_reports_error(repos, monkey
         return "saved answer"
 
     threads, _, outcomes = web_turn(repos, monkeypatch, model)
-    monkeypatch.setattr(sync.GitSync, "commit", lambda *_args: (
+    from assist.thread_git import ThreadGit
+    monkeypatch.setattr(ThreadGit, "commit", lambda *_args: (
         _ for _ in ()).throw(sync.GitSyncError("restricted commit failed")))
     run = threads._create_run("state", "probe")
     if engine == "pi":
@@ -2513,7 +2672,7 @@ def test_visible_commit_failure_preserves_answer_and_reports_error(repos, monkey
     saved = threads._runs().get("state", run.id)
     assert saved.status == "error" and saved.result == "saved answer"
     assert (repos[1] / "answer-work").read_text() == "preserve work\n"
-    assert sync.read_state(str(repos[3]))["sandbox_in_flight"]
+    assert not sync.read_state(str(repos[3])).get("sandbox_in_flight")
     assert git(repos[0], "for-each-ref", "--format=%(refname)") == "refs/heads/main"
 
 
@@ -2610,7 +2769,8 @@ def test_local_commit_failure_cancels_new_continuation_and_rejournals_interjecti
     retained = threads._create_run("state", "earlier promise", origin="continuation")
     queued = []
     monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit", lambda *args: queued.append(args))
-    monkeypatch.setattr(sync.GitSync, "commit", lambda *_args: (
+    from assist.thread_git import ThreadGit
+    monkeypatch.setattr(ThreadGit, "commit", lambda *_args: (
         _ for _ in ()).throw(sync.GitSyncError("restricted commit failed")))
     run = threads._create_run("state", "probe")
     threads._process_message("state", "probe", _run=run)
@@ -2647,14 +2807,16 @@ def test_completed_git_recovery_is_error_without_replaying_saved_answer(repos, m
         threads._recover_run(run)
     saved = threads._runs().get("state", run.id)
     assert saved.status == "error" and saved.result == "saved answer"
-    assert "Git" in saved.error and "reconcile" in saved.error.lower()
+    assert "Git" in saved.error and "reconcil" in saved.error.lower()
     assert sync.read_state(str(repos[3])) == before
     assert (repos[1] / "crash-work").read_text() == "preserve crash edits\n"
 
 
 def test_web_merge_records_new_thread_branch_without_losing_published_ref(repos, monkeypatch):
     """A successful gated merge must leave the next turn on its new branch."""
+    from fastapi import HTTPException
     from assist.domain_manager import DomainManager
+    from assist.sandbox_manager import SandboxManager
     from manage.web import threads
 
     remote, worktree, phone, binding = repos
@@ -2676,13 +2838,33 @@ def test_web_merge_records_new_thread_branch_without_losing_published_ref(repos,
     git(phone, "push", "origin", "main")
     manager = DomainManager(str(worktree), str(remote), branch_suffix="fixture")
     monkeypatch.setattr(threads, "MANAGER", SimpleNamespace(
+        root_dir=str(binding.parent),
         get=lambda _tid: object(),
         thread_dir=lambda _tid: str(binding),
         thread_default_working_dir=lambda _tid: str(worktree)))
+    monkeypatch.setattr(threads, "_runs", lambda: SimpleNamespace(
+        list=lambda _tid: [], scan_children=lambda: []))
     monkeypatch.setattr(threads, "_require_deep_thread", lambda _tid: None)
     monkeypatch.setattr(threads, "_get_status", lambda _tid: {"stage": "ready"})
     monkeypatch.setattr(threads, "_get_domain_manager", lambda _tid: manager)
     monkeypatch.setattr(threads, "_clear_conflict", lambda _tid: None)
+    backend = LocalBackend(worktree)
+    backend.container = object()
+
+    def verifier(_worktree, *, before_start, **_kwargs):
+        assert before_start is None
+        return backend
+
+    monkeypatch.setattr(SandboxManager, "get_git_verification_backend", verifier)
+    monkeypatch.setattr(SandboxManager, "cleanup_verified", lambda *_args: None)
+
+    main_before = git(remote, "rev-parse", "refs/heads/main")
+    with pytest.raises(HTTPException) as dirty_error:
+        threads.merge_thread("fixture")
+    assert dirty_error.value.status_code == 409
+    assert git(remote, "rev-parse", "refs/heads/main") == main_before
+    assert (worktree / "user-untracked").read_text() == "keep this user work\n"
+    (worktree / "user-untracked").unlink()
 
     assert threads.merge_thread("fixture").status_code == 303
     new_branch, new_revision = sync.identity(str(worktree))
@@ -2694,9 +2876,7 @@ def test_web_merge_records_new_thread_branch_without_losing_published_ref(repos,
     assert (after["published_branch"], after["published_revision"]) == (None, None)
     assert after["preflights"] == {}
     assert git(remote, "rev-parse", "refs/heads/main") == new_revision
-    assert (worktree / "user-untracked").read_text() == "keep this user work\n"
-    with pytest.raises(sync.GitDirtyWorktreeError):
-        sync.require_clean(LocalBackend(worktree))
+    sync.require_clean(LocalBackend(worktree))
 
 
 def test_post_merge_branch_rejects_unverified_remote_main(repos):
@@ -2741,7 +2921,7 @@ def test_post_merge_branch_keeps_retained_preflight_fenced(repos):
     assert git(remote, "rev-parse", "refs/heads/" + old_branch) == old_revision
 
 
-def test_web_merge_rejects_retained_preflight_before_main_push(repos, monkeypatch):
+def test_web_merge_rejects_unfinished_child_before_main_push(repos, monkeypatch):
     from fastapi import HTTPException
     from manage.web import threads
 
@@ -2749,22 +2929,23 @@ def test_web_merge_rejects_retained_preflight_before_main_push(repos, monkeypatc
     branch, revision = sync.identity(str(worktree))
     git(worktree, "push", "origin", "HEAD:refs/heads/" + branch)
     state = sync.read_state(str(binding))
-    state.update(published={branch: revision}, published_branch=branch,
-                 published_revision=revision,
-                 preflights={"old-work": {"branch": branch,
-                                          "expected": revision, "base": revision}})
-    sync._write_state(str(binding), state)
     main_before = git(remote, "rev-parse", "refs/heads/main")
     monkeypatch.setattr(threads, "MANAGER", SimpleNamespace(
+        root_dir=str(binding.parent),
         get=lambda _tid: object(),
         thread_dir=lambda _tid: str(binding),
         thread_default_working_dir=lambda _tid: str(worktree)))
+    monkeypatch.setattr(threads, "_runs", lambda: SimpleNamespace(
+        list=lambda _tid: [],
+        scan_children=lambda: [SimpleNamespace(
+            thread_id="sub-child", work_id="child-work", status="awaiting_approval",
+            parent_thread_id="fixture")]))
     monkeypatch.setattr(threads, "_require_deep_thread", lambda _tid: None)
     monkeypatch.setattr(threads, "_get_status", lambda _tid: {"stage": "ready"})
     monkeypatch.setattr(threads, "_get_domain_manager", lambda _tid: SimpleNamespace(
         repo=object(), merge_and_push=lambda: pytest.fail("merge ran before Git validation")))
 
-    with pytest.raises(HTTPException) as error:
+    with pytest.raises(HTTPException, match="unfinished work") as error:
         threads.merge_thread("fixture")
 
     assert error.value.status_code == 409

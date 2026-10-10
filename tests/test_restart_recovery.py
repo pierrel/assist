@@ -828,7 +828,7 @@ def test_legacy_git_completed_projection_is_not_ready_after_restart(wired, monke
     _set_status(tid, "processing", pending_message="saved checkpoint answer")
     threads.queue_recovery_runs()
     assert _get_status(tid)["stage"] == "error"
-    assert "unverified" in _get_status(tid)["error"]
+    assert "Bound Git workspace is unavailable" in _get_status(tid)["error"]
     assert read_state(str(root / tid)) == before
 
 

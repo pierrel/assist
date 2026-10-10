@@ -276,15 +276,15 @@ def _get_domain_manager(tid: str, domain: str | None = None) -> DomainManager | 
     For new threads pass *domain* (a git URL to clone).
     For existing threads pass None — DomainManager auto-detects the remote.
 
-    Passes the last 4 chars of ``tid`` as ``branch_suffix`` so per-thread
-    branches and post-merge re-branches are unambiguous when two threads
-    are created within the same UTC second.
+    Passes the complete generated ``tid`` as ``branch_suffix`` so per-thread
+    branches and post-merge re-branches are unambiguous across threads
+    created within the same UTC second.
     """
     if tid in DOMAIN_MANAGERS:
         return DOMAIN_MANAGERS[tid]
     twdir = MANAGER.thread_default_working_dir(tid)
     try:
-        dm = DomainManager(twdir, domain, branch_suffix=tid[-4:])
+        dm = DomainManager(twdir, domain, branch_suffix=tid)
         DOMAIN_MANAGERS[tid] = dm
         return dm
     except Exception:
@@ -304,8 +304,9 @@ def _get_sandbox_backend(tid: str, tz: str | None = None, *,
     Hidden child runs pass ``False`` and receive self-contained task briefs instead.
 
     Git reconciliation is owned by the queued writer, not sandbox construction;
-    resumed slices must not fast-forward their in-flight worktree. ``before_start``
-    records the Git flight fence immediately before the possibly ambiguous create.
+    resumed slices must not fast-forward their in-flight worktree. Scoped
+    sandbox authority records managed generations before Docker creation.
+    ``before_start`` remains an optional legacy caller callback.
     """
     work_dir = MANAGER.thread_default_working_dir(tid)
     return SandboxManager.get_sandbox_backend(

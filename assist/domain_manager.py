@@ -66,8 +66,8 @@ def create_timestamped_branch(repo_dir: str, suffix: str | None = None,
     """Create and checkout a new assist/[timestamp][-suffix] branch from ``start_point``.
 
     ``suffix`` is appended (with a leading hyphen) when supplied.  Pass
-    the last 4 chars of the thread id to avoid collisions when two
-    threads are created within the same UTC second.  ``start_point`` is
+    the complete generated thread id to avoid cross-thread collisions when
+    two threads are created within the same UTC second.  ``start_point`` is
     normally ``main`` (a fresh thread branch) but is ``HEAD`` when
     re-attaching a detached HEAD so the detached commit is preserved.
 

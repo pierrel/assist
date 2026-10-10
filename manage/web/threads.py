@@ -55,7 +55,8 @@ import anyio.to_thread
 from langchain_core.messages import HumanMessage
 
 from assist.backlog import PendingMessage
-from assist.run_service import Approval, InvalidRunTransition, Run, RunNotFound, browser_reset_owed
+from assist.run_service import (Approval, InvalidRunTransition, Run, RunNotFound,
+                                RunStoreUnavailable, browser_reset_owed)
 from assist.async_subagents import AsyncTaskContext, async_task_context
 from assist.egress.store import EgressWaiter, resolution_prompt
 from assist.egress.tools import (EGRESS_ORIGIN_THREAD_ID,
@@ -104,8 +105,11 @@ from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
 from edd.live_capture import CaptureStorageFull
 
 from manage.web.app import app
-from manage.web.git_lifecycle import (GitLifecycle, preflight_fence_error as git_preflight_fence_error,
-                                      recovery_error as git_recovery_error)
+from manage.web.thread_git_lifecycle import (
+    ThreadGitLifecycle as GitLifecycle,
+    preflight_fence_error as git_preflight_fence_error,
+    recovery_error as git_recovery_error,
+)
 from manage.web.run_stream import PHONE_DELTA_CHUNK_BYTES, RUN_STREAMS
 from manage.web.diff import _DIFF_CSS, _render_inline_diffs
 from assist.geo.model import STATE_FAILED, STATE_IMPORTING
@@ -1745,7 +1749,7 @@ def _initialize_thread_active(
                     dm = DomainManager(
                         MANAGER.thread_default_working_dir(tid),
                         domain,
-                        branch_suffix=tid[-4:],
+                        branch_suffix=tid,
                         clone_timeout_s=INITIALIZATION_CLONE_TIMEOUT_S,
                     )
                     # Refresh cache: a previous render may have cached a no-remote DM.
@@ -2554,7 +2558,7 @@ def _frequency_configurable(run: Run | None, *, sender: str | None,
 
 
 def _terminalize_dirty_run(run: Run, error: GitSyncError) -> None:
-    """Persist the exact failed Run before releasing its verified Git flight fence."""
+    """Persist the failed Run before its preflight sandbox is torn down."""
     with _RUN_ADMISSION_LOCK:
         current = _runs().get(run.thread_id, run.id)
         if current.status != "running" or current.work_id != run.work_id:
@@ -2602,7 +2606,9 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                         run.parent_thread_id)
                     git_lifecycle = git_scope.enter_context(GitLifecycle.acquire(
                         MANAGER.thread_dir(run.parent_thread_id), parent_working_dir,
-                        run.work_id))
+                        run.work_id,
+                        thread_scope=(MANAGER.root_dir, run.parent_thread_id),
+                        owner_run_id=run.id))
                     if git_lifecycle.bound:
                         child_scope.callback(cleanup_child_sandbox)
                     if not (resume or run.resume or run.resume_decision is not None):
@@ -2753,7 +2759,9 @@ def _recover_child_run(run: Run) -> None:
                 _runs().transition(run.thread_id, run.id, "running", result=result)
             with THREAD_QUEUE.acquire(run.thread_id), GitLifecycle.acquire(
                     MANAGER.thread_dir(run.parent_thread_id), parent_working_dir,
-                    run.work_id) as git_lifecycle:
+                    run.work_id,
+                    thread_scope=(MANAGER.root_dir, run.parent_thread_id),
+                    owner_run_id=run.id) as git_lifecycle:
                 git_lifecycle.recover_child(
                     str(result), MANAGER.thread_dir(run.thread_id))
                 with _RUN_ADMISSION_LOCK:
@@ -2999,7 +3007,8 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
     try:
         with THREAD_QUEUE.acquire(tid, user_priority=user_priority), GitLifecycle.acquire(
                 MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid),
-                run.work_id) as git_lifecycle:
+                run.work_id, thread_scope=(MANAGER.root_dir, tid),
+                owner_run_id=run.id) as git_lifecycle:
             # The selector's earlier check only permits reservation. This
             # authority-bearing recheck prevents a queued Pi Run from starting
             # after the operator disables the preview.
@@ -3403,7 +3412,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                    and _run.mode == "turn"
                                    and _run.text is not None))) as queue_handle, GitLifecycle.acquire(
                 MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid),
-                _run.work_id if _run else tid) as git_lifecycle:
+                _run.work_id if _run else tid,
+                thread_scope=(MANAGER.root_dir, tid),
+                owner_run_id=_run.id if _run else None) as git_lifecycle:
             # A queued run remains pending until it actually owns THREAD_QUEUE. This
             # is what makes it visible to the active turn's interjection reader. Two
             # dispatchers for one run serialize here; only the first can claim it.
@@ -4075,7 +4086,7 @@ async def create_thread(domain: str | None = Form(None), engine: str = Form("dee
             DomainManager,
             MANAGER.thread_default_working_dir(tid),
             selected,
-            branch_suffix=tid[-4:]
+            branch_suffix=tid
         )
         await run_in_threadpool(authorize_branch, MANAGER.thread_dir(tid),
                                MANAGER.thread_default_working_dir(tid))
@@ -5459,9 +5470,8 @@ def queue_recovery_runs() -> None:
              if run.id == status.get("pending_run_id") and run.status == "error"),
             None)
         if terminal_error is not None and status.get("stage") in BUSY_STAGES | {"error"}:
-            # The terminal Run may precede status projection or flight clearance.
-            # Never synthesize its stale prompt, and show the stronger retained
-            # fence if clearance did not become durable.
+            # The terminal Run may precede status projection. Never synthesize
+            # its stale prompt; show a historical retained Git hold if present.
             fence_error = git_preflight_fence_error(
                 MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid))
             if status.get("stage") in BUSY_STAGES or fence_error:
@@ -6665,6 +6675,20 @@ async def capture_fragment(tid: str, capture_id: str) -> HTMLResponse:
     )
 
 
+def _git_merge_has_unfinished_work(tid: str) -> bool:
+    """Find real unfinished parent/child work, not old Git preflight records."""
+    with _RUN_ADMISSION_LOCK:
+        try:
+            runs = _runs().list(tid)
+            runs.extend(run for run in _runs().scan_children()
+                        if run.parent_thread_id == tid)
+        except (OSError, RunStoreUnavailable) as error:
+            raise GitSyncError("Git merge Run state is unavailable") from error
+        latest = {(run.thread_id, run.work_id): run for run in runs}
+        return any(run.status not in {"success", "error", "timeout", "cancelled"}
+                   for run in latest.values())
+
+
 @app.post("/thread/{tid}/merge")
 def merge_thread(tid: str):
     """Merge & Push: rebase the thread branch onto origin/main, squash into local main,
@@ -6704,7 +6728,10 @@ def merge_thread(tid: str):
     with MERGE_LOCK, ExitStack() as merge_scope:
         try:
             git_lifecycle = merge_scope.enter_context(GitLifecycle.acquire(
-                MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid)))
+                MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid),
+                thread_scope=(MANAGER.root_dir, tid)))
+            if _git_merge_has_unfinished_work(tid):
+                raise GitSyncError("Thread has unfinished work; finish it before merging")
             git_lifecycle.validate_merge_candidate()
             dm.merge_and_push()
             git_lifecycle.record_merged_branch()

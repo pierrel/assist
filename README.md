@@ -108,8 +108,9 @@ where reliability is harder than with frontier APIs.
   with edits isolated until you choose to merge. Multiple domains
   coexist. When Merge & Push creates a fresh branch, the thread records that
   local branch; it remains unpublished until a later successful
-  turn, while the previous published ref remains intact. Dirty files still
-  block the next turn rather than being committed by the merge handoff.
+  turn, while the previous published ref remains intact. Merge & Push requires
+  a clean checkout; a later turn may commit retained edits only when the remote
+  thread branch still has the exact local tip.
   Old local clones with shared Git object inodes need an
   [operator-verified detachment](docs/2026-10-01-legacy-git-object-detachment.org)
   before source enrollment; the helper does not infer a source or change work.
@@ -1095,26 +1096,36 @@ When enabled, each thread creates a git branch and can merge changes back to mai
 
 New Git-backed web threads bind their configured source and actual non-main
 thread branch outside the agent workspace. Before fresh turns, clean phone-pushed
-commits fast-forward locally. After successful Deep, Pi, or hidden child work,
-changes attempt a commit inside the restricted sandbox and the server attempts publication
-of only that thread branch. No-file-change turns also attempt publication; main
-and tags are not automatically pushed. Dirty, divergent, rewritten, or unavailable
-Git state holds for explicit reconciliation while preserving work and saved answers.
+commits fast-forward locally. At an unchanged remote tip, a turn may continue
+with ordinary visible uncommitted work; a successful turn then stages and commits
+it with that turn's changes inside the restricted sandbox. Dirty work with a
+different remote tip, hidden index flags, divergence, rewritten history, or
+unavailable Git state holds for explicit reconciliation without changing the
+worktree. After successful Deep, Pi, or hidden child work, the server publishes
+only that thread branch with a checked fast-forward push. No-file-change turns
+also publish; main and tags are not automatically pushed.
 For an uncancelled authenticated phone-created Git thread, successful initial
 publication makes its branch fetchable before the first model turn, even when
 that branch still points at main's commit. A later model failure does not
 undo that publication. Clone or publication failure can still leave no remote
 branch. Browser-created threads do not use this early publication path.
-When a clean preflight positively finds uncommitted work and its exact sandbox
-teardown is verified, the turn ends with a dirty-worktree hold, not a teardown
-uncertainty. Later queued turns check that work independently; none replays the
-failed prompt. Unverified cleanup retains the stronger teardown fence.
+An authorized later turn may recreate a missing remote thread ref from its
+verified local history; Git refs alone do not record an earlier remote deletion.
+When preflight finds dirty work and a different remote tip, the turn ends with
+a dirty-worktree hold after verified sandbox teardown. Later queued turns check
+that work independently; none replays the failed prompt. Unverified cleanup
+retains the stronger teardown fence.
 If a hidden child yields its fair-scheduling slot, a new parent message waits
 until the child's sandbox teardown and Git workspace lock release. After safe
 teardown, it runs normally instead of failing on a transient lock.
-Local commit or verified teardown failure reports a turn error with the saved
-answer retained. Remote-only publication failure remains best-effort and does
-not discard a finalized local answer; the pending Git error/fences remain.
+Local commit, teardown, or remote publication failure reports a turn error
+with any saved answer retained. Unconfirmed sandbox teardown blocks further
+Git publication until the scoped stop proof succeeds; an unverified push never
+marks that Run successful.
+After a host crash, ordinary checkpoint recovery can resume a nonterminal
+model Run; a tool effect made just before an unpersisted checkpoint may repeat.
+Verified sandbox stop prevents a concurrent writer, not arbitrary exactly-once
+tool execution. Terminal and cancelled Runs remain non-replayable.
 After restart, a saved reply alone is not Git finalization proof. Completed
 visible Git-bound Deep/Pi recovery reports an explicit reconciliation error, preserves the
 answer/work/fences, and does not replay the model or reconstruct the commit.

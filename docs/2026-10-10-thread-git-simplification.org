@@ -1,0 +1,71 @@
+#+title: Thread Git simplification
+#+date: 2026-10-10
+
+* Boundary
+
+The private source binding authorizes one checked-out thread branch. Ordinary
+Git refs, not a second publication journal, decide whether a turn can
+fast-forward and whether its commit was published. The agent's writable Git
+configuration is never used by credentialed host Git. Git-bound Deep, Pi and
+child work requires the restricted sandbox; the same workspace lock covers
+turn and user-gated merge entry. Existing merge/rebranch mechanics are not
+rewritten here.
+
+* Numbered construction
+
+1. =assist/thread_git.py= uses the bound source and a private authenticated
+   object snapshot. Before the model, a clean checkout fetches the exact
+   branch and fast-forwards only. Ordinary dirty files may continue only at
+   an equal remote tip; a different tip or hidden index state holds without
+   checkout mutation. After the model, stage and commit in the restricted
+   sandbox, then make a checked fast-forward push of that branch only. A
+   failed or unverified push is a visible Run error with saved work retained.
+2. =manage/web/thread_git_lifecycle.py= composes those operations with the
+   existing workspace fence and scoped sandbox authority. Authority is saved
+   before Docker create. Exact generation teardown is verified before host
+   object reads or a later writer; unknown create, teardown or scope holds
+   until the existing scoped scan proves the workspace empty. New Git turns
+   do not write a duplicate =sandbox_in_flight= or =quarantine= state.
+   Historical retained values of those fields still require operator
+   reconciliation.
+3. New authenticated phone Git threads publish their non-main branch before
+   their first model Run. Creation uses an expected-absent ref lease; a
+   competing ref cannot be overwritten. A matching or descendant ref is
+   verified from the trusted source, and ordinary pre-turn preparation
+   incorporates a phone-pushed descendant before model admission. If an
+   authorized pending initializer sees an absent ref after a crash, it may
+   create it again. Ordinary authorized turns also recreate an absent ref
+   from verified local history; neither path claims a historical remote-
+   deletion or rewind detector. Durable app cancellation/deletion still
+   prevents the initializer from publishing.
+4. Web thread branch factories use the complete server-generated thread ID as
+   the suffix. Existing checked-out branches are not renamed. Phone metadata
+   exposes the bound branch and actual checkout revision, not historical
+   publication progress. The device fetches through its separate Git
+   credential; no Git-object web endpoint is added.
+
+* Risks and checks
+
+- Exact-ref movement between fetch and push is checked again; non-fast-forward
+  or unrelated history never overwrites a user commit. Remote absence remains
+  different from a failed fetch.
+- The old sidecar can contain ambiguous historical flight or publication
+  records. It remains an operator hold where needed; this change does not
+  silently migrate a dirty or unknown old turn.
+- Verified Docker stop proves a previous generation cannot write concurrently;
+  it does not prove an arbitrary model tool ran only once. If the host crashes
+  after a tool/file effect but before the graph checkpoint persists, the
+  existing generic Run recovery may resume and repeat that effect. Existing
+  terminal/cancelled Run and approval fences remain in force; this change
+  makes no exactly-once tool claim or new Git outcome journal.
+- The project-wide prompt-census subprocess test is run separately when a
+  combined suite stalls; a partial full-suite run is not called a pass.
+
+* Historical supersessions
+
+- =2026-10-06-authenticated-phone-initial-git-publication.org=, “Numbered
+  implementation” item 1 and “Trade-offs and held choices”: an exact durable
+  initial publication intent and nullable published pair are no longer the
+  active publication authority. The trusted Git ref and authorized pending
+  initializer are used as stated above. The browser early-publication boundary
+  remains unchanged.

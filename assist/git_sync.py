@@ -590,7 +590,7 @@ def authorize_branch(thread_dir: str, worktree: str) -> None:
 
 def publish_initial_branch(thread_dir: str, worktree: str,
                            verify_owner: Callable[[], None] | None = None) -> None:
-    """Publish a newly authorized thread branch before its first model turn."""
+    """Ensure an authorized new thread ref exists without rewriting a remote tip."""
     with _workspace_lock(thread_dir):
         if verify_owner is not None:
             verify_owner()
@@ -598,20 +598,17 @@ def publish_initial_branch(thread_dir: str, worktree: str,
         if state is None or not state.get("branch") or not state.get("local_revision"):
             raise GitSyncError("New Git thread branch is unavailable")
         branch, revision = state["branch"], state["local_revision"]
+        sources = tuple(source.strip() for source in os.getenv("ASSIST_DOMAINS", "").split(",")
+                        if source.strip())
+        if state["source"] not in sources:
+            raise GitSyncError("Configured Git source is unavailable")
         if (state.get("sandbox_in_flight") or state.get("quarantine")
                 or state["preflights"]):
             raise GitSyncError("New Git thread has retained work; reconcile before publication")
-        if state["published"]:
-            if (state["published"].get(branch) == revision
-                    and (state.get("published_branch"), state.get("published_revision"))
-                    == (branch, revision) and state.get("intent") is None):
-                return
-            raise GitSyncError("New Git thread publication needs operator reconciliation")
-        intent = state.get("intent")
-        expected_intent = {"kind": "initial", "branch": branch,
-                           "expected": None, "desired": revision}
-        if intent is not None and intent != expected_intent:
-            raise GitSyncError("New Git thread publication outcome is unknown")
+        old_intent = {"kind": "initial", "branch": branch,
+                      "expected": None, "desired": revision}
+        if state.get("intent") not in (None, old_intent):
+            raise GitSyncError("New Git thread has unresolved publication intent")
         with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
             store = _Store(path)
             if store.snapshot(worktree) != (branch, revision):
@@ -619,26 +616,26 @@ def publish_initial_branch(thread_dir: str, worktree: str,
             main = store.fetch(state["source"], "main")
             if main is None or not store.ancestor(revision, main):
                 raise GitSyncError("New Git thread branch is not in trusted main history")
-            remote = store.remote_ref(state["source"], branch)
-            if remote is not None and (intent is None or remote != revision):
+            remote = store.fetch(state["source"], branch)
+            if remote is not None and not store.ancestor(revision, remote):
                 raise GitSyncError("New Git thread branch already exists remotely")
             if remote is None:
-                if intent is None:
-                    state["intent"] = expected_intent
-                    _write_state(thread_dir, state)
-                store.git("push", "--porcelain", "--no-verify",
-                          "--force-with-lease=refs/heads/" + branch + ":",
-                          state["source"], revision + ":refs/heads/" + branch,
-                          allowed=(0, 1))
-                remote = store.remote_ref(state["source"], branch)
-            if remote != revision:
+                try:
+                    store.git("push", "--porcelain", "--no-verify",
+                              "--force-with-lease=refs/heads/" + branch + ":", state["source"],
+                              revision + ":refs/heads/" + branch)
+                except GitSyncError:
+                    if store.remote_ref(state["source"], branch) != revision:
+                        raise
+                remote = revision
+            if store.remote_ref(state["source"], branch) != remote:
                 raise GitSyncError("New Git thread publication is pending verification")
         if identity(worktree) != (branch, revision):
             raise GitSyncError("New Git thread checkout changed during publication")
-        state["published"][branch] = revision
-        state.update(published_branch=branch, published_revision=revision,
-                     intent=None, error=None)
-        _write_state(thread_dir, state)
+        # Migrate only an exact old initializer receipt after proving its ref.
+        if state.get("intent") == old_intent:
+            state["intent"] = None
+            _write_state(thread_dir, state)
 
 
 def _independent_roots(roots) -> None:
@@ -1180,9 +1177,9 @@ def read_commit_receipt(child_thread_dir: str, work_id: str) -> dict | None:
 
 
 def workspace(thread_dir: str, worktree: str) -> dict:
-    """Bound phone metadata; no remote URL, dirty probe or host Git invocation."""
+    """Bound phone identity; remote Git, not old publication records, is current."""
     value = {"repo_key": None, "repo_label": "No repository", "branch": None,
-             "revision": None, "published_branch": None, "published_revision": None,
+             "revision": None, "thread_branch": None,
              "sync_error": None}
     try:
         state = read_state(thread_dir)
@@ -1194,11 +1191,18 @@ def workspace(thread_dir: str, worktree: str) -> dict:
         source = state["source"]
         value.update(repo_key=hashlib.sha256(source.encode()).hexdigest()[:20],
                      repo_label=source_label(source),
-                     published_branch=state.get("published_branch"),
-                     published_revision=state.get("published_revision"),
-                     sync_error=state.get("error"))
-        branch, revision = identity(worktree)
-        value.update(branch=branch, revision=revision)
+                     thread_branch=state.get("branch"))
+        try:
+            branch, revision = identity(worktree)
+        except GitSyncError:
+            # A busy merge may transiently check out main. The bound thread
+            # branch remains a selector for an ordinary remote fetch, not a
+            # claim that the checkout or remote has a particular revision.
+            value["sync_error"] = "Thread checkout branch is unavailable"
+        else:
+            if branch != state.get("branch"):
+                raise GitSyncError("Thread branch needs operator verification")
+            value.update(branch=branch, revision=revision)
     except (GitSyncError, OSError, UnicodeError):
         value["repo_label"] = "Repository unavailable"
         value["sync_error"] = "Git workspace metadata is unavailable"
