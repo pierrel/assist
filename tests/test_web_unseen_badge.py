@@ -18,7 +18,7 @@ from manage.web.threads import render_index, get_thread
 @pytest.fixture
 def threads_root(tmp_path, monkeypatch):
     monkeypatch.setattr(web.MANAGER, "root_dir", str(tmp_path))
-    monkeypatch.setattr("manage.web.threads._has_unmerged_changes", lambda tid: False)
+    monkeypatch.setattr("manage.web.state._has_unmerged_changes", lambda tid: "no")
     state.DESCRIPTION_CACHE.clear()
     state._UNSEEN.clear()
     yield tmp_path
@@ -100,7 +100,7 @@ class TestChokePoint:
 
 class TestPrecedence:
     def test_new_beats_unmerged(self, threads_root, monkeypatch):
-        monkeypatch.setattr("manage.web.threads._has_unmerged_changes", lambda tid: True)
+        monkeypatch.setattr("manage.web.state._has_unmerged_changes", lambda tid: "yes")
         _make_thread(threads_root, "t1", "Coffee thread")
         state._mark_unseen_response("t1")
         html = render_index()

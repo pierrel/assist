@@ -18,7 +18,7 @@ def threads_root(tmp_path, monkeypatch):
     monkeypatch.setattr(web.MANAGER, "root_dir", str(tmp_path))
     # Use the REAL thread_dir (root_dir-based) so its tid validation is exercised.
     # render_index reaches _has_unmerged_changes (git I/O) for idle threads.
-    monkeypatch.setattr("manage.web.threads._has_unmerged_changes", lambda tid: False)
+    monkeypatch.setattr("manage.web.state._has_unmerged_changes", lambda tid: "no")
     state.DESCRIPTION_CACHE.clear()
     yield tmp_path
     state.DESCRIPTION_CACHE.clear()

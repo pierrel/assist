@@ -613,6 +613,23 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
     }
 
 
+def _open_thread(tid: str) -> dict[str, Any]:
+    """Acknowledge that the user opened the thread on the phone.
+
+    This is the phone's "view": it clears the unseen ("new") and urgent flags,
+    reusing the SAME helpers the web thread page (get_thread) calls, so the two
+    surfaces share the read-receipt/ack semantics instead of duplicating them.
+    It is a dedicated endpoint because GET /threads/{tid} is overloaded —
+    clients also use it for auth probes and busy-check polls that must never
+    clear a flag.  Both clears are missing-ok and never-raise, so a flag hiccup
+    can't 500 an open.
+    """
+    _thread_dir(tid)
+    state._clear_unseen_response(tid)
+    state._clear_urgent(tid)
+    return {"thread_id": tid}
+
+
 def _thread_repo_summary(tid: str, status: dict[str, Any]) -> tuple[str | None, str]:
     """Use the host-owned source binding, never the workspace's mutable origin."""
     from assist.git_sync import GitSyncError, read_state, source_label
@@ -636,15 +653,24 @@ def _list_threads() -> dict[str, Any]:
             repo_key, repo_label = _thread_repo_summary(tid, status)
             title = _stored_thread_title(tid)
             activity_at = os.stat(_thread_dir(tid)).st_mtime
-            values.append((threads._thread_status_rank(tid, status.get("stage", "ready")), {
+            stage = status.get("stage", "ready")
+            unread = state._has_unseen_response(tid)
+            urgent = state._has_urgent(tid)
+            values.append((threads._thread_status_rank(tid, stage), {
                 "id": tid,
                 "description": title,
                 "search_description": _normalized_search_title(title),
                 "harness": read_thread_engine(_thread_dir(tid)).name,
-                "status": status.get("stage", "ready"),
+                "status": stage,
                 "repo_key": repo_key,
                 "repo_label": repo_label,
-                "unread": state._has_unseen_response(tid),
+                "unread": unread,
+                "urgent": urgent,
+                # Tri-state, mirroring web's index short-circuit: "yes" (dirty),
+                # "no" (checked, clean), or "unknown" (not checked because a
+                # stronger pill is already present).  "unknown" != "no" on the
+                # wire — the client only shows the unmerged pill for "yes".
+                "unmerged": state._unmerged_state(tid, stage, urgent, unread),
                 "activity_at": activity_at,
                 "revision": _thread_revision_cursor(tid),
             }))
@@ -1236,6 +1262,12 @@ async def list_threads() -> dict[str, Any]:
 @router.get("/threads/{tid}")
 async def get_thread(tid: str) -> dict[str, Any]:
     return await anyio.to_thread.run_sync(_snapshot, tid)
+
+
+@router.post("/threads/{tid}/open")
+async def open_thread(tid: str) -> dict[str, Any]:
+    """Clear the unseen/urgent flags once the user has opened the thread."""
+    return await anyio.to_thread.run_sync(_open_thread, tid)
 
 
 @router.get("/threads/{tid}/history")

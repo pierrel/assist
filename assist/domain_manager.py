@@ -377,13 +377,22 @@ class DomainManager:
             return []
         return git_diff_main(self.repo_path)
 
-    def has_changes_vs_main(self) -> bool:
-        """True iff the working tree has unmerged work compared to ``main``.
+    def has_changes_vs_main(self) -> str:
+        """Tri-state: does the working tree have unmerged work vs ``main``?
 
-        Cheaper than :meth:`main_diff` when only a bool is needed —
-        used by the index page to decide whether to render an
-        "unmerged" status badge per thread.  Three independent checks
-        — ``True`` if any signals dirty:
+        Cheaper than :meth:`main_diff` when only the status is needed —
+        used by the index page and phone catalog to decide whether to
+        render an "unmerged" badge per thread.  Returns one of:
+
+        - ``"yes"``     — a check ran and found unmerged work.
+        - ``"no"``      — a check ran and the tree is confirmed clean.
+        - ``"unknown"`` — the check could not run (no bound repo, the
+          path is not a git repo, or a git invocation failed).
+
+        ``unknown`` is distinct from ``"no"`` on purpose: "not checked"
+        is not "confirmed clean", and callers surface that distinction
+        rather than silently reporting a broken check as a clean tree.
+        Three independent checks — ``"yes"`` if any signals dirty:
 
         - ``git diff --quiet HEAD`` exits 1 if the working tree or
           index has any uncommitted edits to tracked files.  Critical
@@ -397,22 +406,25 @@ class DomainManager:
           untracked-but-not-ignored files; if non-empty, the thread
           has new files that haven't been committed yet.
 
-        For each git invocation we treat any returncode other than
-        the documented 0 (clean) / 1 (dirty) as "no info, assume
-        clean" rather than falsely badging every thread as unmerged
-        — e.g., when the repo has no ``main`` branch yet.
+        A git invocation returning anything other than the documented
+        0 (clean) / 1 (dirty) — e.g. an empty repo where ``diff HEAD``
+        has no HEAD to diff against, or a repo with no ``main`` branch
+        yet — cannot confirm either state, so the answer is
+        ``"unknown"``, not a false "clean" that hides the failure.
         """
         if not self.repo:
-            return False
+            return "unknown"
         if not is_git_repo(self.repo_path):
-            return False
+            return "unknown"
         # 1. Working tree + index vs HEAD (tracked but uncommitted).
         worktree = subprocess.run(
             ['git', '-C', self.repo_path, 'diff', '--quiet', 'HEAD'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         )
         if worktree.returncode == 1:
-            return True
+            return "yes"
+        if worktree.returncode != 0:
+            return "unknown"
         # 2. Branch commits vs main merge-base (main is kept ff'd to origin/main each turn,
         #    so another thread's merged work doesn't badge this thread as unmerged).
         committed = subprocess.run(
@@ -420,13 +432,17 @@ class DomainManager:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         )
         if committed.returncode == 1:
-            return True
+            return "yes"
+        if committed.returncode != 0:
+            return "unknown"
         # 3. Untracked files (independent of either diff).
         untracked = subprocess.run(
             ['git', '-C', self.repo_path, 'ls-files', '--others', '--exclude-standard'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
         )
-        return bool(untracked.stdout.strip())
+        if untracked.returncode != 0:
+            return "unknown"
+        return "yes" if untracked.stdout.strip() else "no"
 
     def domain(self) -> str:
         return self.repo_path

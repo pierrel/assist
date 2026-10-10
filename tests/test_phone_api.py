@@ -179,6 +179,8 @@ def test_thread_list_uses_stored_titles_and_supplies_chooser_metadata(tmp_path, 
     monkeypatch.setattr(state, "_get_status", lambda tid: {"stage": "ready"})
     monkeypatch.setattr(state, "_get_domain_manager",
                         lambda tid: (_ for _ in ()).throw(AssertionError("no mutable origin")))
+    monkeypatch.setattr(state, "_has_urgent", lambda tid: False)
+    monkeypatch.setattr(state, "_has_unmerged_changes", lambda tid: "no")
     monkeypatch.setattr(phone_api, "_thread_workspace",
                         lambda tid: (_ for _ in ()).throw(AssertionError("no Git worktree scan")))
 
@@ -194,6 +196,143 @@ def test_thread_list_uses_stored_titles_and_supplies_chooser_metadata(tmp_path, 
     assert len(thread["revision"]) == 24
 
 
+def test_thread_list_exposes_urgent_and_unmerged_from_state(tmp_path, monkeypatch):
+    thread_dir = _thread_environment(tmp_path, monkeypatch, [])
+    from assist.git_sync import bind
+    bind(str(thread_dir), "https://example.com/repo.git")
+    monkeypatch.setattr(state.MANAGER, "list", lambda: ["thread-a"])
+    monkeypatch.setattr(state, "_get_status", lambda tid: {"stage": "ready"})
+
+    # A settled (ready, no urgent/new) thread runs the git check: "yes" -> "yes".
+    monkeypatch.setattr(state, "_has_urgent", lambda tid: False)
+    monkeypatch.setattr(state, "_has_unseen_response", lambda tid: False)
+    monkeypatch.setattr(
+        state, "_has_unmerged_changes", lambda tid: "yes")
+
+    thread = _client(monkeypatch).get(
+        "/api/v1/phone/threads", headers=_auth()).json()["threads"][0]
+    assert thread["urgent"] is False
+    assert thread["unmerged"] == "yes"
+
+    # Same settled thread, clean working tree -> "no" (checked, confirmed clean).
+    monkeypatch.setattr(state, "_has_unmerged_changes", lambda tid: "no")
+    thread = _client(monkeypatch).get(
+        "/api/v1/phone/threads", headers=_auth()).json()["threads"][0]
+    assert thread["urgent"] is False
+    assert thread["unmerged"] == "no"
+
+    # A settled thread whose check could not run (no repo / git failure) ->
+    # "unknown".  Distinct from "no": the phone must not present a broken
+    # check as a confirmed-clean tree.
+    monkeypatch.setattr(state, "_has_unmerged_changes", lambda tid: "unknown")
+    thread = _client(monkeypatch).get(
+        "/api/v1/phone/threads", headers=_auth()).json()["threads"][0]
+    assert thread["urgent"] is False
+    assert thread["unmerged"] == "unknown"
+
+
+def test_thread_list_short_circuits_unmerged_behind_a_stronger_pill(tmp_path, monkeypatch):
+    thread_dir = _thread_environment(tmp_path, monkeypatch, [])
+    from assist.git_sync import bind
+    bind(str(thread_dir), "https://example.com/repo.git")
+    monkeypatch.setattr(state.MANAGER, "list", lambda: ["thread-a"])
+    calls = []
+    monkeypatch.setattr(state, "_has_unmerged_changes",
+                        lambda tid: calls.append(tid) or "yes")
+
+    # URGENT is a stronger pill than unmerged: the git check must be skipped,
+    # and the wire says "not checked" ("unknown"), NOT "confirmed clean" ("no").
+    monkeypatch.setattr(state, "_get_status", lambda tid: {"stage": "ready"})
+    monkeypatch.setattr(state, "_has_urgent", lambda tid: True)
+    monkeypatch.setattr(state, "_has_unseen_response", lambda tid: False)
+    thread = _client(monkeypatch).get(
+        "/api/v1/phone/threads", headers=_auth()).json()["threads"][0]
+    assert thread["urgent"] is True
+    assert thread["unmerged"] == "unknown"
+    assert calls == []
+
+    # A BUSY stage also short-circuits (web shows the busy pill, not unmerged).
+    calls.clear()
+    monkeypatch.setattr(state, "_get_status", lambda tid: {"stage": "processing"})
+    monkeypatch.setattr(state, "_has_urgent", lambda tid: False)
+    thread = _client(monkeypatch).get(
+        "/api/v1/phone/threads", headers=_auth()).json()["threads"][0]
+    assert thread["status"] == "processing"
+    assert thread["unmerged"] == "unknown"
+    assert calls == []
+
+    # An UNREAD ("new") reply also short-circuits.
+    calls.clear()
+    monkeypatch.setattr(state, "_get_status", lambda tid: {"stage": "ready"})
+    monkeypatch.setattr(state, "_has_unseen_response", lambda tid: True)
+    thread = _client(monkeypatch).get(
+        "/api/v1/phone/threads", headers=_auth()).json()["threads"][0]
+    assert thread["unmerged"] == "unknown"
+    assert calls == []
+
+
+def test_phone_thread_open_clears_unread_and_urgent(tmp_path, monkeypatch):
+    thread_dir = _thread_environment(tmp_path, monkeypatch, [
+        {"content": "hi", "role": "user"},
+    ])
+    # The phone's "view" is the dedicated open endpoint — it reuses the SAME
+    # helpers the web thread page clears through, so the unseen ("new") +
+    # urgent flags drop there.
+    state._mark_unseen_response("thread-a")
+    state._mark_urgent("thread-a")
+    assert state._has_unseen_response("thread-a")
+    assert state._has_urgent("thread-a")
+
+    response = _client(monkeypatch).post(
+        "/api/v1/phone/threads/thread-a/open", headers=_auth())
+
+    assert response.status_code == 200
+    assert not state._has_unseen_response("thread-a")
+    assert not state._has_urgent("thread-a")
+    assert not (thread_dir / "unseen_response").exists()
+    assert not (thread_dir / "urgent_response").exists()
+
+
+def test_phone_snapshot_get_never_clears_unread_or_urgent(tmp_path, monkeypatch):
+    thread_dir = _thread_environment(tmp_path, monkeypatch, [
+        {"content": "hi", "role": "user"},
+    ])
+    state._mark_unseen_response("thread-a")
+    state._mark_urgent("thread-a")
+
+    # GET /threads/{tid} is overloaded: clients also use it for auth probes
+    # and busy-check polls that must never clear a flag.  Only the dedicated
+    # open endpoint clears.
+    response = _client(monkeypatch).get(
+        "/api/v1/phone/threads/thread-a", headers=_auth())
+
+    assert response.status_code == 200
+    assert state._has_unseen_response("thread-a")
+    assert state._has_urgent("thread-a")
+    assert (thread_dir / "unseen_response").exists()
+    assert (thread_dir / "urgent_response").exists()
+
+
+def test_phone_history_page_does_not_clear_unread_or_urgent(tmp_path, monkeypatch):
+    thread_dir = _thread_environment(tmp_path, monkeypatch, [
+        {"content": "one", "role": "user"},
+        {"content": "two", "role": "assistant"},
+    ])
+    state._mark_unseen_response("thread-a")
+    state._mark_urgent("thread-a")
+    cursor = phone_api._message_id("thread-a", {"content": "one", "role": "user"}, 1)
+
+    # History pagination (before is set) is still a read: the user is scrolling
+    # an already-opened view, and clearing belongs to the dedicated open
+    # endpoint, not to any snapshot GET.
+    response = _client(monkeypatch).get(
+        f"/api/v1/phone/threads/thread-a/history?before={cursor}", headers=_auth())
+
+    assert response.status_code == 200
+    assert state._has_unseen_response("thread-a")
+    assert state._has_urgent("thread-a")
+
+
 def test_thread_list_uses_setup_domain_without_caching_an_empty_manager(tmp_path, monkeypatch):
     thread_dir = _thread_environment(tmp_path, monkeypatch, [])
     from assist.git_sync import bind
@@ -206,6 +345,8 @@ def test_thread_list_uses_setup_domain_without_caching_an_empty_manager(tmp_path
         state, "_get_domain_manager",
         lambda tid: (_ for _ in ()).throw(AssertionError("no pre-clone manager")),
     )
+    monkeypatch.setattr(state, "_has_urgent", lambda tid: False)
+    monkeypatch.setattr(state, "_has_unmerged_changes", lambda tid: "no")
 
     response = _client(monkeypatch).get("/api/v1/phone/threads", headers=_auth())
 

@@ -15,7 +15,7 @@ from manage.web.threads import render_index
 @pytest.fixture
 def threads_root(tmp_path, monkeypatch):
     monkeypatch.setattr(web.MANAGER, "root_dir", str(tmp_path))
-    monkeypatch.setattr("manage.web.threads._has_unmerged_changes", lambda tid: False)
+    monkeypatch.setattr("manage.web.state._has_unmerged_changes", lambda tid: "no")
     state.DESCRIPTION_CACHE.clear()
     state._UNSEEN.clear()
     state._URGENT.clear()
@@ -59,8 +59,8 @@ class TestThreadListOrdering:
         assert html.index("/thread/t_new2") < html.index("/thread/t_old")
 
     def test_merge_status_has_no_bearing(self, threads_root, monkeypatch):
-        monkeypatch.setattr("manage.web.threads._has_unmerged_changes",
-                            lambda tid: tid == "t_unmerged")
+        monkeypatch.setattr("manage.web.state._has_unmerged_changes",
+                            lambda tid: "yes" if tid == "t_unmerged" else "no")
         _mk(threads_root, "t_unmerged")
         _mk(threads_root, "t_urgent")
         state._URGENT.add("t_urgent")

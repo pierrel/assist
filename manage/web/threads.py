@@ -150,7 +150,7 @@ from manage.web.state import (
     _get_sandbox_backend,
     _get_status,
     _get_timings,
-    _has_unmerged_changes,
+    _unmerged_state,
     _has_unseen_response,
     _clear_unseen_response,
     _mark_unseen_response,
@@ -345,10 +345,15 @@ def render_index() -> str:
                 ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
                 ' margin-right:.4rem;">new</span>'
             )
-        elif _has_unmerged_changes(tid):
+        elif _unmerged_state(tid, stage, False, False) == "yes":
             # Soft amber, distinct from yellow (busy) and red (error).
-            # Strictly secondary to the process-state badges above —
-            # only shows when the thread is otherwise idle.
+            # Strictly secondary to the process-state badges above: this
+            # branch only runs once queued/busy/error/urgent/new have all
+            # fallen through, so the shared _unmerged_state (which
+            # short-circuits to "unknown" for those same signals) runs the
+            # git check and the badge renders only on a confirmed "yes".
+            # "no" (clean) and "unknown" (no repo / git failure) render no
+            # badge, exactly like the phone catalog.
             badge = (
                 '<span style="font-size:.7rem; color:#6b7280; background:#fafafa;'
                 ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
