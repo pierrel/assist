@@ -27,6 +27,8 @@ from langchain.agents.middleware.types import (
     ModelResponse,
 )
 from openai import BadRequestError
+from langchain_core.exceptions import ContextOverflowError
+from langchain_openai.chat_models.base import OpenAIContextOverflowError
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +36,8 @@ logger = logging.getLogger(__name__)
 class BadRequestRetryMiddleware(AgentMiddleware):
     """Catch BadRequestError from the model API, sanitize messages, and retry.
 
-    On each retry the middleware applies increasingly aggressive sanitization:
+    Context overflow passes through to conversation compaction. Other bad
+    requests receive increasingly aggressive sanitization:
 
     1. Strip control characters and fix invalid JSON escapes in all messages.
     2. (Same sanitization — non-determinism alone may resolve it.)
@@ -202,6 +205,12 @@ class BadRequestRetryMiddleware(AgentMiddleware):
             try:
                 return handler(request)
             except BadRequestError as exc:
+                # Context overflow needs compaction, not content sanitization.
+                if isinstance(exc, ContextOverflowError):
+                    raise
+                if exc.type == "exceed_context_size_error":
+                    raise OpenAIContextOverflowError(
+                        exc.message, response=exc.response, body=exc.body) from exc
                 last_error = exc
                 self._retry_count += 1
                 remaining = self.max_retries - attempt

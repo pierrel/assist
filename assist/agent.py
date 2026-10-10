@@ -48,6 +48,8 @@ from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddlew
 from assist.middleware.output_sanitization import OutputSanitizationMiddleware
 from assist.middleware.tool_result_to_file import ToolResultToFileMiddleware
 from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
+from assist.middleware.summarization import BoundedSummarizationMiddleware
+from deepagents.middleware.summarization import SummarizationMiddleware
 from assist.middleware.loop_detection import LoopDetectionMiddleware
 from assist.middleware.search_unavailable_breaker import SearchUnavailableBreakerMiddleware
 from assist.middleware.search_runaway_breaker import SearchRunawayBreakerMiddleware
@@ -135,7 +137,8 @@ def _tool_name(tool_value) -> str:
 # provider-wide ("openai" is every assist model's provider) so the main
 # graph, the research pipeline, and the eval harness all agree.
 register_harness_profile("openai", HarnessProfile(
-    general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)))
+    general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False),
+    excluded_middleware={SummarizationMiddleware}))
 
 
 def _has_domain_skills(backend: BackendProtocol) -> bool:
@@ -288,7 +291,7 @@ def _hardening_middleware():
     # Core middleware: retry, tool call limiting, JSON validation.
     # See `_make_retry_middleware` for the retry-on tuple rationale.
     retry_middle = _make_retry_middleware()
-    # Catch BadRequestError (e.g. context overflow), sanitize & truncate, retry.
+    # Sanitize malformed content; context overflow reaches compaction.
     bad_request_mw = BadRequestRetryMiddleware(max_retries=3)
     # Validate and fix JSON in tool call arguments
     json_validation_mw = JsonValidationMiddleware(strict=False)
@@ -319,15 +322,10 @@ def _hardening_middleware():
     # Innermost so it runs immediately before the handler on every (re)try.
     image_guard_mw = ImageInputGuardMiddleware()
 
-    # Note: context-aware compaction is delegated to deepagents 0.6.1's
-    # built-in SummarizationMiddleware (trigger fraction=0.85, offloads
-    # to /conversation_history/{thread_id}.md).  Per-result tool-output
-    # eviction is delegated to deepagents' FilesystemMiddleware
-    # (default 20k-token cap).  Our previous ContextAwareToolEvictionMiddleware
-    # was redundant with both and was deleted on 2026-05-16 — see
-    # docs/2026-05-16-context-management-overhaul.org.  We kept its
-    # ANSI/control-char sanitization in OutputSanitizationMiddleware
-    # (proactive, before content lands in state).
+    # BoundedSummarizationMiddleware retains Deep Agents history offload and
+    # raw messages while fitting summary calls to the runtime context.
+    # FilesystemMiddleware still handles per-result eviction; output
+    # sanitization removes ANSI/control characters before they enter state.
     stack = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
              OutputSanitizationMiddleware(),
              write_collision_mw, git_push_blocker_mw,
@@ -581,7 +579,8 @@ def create_agent(model: BaseChatModel,
         # call doesn't kill the parent thread the way it killed the
         # vegan-pizza thread on 2026-05-03 (which lost a sub-research-agent
         # call to an unretried APITimeoutError).
-        "middleware": [_make_retry_middleware(),
+        "middleware": [BoundedSummarizationMiddleware(model, backend),
+                       _make_retry_middleware(),
                        BadRequestRetryMiddleware(max_retries=3),
                        OutputSanitizationMiddleware(),
                        LoopDetectionMiddleware(),
@@ -617,9 +616,9 @@ def create_agent(model: BaseChatModel,
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=static_prompt,
-        middleware=mw + [
-            # This is deliberately first among Assist middleware: framework
-            # prompt appenders remain outside it, while Assist prompt owners
+        middleware=[BoundedSummarizationMiddleware(model, backend), *mw,
+            # Prompt composition is first among Assist prompt owners: framework
+            # prompt appenders remain outside it, while other Assist prompt owners
             # keep their existing order inside it.
             *([PromptCompositionMiddleware(static_prompt)] if spec.web_main else []),
             # Offload a large execute result (a long build/test log) to a file +
@@ -721,8 +720,7 @@ def create_context_agent(model: BaseChatModel,
 
     # Catch BadRequestError, sanitize & truncate messages, retry.
     base_mw.append(BadRequestRetryMiddleware(max_retries=3))
-    # Context compaction delegated to deepagents' SummarizationMiddleware
-    # (auto-installed by create_deep_agent at fraction=0.85).  Per-result
+    # Bounded compaction keeps Deep Agents history offload. Per-result
     # eviction delegated to deepagents' FilesystemMiddleware (20k cap).
     # Proactive ANSI/control-char strip from tool output:
     base_mw.append(OutputSanitizationMiddleware())
@@ -748,7 +746,7 @@ def create_context_agent(model: BaseChatModel,
                                       workspace_dir=workspace_dir),
         backend=backend,
         tools=list(execution_egress_tools),
-        middleware=base_mw + middleware
+        middleware=[BoundedSummarizationMiddleware(model, backend)] + base_mw + middleware
         + ([egress_skills] if egress_skills is not None else []) + [logging_mw],
     )
 
@@ -814,9 +812,7 @@ def create_research_agent(model: BaseChatModel,
 
     # Catch BadRequestError, sanitize & truncate messages, retry.
     base_mw.append(BadRequestRetryMiddleware(max_retries=3))
-    # Context compaction delegated to deepagents' SummarizationMiddleware
-    # (auto-installed by create_deep_agent at fraction=0.85, with LLM-
-    # summarization + offload to /conversation_history/{thread_id}.md).
+    # Bounded compaction retains raw messages and offloads summarized history.
     # Per-result tool-output eviction delegated to FilesystemMiddleware.
     # Proactive ANSI/control-char strip from tool output:
     base_mw.append(OutputSanitizationMiddleware())
@@ -904,7 +900,8 @@ def create_research_agent(model: BaseChatModel,
     # calls in a diag because nothing would short-circuit a model that
     # kept "thinking of more references to verify".
     def _subagent_safety_mw():
-        return [_make_retry_middleware(),
+        return [BoundedSummarizationMiddleware(model, backend),
+                _make_retry_middleware(),
                 BadRequestRetryMiddleware(max_retries=3),
                 # Offload a large read_url result to /large_tool_results/ + hand the
                 # agent a preview + path to grep (full page reachable, context bounded).
@@ -998,7 +995,7 @@ def create_research_agent(model: BaseChatModel,
         # No _read_url_guards here: the orchestrator has no read_url to guard.
         # The searcher + fact-check sub-agents carry those guards themselves.
         # logging_mw stays innermost/last.
-        middleware=(base_mw + middleware
+        middleware=([BoundedSummarizationMiddleware(model, backend)] + base_mw + middleware
                     + ([ToolResultToFileMiddleware(
                         backend, tools={"read_url"}, floor_chars=4000,
                         preview_style="head", untrusted=True,
