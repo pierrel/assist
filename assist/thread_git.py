@@ -168,15 +168,20 @@ if hidden:
             if store.remote_ref(self.source, branch) != desired:
                 raise GitSyncError("Thread branch publication is not verified")
 
-    def record_merged_branch(self) -> None:
-        """Authorize only the new branch left by a successful gated main merge."""
+    def record_merged_branch(self, expected_old_tip: tuple[str, str]) -> None:
+        """Verify the gated merge and authorize a new branch only if one exists."""
         with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
             store = _Store(path)
             branch, revision = store.snapshot(self.worktree)
             if branch == self.branch:
+                if (branch, revision) != expected_old_tip:
+                    raise GitSyncError("Thread branch changed during merge")
                 return  # A pending main push did not rebranch the thread.
             if store.remote_ref(self.source, "main") != revision:
                 raise GitSyncError("Post-merge thread branch needs verification")
+            old_branch, old_revision = expected_old_tip
+            if old_branch != self.branch or store.remote_ref(self.source, old_branch) != old_revision:
+                raise GitSyncError("Old thread branch changed during merge")
             if identity(self.worktree) != (branch, revision):
                 raise GitSyncError("Post-merge branch changed during verification")
         self.binding.update(branch=branch, local_revision=revision,

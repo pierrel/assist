@@ -325,8 +325,8 @@ class DomainManager:
             repo_path: Path to local repository
             repo: Remote repository URL (optional — sandbox works without git)
             branch_suffix: Forwarded to :func:`create_timestamped_branch`
-                during clone and post-merge re-branch.  Pass the last 4
-                chars of the owning thread id.
+                during clone and post-merge re-branch. Pass the complete
+                generated owning thread ID to avoid same-second collisions.
             clone_timeout_s: Optional hard deadline for the initial ``git clone``.
 
         Raises:

@@ -47,6 +47,7 @@ class ThreadGitLifecycle:
         self._thread_scope = thread_scope
         self._owner_run_id = owner_run_id
         self._teardown_failed = False
+        self._validated_merge_tip: tuple[str, str] | None = None
 
     @classmethod
     @contextmanager
@@ -170,13 +171,17 @@ class ThreadGitLifecycle:
         if self.bound:
             from assist.git_sync import _Store
             import tempfile
+            self._validated_merge_tip = None
             self._verify_clean(None)
             with tempfile.TemporaryDirectory(prefix="assist-git-") as path:
                 store = _Store(path)
                 branch, revision = self._owner._snapshot(store)
                 if store.remote_ref(self._owner.source, branch) != revision:
                     raise GitSyncError("Thread branch must be published before merge")
+            self._validated_merge_tip = (branch, revision)
 
     def record_merged_branch(self) -> None:
         if self.bound:
-            self._owner.record_merged_branch()
+            if self._validated_merge_tip is None:
+                raise GitSyncError("Thread merge validation is unavailable")
+            self._owner.record_merged_branch(self._validated_merge_tip)

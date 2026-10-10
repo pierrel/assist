@@ -9,7 +9,7 @@ import pytest
 from assist.git_sync import GitSyncError, _write_state, bind, authorize_branch, read_state, workspace
 from assist import git_sync as sync
 from assist.thread_git import ThreadGit
-from manage.web.thread_git_lifecycle import preflight_fence_error
+from manage.web.thread_git_lifecycle import ThreadGitLifecycle, preflight_fence_error
 
 
 def git(path, *args):
@@ -155,6 +155,57 @@ def test_established_thread_recreates_absent_remote_ref_without_rewrite(reposito
     later.publish()
 
     assert git(remote, "rev-parse", "refs/heads/" + branch) == revision
+
+
+def test_post_merge_rebranch_holds_when_phone_advances_old_branch(repositories, monkeypatch):
+    remote, server, phone, binding = repositories
+    old_branch = git(server, "symbolic-ref", "--short", "HEAD")
+    first = owner(repositories)
+    first.publish()
+    original_binding = read_state(str(binding))
+    lifecycle = ThreadGitLifecycle(owner(repositories), str(server))
+    monkeypatch.setattr(lifecycle, "_verify_clean", lambda _timezone: None)
+    lifecycle.validate_merge_candidate()
+
+    git(phone, "fetch", "origin", old_branch)
+    git(phone, "checkout", "-b", old_branch, "origin/" + old_branch)
+    (phone / "phone").write_text("concurrent phone commit\n")
+    git(phone, "add", "phone")
+    git(phone, "commit", "-m", "phone commit")
+    git(phone, "push", "origin", old_branch)
+    phone_tip = git(remote, "rev-parse", "refs/heads/" + old_branch)
+
+    git(server, "checkout", "-b", "assist/new-branch")
+    with pytest.raises(GitSyncError, match="Old thread branch changed"):
+        lifecycle.record_merged_branch()
+
+    assert read_state(str(binding)) == original_binding
+    assert git(remote, "rev-parse", "refs/heads/" + old_branch) == phone_tip
+    assert git(server, "symbolic-ref", "--short", "HEAD") == "assist/new-branch"
+    assert (phone / "phone").read_text() == "concurrent phone commit\n"
+
+
+def test_pending_main_push_holds_if_thread_tip_changes_without_rebranch(
+        repositories, monkeypatch):
+    remote, server, _, binding = repositories
+    first = owner(repositories)
+    first.publish()
+    original_binding = read_state(str(binding))
+    lifecycle = ThreadGitLifecycle(owner(repositories), str(server))
+    monkeypatch.setattr(lifecycle, "_verify_clean", lambda _timezone: None)
+    lifecycle.validate_merge_candidate()
+
+    (server / "local").write_text("unexpected local change\n")
+    git(server, "add", "local")
+    git(server, "commit", "-m", "unexpected local change")
+    new_tip = git(server, "rev-parse", "HEAD")
+
+    with pytest.raises(GitSyncError, match="Thread branch changed during merge"):
+        lifecycle.record_merged_branch()
+
+    assert read_state(str(binding)) == original_binding
+    assert git(server, "rev-parse", "HEAD") == new_tip
+    assert git(remote, "rev-parse", "refs/heads/assist/test") != new_tip
 
 
 def test_dirty_equal_tip_preflight_preserves_untracked_work(repositories):

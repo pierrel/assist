@@ -109,8 +109,9 @@ where reliability is harder than with frontier APIs.
   coexist. When Merge & Push creates a fresh branch, the thread records that
   local branch; it remains unpublished until a later successful
   turn, while the previous published ref remains intact. Merge & Push requires
-  a clean checkout; a later turn may commit retained edits only when the remote
-  thread branch still has the exact local tip.
+  a clean checkout and holds post-merge branch authorization if the final check
+  observes that a phone push advanced the old thread ref. A later turn may commit
+  retained edits only when the remote thread branch still has the exact local tip.
   Old local clones with shared Git object inodes need an
   [operator-verified detachment](docs/2026-10-01-legacy-git-object-detachment.org)
   before source enrollment; the helper does not infer a source or change work.
