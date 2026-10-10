@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from assist.git_sync import (_initial_binding, _write_state, authorize_branch,
+from assist.git_sync import (GitSyncError, _initial_binding, _write_state, authorize_branch,
                              bind, identity, publish_initial_branch)
 from assist.thread_git import ThreadGit
 from manage.web.thread_git_lifecycle import ThreadGitLifecycle
@@ -99,6 +99,36 @@ def test_new_thread_publishes_at_main_before_no_change_turn(
     assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == identity(str(server))[1]
     owner = ThreadGit(str(directory), str(server), (str(source),))
     assert owner.plan_prepare().remote == identity(str(server))[1]
+
+
+def test_new_thread_does_not_advance_an_existing_remote_branch(
+        repositories, tmp_path, monkeypatch):
+    source, server, _ = repositories
+    old_remote = git("rev-parse", "refs/heads/assist/thread", cwd=source)
+    commit(server, "later.txt", "new main tip\n")
+    git("push", "origin", "HEAD:main", cwd=server)
+    directory = tmp_path / "new-thread"
+    directory.mkdir()
+    from assist.browser.manager import BrowserManager
+    monkeypatch.setattr(BrowserManager, "confirm_owner_stopped", lambda *args, **kwargs: False)
+    monkeypatch.setenv("ASSIST_DOMAINS", str(source))
+    bind(str(directory), str(source))
+    authorize_branch(str(directory), str(server))
+    with pytest.raises(GitSyncError, match="already names different work"):
+        publish_initial_branch(str(directory), str(server))
+    assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == old_remote
+
+
+def test_unconfirmed_browser_generation_is_a_git_hold(bound_thread, monkeypatch):
+    owner, _, server, _ = bound_thread
+    from assist.browser.manager import BrowserManager, BrowserUnavailable
+    def unavailable(*_args, **_kwargs):
+        raise BrowserUnavailable("generation scan is incomplete")
+    monkeypatch.setattr(BrowserManager, "confirm_owner_stopped", unavailable)
+    lifecycle = ThreadGitLifecycle(owner, str(server), (str(server.parent), "thread"))
+    with pytest.raises(GitSyncError, match="generation needs verification"):
+        with lifecycle._host_fence():
+            pass
 
 
 def test_server_dirty_work_is_not_overwritten_by_phone_push(bound_thread):

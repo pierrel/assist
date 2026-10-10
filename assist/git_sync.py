@@ -624,7 +624,7 @@ def publish_initial_branch(thread_dir: str, worktree: str,
                 main, _ = repository.fetch("main")
                 if not repository.ancestor(revision, main):
                     raise GitSyncError("New Git thread branch is not in trusted main history")
-                repository.publish(branch, revision)
+                repository.publish(branch, revision, create_only=True)
             if identity(worktree) != (branch, revision):
                 raise GitSyncError("New Git thread checkout changed during publication")
 

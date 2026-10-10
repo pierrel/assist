@@ -72,7 +72,9 @@ thread branch. A conflict or competing main push needs manual resolution.
 Dirty or divergent server work, missing operator-verified legacy binding,
 unverified sandbox teardown, and uncertain publication stop before another
 model turn. Saved answers and files are preserved; failed prompts are not
-replayed merely to repair Git. =workspace.sync_error= reports the hold.
+replayed merely to repair Git. Source or checkout metadata holds appear in
+=workspace.sync_error=; turn and publication holds appear on the Run or thread
+status.
 Operator-only legacy enrollment and stopped-writer recovery remain available
 with their exact source, history and writer-exclusion proofs; neither infers a
 source from the checkout's mutable =origin= nor discards dirty work. Their

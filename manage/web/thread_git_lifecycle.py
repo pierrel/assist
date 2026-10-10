@@ -126,7 +126,7 @@ class ThreadGitLifecycle:
         if self._thread_scope is None:
             raise GitSyncError("Git sandbox thread authority is unavailable")
         from assist.browser import authority
-        from assist.browser.manager import BrowserManager
+        from assist.browser.manager import BrowserManager, BrowserUnavailable
         root, tid = self._thread_scope
         try:
             with authority.generation_fence(root, tid):
@@ -135,7 +135,7 @@ class ThreadGitLifecycle:
                 yield
         except GitSyncError:
             raise
-        except (OSError, RuntimeError, TimeoutError) as error:
+        except (BrowserUnavailable, OSError, RuntimeError, TimeoutError) as error:
             raise GitSyncError("Git workspace generation needs verification") from error
 
     def prepare(self, timezone: str | None, *, terminalize_dirty=None) -> None:
