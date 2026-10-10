@@ -146,3 +146,19 @@ def test_workspace_config_hooks_and_alternates_never_cross_host_boundary(
     alternate.write_text(str(source / "objects") + "\n")
     with pytest.raises(GitSyncError, match="Unsupported Git object entry"):
         LocalGit(str(source), str(server))
+
+
+def test_standard_split_commit_graph_is_bounded_not_rejected(repositories):
+    source, server, _ = repositories
+    git("commit-graph", "write", "--split", "--reachable", cwd=server)
+    graphs = server / ".git" / "objects" / "info" / "commit-graphs"
+    assert (graphs / "commit-graph-chain").is_file()
+    assert len(list(graphs.glob("graph-*.graph"))) == 1
+    with LocalGit(str(source), str(server)) as host:
+        assert host.same_tip() == identity(str(server))
+
+    graph = next(graphs.glob("graph-*.graph"))
+    graph.unlink()
+    graph.symlink_to(source / "objects" / "info" / "commit-graph")
+    with pytest.raises(GitSyncError, match="Git object"):
+        LocalGit(str(source), str(server))

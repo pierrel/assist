@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from contextlib import nullcontext
+import asyncio
 from pathlib import Path
 import subprocess
 
@@ -103,6 +104,25 @@ def test_new_thread_publishes_at_main_before_no_change_turn(
     assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == identity(str(server))[1]
     owner = ThreadGit(str(directory), str(server), (str(source),))
     assert owner.plan_prepare().remote == identity(str(server))[1]
+
+
+def test_empty_web_thread_publishes_its_configured_branch(
+        repositories, tmp_path, monkeypatch):
+    source, _, _ = repositories
+    from assist.browser.manager import BrowserManager
+    from manage.web import threads
+    thread_root = tmp_path / "threads"
+    thread_root.mkdir()
+    monkeypatch.setattr(threads.MANAGER, "root_dir", str(thread_root))
+    monkeypatch.setattr(threads, "DOMAINS", [str(source)])
+    monkeypatch.setenv("ASSIST_DOMAINS", str(source))
+    monkeypatch.setattr(BrowserManager, "confirm_owner_stopped", lambda *args, **kwargs: False)
+    response = asyncio.run(threads.create_thread(str(source), "deepagents"))
+    tid = response.headers["location"].removeprefix("/thread/")
+    worktree = threads.MANAGER.thread_default_working_dir(tid)
+    branch, revision = identity(worktree)
+    assert branch != "main"
+    assert git("rev-parse", "refs/heads/" + branch, cwd=source) == revision
 
 
 def test_new_thread_does_not_advance_an_existing_remote_branch(

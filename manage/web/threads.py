@@ -4130,6 +4130,8 @@ async def create_thread(domain: str | None = Form(None), engine: str = Form("dee
         )
         await run_in_threadpool(authorize_branch, MANAGER.thread_dir(tid),
                                MANAGER.thread_default_working_dir(tid))
+        await run_in_threadpool(publish_initial_branch, MANAGER.thread_dir(tid),
+                               MANAGER.thread_default_working_dir(tid))
     elif selected_engine == "pi":
         await run_in_threadpool(_create_empty_pi_workspace, tid)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)

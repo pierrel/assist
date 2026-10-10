@@ -25,6 +25,7 @@ _PACK_FILE = re.compile(
     r"(?:pack-[0-9a-f]{40}\.(?:pack|idx|rev|bitmap|keep|mtimes)|multi-pack-index)\Z"
 )
 _INFO_FILE = {"packs", "commit-graph"}
+_SPLIT_GRAPH_FILE = re.compile(r"graph-[0-9a-f]{40}\.graph\Z")
 _OBJECT_LIMIT = 2 * 1024 * 1024 * 1024
 _FILE_LIMIT = 20_000
 _GIT_TIMEOUT = 30
@@ -36,6 +37,22 @@ def _validated_objects(worktree: str) -> str:
     """Admit standard, independent Git objects; never follow alternates or links."""
     total = count = 0
     deadline = time.monotonic() + _GIT_TIMEOUT
+
+    def bounded_entry() -> None:
+        nonlocal count
+        count += 1
+        if count > _FILE_LIMIT or time.monotonic() > deadline:
+            raise GitSyncError("Git object verification exceeded its bound")
+
+    def regular_file(name: str, directory: int) -> None:
+        nonlocal total
+        info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise GitSyncError("Git objects need independent regular storage")
+        total += info.st_size
+        if total > _OBJECT_LIMIT:
+            raise GitSyncError("Git objects exceed the host operation limit")
+
     with _directory(worktree) as root, _directory(".git", parent=root) as metadata, \
             _directory("objects", parent=metadata) as objects:
         info = os.fstat(objects)
@@ -47,20 +64,25 @@ def _validated_objects(worktree: str) -> str:
                 raise GitSyncError("Unsupported Git object directory")
             with _directory(group, parent=objects) as directory:
                 for child in os.scandir(directory):
-                    count += 1
-                    if count > _FILE_LIMIT or time.monotonic() > deadline:
-                        raise GitSyncError("Git object verification exceeded its bound")
+                    bounded_entry()
                     name = child.name
+                    if group == "info" and name == "commit-graphs":
+                        try:
+                            with _directory(name, parent=directory) as graphs:
+                                for graph in os.scandir(graphs):
+                                    bounded_entry()
+                                    if (graph.name != "commit-graph-chain"
+                                            and not _SPLIT_GRAPH_FILE.fullmatch(graph.name)):
+                                        raise GitSyncError("Unsupported Git object entry")
+                                    regular_file(graph.name, graphs)
+                        except OSError as error:
+                            raise GitSyncError("Unsupported Git object entry") from error
+                        continue
                     if (group == "info" and name not in _INFO_FILE
                             or group == "pack" and not _PACK_FILE.fullmatch(name)
                             or group not in {"pack", "info"} and not _OBJECT_FILE.fullmatch(name)):
                         raise GitSyncError("Unsupported Git object entry")
-                    info = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                        raise GitSyncError("Git objects need independent regular storage")
-                    total += info.st_size
-                    if total > _OBJECT_LIMIT:
-                        raise GitSyncError("Git objects exceed the host operation limit")
+                    regular_file(name, directory)
     return os.path.join(worktree, ".git", "objects")
 
 
