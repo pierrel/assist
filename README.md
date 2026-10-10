@@ -411,8 +411,9 @@ sync the template with `make deploy-code` and run `make deploy-service`
 before restarting.
 
 An intentional restart waits for in-flight turns and schedule callbacks to
-finish, including owned sandbox teardown. Git transport supplies sidecar flight
-fencing and finalization. Accepted Runs not yet executing remain durable
+finish, including owned sandbox teardown. Scoped sandbox authority fences
+managed Git writer generations, and Git publication is verified before Run
+success. Accepted Runs not yet executing remain durable
 and are requeued after restart. Install the updated service unit before relying
 on this behavior. A long turn can leave `systemctl restart` waiting; inspect the
 running stop job and service log rather than forcing the process down. If a live
