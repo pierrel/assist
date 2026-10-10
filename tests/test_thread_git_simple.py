@@ -1,6 +1,7 @@
 """Complete local-first Git sequences over real bare and working repositories."""
 
 from dataclasses import dataclass
+from contextlib import nullcontext
 from pathlib import Path
 import subprocess
 
@@ -8,6 +9,7 @@ import pytest
 
 from assist.git_sync import (GitSyncError, _initial_binding, _write_state, authorize_branch,
                              bind, identity, publish_initial_branch)
+from assist.domain_manager import git_diff_main
 from assist.thread_git import ThreadGit
 from manage.web.thread_git_lifecycle import ThreadGitLifecycle
 from tests.test_local_git import commit, git, repositories  # noqa: F401
@@ -21,6 +23,8 @@ class Response:
 
 
 class LocalSandbox:
+    container = None
+
     def execute(self, command):
         result = subprocess.run(command, shell=True, check=False, capture_output=True)
         return Response(exit_code=result.returncode)
@@ -177,7 +181,8 @@ def test_child_handoff_keeps_parent_base_and_holds_partial_edits(bound_thread, m
     assert identity(str(server))[1] == original
 
 
-def test_merge_uses_published_history_only_and_preserves_checkout(bound_thread, tmp_path):
+def test_merge_uses_published_history_only_and_preserves_checkout(
+        bound_thread, tmp_path, monkeypatch):
     owner, source, server, phone = bound_thread
     thread_tip = commit(server, "published.txt", "thread\n")
     assert owner.publish() is None
@@ -190,7 +195,11 @@ def test_merge_uses_published_history_only_and_preserves_checkout(bound_thread, 
     main_tip = commit(main_client, "main.txt", "main\n")
     git("push", "origin", "main", cwd=main_client)
 
-    assert owner.merge_main() == "Merged published thread assist/thread"
+    lifecycle = ThreadGitLifecycle(owner, str(server), (str(tmp_path), "thread"))
+    monkeypatch.setattr(lifecycle, "_host_fence", nullcontext)
+    monkeypatch.setattr(lifecycle, "_backend", lambda _: LocalSandbox())
+    monkeypatch.setattr(lifecycle, "_cleanup", lambda _: None)
+    assert lifecycle.merge_and_push() == "Merged published thread assist/thread"
     merged = git("rev-parse", "refs/heads/main", cwd=source)
     assert merged not in {thread_tip, main_tip}
     assert git("merge-base", "--is-ancestor", thread_tip, merged, cwd=source) == ""
@@ -200,6 +209,9 @@ def test_merge_uses_published_history_only_and_preserves_checkout(bound_thread, 
     assert (server / "uncommitted.txt").read_bytes() == b"server draft\n"
     assert phone_draft.read_bytes() == b"phone draft\n"
     assert (server / ".git" / "index").read_bytes() == before_index
+    assert git("cat-file", "-e", merged + "^{commit}", cwd=server) == ""
+    assert [change.path for change in git_diff_main(str(server), merged)] == [
+        "uncommitted.txt"]
 
 
 def test_merge_conflict_leaves_main_and_thread_unchanged(bound_thread, tmp_path):
@@ -212,6 +224,52 @@ def test_merge_conflict_leaves_main_and_thread_unchanged(bound_thread, tmp_path)
     main_tip = commit(main_client, "README", "main\n")
     git("push", "origin", "main", cwd=main_client)
     with pytest.raises(Exception, match="conflicted"):
-        owner.merge_main()
+        owner.plan_merge_main()
     assert git("rev-parse", "refs/heads/main", cwd=source) == main_tip
     assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == thread_tip
+
+
+def test_merge_import_failure_does_not_publish_main(bound_thread):
+    owner, source, server, _ = bound_thread
+    commit(server, "thread.txt", "thread\n")
+    owner.publish()
+    original = git("rev-parse", "refs/heads/main", cwd=source)
+    plan = owner.plan_merge_main()
+    with pytest.raises(GitSyncError, match="restricted sandbox"):
+        owner.import_merge(None, plan)
+    assert git("rev-parse", "refs/heads/main", cwd=source) == original
+
+
+def test_merge_teardown_failure_does_not_publish_main(
+        bound_thread, tmp_path, monkeypatch):
+    owner, source, server, _ = bound_thread
+    commit(server, "thread.txt", "thread\n")
+    owner.publish()
+    original = git("rev-parse", "refs/heads/main", cwd=source)
+    lifecycle = ThreadGitLifecycle(owner, str(server), (str(tmp_path), "thread"))
+    monkeypatch.setattr(lifecycle, "_host_fence", nullcontext)
+    monkeypatch.setattr(lifecycle, "_backend", lambda _: LocalSandbox())
+
+    def fail_cleanup(_):
+        raise GitSyncError("Git sandbox teardown needs operator verification")
+
+    monkeypatch.setattr(lifecycle, "_cleanup", fail_cleanup)
+    with pytest.raises(GitSyncError, match="teardown"):
+        lifecycle.merge_and_push()
+    assert git("rev-parse", "refs/heads/main", cwd=source) == original
+
+
+def test_merge_holds_when_published_thread_advances_during_import(
+        bound_thread, tmp_path):
+    owner, source, server, phone = bound_thread
+    commit(server, "thread.txt", "thread\n")
+    owner.publish()
+    original_main = git("rev-parse", "refs/heads/main", cwd=source)
+    plan = owner.plan_merge_main()
+    owner.import_merge(LocalSandbox(), plan)
+    git("pull", "--ff-only", "origin", "assist/thread", cwd=phone)
+    commit(phone, "phone.txt", "later\n")
+    git("push", "origin", "assist/thread", cwd=phone)
+    with pytest.raises(GitSyncError, match="advanced"):
+        owner.publish_merge(plan)
+    assert git("rev-parse", "refs/heads/main", cwd=source) == original_main

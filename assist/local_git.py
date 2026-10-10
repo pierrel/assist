@@ -178,6 +178,18 @@ class LocalGit:
             raise GitSyncError("Incoming Git bundle exceeds its bound")
         return Path(path).read_bytes()
 
+    def bundle_commit(self, revision: str, local: str | None) -> bytes:
+        """Export one private commit's missing objects for restricted checkout import."""
+        self.git("update-ref", "refs/heads/assist-review-merge", revision)
+        path = os.path.join(self.directory, "review.bundle")
+        arguments = ["bundle", "create", path, "refs/heads/assist-review-merge"]
+        if local is not None:
+            arguments.extend(("--not", local))
+        self.git(*arguments)
+        if os.path.getsize(path) > _BUNDLE_LIMIT:
+            raise GitSyncError("Merged Git bundle exceeds its bound")
+        return Path(path).read_bytes()
+
     def publish(self, branch: str, desired: str, *, create_only: bool = False) -> str:
         """Publish without rewriting a remote ref; verify desired ancestry."""
         self.git("fsck", "--strict", "--no-reflogs", "--no-dangling", desired)

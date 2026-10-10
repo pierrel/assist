@@ -17,6 +17,14 @@ class PreparePlan:
     bundle: bytes | None
 
 
+@dataclass(frozen=True)
+class MergePlan:
+    local: str
+    thread: str
+    merged: str
+    bundle: bytes
+
+
 class ThreadGit:
     """One locked checkout and its private, operator-authorized source."""
 
@@ -111,8 +119,11 @@ class ThreadGit:
             repository.publish(result, desired, create_only=True)
             return result
 
-    def merge_main(self) -> str:
-        """Merge only published refs privately; leave server/client checkouts alone."""
+    def plan_merge_main(self) -> MergePlan:
+        """Build a published-ref merge and its bounded checkout object import."""
+        branch, local = identity(self.worktree)
+        if branch != self.branch:
+            raise GitSyncError("Thread branch changed during main integration")
         with LocalGit(self.source) as repository:
             main, thread = repository.fetch(self.branch)
             if thread is None:
@@ -129,5 +140,34 @@ class ThreadGit:
                                     "-m", "Merge thread " + self.branch)
             if not repository.ancestor(main, merged) or not repository.ancestor(thread, merged):
                 raise GitSyncError("Main integration ancestry is invalid")
-            repository.publish("main", merged)
-            return "Merged published thread " + self.branch
+            return MergePlan(local, thread, merged,
+                             repository.bundle_commit(merged, local if repository.has(local)
+                                                      else None))
+
+    def import_merge(self, sandbox, plan: MergePlan) -> None:
+        """Make the review base readable without moving any checkout ref or file."""
+        if sandbox is None:
+            raise GitSyncError("Main integration requires the restricted sandbox")
+        transfer = "/tmp/assist-git-merge.bundle"
+        response = sandbox.upload_files([(transfer, plan.bundle)])[0]
+        if response.error:
+            raise GitSyncError("Could not import merged Git objects")
+        _sandbox_git(sandbox, _WORKTREE_GIT + " bundle unbundle "
+                     + shlex.quote(transfer) + " && " + _WORKTREE_GIT
+                     + " cat-file -e " + plan.merged + "^{commit}"
+                     + "; code=$?; rm -- " + shlex.quote(transfer) + "; exit \"$code\"")
+        if identity(self.worktree) != (self.branch, plan.local):
+            raise GitSyncError("Thread branch changed during main integration")
+
+    def publish_merge(self, plan: MergePlan) -> str:
+        """Publish only after the restricted checkout has the review objects."""
+        with LocalGit(self.source, self.worktree) as repository:
+            if self._verified_tip(repository) != plan.local:
+                raise GitSyncError("Thread branch changed during main integration")
+            if not repository.has(plan.merged):
+                raise GitSyncError("Merged Git objects are unavailable")
+            if repository.remote_ref(self.branch) != plan.thread:
+                raise GitSyncError("Published thread branch advanced during main integration")
+            if repository.publish("main", plan.merged) != plan.merged:
+                raise GitSyncError("Published main advanced after this integration")
+        return "Merged published thread " + self.branch

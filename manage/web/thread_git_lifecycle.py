@@ -209,4 +209,11 @@ class ThreadGitLifecycle:
         if not self.bound:
             raise GitSyncError("Thread merge validation is unavailable")
         with self._host_fence():
-            return self._owner.merge_main()
+            plan = self._owner.plan_merge_main()
+        backend = self._backend(None)
+        try:
+            self._owner.import_merge(backend, plan)
+        finally:
+            self._cleanup(backend.container)
+        with self._host_fence():
+            return self._owner.publish_merge(plan)

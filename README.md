@@ -112,7 +112,9 @@ where reliability is harder than with frontier APIs.
   normally without rewriting them. If a phone push races a server turn, the
   server saves its commit on an `assist-result/<commit>` branch for a local
   merge. Merge & Push uses only published main and thread commits in a private
-  repository, leaving both working checkouts and the thread branch alone.
+  repository. It imports the merged Git objects into the server checkout
+  before publication so the immediate web diff works, without moving either
+  working checkout or the thread branch.
 
 - **Multiple frontends, one Deep Agents core.** Web UI, CLI, and an Emacs
   integration share the standard agent runtime, memory, and domain repos.
@@ -1119,7 +1121,8 @@ Git-object proxy. Sending a message neither commits nor pulls phone work.
 After a successful Run, it fetches and fast-forwards only a clean local
 checkout; dirty or unpushed work remains for ordinary Git reconciliation.
 Merge & Push privately merges only published main and thread histories; it
-does not change either working checkout or the thread branch. Conflicts and
+imports the merged objects for immediate web review but does not move either
+working checkout or the thread branch. Conflicts and
 competing main advances are visible failures for manual resolution.
 
 ## Docker Sandbox
