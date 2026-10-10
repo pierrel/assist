@@ -1,7 +1,10 @@
 import logging
 import os
+import re
+import signal
 import subprocess
 import tempfile
+import time
 from typing import List
 from pydantic import BaseModel
 from datetime import datetime
@@ -38,6 +41,43 @@ class Change(BaseModel):
     diff: str
 
 
+_REVIEW_DIFF_SECONDS = 10
+_REVIEW_DIFF_BYTES = 2 * 1024 * 1024
+_REVIEW_DIFF_FILES = 100
+
+
+def _bounded_review_git(repo_dir: str, arguments: list[str], deadline: float):
+    """Run a bound review read without agent-selected helpers or unbounded output."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError("Git review diff timed out")
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith("GIT_")}
+    environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
+                       GIT_NO_REPLACE_OBJECTS="1", GIT_TERMINAL_PROMPT="0")
+    command = ["prlimit", "--as=2147483648", "--cpu=10",
+               f"--fsize={_REVIEW_DIFF_BYTES}", "--", "git", "-C", repo_dir,
+               "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+               *arguments]
+    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(command, stdout=output, stderr=errors,
+                                   env=environment, start_new_session=True)
+        try:
+            process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as error:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            raise RuntimeError("Git review diff timed out") from error
+        output.seek(0)
+        data = output.read(_REVIEW_DIFF_BYTES + 1)
+        if len(data) > _REVIEW_DIFF_BYTES:
+            raise RuntimeError("Git review diff is too large")
+        if process.returncode not in (0, 1):
+            raise RuntimeError("Git review diff is unavailable or too large")
+        return subprocess.CompletedProcess(command, process.returncode,
+                                           data.decode("utf-8", "replace"), "")
+
+
 def current_branch(repo_dir: str) -> str:
     """Return the checked-out branch name.
 
@@ -66,8 +106,8 @@ def create_timestamped_branch(repo_dir: str, suffix: str | None = None,
     """Create and checkout a new assist/[timestamp][-suffix] branch from ``start_point``.
 
     ``suffix`` is appended (with a leading hyphen) when supplied.  Pass
-    the last 4 chars of the thread id to avoid collisions when two
-    threads are created within the same UTC second.  ``start_point`` is
+    the complete generated thread id to avoid cross-thread collisions when
+    two threads are created within the same UTC second.  ``start_point`` is
     normally ``main`` (a fresh thread branch) but is ``HEAD`` when
     re-attaching a detached HEAD so the detached commit is preserved.
 
@@ -95,12 +135,11 @@ def create_timestamped_branch(repo_dir: str, suffix: str | None = None,
 def ensure_thread_branch(repo_dir: str, suffix: str | None = None) -> str:
     """Guarantee HEAD is on a thread branch so per-turn commits stay reviewable.
 
-    The web flow renders ``git diff main...HEAD`` and only shows the
-    Review / Merge buttons when that diff is non-empty.  If a thread is
-    left on ``main`` — a merge that failed between checking out ``main``
-    and re-branching, or an older flow that stranded it — every later
-    commit lands on ``main``, the diff is always empty, and the work can
-    never be reviewed.
+    This is the legacy DomainManager path. Bound web turns require their
+    authorized non-main branch and compare against configured-source main;
+    their Merge & Push action does not rebranch. In older flows that did
+    rebranch, a failure could strand HEAD on ``main`` and hide changes from
+    the local-main review diff.
 
     When HEAD is on ``main``, re-branch onto a fresh ``assist/<ts>``
     branch off ``main``.  ``git checkout -b`` carries the working tree's
@@ -202,64 +241,66 @@ def git_diff(repo_dir: str) -> List[Change]:
     return changes
 
 
-def git_diff_main(repo_dir: str) -> List[Change]:
-    """Return diffs of the thread branch compared to ``main``.
+def git_diff_main(repo_dir: str, base_oid: str | None = None,
+                  head_oid: str | None = None) -> List[Change]:
+    """Return thread changes against an immutable base when one is supplied.
 
-    ``main`` is kept fast-forwarded to ``origin/main`` each turn (see
-    :meth:`DomainManager._fast_forward_local_main`), so ``main...HEAD`` reflects only THIS
-    thread's own work — never changes another thread merged into main. Includes tracked
-    changes and untracked files as added.
+    Bound web callers pass the exact configured-source main and displayed head
+    OIDs through bounded, helper-free Git reads. Legacy callers without both
+    revisions still compare local ``main...HEAD``. Untracked files appear as
+    additions in either case.
     """
+    for oid in (base_oid, head_oid):
+        if oid is not None and not re.fullmatch(r"[0-9a-f]{40}", oid):
+            raise ValueError("Invalid Git review revision")
+    comparison = (base_oid or "main") + "..." + (head_oid or "HEAD")
     changes: List[Change] = []
+    bounded = base_oid is not None and head_oid is not None
+    deadline = time.monotonic() + _REVIEW_DIFF_SECONDS
 
-    # Files changed relative to main
-    names = subprocess.run(
-        ['git', '-C', repo_dir, 'diff', '--name-only', 'main...'],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
+    def run(arguments: list[str]):
+        if bounded:
+            return _bounded_review_git(repo_dir, arguments, deadline)
+        return subprocess.run(['git', '-C', repo_dir, *arguments],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, errors='replace', check=False)
+
+    # Files changed relative to the selected comparison base.
+    diff_options = ['--no-ext-diff', '--no-textconv'] if bounded else []
+    names = run(['diff', *diff_options, '--name-only', comparison])
     if names.returncode not in (0, 1):
-        raise RuntimeError(f"git diff --name-only main... failed: {names.stderr.strip()}")
+        raise RuntimeError(f"git diff --name-only {comparison} failed: {names.stderr.strip()}")
 
-    for path in [l.strip() for l in names.stdout.splitlines() if l.strip()]:
-        d = subprocess.run(
-            ['git', '-C', repo_dir, 'diff', '--no-color', 'main...', '--', path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            encoding='utf-8',
-            errors='replace',
-            check=False,
-        )
+    paths = [line.strip() for line in names.stdout.splitlines() if line.strip()]
+    if bounded and len(paths) > _REVIEW_DIFF_FILES:
+        raise RuntimeError("Git review diff has too many files")
+    total_bytes = 0
+    for path in paths:
+        d = run(['diff', *diff_options, '--no-color', comparison, '--', path])
         if d.returncode not in (0, 1):
-            raise RuntimeError(f"git diff main... failed for {path}: {d.stderr.strip()}")
+            raise RuntimeError(f"git diff {comparison} failed for {path}: {d.stderr.strip()}")
         if d.stdout:
+            total_bytes += len(d.stdout.encode('utf-8'))
+            if bounded and total_bytes > _REVIEW_DIFF_BYTES:
+                raise RuntimeError("Git review diff is too large")
             changes.append(Change(path=path, diff=d.stdout))
 
     # Untracked files: show as diff from /dev/null
-    ls = subprocess.run(
-        ['git', '-C', repo_dir, 'ls-files', '--others', '--exclude-standard'],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
+    ls = run(['ls-files', '--others', '--exclude-standard'])
     if ls.returncode != 0:
         raise RuntimeError(f"git ls-files failed: {ls.stderr.strip()}")
 
-    for path in [line.strip() for line in ls.stdout.splitlines() if line.strip()]:
-        d = subprocess.run(
-            ['git', '-C', repo_dir, 'diff', '--no-index', '--no-color', '--', '/dev/null', path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            encoding='utf-8',
-            errors='replace',
-            check=False,
-        )
+    untracked = [line.strip() for line in ls.stdout.splitlines() if line.strip()]
+    if bounded and len(paths) + len(untracked) > _REVIEW_DIFF_FILES:
+        raise RuntimeError("Git review diff has too many files")
+    for path in untracked:
+        d = run(['diff', *diff_options, '--no-index', '--no-color', '--', '/dev/null', path])
         if d.returncode not in (0, 1):
             raise RuntimeError(f"git diff --no-index failed for {path}: {d.stderr.strip()}")
         if d.stdout:
+            total_bytes += len(d.stdout.encode('utf-8'))
+            if bounded and total_bytes > _REVIEW_DIFF_BYTES:
+                raise RuntimeError("Git review diff is too large")
             changes.append(Change(path=path, diff=d.stdout))
 
     return changes
@@ -325,8 +366,8 @@ class DomainManager:
             repo_path: Path to local repository
             repo: Remote repository URL (optional — sandbox works without git)
             branch_suffix: Forwarded to :func:`create_timestamped_branch`
-                during clone and post-merge re-branch.  Pass the last 4
-                chars of the owning thread id.
+                during clone and post-merge re-branch. Pass the complete
+                generated owning thread ID to avoid same-second collisions.
             clone_timeout_s: Optional hard deadline for the initial ``git clone``.
 
         Raises:
@@ -366,19 +407,22 @@ class DomainManager:
             return []
         return git_diff(self.repo_path)
 
-    def main_diff(self) -> List[Change]:
-        if not self.repo:
+    def main_diff(self, base_oid: str | None = None,
+                  head_oid: str | None = None) -> List[Change]:
+        if not self.repo and base_oid is None:
             return []
         if not is_git_repo(self.repo_path):
+            if base_oid is not None:
+                raise RuntimeError("Bound Git review checkout is unavailable")
             logger.warning(
                 "main_diff() skipped: %s has self.repo=%s but is not a git repo",
                 self.repo_path, self.repo,
             )
             return []
-        return git_diff_main(self.repo_path)
+        return git_diff_main(self.repo_path, base_oid, head_oid)
 
-    def has_changes_vs_main(self) -> bool:
-        """True iff the working tree has unmerged work compared to ``main``.
+    def has_changes_vs_main(self, base_oid: str | None = None) -> bool:
+        """True iff the working tree has unmerged work against the chosen base.
 
         Cheaper than :meth:`main_diff` when only a bool is needed —
         used by the index page to decide whether to render an
@@ -390,22 +434,29 @@ class DomainManager:
           because the assist flow can sit between an edit and the
           end-of-turn ``sync()`` commit; the user expects the badge
           to fire on tracked-but-uncommitted dirt too.
-        - ``git diff --quiet main...`` exits 1 if any *committed* work
-          on this branch is not in ``main``.  Catches the post-sync
-          "ready to merge" steady state.
+        - A three-dot comparison against the exact supplied base, or legacy
+          local ``main``, finds committed thread work.
         - ``git ls-files --others --exclude-standard`` lists any
           untracked-but-not-ignored files; if non-empty, the thread
           has new files that haven't been committed yet.
 
-        For each git invocation we treat any returncode other than
-        the documented 0 (clean) / 1 (dirty) as "no info, assume
-        clean" rather than falsely badging every thread as unmerged
-        — e.g., when the repo has no ``main`` branch yet.
+        A supplied bound base must exist locally and compare successfully;
+        otherwise callers show review pending, never a false clean badge.
+        Legacy callers retain their old best-effort local-main behavior.
         """
-        if not self.repo:
+        if not self.repo and base_oid is None:
             return False
         if not is_git_repo(self.repo_path):
+            if base_oid is not None:
+                raise RuntimeError("Bound Git review checkout is unavailable")
             return False
+        if base_oid is not None and not re.fullmatch(r"[0-9a-f]{40}", base_oid):
+            raise ValueError("Invalid Git review revision")
+        if base_oid is not None and subprocess.run(
+            ['git', '-C', self.repo_path, 'cat-file', '-e', base_oid + '^{commit}'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        ).returncode != 0:
+            raise RuntimeError("Configured review main object is not available locally")
         # 1. Working tree + index vs HEAD (tracked but uncommitted).
         worktree = subprocess.run(
             ['git', '-C', self.repo_path, 'diff', '--quiet', 'HEAD'],
@@ -413,19 +464,24 @@ class DomainManager:
         )
         if worktree.returncode == 1:
             return True
-        # 2. Branch commits vs main merge-base (main is kept ff'd to origin/main each turn,
-        #    so another thread's merged work doesn't badge this thread as unmerged).
+        if base_oid is not None and worktree.returncode != 0:
+            raise RuntimeError("Bound Git worktree comparison is unavailable")
+        # 2. Committed work against the selected base.
         committed = subprocess.run(
-            ['git', '-C', self.repo_path, 'diff', '--quiet', 'main...'],
+            ['git', '-C', self.repo_path, 'diff', '--quiet', (base_oid or 'main') + '...HEAD'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         )
         if committed.returncode == 1:
             return True
+        if base_oid is not None and committed.returncode != 0:
+            raise RuntimeError("Configured review comparison is unavailable")
         # 3. Untracked files (independent of either diff).
         untracked = subprocess.run(
             ['git', '-C', self.repo_path, 'ls-files', '--others', '--exclude-standard'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
         )
+        if base_oid is not None and untracked.returncode != 0:
+            raise RuntimeError("Bound Git untracked-file probe is unavailable")
         return bool(untracked.stdout.strip())
 
     def domain(self) -> str:
