@@ -51,6 +51,10 @@ class ThreadGit:
             raise GitSyncError("Thread branch left its authorized history")
         return tip
 
+    def verify_checkout_tip(self) -> str:
+        with LocalGit(self.source, self.worktree) as repository:
+            return self._verified_tip(repository)
+
     def plan_prepare(self) -> PreparePlan:
         """Use exact remote refs; retry a retained commit without model replay."""
         with LocalGit(self.source, self.worktree) as repository:

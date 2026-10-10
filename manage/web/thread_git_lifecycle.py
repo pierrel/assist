@@ -163,10 +163,16 @@ class ThreadGitLifecycle:
         finally:
             self._cleanup(backend.container)
         self._verify_clean(timezone)
+        with self._host_fence():
+            if self._owner.verify_checkout_tip() != plan.remote:
+                raise GitSyncError("Thread branch changed after sandbox teardown")
 
     def resume(self) -> None:
         if self._teardown_failed:
             raise GitSyncError("Git sandbox teardown needs operator verification")
+        if self.bound:
+            with self._host_fence():
+                self._owner.verify_checkout_tip()
 
     def handoff(self, timezone: str | None) -> None:
         """Continue a child wake on its parent's base only if that checkout is clean."""

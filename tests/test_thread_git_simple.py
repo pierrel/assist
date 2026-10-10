@@ -182,6 +182,40 @@ def test_dirty_retained_commit_cannot_publish_before_preflight(bound_thread, mon
     assert (server / "unsaved.txt").read_text() == "user draft\n"
 
 
+def test_prepare_holds_same_tree_ref_rewrite_after_sandbox_check(bound_thread, monkeypatch):
+    owner, source, server, _ = bound_thread
+    original = identity(str(server))[1]
+    tree = git("rev-parse", original + "^{tree}", cwd=server)
+    rewritten = git("-c", "user.name=Test", "-c", "user.email=test@localhost",
+                    "commit-tree", tree, "-p", original, "-m", "late hook", cwd=server)
+    lifecycle = ThreadGitLifecycle(owner, str(server))
+    import assist.git_sync as git_sync
+    monkeypatch.setattr(lifecycle, "_host_fence", nullcontext)
+    monkeypatch.setattr(lifecycle, "_backend", lambda _: LocalSandbox())
+    monkeypatch.setattr(lifecycle, "_verify_clean",
+                        lambda _: git_sync.require_clean(LocalSandbox()))
+    monkeypatch.setattr(lifecycle, "_cleanup",
+                        lambda _: git("update-ref", "refs/heads/assist/thread",
+                                      rewritten, original, cwd=server))
+    with pytest.raises(GitSyncError, match="changed after sandbox teardown"):
+        lifecycle.prepare(None)
+    assert identity(str(server))[1] == rewritten
+    assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == original
+
+
+def test_resume_holds_checkout_outside_authorized_history(bound_thread, monkeypatch):
+    owner, _, server, _ = bound_thread
+    original = identity(str(server))[1]
+    tree = git("rev-parse", original + "^{tree}", cwd=server)
+    rewritten = git("-c", "user.name=Test", "-c", "user.email=test@localhost",
+                    "commit-tree", tree, "-m", "unrelated", cwd=server)
+    git("update-ref", "refs/heads/assist/thread", rewritten, original, cwd=server)
+    lifecycle = ThreadGitLifecycle(owner, str(server))
+    monkeypatch.setattr(lifecycle, "_host_fence", nullcontext)
+    with pytest.raises(GitSyncError, match="authorized history"):
+        lifecycle.resume()
+
+
 def test_child_handoff_keeps_parent_base_and_holds_partial_edits(bound_thread, monkeypatch):
     owner, source, server, phone = bound_thread
     original = identity(str(server))[1]
@@ -191,6 +225,7 @@ def test_child_handoff_keeps_parent_base_and_holds_partial_edits(bound_thread, m
     import assist.git_sync as git_sync
     monkeypatch.setattr(lifecycle, "_verify_clean",
                         lambda _: git_sync.require_clean(LocalSandbox()))
+    monkeypatch.setattr(lifecycle, "_host_fence", nullcontext)
     lifecycle.handoff(None)
     assert identity(str(server))[1] == original
     assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == later

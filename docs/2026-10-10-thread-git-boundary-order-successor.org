@@ -1,0 +1,43 @@
+#+title: Thread Git boundary and merge-order correction
+#+date: 2026-10-10
+
+* Current boundary
+
+The configured source and the bound checkout are accessed through a disposable,
+config-clean private Git store. Ordinary preflight transfers missing objects in
+a bounded bundle into the restricted sandbox, then fast-forwards a clean
+checkout there. After the writable sandbox and final clean verifier have both
+been torn down, a host-fenced private Git check requires the branch and tip to
+equal the planned published revision before admitting a new model turn.
+Resuming a paused turn instead verifies the bound branch, object graph, and
+authorized ancestry without fetching or discarding in-progress work.
+
+For user-gated Merge & Push, the private source-only store constructs the
+two-parent merge and exports its bounded objects. The restricted sandbox
+imports those objects into the checkout *before* main publication, and its
+teardown is verified. Only then does the private store publish main with an
+ordinary non-force push for an existing ref and verify the resulting remote
+OID. The checkout thread ref, index, and files are not moved by this import.
+Failure before main publication leaves main unchanged. A later remote-main
+advance or uncertain push result is reported, not described as a rollback.
+
+The observed published thread tip is checked again in the final publication
+phase before the main push. That read and the main push are independent Git
+operations, not an atomic cross-ref transaction. A simultaneous later phone
+push remains on the thread ref for a subsequent merge; no latest-at-publication
+guarantee is made.
+
+* Historical supersessions
+
+This note directly supersedes =docs/2026-10-10-thread-git-boundary-successor.org=:
+
+- =Outcome=: object import and verified teardown happen before the main push,
+  not after; existing main uses non-force publication with exact result
+  verification, not an exact expected-main lease; the thread check is not
+  atomic with main publication.
+- =Transport choice=: ordinary preflight now uses a bounded private-store
+  bundle and restricted sandbox import, not the earlier authenticated object
+  snapshot.
+- =Boundaries and checks=: no exact-main-lease or latest-thread guarantee is
+  claimed for an existing main ref. The branch and planned preflight tip are
+  rechecked after final sandbox teardown.
