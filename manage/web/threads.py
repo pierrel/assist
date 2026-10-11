@@ -55,7 +55,8 @@ import anyio.to_thread
 from langchain_core.messages import HumanMessage
 
 from assist.backlog import PendingMessage
-from assist.run_service import Approval, InvalidRunTransition, Run, RunNotFound, browser_reset_owed
+from assist.run_service import (Approval, InvalidRunTransition, Run, RunNotFound,
+                                RunStoreUnavailable, browser_reset_owed)
 from assist.async_subagents import AsyncTaskContext, async_task_context
 from assist.egress.store import EgressWaiter, resolution_prompt
 from assist.egress.tools import (EGRESS_ORIGIN_THREAD_ID,
@@ -104,8 +105,11 @@ from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
 from edd.live_capture import CaptureStorageFull
 
 from manage.web.app import app
-from manage.web.git_lifecycle import (GitLifecycle, preflight_fence_error as git_preflight_fence_error,
-                                      recovery_error as git_recovery_error)
+from manage.web.thread_git_lifecycle import (
+    ThreadGitLifecycle as GitLifecycle,
+    preflight_fence_error as git_preflight_fence_error,
+    recovery_error as git_recovery_error,
+)
 from manage.web.run_stream import PHONE_DELTA_CHUNK_BYTES, RUN_STREAMS
 from manage.web.diff import _DIFF_CSS, _render_inline_diffs
 from assist.geo.model import STATE_FAILED, STATE_IMPORTING
@@ -151,6 +155,7 @@ from manage.web.state import (
     _get_status,
     _get_timings,
     _has_unmerged_changes,
+    _review_base,
     _has_unseen_response,
     _clear_unseen_response,
     _mark_unseen_response,
@@ -274,6 +279,7 @@ def _thread_status_rank(tid: str, stage: str) -> int:
 
 def render_index() -> str:
     items = []
+    review_bases: dict[str, str | None] = {}
     for tid in MANAGER.list():
         title = _thread_title(tid)
         try:
@@ -345,7 +351,11 @@ def render_index() -> str:
                 ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
                 ' margin-right:.4rem;">new</span>'
             )
-        elif _has_unmerged_changes(tid):
+        elif (unmerged := _has_unmerged_changes(tid, review_bases)) is None:
+            badge = ('<span style="font-size:.7rem; color:#6b7280; background:#fafafa;'
+                     ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
+                     ' margin-right:.4rem;">review pending</span>')
+        elif unmerged:
             # Soft amber, distinct from yellow (busy) and red (error).
             # Strictly secondary to the process-state badges above —
             # only shows when the thread is otherwise idle.
@@ -824,13 +834,18 @@ def render_thread(
     # top-of-page block, separate from the message bubbles, so the per-file
     # collapse stack and the Merge / Review buttons sit together.
     diffs: list[Change] = []
+    diff_pending = False
+    review_base = None
     if history_before is None and not is_init and not is_pi:
         try:
+            review_base = _review_base(tid)
             dm = _get_domain_manager(tid)
             if dm:
-                diffs = dm.main_diff()
+                diffs = dm.main_diff(review_base)
+            elif review_base is not None:
+                raise GitSyncError("Bound Git review checkout is unavailable")
         except Exception:
-            pass
+            diff_pending = True
 
     # Surface a persistent merge-conflict banner above the diff stack
     # whenever the most recent merge attempt aborted on a rebase
@@ -858,7 +873,8 @@ def render_thread(
         </div>
         """
 
-    diff_block_html = ""
+    diff_block_html = ('<p><em>Review base pending or unavailable.</em></p>'
+                       if diff_pending else '')
     if diffs:
         diff_files_html = _render_inline_diffs(tid, diffs)
         diff_block_html = f"""
@@ -867,7 +883,7 @@ def render_thread(
             <a class="btn btn-secondary review-btn" href="/thread/{tid}/review">Review</a>
             <form action="/thread/{tid}/merge" method="post" style="margin: 0;">
               <button class="btn merge-btn" type="submit"
-                      onclick="return confirm('Merge this branch into main and push to origin? This rebases onto origin/main, squashes into one commit, and pushes.');">
+                      onclick="return confirm('Merge this branch into main and push to origin? The thread branch remains unchanged.');">
                 Merge &amp; Push
               </button>
             </form>
@@ -1006,6 +1022,19 @@ def render_thread(
             '<span style="margin-left:.5rem; color:#9ca3af; font-size:.75rem;'
             f'font-weight:normal;">{badge}</span></div><div class="content">'
             f'{html.escape(r.text).replace(chr(10), "<br/>")}</div>{detail}</div>'))
+    # The accepted redirect clears the browser draft. A queued follower may
+    # replace status before the owner sees a stale review error, so project its
+    # durable Run text independently of the current status.
+    failed_reviews = [run for run in _visible_runs
+                      if (run.status == "error" and run.review_snapshot is not None
+                          and run.text and (run.error or "").startswith((
+                              "Review changed while queued", "Review base is unavailable",
+                              "Review cannot run while")))]
+    for run in failed_reviews[-3:]:
+        rendered.insert(0, (
+            '<div class="msg user"><div class="role">user · review not delivered</div>'
+            f'<div class="content">{render_markdown(run.text, extensions=_MD_EXTENSIONS)}</div>'
+            f'<div class="content">{html.escape(run.error or "")}</div></div>'))
     notices = [run for run in _visible_runs if run.browser_reset_notice]
     if notices:
         latest = notices[-1]
@@ -1064,6 +1093,9 @@ def render_thread(
                 os.path.join(MANAGER.thread_dir(tid), "description.txt"))
         label = "Couldn't process your message:" if had_prior_turn else "Setup failed:"
         status_banner = f'<div class="error-msg"><strong>{label}</strong> {err}</div>'
+    elif stage == "ready" and status.get("git_notice"):
+        status_banner = ('<div class="status-banner">'
+                         + html.escape(status["git_notice"]) + '</div>')
     elif stage == "awaiting_approval" and status.get("pending_email_token"):
         proposal = email_approval_preview(status)
         sender, cc = proposal["from"], proposal["cc"]
@@ -1692,15 +1724,15 @@ def _settle_cancelled_initializer(tid: str, run_id: str) -> bool:
     return True
 
 
-def _verify_phone_initializer_owner(tid: str, run_id: str) -> None:
+def _verify_initializer_owner(tid: str, run_id: str) -> None:
     """Reject a deleted or replaced first Run while its Git fence is held."""
     try:
         current = _runs().get(tid, run_id)
     except RunNotFound as error:
-        raise GitSyncError("Phone thread initializer was replaced") from error
+        raise GitSyncError("Thread initializer was replaced") from error
     if (current.status != "pending"
             or _get_status(tid).get("pending_run_id") != run_id):
-        raise GitSyncError("Phone thread initializer is no longer pending")
+        raise GitSyncError("Thread initializer is no longer pending")
 
 
 def _initialize_thread(
@@ -1745,7 +1777,7 @@ def _initialize_thread_active(
                     dm = DomainManager(
                         MANAGER.thread_default_working_dir(tid),
                         domain,
-                        branch_suffix=tid[-4:],
+                        branch_suffix=tid,
                         clone_timeout_s=INITIALIZATION_CLONE_TIMEOUT_S,
                     )
                     # Refresh cache: a previous render may have cached a no-remote DM.
@@ -1760,10 +1792,10 @@ def _initialize_thread_active(
         # it is never interrupted, but the cancelled Run is never executed.
         if _settle_cancelled_initializer(tid, run_id):
             return
-        if domain and current.dispatch_key and current.dispatch_key.startswith("phone:"):
+        if domain:
             publish_initial_branch(MANAGER.thread_dir(tid),
                                    MANAGER.thread_default_working_dir(tid),
-                                   lambda: _verify_phone_initializer_owner(tid, run_id))
+                                   lambda: _verify_initializer_owner(tid, run_id))
         if _settle_cancelled_initializer(tid, run_id):
             return
         _execute_run(run_id, tid)
@@ -2010,6 +2042,7 @@ def _pending_run_records(tid: str) -> list[PendingMessage]:
         rider=run.rider, enqueued_at=run.created_at, origin=run.origin, id=run.id)
         for run in eligible
         if (run.status == "pending" and run.mode == "turn" and run.text
+            and run.review_snapshot is None
             and run.assistant_id == "general-agent")]
 
 
@@ -2478,7 +2511,8 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 delegate_user_urls=(), location: LocationSnapshot | None = None,
                 user_origin: bool = False, user_event_id: str | None = None,
                 revocation_pending: bool = False,
-                browser_reset_run_id: str | None = None) -> Run:
+                browser_reset_run_id: str | None = None,
+                review_snapshot: dict | None = None) -> Run:
     """Commit one web turn before placing its id on a dispatch queue."""
     with RUN_GATE.active() as accepted:
         if not accepted:
@@ -2496,7 +2530,8 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
             location=_location_to_fields(location) if location else None,
             user_origin=user_origin, user_event_id=user_event_id,
             revocation_pending=revocation_pending,
-            browser_reset_run_id=browser_reset_run_id)
+            browser_reset_run_id=browser_reset_run_id,
+            review_snapshot=review_snapshot)
 
 
 def _publish_phone_text(tid: str, work_id: str, text: str) -> None:
@@ -2554,12 +2589,19 @@ def _frequency_configurable(run: Run | None, *, sender: str | None,
 
 
 def _terminalize_dirty_run(run: Run, error: GitSyncError) -> None:
-    """Persist the exact failed Run before releasing its verified Git flight fence."""
+    """Persist the failed Run before its preflight sandbox is torn down."""
     with _RUN_ADMISSION_LOCK:
         current = _runs().get(run.thread_id, run.id)
         if current.status != "running" or current.work_id != run.work_id:
             raise GitSyncError("Git dirty preflight Run identity needs operator verification")
         _runs().transition(run.thread_id, run.id, "error", error=str(error))
+
+
+def _git_result_notice(branch: str | None) -> str | None:
+    if branch is None:
+        return None
+    return ("Completed changes are on Git branch " + branch + ". Fetch and merge "
+            "it into the thread branch locally, resolve conflicts, and push.")
 
 
 def _execute_child_run(run: Run, *, resume: bool = False) -> None:
@@ -2602,14 +2644,14 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                         run.parent_thread_id)
                     git_lifecycle = git_scope.enter_context(GitLifecycle.acquire(
                         MANAGER.thread_dir(run.parent_thread_id), parent_working_dir,
-                        run.work_id))
+                        run.work_id,
+                        thread_scope=(MANAGER.root_dir, run.parent_thread_id),
+                        owner_run_id=run.id))
                     if git_lifecycle.bound:
                         child_scope.callback(cleanup_child_sandbox)
-                    if not (resume or run.resume or run.resume_decision is not None):
-                        git_lifecycle.prepare(
-                            None, terminalize_dirty=lambda error: _terminalize_dirty_run(run, error))
-                    else:
-                        git_lifecycle.resume()
+                    # The child shares its active parent's checkout. A phone
+                    # push during that parent turn must not change this base.
+                    git_lifecycle.resume()
                     try:
                         sandbox = _get_sandbox_backend(
                             run.parent_thread_id, include_agent=False,
@@ -2640,11 +2682,15 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                     if git_lifecycle.bound and not waits_for_egress:
                         git_lifecycle.cleanup_model(sandbox_generation)
                         sandbox_generation = None
-                        git_lifecycle.finish_child(
+                        result_branch = git_lifecycle.finish_child(
                             str(result or "assistant task update"),
                             MANAGER.thread_dir(run.thread_id))
+                        notice = _git_result_notice(result_branch)
                         with _RUN_ADMISSION_LOCK:
-                            run = _runs().transition(run.thread_id, run.id, "success")
+                            run = _runs().transition(
+                                run.thread_id, run.id, "success",
+                                **({"result": str(result or "") + "\n\n" + notice}
+                                   if notice else {}))
                         git_lifecycle.child_terminal()
                     if waits_for_egress and run.parent_thread_id is not None:
                         _resume_egress_waiters(run.parent_thread_id)
@@ -2753,7 +2799,9 @@ def _recover_child_run(run: Run) -> None:
                 _runs().transition(run.thread_id, run.id, "running", result=result)
             with THREAD_QUEUE.acquire(run.thread_id), GitLifecycle.acquire(
                     MANAGER.thread_dir(run.parent_thread_id), parent_working_dir,
-                    run.work_id) as git_lifecycle:
+                    run.work_id,
+                    thread_scope=(MANAGER.root_dir, run.parent_thread_id),
+                    owner_run_id=run.id) as git_lifecycle:
                 git_lifecycle.recover_child(
                     str(result), MANAGER.thread_dir(run.thread_id))
                 with _RUN_ADMISSION_LOCK:
@@ -2936,7 +2984,10 @@ def _execute_run_active(run_id: str, tid: str, *, user_priority: bool = False) -
             terminal = ("error" if stage == "error"
                         else "awaiting_approval" if stage == "awaiting_approval"
                         else "success")
-            _runs().transition(tid, run_id, terminal, error=status.get("error"))
+            notice = status.get("git_notice") if terminal == "success" else None
+            result = ((current.result or "") + "\n\n" + notice).strip() if notice else None
+            _runs().transition(tid, run_id, terminal, error=status.get("error"),
+                               result=result)
             current = _runs().get(tid, run_id)
         if current.status in {"success", "error", "timeout", "cancelled", "awaiting_approval"}:
             if not any(candidate.id != current.id
@@ -2999,7 +3050,8 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
     try:
         with THREAD_QUEUE.acquire(tid, user_priority=user_priority), GitLifecycle.acquire(
                 MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid),
-                run.work_id) as git_lifecycle:
+                run.work_id, thread_scope=(MANAGER.root_dir, tid),
+                owner_run_id=run.id) as git_lifecycle:
             # The selector's earlier check only permits reservation. This
             # authority-bearing recheck prevents a queued Pi Run from starting
             # after the operator disables the preview.
@@ -3057,10 +3109,15 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
             if git_lifecycle.bound:
                 with _RUN_ADMISSION_LOCK:
                     _runs().transition(tid, run.id, "running", result=result.reply)
-                git_lifecycle.finish_visible(result.reply, (run.rider or {}).get("tz"))
+                result_branch = git_lifecycle.finish_visible(
+                    result.reply, (run.rider or {}).get("tz"))
+            else:
+                result_branch = None
+            notice = _git_result_notice(result_branch)
             with _RUN_ADMISSION_LOCK:
-                _runs().transition(tid, run.id, "success", result=result.reply)
-            _set_status(tid, "ready")
+                _runs().transition(tid, run.id, "success",
+                                   result=result.reply + ("\n\n" + notice if notice else ""))
+            _set_status(tid, "ready", **({"git_notice": notice} if notice else {}))
             MANAGER.touch(tid)
     except (PiConversationError, PiRuntimeError, GitSyncError, ThreadHoldExpired, QueueWaitTimeout) as error:
         logging.error("Pi run %s failed", run.id, exc_info=True)
@@ -3223,6 +3280,7 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
         pending_text=pending_text if decision == "resume" else None,
         origin=run.origin, work_id=run.work_id,
         user_event_id=run.user_event_id,
+        review_snapshot=run.review_snapshot if decision != "resume" else None,
         location=_location_from_fields(run.location))
     _RESUME_SCHEDULER.submit(successor.id, tid, user_priority=user_priority)
 
@@ -3349,6 +3407,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # exit the function before that fire.
     _terminal: tuple[str, str | None] | None = None
     gmail_terminal = None
+    git_publication_notice = None
     queue_handle = None
     hold_drained = False
     decision_key = (_run.dispatch_key or "") if _run is not None else ""
@@ -3403,7 +3462,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                    and _run.mode == "turn"
                                    and _run.text is not None))) as queue_handle, GitLifecycle.acquire(
                 MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid),
-                _run.work_id if _run else tid) as git_lifecycle:
+                _run.work_id if _run else tid,
+                thread_scope=(MANAGER.root_dir, tid),
+                owner_run_id=_run.id if _run else None) as git_lifecycle:
             # A queued run remains pending until it actually owns THREAD_QUEUE. This
             # is what makes it visible to the active turn's interjection reader. Two
             # dispatchers for one run serialize here; only the first can claim it.
@@ -3495,7 +3556,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 except InvalidRunTransition:
                     return
             _set_status(tid, "starting_sandbox", **pending_kwargs)
-            if not resume and resume_decision is None:
+            if not resume and resume_decision is None and origin != "task-completion":
                 def terminalize_dirty(error: GitSyncError) -> None:
                     if _run is not None:
                         _terminalize_dirty_run(_run, error)
@@ -3503,8 +3564,23 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
 
                 git_lifecycle.prepare(rider.tz if rider else None,
                                       terminalize_dirty=terminalize_dirty)
+            elif origin == "task-completion":
+                git_lifecycle.handoff(rider.tz if rider else None)
             else:
                 git_lifecycle.resume()
+            if _run is not None and _run.review_snapshot is not None and not resume:
+                # A queued review cannot interject. Recheck the exact displayed
+                # diff after preflight; bound Git reads keep the global queue live.
+                from manage.web.review import _review_snapshot
+                try:
+                    current_review, _changes = _review_snapshot(
+                        tid, None)
+                except (GitSyncError, OSError, RuntimeError) as error:
+                    raise GitSyncError("Review base is unavailable; refresh and re-anchor. "
+                                       "Your comments remain in the saved review Run.") from error
+                if current_review != _run.review_snapshot:
+                    raise GitSyncError("Review changed while queued; refresh and re-anchor. "
+                                       "Your comments remain in the saved review Run.")
             sandbox = None
             sandbox_generation = None
             browser_session = None
@@ -3582,6 +3658,15 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                        **assistant_kwargs)
                 except FileNotFoundError:
                     return
+                if (_run is not None and _run.review_snapshot is not None
+                        and (chat.pending_reply() or _pending_email(chat)
+                             or _pending_gmail(chat))):
+                    # Ordinary new messages may run a model-backed reject turn to
+                    # supersede an interrupted reply. A line review must not:
+                    # that turn could change the checkout after its diff check.
+                    raise GitSyncError("Review cannot run while an earlier reply awaits "
+                                       "approval; refresh and re-anchor. Your comments "
+                                       "remain in the saved review Run.")
                 _set_status(tid, "processing", **pending_kwargs)
                 record = _runs().approval(tid, _run.approval_id) if _run and _run.approval_id else None
                 record_consumed = False
@@ -3734,7 +3819,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             if (git_lifecycle.bound and not chat.pending_reply() and not _pending_email(chat)
                     and not pending_gmail):
                 try:
-                    git_lifecycle.finish_visible(resp or "assistant update", rider.tz if rider else None)
+                    result_branch = git_lifecycle.finish_visible(
+                        resp or "assistant update", rider.tz if rider else None)
+                    git_publication_notice = _git_result_notice(result_branch)
                 except GitSyncError:
                     _terminal = ("error", resp)
                     raise
@@ -3814,8 +3901,11 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             elif pending_email and not pending_gmail:
                 _terminal = ("awaiting_approval", pending_email.get("body", ""))
             else:
-                _set_status(tid, "ready", mark_unseen=not _quiet_ready(_run))
-                _terminal = ("ready", resp)
+                _set_status(tid, "ready", mark_unseen=not _quiet_ready(_run),
+                            **({"git_notice": git_publication_notice}
+                               if git_publication_notice else {}))
+                _terminal = ("ready", (resp or "") + ("\n\n" + git_publication_notice
+                                                 if git_publication_notice else ""))
                 if origin == "continuation":
                     append_event(MANAGER.thread_dir(tid), "continuation_completed",
                                  id=event_id or "")
@@ -4075,9 +4165,11 @@ async def create_thread(domain: str | None = Form(None), engine: str = Form("dee
             DomainManager,
             MANAGER.thread_default_working_dir(tid),
             selected,
-            branch_suffix=tid[-4:]
+            branch_suffix=tid
         )
         await run_in_threadpool(authorize_branch, MANAGER.thread_dir(tid),
+                               MANAGER.thread_default_working_dir(tid))
+        await run_in_threadpool(publish_initial_branch, MANAGER.thread_dir(tid),
                                MANAGER.thread_default_working_dir(tid))
     elif selected_engine == "pi":
         await run_in_threadpool(_create_empty_pi_workspace, tid)
@@ -4518,7 +4610,8 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
                                run_id: str | None = None,
                                work_id: str | None = None,
                                browser_state=None,
-                               browser_map_record: bool = False) -> tuple[Run, bool]:
+                               browser_map_record: bool = False,
+                               review_snapshot: dict | None = None) -> tuple[Run, bool]:
     """Admit one message under the short browser fence and Run lock."""
     if (_get_status(tid).get("pending_email_token")
             or _get_status(tid).get("pending_gmail_token")):
@@ -4552,6 +4645,7 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
                       dispatch_key=dispatch_key,
                       max_pending=max_pending, user_origin=True,
                       revocation_pending=browser_hold and not pi_thread,
+                      review_snapshot=review_snapshot,
                       browser_reset_run_id=(
                           lease["owner_run_id"] if lease is not None else
                           session.run_id if session is not None else
@@ -4579,7 +4673,8 @@ def _accept_message_run(tid: str, text: str, rider=None,
                         dispatch_key: str | None = None,
                         max_pending: int | None = None,
                         run_id: str | None = None,
-                        work_id: str | None = None) -> tuple[Run, bool]:
+                        work_id: str | None = None,
+                        review_snapshot: dict | None = None) -> tuple[Run, bool]:
     """Persist one web submission and return whether earlier work owns the thread."""
     with browser_authority.fence(MANAGER.root_dir, tid) as browser_state:
         map_record = False
@@ -4595,7 +4690,7 @@ def _accept_message_run(tid: str, text: str, rider=None,
         with _RUN_ADMISSION_LOCK:
             run, busy = _accept_message_run_locked(
                 tid, text, rider, location, dispatch_key, max_pending,
-                run_id, work_id, browser_state, map_record)
+                run_id, work_id, browser_state, map_record, review_snapshot)
     if run.status == "revocation_pending":
         _queue_browser_revocation(tid)
     return run, busy
@@ -5459,9 +5554,8 @@ def queue_recovery_runs() -> None:
              if run.id == status.get("pending_run_id") and run.status == "error"),
             None)
         if terminal_error is not None and status.get("stage") in BUSY_STAGES | {"error"}:
-            # The terminal Run may precede status projection or flight clearance.
-            # Never synthesize its stale prompt, and show the stronger retained
-            # fence if clearance did not become durable.
+            # The terminal Run may precede status projection. Never synthesize
+            # its stale prompt; show a historical retained Git hold if present.
             fence_error = git_preflight_fence_error(
                 MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid))
             if status.get("stage") in BUSY_STAGES or fence_error:
@@ -6665,10 +6759,23 @@ async def capture_fragment(tid: str, capture_id: str) -> HTMLResponse:
     )
 
 
+def _git_merge_has_unfinished_work(tid: str) -> bool:
+    """Find real unfinished parent/child work, not old Git preflight records."""
+    with _RUN_ADMISSION_LOCK:
+        try:
+            runs = _runs().list(tid)
+            runs.extend(run for run in _runs().scan_children()
+                        if run.parent_thread_id == tid)
+        except (OSError, RunStoreUnavailable) as error:
+            raise GitSyncError("Git merge Run state is unavailable") from error
+        latest = {(run.thread_id, run.work_id): run for run in runs}
+        return any(run.status not in {"success", "error", "timeout", "cancelled"}
+                   for run in latest.values())
+
+
 @app.post("/thread/{tid}/merge")
 def merge_thread(tid: str):
-    """Merge & Push: rebase the thread branch onto origin/main, squash into local main,
-    and push to origin — one action (see ``DomainManager.merge_and_push``).
+    """Merge & Push integrates a bound thread without rewriting its branch.
 
     Declared SYNC (not ``async def``) on purpose: it acquires ``MERGE_LOCK`` and runs
     blocking git subprocesses, so FastAPI must run it in the threadpool — an ``async def``
@@ -6677,9 +6784,8 @@ def merge_thread(tid: str):
 
     Holds ``MERGE_LOCK`` for the duration so two web requests merging or
     pushing at the same instant don't race the host's git operations.
-    Persists a ``merge_conflict.json`` marker on rebase conflict so the
-    UI can render a banner across subsequent renders; clears the marker
-    on a clean merge.
+    Legacy non-bound merges retain their conflict marker; a bound merge
+    reports an integration hold without changing the thread checkout.
 
     Refuses with 409 at the busy-status precheck. Git-backed threads also
     acquire the shared workspace ownership fence, covering sandbox writers
@@ -6698,16 +6804,20 @@ def merge_thread(tid: str):
         )
 
     dm = _get_domain_manager(tid)
-    if not dm or not dm.repo:
-        raise HTTPException(status_code=400, detail="No git repository configured for this thread")
-
     with MERGE_LOCK, ExitStack() as merge_scope:
         try:
             git_lifecycle = merge_scope.enter_context(GitLifecycle.acquire(
-                MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid)))
+                MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid),
+                thread_scope=(MANAGER.root_dir, tid)))
+            if not git_lifecycle.bound and (not dm or not dm.repo):
+                raise ValueError("No git repository configured for this thread")
+            if _git_merge_has_unfinished_work(tid):
+                raise GitSyncError("Thread has unfinished work; finish it before merging")
             git_lifecycle.validate_merge_candidate()
-            dm.merge_and_push()
-            git_lifecycle.record_merged_branch()
+            if git_lifecycle.bound:
+                git_lifecycle.merge_and_push()
+            else:
+                dm.merge_and_push()
             _clear_conflict(tid)
             return RedirectResponse(
                 url=f"/thread/{tid}?merged=1",

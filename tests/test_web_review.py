@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -374,6 +376,195 @@ class TestPostReviewRoute:
         r = client.post("/thread/thread-1/review",
                         data={"payload": json.dumps({"overall": "", "lines": []})})
         assert r.status_code == 400
+
+    def test_stale_review_snapshot_is_rejected_before_run_acceptance(self, client, monkeypatch):
+        snapshot = {"base_oid": "a" * 40, "head_oid": "b" * 40,
+                    "diff_digest": "c" * 64}
+        monkeypatch.setattr("manage.web.review._get_domain_manager",
+                            lambda _tid: SimpleNamespace())
+        monkeypatch.setattr("manage.web.review._review_snapshot",
+                            lambda _tid, _dm: (snapshot, [Change(path="a.py", diff=_basic_diff())]))
+        monkeypatch.setattr("manage.web.threads._accept_message_run",
+                            lambda *_args: pytest.fail("stale review accepted a Run"))
+        payload = {"overall": "older review", "lines": [], **snapshot}
+        payload["base_oid"] = "d" * 40
+        result = client.post("/thread/thread-1/review",
+                             data={"payload": json.dumps(payload)}, follow_redirects=False)
+        assert result.status_code == 409
+
+    def test_bound_review_cannot_accept_when_domain_manager_is_unavailable(self, client, monkeypatch):
+        monkeypatch.setattr("manage.web.review._get_domain_manager", lambda _tid: None)
+        monkeypatch.setattr("manage.web.review._review_base", lambda _tid: "a" * 40)
+        monkeypatch.setattr("manage.web.threads._accept_message_run",
+                            lambda *_args: pytest.fail("unavailable bound review accepted a Run"))
+        result = client.post("/thread/thread-1/review",
+                             data={"payload": json.dumps({"overall": "review", "lines": []})},
+                             follow_redirects=False)
+        assert result.status_code == 409
+
+    def test_matching_review_snapshot_accepts_one_run(self, client, monkeypatch):
+        snapshot = {"base_oid": "a" * 40, "head_oid": "b" * 40,
+                    "diff_digest": "c" * 64}
+        monkeypatch.setattr("manage.web.review._get_domain_manager",
+                            lambda _tid: SimpleNamespace())
+        monkeypatch.setattr("manage.web.review._review_snapshot",
+                            lambda _tid, _dm: (snapshot, [Change(path="a.py", diff=_basic_diff())]))
+        monkeypatch.setattr("manage.web.threads._execute_run", lambda *_args: None)
+        payload = {"overall": "current review", "lines": [], **snapshot}
+        result = client.post("/thread/thread-1/review",
+                             data={"payload": json.dumps(payload)}, follow_redirects=False)
+        assert result.status_code == 303
+        from manage.web import threads
+        review_runs = [run for run in threads._runs().list("thread-1")
+                       if run.review_snapshot is not None]
+        assert len(review_runs) == 1
+        assert review_runs[0].review_snapshot == snapshot
+        assert threads._pending_run_records("thread-1") == []
+
+    def test_queued_review_rechecks_after_its_own_git_preflight(self, client, monkeypatch):
+        from manage.web import threads
+        from manage.web.state import _get_status
+
+        original = {"base_oid": "a" * 40, "head_oid": "b" * 40,
+                    "diff_digest": "c" * 64}
+        changed = {**original, "diff_digest": "d" * 64}
+        observed = [original]
+        message = "## Change review\n\n- file.py: keep this line\n"
+        run = threads._runs().create("thread-1", "general-agent", message,
+                                     review_snapshot=original)
+
+        class Lifecycle:
+            bound = False
+
+            def prepare(self, _timezone, *, terminalize_dirty=None):
+                observed[0] = changed
+
+        monkeypatch.setattr(threads.GitLifecycle, "acquire",
+                            lambda *_args, **_kwargs: nullcontext(Lifecycle()))
+        monkeypatch.setattr("manage.web.review._review_snapshot",
+                            lambda *_args: (observed[0], []))
+        monkeypatch.setattr(threads, "_get_domain_manager", lambda _tid: None)
+        monkeypatch.setattr(threads, "_get_sandbox_backend",
+                            lambda *_args, **_kwargs: pytest.fail("stale review reached model setup"))
+
+        threads._process_message("thread-1", message, _run=run)
+
+        saved = threads._runs().get("thread-1", run.id)
+        assert saved.status == "error"
+        assert saved.text == message
+        assert saved.error.startswith("Review changed while queued")
+        assert _get_status("thread-1")["pending_run_id"] == run.id
+        monkeypatch.setattr(threads, "_review_base", lambda _tid: None)
+        rendered = threads.render_thread(
+            "thread-1", SimpleNamespace(get_web_messages=lambda: [], get_messages=lambda: []))
+        assert "keep this line" in rendered
+        assert "refresh and re-anchor" in rendered
+        from manage.web.state import _set_status
+        _set_status("thread-1", "ready")
+        rendered_after_follower = threads.render_thread(
+            "thread-1", SimpleNamespace(
+                get_web_messages=lambda: [{"role": "user", "content": message}],
+                get_messages=lambda: [{"role": "user", "content": message}]))
+        assert "keep this line" in rendered_after_follower
+        assert "review not delivered" in rendered_after_follower
+
+    def test_review_never_supersedes_prior_approval_after_snapshot_check(self, client, monkeypatch):
+        from manage.web import threads
+
+        snapshot = {"base_oid": "a" * 40, "head_oid": "b" * 40,
+                    "diff_digest": "c" * 64}
+        run = threads._runs().create("thread-1", "general-agent", "## Change review\nline",
+                                     review_snapshot=snapshot)
+
+        class Lifecycle:
+            bound = False
+
+            def prepare(self, _timezone, *, terminalize_dirty=None):
+                pass
+
+            def require_sandbox(self, _sandbox):
+                pass
+
+            def cleanup_model(self, _generation):
+                pass
+
+        class Chat:
+            def pending_reply(self):
+                return {"text": "old draft"}
+
+            def resume_reply(self, _decision):
+                pytest.fail("review started a model-backed supersede")
+
+            def message(self, _text):
+                pytest.fail("review reached the model on an interrupted graph")
+
+        monkeypatch.setattr(threads.GitLifecycle, "acquire",
+                            lambda *_args, **_kwargs: nullcontext(Lifecycle()))
+        monkeypatch.setattr("manage.web.review._review_snapshot",
+                            lambda *_args: (snapshot, []))
+        monkeypatch.setattr(threads, "_get_domain_manager", lambda _tid: None)
+        monkeypatch.setattr(threads, "_get_sandbox_backend",
+                            lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(threads.BrowserManager, "reconcile_startup",
+                            lambda *_args: False)
+        monkeypatch.setattr(threads.MANAGER, "get", lambda *_args, **_kwargs: Chat())
+
+        threads._process_message("thread-1", run.text, _run=run)
+
+        saved = threads._runs().get("thread-1", run.id)
+        assert saved.status == "error"
+        assert "earlier reply awaits approval" in saved.error
+
+    def test_pending_review_cannot_interject_into_active_turn(self, client):
+        from manage.web import threads
+
+        snapshot = {"base_oid": "a" * 40, "head_oid": "b" * 40,
+                    "diff_digest": "c" * 64}
+        review = threads._runs().create("thread-1", "general-agent",
+                                            "## Change review\ncomment", review_snapshot=snapshot)
+        ordinary = threads._runs().create("thread-1", "general-agent", "ordinary")
+        pending = threads._pending_run_records("thread-1")
+        assert [message.id for message in pending] == [ordinary.id]
+        assert threads._runs().get("thread-1", review.id).status == "pending"
+
+    def test_failed_review_projection_is_bounded(self, client, monkeypatch):
+        from manage.web import threads
+        from manage.web.state import _set_status
+
+        snapshot = {"base_oid": "a" * 40, "head_oid": "b" * 40,
+                    "diff_digest": "c" * 64}
+        for index in range(5):
+            run = threads._runs().create("thread-1", "general-agent",
+                                         f"## Change review\nunique-{index}",
+                                         review_snapshot=snapshot)
+            threads._runs().claim("thread-1", run.id)
+            threads._runs().transition(
+                "thread-1", run.id, "error",
+                error="Review changed while queued; refresh and re-anchor")
+        _set_status("thread-1", "ready")
+        monkeypatch.setattr(threads, "_review_base", lambda _tid: None)
+        monkeypatch.setattr(threads, "_get_domain_manager", lambda _tid: None)
+
+        rendered = threads.render_thread(
+            "thread-1", SimpleNamespace(get_web_messages=lambda: [], get_messages=lambda: []))
+
+        assert rendered.count("review not delivered") == 3
+        assert "unique-0" not in rendered and "unique-1" not in rendered
+        assert "unique-2" in rendered and "unique-4" in rendered
+
+    def test_review_snapshot_cannot_be_dropped_by_corrupt_run_record(self, client):
+        from assist.run_service import Run
+        from manage.web import threads
+
+        snapshot = {"base_oid": "a" * 40, "head_oid": "b" * 40,
+                    "diff_digest": "c" * 64}
+        run = threads._runs().create("thread-1", "general-agent", "review",
+                                     review_snapshot=snapshot)
+        data = run.to_dict()
+        for invalid in (None, {}, {**snapshot, "head_oid": "not-an-oid"},
+                        {**snapshot, "unexpected": "x"}):
+            with pytest.raises(ValueError, match="invalid review snapshot"):
+                Run.from_dict({**data, "review_snapshot": invalid})
 
     def test_303_and_schedules_background_task(self, client, monkeypatch):
         scheduled: list[tuple[str, str]] = []

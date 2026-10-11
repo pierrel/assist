@@ -27,7 +27,8 @@ from starlette.concurrency import run_in_threadpool
 import anyio
 
 from assist.domain_manager import DomainManager
-from assist.git_sync import source_label
+from assist.git_sync import GitSyncError, identity, read_state, source_label
+from assist.local_git import LocalGit
 from assist.env import load_dev_env
 from assist.sandbox_manager import SandboxManager
 from assist.schedule.store import ScheduleStore
@@ -276,15 +277,15 @@ def _get_domain_manager(tid: str, domain: str | None = None) -> DomainManager | 
     For new threads pass *domain* (a git URL to clone).
     For existing threads pass None — DomainManager auto-detects the remote.
 
-    Passes the last 4 chars of ``tid`` as ``branch_suffix`` so per-thread
-    branches and post-merge re-branches are unambiguous when two threads
-    are created within the same UTC second.
+    Passes the complete generated ``tid`` as ``branch_suffix`` so per-thread
+    branches and post-merge re-branches are unambiguous across threads
+    created within the same UTC second.
     """
     if tid in DOMAIN_MANAGERS:
         return DOMAIN_MANAGERS[tid]
     twdir = MANAGER.thread_default_working_dir(tid)
     try:
-        dm = DomainManager(twdir, domain, branch_suffix=tid[-4:])
+        dm = DomainManager(twdir, domain, branch_suffix=tid)
         DOMAIN_MANAGERS[tid] = dm
         return dm
     except Exception:
@@ -304,8 +305,9 @@ def _get_sandbox_backend(tid: str, tz: str | None = None, *,
     Hidden child runs pass ``False`` and receive self-contained task briefs instead.
 
     Git reconciliation is owned by the queued writer, not sandbox construction;
-    resumed slices must not fast-forward their in-flight worktree. ``before_start``
-    records the Git flight fence immediately before the possibly ambiguous create.
+    resumed slices must not fast-forward their in-flight worktree. Scoped
+    sandbox authority records managed generations before Docker creation.
+    ``before_start`` remains an optional legacy caller callback.
     """
     work_dir = MANAGER.thread_default_working_dir(tid)
     return SandboxManager.get_sandbox_backend(
@@ -316,26 +318,54 @@ def _get_sandbox_backend(tid: str, tz: str | None = None, *,
         **({"before_start": before_start} if before_start is not None else {}))
 
 
-def _has_unmerged_changes(tid: str) -> bool:
-    """True if this thread's working tree has unmerged work vs main.
+def _review_base(tid: str, cache: dict[str, str | None] | None = None) -> str | None:
+    """Resolve bound Git review main from the configured source, never origin."""
+    binding = read_state(MANAGER.thread_dir(tid))
+    if binding is None:
+        if os.path.lexists(os.path.join(MANAGER.thread_default_working_dir(tid), ".git")):
+            raise GitSyncError("Git review source binding is unavailable")
+        return None
+    source = binding["source"]
+    configured = {item.strip() for item in os.getenv("ASSIST_DOMAINS", "").split(",")
+                  if item.strip()}
+    if source not in configured:
+        raise GitSyncError("Configured Git review source is unavailable")
+    if identity(MANAGER.thread_default_working_dir(tid))[0] != binding["branch"]:
+        raise GitSyncError("Thread review branch is unavailable")
+    if cache is not None:
+        if source in cache:
+            if cache[source] is None:
+                raise GitSyncError("Configured Git review main is unavailable")
+            return cache[source]
+        cache[source] = None
+    with LocalGit(source) as repository:
+        base = repository.remote_ref("main")
+    if base is None:
+        raise GitSyncError("Configured Git review main is unavailable")
+    if cache is not None:
+        cache[source] = base
+    return base
 
-    Used by the index page to surface an "unmerged" badge on threads
-    that finished a turn but haven't been merged yet.  Wraps
-    ``DomainManager.has_changes_vs_main`` and swallows any exception
-    (a transient git error here mustn't 500 the index page).
+
+def _has_unmerged_changes(tid: str, cache: dict[str, str | None] | None = None) -> bool | None:
+    """True for unmerged work, or None when a bound review base is unavailable.
+
+    Used by the index page for an "unmerged" badge. A bound source or
+    checkout error becomes a pending badge instead of false cleanliness.
     """
-    dm = _get_domain_manager(tid)
-    if not dm:
-        return False
     try:
-        return dm.has_changes_vs_main()
+        base = _review_base(tid, cache)
+        dm = _get_domain_manager(tid)
+        if not dm:
+            return None if base is not None else False
+        return dm.has_changes_vs_main(base)
     except Exception as e:
         # Log at debug so a future "why is the badge wrong?" debug
         # session has a paper trail without spamming the live tail.
         logging.getLogger(__name__).debug(
             "has_changes_vs_main failed for %s: %s", tid, e,
         )
-        return False
+        return None
 
 
 def _conflict_path(tid: str) -> str:

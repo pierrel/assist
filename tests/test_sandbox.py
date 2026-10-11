@@ -764,6 +764,38 @@ class TestSandboxManager(TestCase):
         with authority.fence(self.temp_dir, "git-turn") as state:
             self.assertEqual(state.lease["generations"], [container.id])
 
+    def test_git_unknown_create_keeps_scoped_lease_until_exact_scan(self):
+        from docker.errors import DockerException
+        from assist.browser import authority, manager as browser
+
+        test_path = os.path.join(self.temp_dir, "git-unknown", "domain")
+        os.makedirs(test_path)
+        authority.mark_new_thread(self.temp_dir, "git-unknown")
+        client = MagicMock()
+        client.containers.run.side_effect = DockerException("unknown create outcome")
+        with patch.object(SandboxManager, "_get_docker_client", return_value=client), \
+             patch.object(SandboxManager, "_ensure_egress_proxy_running"), \
+             patch.object(browser.BrowserManager, "reconcile_startup", return_value=True), \
+             patch.object(browser.BrowserManager, "confirm_owner_stopped", return_value=False):
+            self.assertIsNone(SandboxManager.get_git_verification_backend(
+                test_path, thread_scope=(self.temp_dir, "git-unknown"),
+                owner_run_id="claimed-run"))
+        with authority.fence(self.temp_dir, "git-unknown") as state:
+            self.assertEqual(state.lease["owner_run_id"], "claimed-run")
+            self.assertEqual(state.lease["generations"], [])
+        self.assertRegex(client.containers.run.call_args.kwargs["name"],
+                         r"^assist-turn-[0-9a-f]{32}$")
+        with patch.object(browser, "configured_directory", return_value=None), \
+             patch.object(browser, "_sandbox_generations", return_value={"unknown-id"}), \
+             patch.object(browser, "_bounded_cli", return_value=b""), \
+             patch.object(browser, "_kill_container_confirmed",
+                          side_effect=browser.BrowserUnavailable("stop unconfirmed")):
+            with self.assertRaisesRegex(browser.BrowserUnavailable, "stop unconfirmed"):
+                browser.BrowserManager.confirm_owner_stopped(
+                    self.temp_dir, "git-unknown", None, before_replacement=True)
+        with authority.fence(self.temp_dir, "git-unknown") as state:
+            self.assertEqual(state.lease["owner_run_id"], "claimed-run")
+
     def test_generic_workspaces_do_not_access_browser_authority(self):
         from docker.errors import DockerException
         from assist.browser import authority

@@ -225,6 +225,27 @@ def test_recovery_dispatches_committed_pending_run_without_status_duplicate(
     assert queued["run_id"] == run.id
 
 
+def test_pre_model_review_redispatch_keeps_accepted_snapshot(wired, monkeypatch):
+    tid, _ = wired
+    snapshot = {"base_oid": "a" * 40, "head_oid": "b" * 40,
+                "diff_digest": "c" * 64}
+    run = threads._create_run(tid, "## Change review\nimportant line",
+                              review_snapshot=snapshot)
+    run = threads._runs().claim(tid, run.id)
+    monkeypatch.setattr(threads, "_recovery_decision", lambda *_args: "redispatch")
+    submitted = []
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
+                        lambda run_id, _tid, **_kwargs: submitted.append(run_id))
+
+    threads._recover_run(run)
+
+    assert len(submitted) == 1
+    successor = threads._runs().get(tid, submitted[0])
+    assert successor.text == run.text
+    assert successor.review_snapshot == snapshot
+    assert not successor.resume
+
+
 @pytest.mark.parametrize("stage,fenced", [
     ("starting_sandbox", False), ("starting_sandbox", True), ("error", True),
 ])
@@ -828,7 +849,7 @@ def test_legacy_git_completed_projection_is_not_ready_after_restart(wired, monke
     _set_status(tid, "processing", pending_message="saved checkpoint answer")
     threads.queue_recovery_runs()
     assert _get_status(tid)["stage"] == "error"
-    assert "unverified" in _get_status(tid)["error"]
+    assert "Bound Git workspace is unavailable" in _get_status(tid)["error"]
     assert read_state(str(root / tid)) == before
 
 
@@ -1034,8 +1055,10 @@ def test_event_loop_stays_live_while_store_lock_is_held(wired, monkeypatch):
     The client MUST be context-managed: only ``__enter__`` pins ONE portal (one
     event loop) shared by both requests — the no-ctx form spins a fresh loop per
     request, which would pass even if the append regressed to running inline on
-    the loop (a vacuous test). The lifespan that entering runs is neutralized
-    (recovery scan / scheduler / manager close are process-level, not under test)."""
+    the loop (a vacuous test). Unrelated lifespan work is stubbed (recovery scan,
+    orphan reap, scheduler, manager close); the teardown verifier stays active.
+    An unrelated unsafe-shutdown prerequisite fails this test instead of parking
+    its TestClient forever."""
     import threading as _threading
     import time as _time
     from fastapi.testclient import TestClient
@@ -1050,6 +1073,11 @@ def test_event_loop_stays_live_while_store_lock_is_held(wired, monkeypatch):
     monkeypatch.setattr(threads, "start_scheduler", lambda: None)
     monkeypatch.setattr(threads, "stop_scheduler", lambda: None)
     monkeypatch.setattr(web.MANAGER, "close", lambda: None)
+
+    async def fail_unrelated_shutdown(error):
+        raise AssertionError("unrelated lifespan shutdown failed") from error
+
+    monkeypatch.setattr(st_mod, "_hold_unsafe_shutdown", fail_unrelated_shutdown)
 
     with TestClient(web.app) as client:   # ctx-managed: ONE portal/loop for both
         threads._runs()._lock.acquire()

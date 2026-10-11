@@ -608,11 +608,11 @@ class SandboxManager:
         """Create one per-turn sandbox from a named authority profile.
 
         ``include_assist_env`` is the line between ordinary Deep Agents work and
-        Pi preview work.  A Pi sandbox retains Docker's workspace and egress
+        Pi preview work. A Pi sandbox retains Docker's workspace and egress
         containment but receives no generic application environment or private
-        agent mount. ``before_start`` records a Git recovery fence immediately
-        before Docker create; earlier policy/setup failures create no new fence.
-        A preceding Git generation's retained fence is cleared only after verification.
+        agent mount. Scoped authority records ownership before Docker create;
+        an optional legacy ``before_start`` callback runs there too. A prior
+        managed generation is reconciled before replacement.
         Read-only Git verification omits persistent scratch/private mounts, so
         configured filters cannot mutate the checked worktree through an alias.
         ``thread_scope`` binds managed web/Pi callers to their
@@ -859,12 +859,15 @@ class SandboxManager:
 
     @classmethod
     def get_git_verification_backend(cls, work_dir: str, tz: str | None = None,
-                                     before_start=None):
+                                     before_start=None,
+                                     thread_scope: tuple[str, str] | None = None,
+                                     owner_run_id: str | None = None):
         """Credential-free read-only worktree, with ephemeral scratch and no `/agent`."""
         return cls._get_sandbox_backend(
             work_dir, tz, None, include_assist_env=False,
             include_egress_approvals=False, before_start=before_start,
-            readonly_workspace=True)
+            readonly_workspace=True, thread_scope=thread_scope,
+            owner_run_id=owner_run_id)
 
     # work_dir -> (map directory, egress-network IP, container generation)
     # for shell attribution or an explicit Pi no-grant marker.
@@ -957,8 +960,8 @@ class SandboxManager:
     def cleanup_verified(cls, work_dir: str, expected_container) -> None:
         """Confirm this generation exited before allowing host Git object reads.
 
-        Failed teardown retains the registry entry. The Git owner also persists
-        a quarantine so a process restart cannot silently permit another writer.
+        Failed teardown retains the registry entry. Scoped authority and the
+        Docker generation scan gate replacement even after a process restart.
         """
         from docker.errors import NotFound
         if expected_container is None or cls._containers.get(work_dir) is not expected_container:

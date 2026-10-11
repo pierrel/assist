@@ -1,0 +1,58 @@
+#+TITLE: Thread Git boundary successor
+#+DATE: 2026-10-10
+
+* Outcome
+
+Assist owns turn admission, the workspace writer fence, verified sandbox stop,
+and Run completion. The configured Git source owns commits, ancestry, and
+published refs. The phone uses its own Git credential and checkout; the phone
+API does not proxy Git objects or assert that a local commit was published.
+
+The bound web Merge & Push action selects the exact published thread tip,
+creates an ancestry-preserving merge commit in a disposable private bare
+repository, and pushes only =refs/heads/main= with an exact expected-main
+lease. It never rebases, checks out, resets, rebranches, or pushes the thread
+ref. A conflict or stale thread/main tip leaves both remote refs unchanged.
+If main publishes but the post-push local review-object import fails, the
+action reports that main is published and review objects are pending; it does
+not claim the whole action was rolled back.
+
+Bound web review resolves =main= from the server's configured source, not
+workspace =origin=. The page displays a diff at an exact base/head pair and
+includes their diff digest in the existing browser draft. Submission
+recomputes the source/main, head, and diff before Run acceptance. A changed
+snapshot returns 409. Saved line comments are retained as unanchored text,
+not silently attached to a new line number. Source or local-object failure
+shows review pending rather than a false clean diff/badge. An index request
+coalesces one bounded source query per configured repository.
+
+* Transport choice
+
+A disposable ordinary Git bundle round-trip succeeded, but replacing the
+active =_Store.snapshot= with bundles would require a credentialless export
+generation, verified stop, bounded host import, and often a second sandbox
+generation before the model. The isolated measurement in
+=/tmp/thread-git-bundle-simplicity-probe-20261010.md= found no net lifecycle
+simplification. The existing authenticated object snapshot stays in place.
+
+* Boundaries and checks
+
+The host private Git process strips workspace =GIT_*= variables and ignores
+system/global Git configuration. It fetches only the configured source and
+fixed refs. Worktree mutations stay inside the restricted sandbox, and a
+failed sandbox stop retains the Git hold. The exact main lease plus verified
+merge-commit parents prevents a successful main push from rewriting source
+history or the thread ref. This does not claim to repair every pre-existing
+host-side web diff or legacy CLI Git configuration sink.
+
+Disposable tests cover branch/index preservation, merge ancestry, conflict,
+concurrent main and phone pushes, post-push local import failure, exact review
+snapshot mismatch, untracked-content digest, and bounded source-query errors.
+Root owns combined runtime/Docker proof and deployment. No user worktree was
+reset, stashed, pruned, or used for this local check.
+
+* Historical supersessions
+
+This implementation document supersedes the branch-recreation description
+in =docs/2026-10-10-thread-git-simplification.org= for the bound web Merge &
+Push path only. That dated document remains a record of the earlier candidate.

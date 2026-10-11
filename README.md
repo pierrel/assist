@@ -107,14 +107,14 @@ where reliability is harder than with frontier APIs.
 
 - **Git domain integration.** Each thread works in its own git branch
   of a configured "domain" repo (your life repo, your work repo, etc.)
-  with edits isolated until you choose to merge. Multiple domains
-  coexist. When Merge & Push creates a fresh branch, the thread records that
-  local branch; it remains unpublished until a later successful
-  turn, while the previous published ref remains intact. Dirty files still
-  block the next turn rather than being committed by the merge handoff.
-  Old local clones with shared Git object inodes need an
-  [operator-verified detachment](docs/2026-10-01-legacy-git-object-detachment.org)
-  before source enrollment; the helper does not infer a source or change work.
+  with edits isolated until you choose to merge. Multiple domains coexist.
+  Fresh turns incorporate user-pushed branch commits; successful turns publish
+  normally without rewriting them. If a phone push races a server turn, the
+  server saves its commit on an `assist-result/<commit>` branch for a local
+  merge. Merge & Push uses only published main and thread commits in a private
+  repository. It imports the merged Git objects into the server checkout
+  before publication so the immediate web diff works, without moving either
+  working checkout or the thread branch.
 
 - **Multiple frontends, one Deep Agents core.** Web UI, CLI, and an Emacs
   integration share the standard agent runtime, memory, and domain repos.
@@ -412,8 +412,9 @@ sync the template with `make deploy-code` and run `make deploy-service`
 before restarting.
 
 An intentional restart waits for in-flight turns and schedule callbacks to
-finish, including owned sandbox teardown. Git transport supplies sidecar flight
-fencing and finalization. Accepted Runs not yet executing remain durable
+finish, including owned sandbox teardown. Scoped sandbox authority fences
+managed Git writer generations, and Git publication is verified before Run
+success. Accepted Runs not yet executing remain durable
 and are requeued after restart. Install the updated service unit before relying
 on this behavior. A long turn can leave `systemctl restart` waiting; inspect the
 running stop job and service log rather than forcing the process down. If a live
@@ -1095,54 +1096,40 @@ ASSIST_DOMAINS=/path/to/repo1.git,/path/to/repo2.git
 
 When enabled, each thread creates a git branch and can merge changes back to main.
 
-New Git-backed web threads bind their configured source and actual non-main
-thread branch outside the agent workspace. Before fresh turns, clean phone-pushed
-commits fast-forward locally. After successful Deep, Pi, or hidden child work,
-changes attempt a commit inside the restricted sandbox and the server attempts publication
-of only that thread branch. No-file-change turns also attempt publication; main
-and tags are not automatically pushed. Dirty, divergent, rewritten, or unavailable
-Git state holds for explicit reconciliation while preserving work and saved answers.
-For an uncancelled authenticated phone-created Git thread, successful initial
-publication makes its branch fetchable before the first model turn, even when
-that branch still points at main's commit. A later model failure does not
-undo that publication. Clone or publication failure can still leave no remote
-branch. Browser-created threads do not use this early publication path.
-When a clean preflight positively finds uncommitted work and its exact sandbox
-teardown is verified, the turn ends with a dirty-worktree hold, not a teardown
-uncertainty. Later queued turns check that work independently; none replays the
-failed prompt. Unverified cleanup retains the stronger teardown fence.
-If a hidden child yields its fair-scheduling slot, a new parent message waits
-until the child's sandbox teardown and Git workspace lock release. After safe
-teardown, it runs normally instead of failing on a transient lock.
-Local commit or verified teardown failure reports a turn error with the saved
-answer retained. Remote-only publication failure remains best-effort and does
-not discard a finalized local answer; the pending Git error/fences remain.
-After restart, a saved reply alone is not Git finalization proof. Completed
-visible Git-bound Deep/Pi recovery reports an explicit reconciliation error, preserves the
-answer/work/fences, and does not replay the model or reconstruct the commit.
-Legacy threads need an operator-verified binding and independent object storage.
-An operator can enroll an unbound or never-authorized clone with
-`assist.git_sync.enroll_legacy`, supplying a verified configured source and exact
-branch/commit pair after stopping its legacy writers. Enrollment does not change
-files, index or history, does not infer `origin`, and preserves dirty files for
-explicit reconciliation. A failed setup Run stays failed; send a new message
-after the preserved clone is enrolled and clean. Snapshots omit standard
-multi-pack-index and cruft `.mtimes` metadata, while verifying the imported objects.
-For a bound thread with a retained teardown fence, `assist.git_sync.recover_stopped`
-is an operator-only path. It requires exact source/state/branch approval, stopped
-writers, authenticated history/floors and read-only clean verification with exact
-verifier teardown. It clears only the teardown fence/error, preserving work,
-saved answers and suspended preflights. Dirty, divergent or unknown publication
-state remains held; recovery never replays a failed prompt or commits files.
-Snapshots enforce a 128 MiB per-file and authenticated-object limit. Raw staging
-is separately capped at 256 MiB so duplicate packs can be authenticated and
-compacted in the disposable private store without changing the thread repository
-or expiring unreachable objects. The final snapshot still must fit 128 MiB;
-genuinely oversized repositories remain unavailable. Incoming bundles exclude
-verified existing history and skip import when no objects are new. See
-`docs/2026-09-27-duplicate-pack-runtime.org` for the observed runtime correction.
-The phone uses normal Git credentials, not an Assist-web Git proxy; pending sync
-is reported through bounded `workspace.sync_error` metadata.
+New Git-backed web threads bind an approved source and non-main branch outside
+the agent workspace. Their branch is published immediately, even when it first
+points at main. Before each new visible turn the server fetches the branch and
+fast-forwards its clean checkout to include user-pushed commits. Hidden resumes
+and child handoffs retain their admitted base. Successful work is committed in
+the restricted sandbox and published by a private, config-clean host Git
+process with a normal non-force push. No-change turns verify publication too.
+When a phone push races a server turn, the completed server commit remains on
+`assist-result/<commit>` and the successful Run names it for manual merge.
+The server does not rebase, reset, force-push, or discard client work.
+
+Dirty or divergent server work, an unverified sandbox teardown, missing
+operator-verified binding, or uncertain publication holds before another model
+turn. The saved answer and files remain; recovery does not replay a completed
+model turn. Legacy enrollment and stopped-writer recovery remain operator-only
+with explicit source, history and writer-exclusion proof. They never infer a
+source from mutable `origin` or clear user edits. See the historical procedures
+in `docs/2026-09-27-thread-git-compatibility.org` and
+`docs/2026-09-27-web-git-operator-recovery.org`.
+
+The phone uses its own Git credential and persistent checkout, not an Assist
+Git-object proxy. Sending a message neither commits nor pulls phone work.
+After a successful Run, it fetches and fast-forwards only a clean local
+checkout; dirty or unpushed work remains for ordinary Git reconciliation.
+Merge & Push privately merges only published main and thread histories; it
+imports the merged objects for immediate web review but does not move either
+working checkout or the thread branch. Conflicts and
+competing main advances are visible failures for manual resolution.
+Web diff reviews bind their line comments to the displayed Git base, head,
+and diff. A queued review rechecks all three after its own Git preflight using
+bounded, helper-free Git reads; a diff above 100 files or 2 MiB is unavailable
+for review. If any identity changed, no model sees stale comments. The three
+most recent failed reviews show their saved text for refreshing and
+re-anchoring, even when a later turn replaces the error banner.
 
 ## Docker Sandbox
 

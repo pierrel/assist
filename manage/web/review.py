@@ -12,6 +12,7 @@ the submission flows through the affinity queue exactly like a regular
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import os
 import urllib.parse
@@ -20,7 +21,8 @@ from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
-from assist.domain_manager import Change
+from assist.domain_manager import Change, git_diff_main
+from assist.git_sync import GitSyncError, identity, read_state
 from assist.thread import Thread
 
 from manage.web import threads as _threads
@@ -31,6 +33,7 @@ from manage.web.state import (
     MANAGER,
     _get_domain_manager,
     _get_status,
+    _review_base,
     _thread_title,
 )
 
@@ -43,6 +46,26 @@ _REVIEW_HEADER = "## Change review"
 _REVIEW_OPENER = "I've reviewed the changes and have some comments. Please address them."
 
 
+def _review_snapshot(tid: str, dm) -> tuple[dict | None, list[Change]]:
+    """Return review changes; bound reviews include exact base/head/diff identity."""
+    base = _review_base(tid)
+    if base is None:
+        return None, dm.main_diff() if dm else []
+    binding = read_state(MANAGER.thread_dir(tid))
+    worktree = MANAGER.thread_default_working_dir(tid)
+    branch, head = identity(worktree)
+    if binding is None or branch != binding["branch"]:
+        raise GitSyncError("Thread review branch is unavailable")
+    changes = git_diff_main(worktree, base, head)
+    if identity(worktree) != (branch, head):
+        raise GitSyncError("Thread review changed while the diff was read")
+    canonical = json.dumps([(change.path, change.diff) for change in changes],
+                           ensure_ascii=False, separators=(",", ":")).encode()
+    snapshot = {"base_oid": base, "head_oid": head,
+                "diff_digest": hashlib.sha256(canonical).hexdigest()}
+    return snapshot, changes
+
+
 def _format_review_message(
     overall: str,
     comments: list[dict],
@@ -52,9 +75,9 @@ def _format_review_message(
 
     *comments* is the localStorage payload's ``lines`` list, one dict
     per per-line comment with keys ``file``, ``row``, ``lineText``,
-    ``comment``.  *changes* is the same ``main_diff()`` snapshot the
-    review page rendered, used to detect renames so the agent doesn't
-    have to guess that "foo.py" is the new name of "old_foo.py".
+    ``comment``. *changes* is a freshly recomputed diff used for rename
+    labels; bound-thread submission verifies it matches the displayed
+    snapshot before this formatter runs.
 
     Raises ValueError when both *overall* and *comments* are empty —
     the caller (``POST /thread/{tid}/review``) maps this to 400.
@@ -123,12 +146,13 @@ def render_review_page(tid: str, chat: Thread | None) -> str:
     busy = status.get("stage") in BUSY_STAGES
 
     diffs: list[Change] = []
+    snapshot = None
+    pending = False
     try:
         dm = _get_domain_manager(tid)
-        if dm:
-            diffs = dm.main_diff()
+        snapshot, diffs = _review_snapshot(tid, dm)
     except Exception:
-        pass
+        pending = True
 
     if not diffs:
         return f"""
@@ -142,7 +166,7 @@ def render_review_page(tid: str, chat: Thread | None) -> str:
           <div class="container">
             <div class="nav"><a href="/thread/{tid}">← Back to thread</a></div>
             <h1 style="font-size:1.3rem">Review</h1>
-            <p><em>No diff to review — the working tree matches main.</em></p>
+            <p><em>{'Review base pending or unavailable.' if pending else 'No committed or untracked diff to review.'}</em></p>
           </div>
         {_threads._PULL_TO_REFRESH_SCRIPT}
         </body></html>
@@ -204,6 +228,12 @@ def render_review_page(tid: str, chat: Thread | None) -> str:
               <div style="font-size:.8rem; color:#6b7280; margin-top:.5rem">
                 Click any line in the diff below to leave a comment.  Drafts persist in this browser until you submit.
               </div>
+              <div id="stale-draft" class="busy-note" hidden>
+                The diff changed since these comments were saved. Copy their text and
+                attach it to the current lines; old line numbers will not be reused.
+                <pre style="white-space:pre-wrap"></pre>
+                <button id="discard-stale" type="button">I have copied or re-anchored these comments</button>
+              </div>
             </div>
             <div class="diff-files">
               {files_html}
@@ -214,15 +244,17 @@ def render_review_page(tid: str, chat: Thread | None) -> str:
           (function() {{
             const tid = {json.dumps(tid)};
             const KEY = "assist:review:" + tid;
-            const SCHEMA_VERSION = 1;
-            let state = {{ schemaVersion: SCHEMA_VERSION, overall: "", lines: [], updatedAt: null }};
+            const SNAPSHOT = {json.dumps(snapshot)};
+            const SCHEMA_VERSION = 2;
+            let state = {{ schemaVersion: SCHEMA_VERSION, snapshot: SNAPSHOT,
+                           overall: "", lines: [], unanchored: [], updatedAt: null }};
 
             function load() {{
               try {{
                 const raw = localStorage.getItem(KEY);
                 if (!raw) return;
                 const parsed = JSON.parse(raw);
-                if (parsed && parsed.schemaVersion === SCHEMA_VERSION) state = parsed;
+                if (parsed && (parsed.schemaVersion === 1 || parsed.schemaVersion === 2)) state = parsed;
               }} catch (_) {{}}
             }}
             function save() {{
@@ -276,7 +308,8 @@ def render_review_page(tid: str, chat: Thread | None) -> str:
                   comment: text,
                 }});
               }});
-              state = {{ schemaVersion: SCHEMA_VERSION, overall, lines, updatedAt: new Date().toISOString() }};
+              state = {{ schemaVersion: SCHEMA_VERSION, snapshot: SNAPSHOT, overall, lines,
+                         unanchored: state.unanchored || [], updatedAt: new Date().toISOString() }};
               save();
               updateCount();
             }}
@@ -289,7 +322,20 @@ def render_review_page(tid: str, chat: Thread | None) -> str:
             }}
 
             function rehydrate() {{
+              if (SNAPSHOT && JSON.stringify(state.snapshot) !== JSON.stringify(SNAPSHOT)) {{
+                state.unanchored = [...(state.unanchored || []), ...(state.lines || [])];
+                state.lines = [];
+                state.snapshot = SNAPSHOT;
+                state.schemaVersion = SCHEMA_VERSION;
+                save();
+              }}
               document.getElementById("overall").value = state.overall || "";
+              const stale = document.getElementById("stale-draft");
+              if (state.unanchored && state.unanchored.length) {{
+                stale.hidden = false;
+                stale.querySelector("pre").textContent = state.unanchored.map(
+                  c => c.file + " (line " + c.row + "): " + c.comment).join("\n\n");
+              }}
               const rows = document.querySelectorAll(".diff-row[data-key]");
               for (const c of state.lines) {{
                 for (const row of rows) {{
@@ -312,7 +358,17 @@ def render_review_page(tid: str, chat: Thread | None) -> str:
               attachEditor(row);
             }});
             document.getElementById("overall").addEventListener("input", persistFromDOM);
+            document.getElementById("discard-stale").addEventListener("click", function() {{
+              state.unanchored = [];
+              document.getElementById("stale-draft").hidden = true;
+              save();
+            }});
             document.getElementById("reviewForm").addEventListener("submit", function(ev) {{
+              if (state.unanchored && state.unanchored.length) {{
+                ev.preventDefault();
+                alert("Copy and re-anchor the older line comments, or discard them before submitting.");
+                return;
+              }}
               const overall = document.getElementById("overall").value.trim();
               const lines = [];
               document.querySelectorAll(".comment-editor").forEach(ed => {{
@@ -332,7 +388,8 @@ def render_review_page(tid: str, chat: Thread | None) -> str:
                 alert("Add an overall comment or at least one line comment before submitting.");
                 return;
               }}
-              document.getElementById("payload").value = JSON.stringify({{overall, lines}});
+              document.getElementById("payload").value = JSON.stringify({{overall, lines,
+                ...(SNAPSHOT || {{}})}});
               // Don't clear localStorage here — if the POST fails (network
               // hiccup, 4xx), the user keeps their draft.  The thread
               // page wipes the key on the ``?reviewed=1`` redirect, which
@@ -369,8 +426,8 @@ async def post_review(tid: str, request: Request,
                       background_tasks: BackgroundTasks):
     """Accept the localStorage payload, format it as a thread message, queue it.
 
-    Uses the same durable run acceptance + serial executor as a regular
-    ``/message`` post.
+    Persists the accepted diff identity on the Run for a second check after
+    its own Git preflight, before any queued review reaches the model.
     """
     tdir = MANAGER.thread_dir(tid)
     if not os.path.isdir(tdir):
@@ -391,22 +448,26 @@ async def post_review(tid: str, request: Request,
                 data = json.loads(payload)
             except json.JSONDecodeError as exc:
                 raise ValueError("Malformed review payload") from exc
+            if not isinstance(data, dict):
+                raise ValueError("Malformed review payload")
             overall = ((data.get("overall") or "").strip()
                        if isinstance(data, dict) else "")
-            comments = data.get("lines") if isinstance(data, dict) else []
+            comments = data.get("lines")
             if not isinstance(comments, list):
                 comments = []
             if len(comments) > 200:
                 raise ValueError("Review has too many line comments")
             changes: list[Change] = []
+            dm = _get_domain_manager(tid)
             try:
-                dm = _get_domain_manager(tid)
-                if dm:
-                    changes = dm.main_diff()
-            except Exception:
-                pass
+                snapshot, changes = _review_snapshot(tid, dm)
+            except (GitSyncError, OSError, RuntimeError) as error:
+                raise HTTPException(status_code=409, detail="Review base is unavailable") from error
+            if snapshot and any(data.get(field) != value for field, value in snapshot.items()):
+                raise HTTPException(status_code=409, detail="Review changed; refresh and re-anchor comments")
             message = _format_review_message(overall, comments, changes)
-            return _threads._accept_message_run(tid, message)
+            return _threads._accept_message_run(
+                tid, message, review_snapshot=snapshot)
 
         run, busy = await anyio.to_thread.run_sync(
             format_and_accept, limiter=_threads._get_run_admission_limiter())

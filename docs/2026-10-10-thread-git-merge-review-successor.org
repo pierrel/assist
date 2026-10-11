@@ -1,0 +1,34 @@
+#+title: Thread Git review import and scope correction
+#+date: 2026-10-10
+
+* Main review after Merge & Push
+
+The user-gated merge is constructed in a disposable, configured-source-only Git
+repository. Before main is published, its bounded object bundle is imported by
+the restricted sandbox into the thread checkout. Verified sandbox teardown
+precedes the credentialed main push. Import moves no checkout ref, index entry,
+or working file. A failed import leaves published main unchanged. The final
+publication checks the checkout tip and the originally fetched thread ref,
+then reports success only when published main names the planned merge commit.
+This makes the immediately displayed =main...HEAD= review base readable in the
+checkout after a successful merge. Independent later remote-main pushes may
+still require a subsequent ordinary preflight before the checkout has that
+newer base. The thread-ref read and main push are two ordinary Git operations,
+not an atomic cross-ref transaction: a phone push between them may publish a
+newer thread tip after the merge's observed snapshot.
+
+* Active preflight and initializer scope
+
+The current clean gate runs before remote comparison. A dirty Git checkout is
+held even if its local and published branch tips are equal; it is not admitted
+to another model turn. Initial publication applies to a newly authorized
+configured-source Git domain thread, not only a phone-originated thread.
+
+* Historical supersessions
+
+- =2026-10-10-thread-git-simplification.org=, “Numbered construction” item 1:
+  the sentence allowing ordinary dirty files at an equal remote tip is
+  superseded by the unconditional clean preflight above.
+- =2026-10-10-thread-git-simplification.org=, “Numbered construction” item 3:
+  the phone-only initializer scope is superseded by the configured-source Git
+  domain scope above.
