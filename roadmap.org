@@ -607,6 +607,15 @@ emitted alongside the prose, WITHOUT over-mapping non-spatial replies (a
 regression spot-check on plain Q&A).
 
 * Scheduling
+** TODO Default missing scheduling timezone to Pacific on phone and desktop
+Short term: when no timezone is supplied with a phone or desktop message, use
+=America/Los_Angeles= for scheduling. Preserve an explicitly supplied timezone.
+Use the IANA timezone so Pacific daylight-saving changes follow the date.
+** TODO Send location and timezone context from phone, with desktop support to decide
+Long term: implement the client-to-Assist location/timezone path for at least the
+phone. Decide whether desktop should provide the same context. Carry the supplied
+message context into scheduling and recovered work; retain the Pacific fallback
+when none is available.
 ** DONE Preserve the user's timezone through asynchronous task completion
 When a schedule setup first needs local context, the main agent creates the
 schedule on the context task's completion wake rather than the original user
