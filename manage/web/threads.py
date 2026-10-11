@@ -2737,6 +2737,10 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
     finally:
         if git_lifecycle is None or not git_lifecycle.bound:
             cleanup_child_sandbox()
+        # Children own the parent's sandbox authority. Wake its held messages
+        # only after sandbox cleanup and the child's queue/Git scopes exit.
+        if any(browser_reset_owed(item) for item in _runs().list(run.parent_thread_id)):
+            _queue_browser_revocation(run.parent_thread_id)
     if queue_handle is not None:
         THREAD_QUEUE.pop_hold(queue_handle)
     if duplicate:
@@ -2848,7 +2852,7 @@ def _complete_child_handoff(run: Run) -> Run | None:
     )
     if existing is not None:
         if existing.status == "pending":
-            _RESUME_SCHEDULER.submit(existing.id, existing.thread_id)
+            _dispatch_pending_after(run.parent_thread_id)
         return existing
     try:
         parent = _runs().get(run.parent_thread_id, run.parent_run_id)
@@ -2873,7 +2877,7 @@ def _complete_child_handoff(run: Run) -> Run | None:
             MANAGER.hard_delete(run.thread_id)
             return None
         raise
-    _RESUME_SCHEDULER.submit(successor.id, successor.thread_id)
+    _dispatch_pending_after(run.parent_thread_id)
     return successor
 
 

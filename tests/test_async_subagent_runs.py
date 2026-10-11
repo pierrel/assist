@@ -312,7 +312,9 @@ def test_six_tools_round_trip_through_real_private_asgi(monkeypatch, tmp_path):
 
 def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
         monkeypatch, tmp_path):
-    submitted, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    submitted, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    threads._runs().claim("parent", parent.id)
+    threads._runs().transition("parent", parent.id, "success", result="started task")
     child = SERVICE.create_run(
         "sub-stable", "context-agent", "inspect files", metadata=metadata)
     threads._runs().claim(child.thread_id, child.id)
@@ -333,13 +335,15 @@ def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
     task = SERVICE.get_thread("sub-stable")["values"]["async_task"]
     assert task["status"] == "success"
     assert task["result"] == "child result"
-    assert (wakes[0].id, "parent", {}) in submitted
+    assert (wakes[0].id, "parent", {"user_priority": False}) in submitted
 
 
 def test_terminal_task_recovery_reuses_a_legacy_completion_wake(
         monkeypatch, tmp_path):
     """Prompt wording may change without breaking durable wake recovery."""
-    submitted, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    submitted, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    threads._runs().claim("parent", parent.id)
+    threads._runs().transition("parent", parent.id, "success", result="started task")
     child = SERVICE.create_run(
         "sub-stable", "context-agent", "inspect files", metadata=metadata)
     threads._runs().claim(child.thread_id, child.id)
@@ -356,7 +360,7 @@ def test_terminal_task_recovery_reuses_a_legacy_completion_wake(
     wake = threads._complete_child_handoff(child)
 
     assert wake is not None and wake.id == legacy.id
-    assert (legacy.id, "parent", {}) in submitted
+    assert (legacy.id, "parent", {"user_priority": False}) in submitted
     assert len([
         run for run in threads._runs().list("parent")
         if run.dispatch_key == legacy.dispatch_key
