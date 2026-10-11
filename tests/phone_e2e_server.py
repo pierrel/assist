@@ -30,6 +30,7 @@ from manage.web.protocol_service import SERVICE
 GENERATIONS = {}
 HOLDS = {}
 RESET_REFUSALS = []
+_ANY_GENERATION = object()
 
 
 class Shell:
@@ -62,15 +63,25 @@ def backend(worktree, *, thread_scope=None, owner_run_id=None, **kwargs):
     return Shell(worktree, thread_scope, owner_run_id)
 
 
-def cleanup(worktree, expected=None):
+def cleanup(worktree, expected=_ANY_GENERATION):
     shell = GENERATIONS.get(worktree)
-    if shell is None or expected is not None and expected is not shell.container:
+    if shell is None or expected is None or (
+            expected is not _ANY_GENERATION and expected is not shell.container):
         return
     GENERATIONS.pop(worktree)
     if shell.owner:
         with authority.fence(*shell.scope) as record:
             record.remove_generation(shell.owner, shell.container.id)
             record.clear(shell.owner)
+
+
+def cleanup_verified(worktree, expected):
+    """Reject absent or changed simulator generations before host Git reads."""
+    if expected is None or getattr(GENERATIONS.get(worktree), "container", None) is not expected:
+        raise RuntimeError("Git sandbox generation is unavailable")
+    cleanup(worktree, expected)
+    if worktree in GENERATIONS:
+        raise RuntimeError("Git sandbox generation changed during teardown")
 
 
 def deterministic_thread(tid, working_dir=None, sandbox_backend=None,
@@ -122,7 +133,7 @@ def install():
     SandboxManager.current_container = staticmethod(
         lambda worktree: getattr(GENERATIONS.get(worktree), "container", None))
     SandboxManager.cleanup = staticmethod(cleanup)
-    SandboxManager.cleanup_verified = staticmethod(cleanup)
+    SandboxManager.cleanup_verified = staticmethod(cleanup_verified)
     SandboxManager.reap_orphans = staticmethod(lambda root: None)
     SandboxManager.cleanup_all = staticmethod(lambda: [cleanup(w) for w in list(GENERATIONS)])
     SandboxManager._ensure_egress_proxy_bounded = staticmethod(lambda: None)
