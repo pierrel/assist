@@ -26,6 +26,7 @@ _PACK_FILE = re.compile(
 )
 _INFO_FILE = {"packs", "commit-graph"}
 _SPLIT_GRAPH_FILE = re.compile(r"graph-[0-9a-f]{40}\.graph\Z")
+_BITMAP_REF_TIPS = re.compile(r"bitmap-ref-tips_[A-Za-z0-9]{6}\Z")
 _OBJECT_LIMIT = 2 * 1024 * 1024 * 1024
 _FILE_LIMIT = 20_000
 _GIT_TIMEOUT = 30
@@ -34,7 +35,7 @@ _BUNDLE_LIMIT = 128 * 1024 * 1024
 
 
 def _validated_objects(worktree: str) -> str:
-    """Admit standard, independent Git objects; never follow alternates or links."""
+    """Admit independent Git objects and inert maintenance files; never follow links."""
     total = count = 0
     deadline = time.monotonic() + _GIT_TIMEOUT
 
@@ -44,7 +45,7 @@ def _validated_objects(worktree: str) -> str:
         if count > _FILE_LIMIT or time.monotonic() > deadline:
             raise GitSyncError("Git object verification exceeded its bound")
 
-    def regular_file(name: str, directory: int) -> None:
+    def regular_file(name: str, directory: int) -> int:
         nonlocal total
         info = os.stat(name, dir_fd=directory, follow_symlinks=False)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -52,6 +53,7 @@ def _validated_objects(worktree: str) -> str:
         total += info.st_size
         if total > _OBJECT_LIMIT:
             raise GitSyncError("Git objects exceed the host operation limit")
+        return info.st_size
 
     with _directory(worktree) as root, _directory(".git", parent=root) as metadata, \
             _directory("objects", parent=metadata) as objects:
@@ -60,6 +62,12 @@ def _validated_objects(worktree: str) -> str:
             raise GitSyncError("Git object directory is unavailable")
         for entry in os.scandir(objects):
             group = entry.name
+            if group == "maintenance.lock" or _BITMAP_REF_TIPS.fullmatch(group):
+                bounded_entry()
+                size = regular_file(group, objects)
+                if group == "maintenance.lock" and size:
+                    raise GitSyncError("Unsupported Git object entry")
+                continue
             if group not in {"pack", "info"} and not _OBJECT_DIR.fullmatch(group):
                 raise GitSyncError("Unsupported Git object directory")
             with _directory(group, parent=objects) as directory:
