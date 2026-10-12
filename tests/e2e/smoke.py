@@ -39,6 +39,8 @@ def main():
     replay = api('POST', '/api/v1/phone/threads', body, key)
     if (accepted['thread_id'], accepted['run_id']) != (replay['thread_id'], replay['run_id']):
         raise RuntimeError('Idempotent create changed the durable Run identity')
+    if accepted.get('replayed') is not False or replay.get('replayed') is not True:
+        raise RuntimeError('Idempotent create returned incorrect replay flags')
     path = '/api/v1/phone/threads/' + accepted['thread_id']
     deadline = time.monotonic() + 90
     while time.monotonic() < deadline:

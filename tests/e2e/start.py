@@ -229,6 +229,9 @@ class Fixture:
             with opener.open(request, timeout=5) as response:
                 return json.load(response)
         self.wait('real Assist HTTP readiness', ready)
+        self.wait('synthetic Git repository', lambda: self.docker('exec', '--user', '1000:1000',
+            self.name + '-assist', 'git', '-c', 'core.sshCommand=ssh -F /home/test/.ssh/config',
+            'ls-remote', '--exit-code', SOURCE, 'refs/heads/main'))
         descriptor = {'owner': self.name, 'label': LABEL, 'url': url,
             'container_url': 'https://assist:8443', 'network': self.network,
             'server_container': self.name + '-assist', 'repo_source': SOURCE,

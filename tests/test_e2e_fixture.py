@@ -1,4 +1,4 @@
-"""Observed source privacy and interrupted-cleanup regressions; no Docker required."""
+"""Fixture error/receipt, source privacy and cleanup regressions; no Docker required."""
 import argparse
 import json
 from pathlib import Path
@@ -10,6 +10,39 @@ from tests.e2e.start import Fixture, LABEL
 
 
 class FixtureTests(unittest.TestCase):
+    def test_smoke_rejects_incorrect_idempotent_replay_flags(self):
+        from io import BytesIO
+        from unittest.mock import Mock
+        from tests.e2e import smoke
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'token').write_text('synthetic-token')
+            fixture = root / 'fixture.json'
+            fixture.write_text(json.dumps({'url': 'https://fixture', 'credentials': {
+                'token': str(root / 'token'), 'ca.crt': str(root / 'ca.crt')}}))
+            for flags in [(True, True), (False, False)]:
+                with self.subTest(flags=flags):
+                    creates = iter(flags)
+                    def respond(request, **kwargs):
+                        if request.get_method() == 'POST':
+                            result = {'thread_id': 'thread', 'run_id': 'run', 'replayed': next(creates)}
+                        elif request.full_url.endswith('/threads'):
+                            result = {'repositories': [{'repo_key': 'repo'}]}
+                        elif request.full_url.endswith('/events'):
+                            return BytesIO(b'event: terminal\ndata: {"status":"success"}\n\n')
+                        elif request.full_url.endswith('/runs/run'):
+                            result = {'status': 'success'}
+                        else:
+                            result = {'messages': [{'text': 'Saved http-smoke.txt'}]}
+                        return BytesIO(json.dumps(result).encode())
+                    opener = Mock()
+                    opener.open.side_effect = respond
+                    with (patch('sys.argv', ['smoke', '--fixture', str(fixture)]),
+                          patch('tests.e2e.smoke.ssl.create_default_context', return_value=None),
+                          patch('tests.e2e.smoke.urllib.request.build_opener', return_value=opener)):
+                        with self.assertRaisesRegex(RuntimeError, 'incorrect replay flags'):
+                            smoke.main()
+
     def test_failed_backend_read_is_not_a_successful_model_result(self):
         from types import SimpleNamespace
         from unittest.mock import Mock
