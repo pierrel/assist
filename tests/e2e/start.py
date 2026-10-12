@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 from pathlib import Path
 import resource
@@ -140,7 +141,13 @@ class Fixture:
                         timeout=180, preexec_fn=limit_archive)
             archives.append(archive)
         self.network_attempted = True
-        self.docker('network', 'create', '--internal', '--label', LABEL + '=' + self.name, self.network)
+        self.docker('network', 'create', '--internal', '--opt',
+                    'com.docker.network.bridge.gateway_mode_ipv4=nat',
+                    '--label', LABEL + '=' + self.name, self.network)
+        config = json.loads(self.docker('network', 'inspect', self.network))[0]['IPAM']['Config'][0]
+        addresses = (str(address) for address in ipaddress.ip_network(config['Subnet']).hosts()
+                     if str(address) != config['Gateway'])
+        server_ip, git_ip = next(addresses), next(addresses)
         self.volume_attempted = True
         self.docker('volume', 'create', '--label', LABEL + '=' + self.name, self.volume)
         private = temporary / 'secrets'
@@ -157,7 +164,7 @@ class Fixture:
             '-addext', 'keyUsage=critical,keyCertSign,cRLSign')
         self.command('openssl', 'req', '-newkey', 'rsa:2048', '-nodes',
             '-keyout', str(private / 'server.key'), '-out', str(private / 'server.csr'), '-subj', '/CN=assist')
-        (private / 'extensions').write_text('subjectAltName=DNS:assist,DNS:localhost,IP:127.0.0.1\n'
+        (private / 'extensions').write_text('subjectAltName=DNS:assist,DNS:localhost,IP:127.0.0.1,IP:' + server_ip + '\n'
             'extendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature,keyEncipherment\n'
             'basicConstraints=critical,CA:FALSE\nauthorityKeyIdentifier=keyid,issuer\n')
         self.command('openssl', 'x509', '-req', '-in', str(private / 'server.csr'),
@@ -171,10 +178,10 @@ class Fixture:
         (private / 'remotes.json').write_text(json.dumps({key: SOURCE}))
         for file in private.iterdir():
             file.chmod(0o600)
-        self.create('git', 'python', 'tests/e2e/git.py')
+        self.create('git', 'python', 'tests/e2e/git.py', extra=('--ip', git_ip))
         self.create('assist', 'sh', 'tests/e2e/boot.sh', extra=(
             '--privileged', '--mount', 'type=volume,source=' + self.volume + ',target=/var/lib/docker',
-            '--publish', '127.0.0.1::8443', '-e', 'ASSIST_THREADS_DIR=/state/threads',
+            '--ip', server_ip, '-e', 'ASSIST_THREADS_DIR=/state/threads',
             '-e', 'ASSIST_DOMAINS=' + SOURCE, '-e', 'ASSIST_MODEL_URL=http://model.invalid:1/v1'))
         for file, service, destination in (
             ('authorized_keys', 'git', '/home/test/.ssh/authorized_keys'),
@@ -212,8 +219,7 @@ class Fixture:
             self.docker('exec', self.name + '-assist', 'rm', '/runtime/images.tar')
             archive.unlink()
         self.docker('exec', self.name + '-assist', 'touch', '/runtime/images-ready')
-        port = self.docker('port', self.name + '-assist', '8443/tcp').strip()
-        url = 'https://' + port
+        url = 'https://' + server_ip + ':8443'
         context_tls = ssl.create_default_context(cafile=str(private / 'ca.crt'))
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
                                              urllib.request.HTTPSHandler(context=context_tls))

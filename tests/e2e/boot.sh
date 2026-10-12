@@ -5,7 +5,7 @@ mkdir -p /run/fixture-docker /var/lib/docker
 unset DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_CONTEXT
 dockerd-entrypoint.sh dockerd --storage-driver=overlay2 --host="$DOCKER_HOST" \
   --data-root=/var/lib/docker --exec-root=/run/fixture-docker \
-  --pidfile=/run/fixture-docker/daemon.pid > /runtime/docker.log 2>&1 &
+  --pidfile=/run/fixture-docker/docker.pid > /runtime/docker.log 2>&1 &
 daemon_pid=$!
 server_pid=
 cleanup() {
