@@ -3140,7 +3140,7 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
 
 
 def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
-    """Queue unfinished approval chains first, then user turns and other FIFO work."""
+    """Queue approvals, paused head successors, user turns, then other FIFO work."""
     runs = _runs().list(tid)
     if any(run.status == "running" for run in runs):
         return
@@ -3165,10 +3165,13 @@ def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
             return
         # Pre-record reply approvals retain their existing routing contract.
         approval = next((run for run in pending_runs if run.resume_decision is not None), None)
-    if (approval is None and status.get("stage") == "paused"
-            and any(run.status == "interrupted" for run in runs)):
-        return
-    selected = approval or user or pending_runs[0]
+    recovery = None
+    if status.get("stage") == "paused":
+        interrupted_work = {run.work_id for run in runs if run.status == "interrupted"}
+        recovery = next((run for run in pending_runs if run.work_id in interrupted_work), None)
+        if approval is None and recovery is None and interrupted_work:
+            return
+    selected = approval or recovery or user or pending_runs[0]
     if status.get("stage") in {"initializing", "cloning"}:
         _INITIALIZATION_SCHEDULER.submit(
             selected.id, tid, status.get("domain") or None)

@@ -225,6 +225,80 @@ def test_recovery_dispatches_committed_pending_run_without_status_duplicate(
     assert queued["run_id"] == run.id
 
 
+@pytest.mark.parametrize("decision", ["resume", "redispatch"])
+@pytest.mark.parametrize("consume_before_reset", [False, True])
+def test_restart_reset_requeues_head_successor_before_accepted_follower(
+        wired, monkeypatch, decision, consume_before_reset):
+    """A reset can consume the first recovery wake, but must release the same head."""
+    from assist.browser.manager import BrowserManager
+    from assist.thread_queue import ThreadAffinityQueue
+    from manage.web.state import _recover_interrupted_threads
+
+    tid, _ = wired
+    scheduler = threads._ResumeScheduler()
+    monkeypatch.setattr(threads, "_RESUME_SCHEDULER", scheduler)
+    monkeypatch.setattr(threads, "THREAD_QUEUE", ThreadAffinityQueue())
+    monkeypatch.setattr(threads, "_queue_browser_revocation", lambda _tid: None)
+    monkeypatch.setattr(threads, "_recovery_decision", lambda *_args: decision)
+    # The interrupted process has no live browser or Docker generation.
+    monkeypatch.setattr(BrowserManager, "current_session", lambda _tid: None)
+    monkeypatch.setattr(BrowserManager, "confirm_owner_stopped", lambda *_args: False)
+    calls = []
+    _wire_chat(monkeypatch, tid, calls)
+    head = threads._create_run(tid, "head", user_origin=True)
+    threads._runs().claim(tid, head.id)
+    follower = threads._create_run(tid, "follower", user_origin=True,
+                                  revocation_pending=True, browser_reset_run_id=head.id)
+    _set_status(tid, "processing", pending_message="head", pending_run_id=head.id)
+
+    _recover_interrupted_threads()
+    assert _get_status(tid)["stage"] == "paused"
+    queued = scheduler._q.get_nowait()
+    assert queued["run_id"] == head.id
+    threads._execute_run(head.id, tid)
+    successor = threads._runs().list(tid)[-1]
+    assert successor.id != head.id and successor.work_id == head.work_id
+    assert successor.user_event_id == head.user_event_id
+    assert threads._runs().get(tid, head.id).status == "interrupted"
+    if consume_before_reset:
+        assert scheduler._q.get_nowait()["run_id"] == successor.id
+        threads._execute_run(successor.id, tid)
+        assert scheduler._q.empty() and calls == []
+        assert threads._runs().get(tid, successor.id).status == "pending"
+        assert threads._runs().get(tid, follower.id).status == "revocation_pending"
+
+    assert threads._drain_held_browser_events(tid)
+    assert threads._runs().get(tid, follower.id).status == "pending"
+    queued = scheduler._q.get_nowait()
+    assert queued["run_id"] == successor.id
+    assert scheduler._q.empty()  # A retained notification is deduplicated.
+    threads._execute_run(successor.id, tid)
+    assert calls == ([("resume",)] if decision == "resume" else [("message", "head")])
+    assert threads._runs().get(tid, successor.id).status == "success"
+    assert scheduler._q.get_nowait()["run_id"] == follower.id
+    threads._execute_run(follower.id, tid)
+    assert calls[-1] == ("message", "follower") and len(calls) == 2
+    assert threads._runs().get(tid, follower.id).status == "success"
+    assert scheduler._q.empty()
+
+
+def test_paused_interrupted_head_without_successor_keeps_follower_held(wired, monkeypatch):
+    """A follower alone does not authorize resuming or bypassing a paused head."""
+    tid, _ = wired
+    scheduler = threads._ResumeScheduler()
+    monkeypatch.setattr(threads, "_RESUME_SCHEDULER", scheduler)
+    head = threads._create_run(tid, "head")
+    threads._runs().claim(tid, head.id)
+    threads._runs().transition(tid, head.id, "interrupted")
+    follower = threads._create_run(tid, "follower")
+    _set_status(tid, "paused", pending_message="head", pending_run_id=head.id)
+
+    threads._dispatch_pending_after(tid)
+
+    assert scheduler._q.empty()
+    assert threads._runs().get(tid, follower.id).status == "pending"
+
+
 def test_pre_model_review_redispatch_keeps_accepted_snapshot(wired, monkeypatch):
     tid, _ = wired
     snapshot = {"base_oid": "a" * 40, "head_oid": "b" * 40,
