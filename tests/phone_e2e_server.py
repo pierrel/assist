@@ -37,13 +37,13 @@ class Shell:
     def __init__(self, worktree, scope, owner):
         self.worktree, self.scope, self.owner = worktree, scope, owner
         self.container = SimpleNamespace(id=uuid.uuid4().hex)
-        GENERATIONS[worktree] = self
         if owner:
             with authority.fence(*scope) as record:
                 sequence = max((r.admission_sequence for r in threads._runs().list(scope[1])
                                 if r.user_event_id == r.id), default=0)
                 record.begin(owner, sequence)
                 record.add_generation(owner, self.container.id)
+        GENERATIONS[worktree] = self
 
     def call(self, operation, **data):
         response = requests.post("http://shell:8080/" + operation,
@@ -68,11 +68,12 @@ def cleanup(worktree, expected=_ANY_GENERATION):
     if shell is None or expected is None or (
             expected is not _ANY_GENERATION and expected is not shell.container):
         return
-    GENERATIONS.pop(worktree)
     if shell.owner:
         with authority.fence(*shell.scope) as record:
             record.remove_generation(shell.owner, shell.container.id)
             record.clear(shell.owner)
+    if GENERATIONS.get(worktree) is shell:
+        GENERATIONS.pop(worktree)
 
 
 def cleanup_verified(worktree, expected):

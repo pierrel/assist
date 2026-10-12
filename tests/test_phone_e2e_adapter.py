@@ -1,4 +1,5 @@
 """Pin the simulator's observed exact-generation cleanup contracts."""
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -8,7 +9,7 @@ from tests import phone_e2e_server as adapter
 
 @pytest.fixture
 def shell(monkeypatch):
-    shell = SimpleNamespace(container=object(), owner=None)
+    shell = SimpleNamespace(container=SimpleNamespace(id="fixture-generation"), owner=None)
     monkeypatch.setattr(adapter, "GENERATIONS", {"/fixture": shell})
     return shell
 
@@ -51,4 +52,51 @@ def test_verified_cleanup_rejects_replacement_during_teardown(shell, monkeypatch
     monkeypatch.setattr(adapter, "cleanup", replace)
     with pytest.raises(RuntimeError, match="generation changed during teardown"):
         adapter.cleanup_verified("/fixture", shell.container)
+    assert adapter.GENERATIONS["/fixture"] is replacement
+
+
+@pytest.mark.parametrize("failure", ["begin", "add_generation"])
+def test_failed_authority_setup_preserves_prior_registry_generation(shell, monkeypatch, failure):
+    def operation(name):
+        def run(*args):
+            if name == failure:
+                raise OSError("authority write failed")
+        return run
+
+    @contextmanager
+    def fence(*args):
+        yield SimpleNamespace(begin=operation("begin"), add_generation=operation("add_generation"))
+
+    monkeypatch.setattr(adapter.authority, "fence", fence)
+    monkeypatch.setattr(adapter.threads, "_runs", lambda: SimpleNamespace(list=lambda tid: []))
+    with pytest.raises(OSError, match="authority write failed"):
+        adapter.Shell("/fixture", ("/scope", "thread"), "owner")
+    assert adapter.GENERATIONS["/fixture"] is shell
+
+
+def test_failed_authority_teardown_retains_generation_obligation(shell, monkeypatch):
+    shell.owner, shell.scope = "owner", ("/scope", "thread")
+
+    @contextmanager
+    def fence(*args):
+        raise OSError("authority write failed")
+        yield
+
+    monkeypatch.setattr(adapter.authority, "fence", fence)
+    with pytest.raises(OSError, match="authority write failed"):
+        adapter.cleanup_verified("/fixture", shell.container)
+    assert adapter.GENERATIONS["/fixture"] is shell
+
+
+def test_cleanup_preserves_replacement_registered_during_authority_teardown(shell, monkeypatch):
+    shell.owner, shell.scope = "owner", ("/scope", "thread")
+    replacement = SimpleNamespace(container=object(), owner=None)
+
+    @contextmanager
+    def fence(*args):
+        yield SimpleNamespace(remove_generation=lambda *args: None,
+                              clear=lambda owner: adapter.GENERATIONS.update({"/fixture": replacement}))
+
+    monkeypatch.setattr(adapter.authority, "fence", fence)
+    adapter.cleanup("/fixture", shell.container)
     assert adapter.GENERATIONS["/fixture"] is replacement
