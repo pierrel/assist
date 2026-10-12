@@ -47,7 +47,10 @@ def deterministic_agent(model, working_dir, checkpointer=None, sandbox_backend=N
                 raise RuntimeError(responses[0].error)
             result = 'Saved ' + filename
         elif text.startswith('Read '):
-            result = sandbox_backend.execute('cat -- ' + shlex.quote('/workspace/' + text[5:])).output
+            response = sandbox_backend.execute('cat -- ' + shlex.quote('/workspace/' + text[5:]))
+            if response.exit_code != 0:
+                raise RuntimeError(response.output)
+            result = response.output
         else:
             result = 'Completed: ' + text
         return {'messages': [AIMessage(content=result)]}

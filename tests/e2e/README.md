@@ -6,6 +6,9 @@ Run from an Assist checkout with Docker, Git, SSH-keygen and OpenSSL installed:
 python tests/e2e/start.py --logs /tmp/assist-fixture-new --seconds 600
 ```
 
+For the companion phone client's 1200-second workflow, start this fixture with
+`--seconds 1800` and launch the client promptly after the smoke.
+
 The foreground launcher prints a private bridge HTTPS URL and writes a private
 `fixture.json`. In another terminal, without Emacs:
 

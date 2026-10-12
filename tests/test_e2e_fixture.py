@@ -10,6 +10,17 @@ from tests.e2e.start import Fixture, LABEL
 
 
 class FixtureTests(unittest.TestCase):
+    def test_failed_backend_read_is_not_a_successful_model_result(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from langchain_core.messages import HumanMessage
+        from tests.e2e import server
+        backend = Mock()
+        backend.execute.return_value = SimpleNamespace(exit_code=1, output='cat: missing-file')
+        graph = server.deterministic_agent(None, '/fixture', sandbox_backend=backend)
+        with self.assertRaisesRegex(RuntimeError, 'missing-file'):
+            graph.invoke({'messages': [HumanMessage(content='Read missing-file')]})
+
     def test_snapshot_excludes_environment_and_untracked_credentials(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
