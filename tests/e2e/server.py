@@ -6,6 +6,7 @@ import shlex
 import threading
 import uuid
 
+from docker.errors import NotFound
 from fastapi import APIRouter, Request
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage
@@ -14,7 +15,7 @@ from langgraph.graph import StateGraph, MessagesState, START, END
 import assist.thread as thread_module
 import assist.thread_manager as manager_module
 from assist.browser import authority
-from assist.browser.manager import _sandbox_generations
+from assist.sandbox_manager import SandboxManager
 from manage.web import app, state, threads
 from manage.web.phone_api import _authenticate
 from manage.web.protocol_service import SERVICE
@@ -72,6 +73,16 @@ def inspect_state(tid: str, request: Request):
     _authenticate(request)
     with authority.fence(state.MANAGER.root_dir, tid) as record:
         lease = record.lease
+    container = SandboxManager.current_container(os.path.join(state.MANAGER.root_dir, tid, 'domain'))
+    generation = None
+    if container is not None:
+        try:
+            container.reload()
+        except NotFound:
+            pass
+        else:
+            if container.attrs['State']['Running']:
+                generation = container.id
     with threads._BROWSER_RETRY_LOCK:
         with threads._BROWSER_RESET_QUEUE.mutex:
             reset_idle = (threads._BROWSER_RESET_QUEUE.unfinished_tasks == 0
@@ -79,7 +90,7 @@ def inspect_state(tid: str, request: Request):
                           and tid not in threads._BROWSER_REQUEUE
                           and tid not in threads._BROWSER_RETRY_DUE)
     return {'runs': [asdict(r) for r in threads._runs().list(tid)], 'holds': list(HOLDS),
-            'lease': lease, 'generations': sorted(_sandbox_generations(state.MANAGER.root_dir, tid)),
+            'lease': lease, 'live_registered_generation': generation,
             'reset_worker_idle': reset_idle}
 
 

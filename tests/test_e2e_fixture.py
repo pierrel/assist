@@ -108,6 +108,29 @@ assert sorted(route.path for route in app.routes if route.path.startswith('/__e2
 """], capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_state_requires_positive_native_running_generation(self):
+        from unittest.mock import Mock
+        from docker.errors import NotFound
+        from tests.e2e import server
+        container = Mock(id='generation')
+        with (patch.object(server.state.MANAGER, 'root_dir', '/fixture/threads'),
+              patch.object(server, '_authenticate'),
+              patch.object(server.authority, 'fence') as fence,
+              patch.object(server.threads, '_runs') as runs,
+              patch.object(server.SandboxManager, 'current_container', return_value=container) as current):
+            fence.return_value.__enter__.return_value.lease = {
+                'owner_run_id': 'child', 'generations': ['generation']}
+            runs.return_value.list.return_value = []
+            for running, error, expected in ((True, None, 'generation'),
+                                             (False, None, None),
+                                             (True, NotFound('removed'), None)):
+                container.attrs = {'State': {'Running': running}}
+                container.reload.side_effect = error
+                result = server.inspect_state('parent', None)
+                self.assertEqual(result['live_registered_generation'], expected)
+            current.assert_called_with('/fixture/threads/parent/domain')
+            self.assertEqual(container.reload.call_count, 3)
+
     def test_released_inference_hold_can_be_used_again(self):
         from concurrent.futures import ThreadPoolExecutor
         import time

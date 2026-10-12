@@ -18,7 +18,8 @@ checkpointing, Git lifecycle, browser authority/reset workers, SandboxManager an
 DockerSandboxBackend. Only model readiness, agent graph inference and title
 inference are deterministic. `Write`, `Read` and bounded `Hold` messages provide
 small, repeatable actions through the real backend. Authenticated test routes
-inspect actual state, release inference holds and dispatch a hidden child through
+inspect actual state (including positive Docker running status for the exact
+registered generation, without claiming absence of orphan generations), release inference holds and dispatch a hidden child through
 the actual protocol service. They never dispatch or replace reset workers.
 
 A separate Docker daemon inside the server uses fixed production resource names
