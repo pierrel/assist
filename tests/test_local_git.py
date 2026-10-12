@@ -6,6 +6,7 @@ import subprocess
 import pytest
 
 from assist.git_sync import GitSyncError, identity
+from assist import local_git
 from assist.local_git import LocalGit
 
 
@@ -161,4 +162,59 @@ def test_standard_split_commit_graph_is_bounded_not_rejected(repositories):
     graph.unlink()
     graph.symlink_to(source / "objects" / "info" / "commit-graph")
     with pytest.raises(GitSyncError, match="Git object"):
+        LocalGit(str(source), str(server))
+
+
+def test_git_maintenance_sidecars_do_not_block_verified_publish(repositories, tmp_path):
+    source, server, _ = repositories
+    objects = server / ".git" / "objects"
+    marker = tmp_path / "host-command-ran"
+    (objects / "bitmap-ref-tips_dBGwLz").write_bytes(
+        b"!touch " + str(marker).encode() + b"\n")
+    (objects / "maintenance.lock").touch()
+    git("config", "credential.helper", "!touch " + str(marker), cwd=server)
+    git("config", "remote.origin.pushurl", "ext::touch " + str(marker), cwd=server)
+    desired = commit(server, "server.txt", "server work\n")
+
+    with LocalGit(str(source), str(server)) as host:
+        assert host.same_tip() == ("assist/thread", desired)
+        assert host.publish("assist/thread", desired) == desired
+    assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == desired
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("bad_entry", ["unexpected", "bitmap-ref-tips_bad!", "maintenance.lock"])
+def test_unrecognized_or_nonempty_maintenance_entry_is_rejected(repositories, bad_entry):
+    source, server, _ = repositories
+    (server / ".git" / "objects" / bad_entry).write_bytes(b"unexpected content")
+    with pytest.raises(GitSyncError, match="Unsupported Git object"):
+        LocalGit(str(source), str(server))
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "directory"])
+def test_maintenance_sidecar_requires_independent_regular_file(repositories, kind):
+    source, server, _ = repositories
+    objects = server / ".git" / "objects"
+    sidecar = objects / "bitmap-ref-tips_dBGwLz"
+    target = objects / "maintenance.lock"
+    target.touch()
+    if kind == "symlink":
+        sidecar.symlink_to(target)
+    elif kind == "hardlink":
+        sidecar.hardlink_to(target)
+    else:
+        sidecar.mkdir()
+    with pytest.raises(GitSyncError, match="Git objects need independent regular storage"):
+        LocalGit(str(source), str(server))
+
+
+def test_maintenance_sidecars_share_object_byte_bound(repositories, monkeypatch):
+    source, server, _ = repositories
+    objects = server / ".git" / "objects"
+    ordinary_bytes = sum(path.stat().st_size for path in objects.rglob("*") if path.is_file())
+    monkeypatch.setattr(local_git, "_OBJECT_LIMIT", ordinary_bytes + 63)
+    with LocalGit(str(source), str(server)) as host:
+        assert host.same_tip() == identity(str(server))
+    (objects / "bitmap-ref-tips_dBGwLz").write_bytes(b"x" * 64)
+    with pytest.raises(GitSyncError, match="Git objects exceed the host operation limit"):
         LocalGit(str(source), str(server))

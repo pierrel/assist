@@ -1,0 +1,26 @@
+#+title: Git maintenance object-directory compatibility (2026-10-11)
+
+* Observed failure
+
+An enrolled legacy checkout retained two ordinary root entries under
+=.git/objects=: =maintenance.lock= (empty) and a
+=bitmap-ref-tips_= file with a six-character alphanumeric suffix. The host
+object-layout verifier rejected them before Git could verify the commit.
+The prior enrollment scan had admitted independent root entries, so this
+was a compatibility mismatch. Neither entry is a Git object or authority
+to select a source.
+
+* Narrow correction
+
+The host verifier admits only these exact maintenance sidecar shapes as
+independent, nofollow regular files. They count toward the existing entry,
+byte, and time bounds; =maintenance.lock= must be empty. Unknown root
+entries, links, hardlinks, alternates, and unsupported pack entries still
+fail closed. The sidecar contents are never read or used as Git objects.
+Real Git strict fsck and exact-ref publication remain required.
+
+An empty lock is not proof that maintenance has stopped. A live retry
+requires an operator to exclude independent host Git writers throughout
+the operation; managed sandbox-generation fences alone do not establish
+that exclusion. This correction does not delete or quarantine either file
+and does not alter a thread's files, branch, or history.
