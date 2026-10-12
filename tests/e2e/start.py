@@ -130,11 +130,15 @@ class Fixture:
         (self.args.logs / 'runtime-images.json').write_text(json.dumps([
             {'id': image['Id'], 'tags': image['RepoTags'], 'size': image['Size']}
             for image in images], indent=2))
-        archive = temporary / 'runtime-images.tar'
-        def limit_archive():
-            resource.setrlimit(resource.RLIMIT_FSIZE, (ARCHIVE_LIMIT, ARCHIVE_LIMIT))
-        self.docker('save', '-o', str(archive), *(image['Id'] for image in images),
-                    timeout=180, preexec_fn=limit_archive)
+        archives = []
+        for name, image in zip(IMAGES, images):
+            remaining_bytes = ARCHIVE_LIMIT - sum(p.stat().st_size for p in archives)
+            def limit_archive():
+                resource.setrlimit(resource.RLIMIT_FSIZE, (remaining_bytes, remaining_bytes))
+            archive = temporary / (name + '.tar')
+            self.docker('save', '-o', str(archive), image['Id'],
+                        timeout=180, preexec_fn=limit_archive)
+            archives.append(archive)
         self.network_attempted = True
         self.docker('network', 'create', '--internal', '--label', LABEL + '=' + self.name, self.network)
         self.volume_attempted = True
@@ -185,12 +189,28 @@ class Fixture:
         for service in ('git', 'assist'):
             self.docker('start', self.name + '-' + service)
         self.wait('private Docker daemon', lambda: self.docker('exec', self.name + '-assist', 'docker', 'info'))
-        self.copy(archive, 'assist', '/runtime/images.tar')
-        self.docker('exec', self.name + '-assist', 'docker', 'load', '-i', '/runtime/images.tar', timeout=180)
-        for name, image in zip(IMAGES, images):
-            self.docker('exec', self.name + '-assist', 'docker', 'tag', image['Id'], name)
-        self.docker('exec', self.name + '-assist', 'rm', '/runtime/images.tar')
-        archive.unlink()
+        for name, image, archive in zip(IMAGES, images, archives):
+            self.copy(archive, 'assist', '/runtime/images.tar')
+            loaded = self.docker('exec', self.name + '-assist', 'docker', 'load',
+                                 '-i', '/runtime/images.tar', timeout=180)
+            (self.args.logs / (name + '-load.log')).write_text(loaded)
+            identities = [line.removeprefix('Loaded image ID: ').strip()
+                          for line in loaded.splitlines() if line.startswith('Loaded image ID: ')]
+            if len(identities) != 1:
+                raise RuntimeError('Single-image import did not return exactly one image identity')
+            imported = json.loads(self.docker('exec', self.name + '-assist',
+                                  'docker', 'image', 'inspect', identities[0]))[0]
+            compared = ('RootFS', 'Config', 'Architecture', 'Os')
+            receipt = {'exported_id': image['Id'], 'loaded_id': identities[0],
+                'imported_id': imported['Id'], 'rootfs': imported['RootFS'],
+                'config_sha256': hashlib.sha256(json.dumps(imported['Config'], sort_keys=True).encode()).hexdigest(),
+                'matching': {field: imported[field] == image[field] for field in compared}}
+            (self.args.logs / (name + '-import.json')).write_text(json.dumps(receipt, indent=2))
+            if not all(receipt['matching'].values()):
+                raise RuntimeError('Imported runtime image differs from the exact exported image')
+            self.docker('exec', self.name + '-assist', 'docker', 'tag', identities[0], name)
+            self.docker('exec', self.name + '-assist', 'rm', '/runtime/images.tar')
+            archive.unlink()
         self.docker('exec', self.name + '-assist', 'touch', '/runtime/images-ready')
         port = self.docker('port', self.name + '-assist', '8443/tcp').strip()
         url = 'https://' + port

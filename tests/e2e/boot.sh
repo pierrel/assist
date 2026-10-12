@@ -15,7 +15,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
-startup_end=$(( $(date +%s) + 240 ))
+startup_end=$(( $(date +%s) + 1200 ))
 until docker info > /dev/null 2>&1 && [ -f /runtime/images-ready ]; do
   if [ "$(date +%s)" -ge "$startup_end" ]; then exit 1; fi
   sleep 1
