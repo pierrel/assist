@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import uuid
 
 from deepagents.backends.protocol import ExecuteResponse, FileUploadResponse
-from fastapi import Request
+from fastapi import APIRouter, Request
 from langchain_core.messages import AIMessage
 import requests
 
@@ -30,6 +30,7 @@ from manage.web.protocol_service import SERVICE
 GENERATIONS = {}
 HOLDS = {}
 RESET_REFUSALS = []
+ROUTER = APIRouter()
 _ANY_GENERATION = object()
 
 
@@ -124,6 +125,7 @@ def deterministic_thread(tid, working_dir=None, sandbox_backend=None,
 
 
 def install():
+    app.include_router(ROUTER)
     state.MANAGER.get = deterministic_thread
     threads._llm_reachable = lambda: True  # The in-process deterministic graph is ready.
     SandboxManager.get_pi_sandbox_backend = staticmethod(backend)
@@ -157,7 +159,7 @@ def install():
     threads._drain_held_browser_events = reset
 
 
-@app.get("/__e2e/state/{tid}")
+@ROUTER.get("/__e2e/state/{tid}")
 def inspect_state(tid: str, request: Request):
     _authenticate(request)
     with authority.fence(state.MANAGER.root_dir, tid) as record:
@@ -166,14 +168,14 @@ def inspect_state(tid: str, request: Request):
             "holds": list(HOLDS), "reset_refusals": list(RESET_REFUSALS), "lease": lease}
 
 
-@app.post("/__e2e/release")
+@ROUTER.post("/__e2e/release")
 def release(body: dict, request: Request):
     _authenticate(request)
     HOLDS[body["text"]].set()
     return {"released": True}
 
 
-@app.post("/__e2e/child/{tid}")
+@ROUTER.post("/__e2e/child/{tid}")
 def child(tid: str, request: Request):
     _authenticate(request)
     parent = threads._runs().list(tid)[-1]

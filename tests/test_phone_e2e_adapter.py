@@ -100,3 +100,18 @@ def test_cleanup_preserves_replacement_registered_during_authority_teardown(shel
     monkeypatch.setattr(adapter.authority, "fence", fence)
     adapter.cleanup("/fixture", shell.container)
     assert adapter.GENERATIONS["/fixture"] is replacement
+
+
+def test_import_does_not_register_routes_but_explicit_install_does():
+    import subprocess
+    import sys
+    result = subprocess.run([sys.executable, "-c", """
+from manage.web import app
+before = [route.path for route in app.routes]
+from tests import phone_e2e_server as adapter
+assert [route.path for route in app.routes] == before
+adapter.install()
+assert sorted(route.path for route in app.routes if route.path.startswith('/__e2e/')) == [
+    '/__e2e/child/{tid}', '/__e2e/release', '/__e2e/state/{tid}']
+"""], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
