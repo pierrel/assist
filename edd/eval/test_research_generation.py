@@ -37,24 +37,42 @@ def _count_sourced_recommendations(result, recommendations):
     body, *sources = re.split(
         r"(?im)^\s*(?:#{1,6}\s*)?(?:\*\*)?Sources:?(?:\*\*)?\s*$", result, maxsplit=1)
     url_pattern = r"https?://[^\s\])>|]+"
-    source_urls = set(re.findall(url_pattern, sources[0])) if sources else set()
+    source_urls = {url.rstrip(".,;") for url in re.findall(url_pattern, sources[0])} if sources else set()
     item_start = r"[ \t]*(?:#{1,6}\s|[-*+]\s|\d{1,9}[.)]\s|[^\n]*\|)"
     paragraphs = re.split(r"\n\s*\n|\n(?=" + item_start + ")", body)
+    identities = {(author, title) for author, title, _, _ in recommendations}
+    names = sorted({name for pair in identities for name in pair}, key=len, reverse=True)
+    identity_tokens = "|".join(re.escape(name) for name in names)
+    sections = []
+    for paragraph in paragraphs:
+        tokens = list(re.finditer(identity_tokens, paragraph))
+        starts = {0: None}
+        index = 0
+        while index < len(tokens):
+            pair = tuple(token.group() for token in tokens[index:index + 2])
+            if len(pair) == 2 and (pair in identities or pair[::-1] in identities):
+                starts[tokens[index].start()] = pair if pair in identities else pair[::-1]
+                index += 2
+            else:
+                starts[tokens[index].start()] = None
+                index += 1
+        boundaries = sorted(starts) + [len(paragraph)]
+        sections.extend((paragraph[start:end], starts[start])
+                        for start, end in zip(boundaries, boundaries[1:]))
+    paragraphs = sections
     count = 0
     for author, title, url, format_pattern in recommendations:
-        for index, paragraph in enumerate(paragraphs):
-            if title not in paragraph or author not in paragraph:
+        for index, (paragraph, identity) in enumerate(paragraphs):
+            if identity != (author, title):
                 continue
             description = paragraph
             if index + 1 < len(paragraphs):
-                following = paragraphs[index + 1]
-                if not re.match(item_start, following) and not any(
-                        next_title in following and next_author in following
-                        for next_author, next_title, _, _ in recommendations):
+                following = paragraphs[index + 1][0]
+                if not re.match(item_start, following) and not re.match(identity_tokens, following):
                     description += "\n\n" + following
             # Support the worker's final Sources list, but an explicit inline
             # link in the identity or its description must match this book.
-            inline_urls = set(re.findall(url_pattern, description))
+            inline_urls = {url.rstrip(".,;") for url in re.findall(url_pattern, description)}
             if url in (inline_urls or source_urls) and re.search(format_pattern, description.lower()):
                 count += 1
                 break

@@ -227,3 +227,49 @@ def test_recommendation_does_not_borrow_new_item_without_known_identity(followin
     result = "Book One by Writer One.\n" + following + "\n\nSources:\nhttps://example.org/one"
     assert _count_sourced_recommendations(result, [
         ("Writer One", "Book One", "https://example.org/one", r"narrative|prose")]) == 0
+
+
+@pytest.mark.parametrize("bound, expected", [(50000, 24576), (1234, 1234)])
+def test_request_completion_alias_is_capped_in_actual_provider_payload(bound, expected):
+    from langchain.agents.middleware.types import ModelRequest
+    from assist.middleware.research_generation import ResearchGenerationMiddleware
+    requests = []
+    def provider(request):
+        requests.append(request)
+        return _response()
+    model = _model(provider)
+    request = ModelRequest(model=model, messages=[HumanMessage("Research")], state={"messages": []},
+                           model_settings={"max_completion_tokens": bound})
+    ResearchGenerationMiddleware().wrap_model_call(request, lambda bounded:
+        bounded.model.invoke(bounded.messages, **bounded.model_settings))
+    assert len(requests) == 1
+    payload = json.loads(requests[0].content)
+    assert payload["max_completion_tokens"] == expected
+    assert "max_tokens" not in payload
+    assert request.model_settings == {"max_completion_tokens": bound}
+
+
+@pytest.mark.parametrize("body, expected", [
+    ("Book One by Writer One. Book Two by Writer Two, narrative prose and visual comic.", 1),
+    ("Writer One's Book One. Writer Two's Book Two, narrative prose and visual comic.", 1),
+    ("Book One by Writer One, narrative prose https://example.org/two; "
+     "Book Two by Writer Two, visual comic https://example.org/one", 0),
+    ("Book One by Writer One, narrative prose https://example.org/one; "
+     "Book Two by Writer Two, visual comic https://example.org/two", 2),
+])
+def test_recommendation_evidence_stops_at_same_paragraph_identity(body, expected):
+    from edd.eval.test_research_generation import _count_sourced_recommendations
+    result = body + "\n\nSources:\nhttps://example.org/one\nhttps://example.org/two"
+    rows = [("Writer One", "Book One", "https://example.org/one", r"narrative|prose"),
+            ("Writer Two", "Book Two", "https://example.org/two", r"comic|visual")]
+    assert _count_sourced_recommendations(result, rows) == expected
+
+
+@pytest.mark.parametrize("second", ["Book Two by Writer One", "Book Two"])
+def test_same_author_is_not_reused_across_recommendation_identities(second):
+    from edd.eval.test_research_generation import _count_sourced_recommendations
+    result = (f"Book One by Writer One. {second}, narrative prose and visual comic.\n\n"
+              "Sources:\nhttps://example.org/one\nhttps://example.org/two")
+    rows = [("Writer One", "Book One", "https://example.org/one", r"narrative|prose"),
+            ("Writer One", "Book Two", "https://example.org/two", r"comic|visual")]
+    assert _count_sourced_recommendations(result, rows) == (1 if "by Writer One" in second else 0)
