@@ -6,7 +6,8 @@ Summarization, PatchToolCalls).  Without explicitly adding
 ``LoopDetectionMiddleware`` and ``EmptyResponseRecoveryMiddleware`` via
 the ``"middleware"`` key, those subagents have no protection against
 the runaway/empty-response failure modes the rest of the agent stack
-defends against.  This test pins that protection so a future refactor
+defends against. Research-factory specs also carry the generation-limit guard.
+This test pins that protection so a future refactor
 of the dict specs cannot silently drop it.
 """
 from tempfile import TemporaryDirectory
@@ -21,6 +22,7 @@ from assist.middleware.empty_response_recovery import (
     EmptyResponseRecoveryMiddleware,
 )
 from assist.middleware.loop_detection import LoopDetectionMiddleware
+from assist.middleware.research_generation import ResearchGenerationMiddleware
 from assist.middleware.search_unavailable_breaker import SearchUnavailableBreakerMiddleware
 
 
@@ -89,7 +91,7 @@ class TestSubagentSafetyMiddleware(TestCase):
 
         for spec in dict_specs:
             present = _safety_mw_types_in(spec)
-            missing = self.REQUIRED - present
+            missing = (self.REQUIRED | {ResearchGenerationMiddleware}) - present
             self.assertFalse(
                 missing,
                 f"Subagent '{spec.get('name')}' missing safety middleware: "

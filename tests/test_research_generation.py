@@ -1,4 +1,4 @@
-"""Offline provider-boundary tests for research generation and partial results."""
+"""Offline provider-boundary and research-acceptance validator regressions."""
 import json
 
 import httpx
@@ -172,26 +172,36 @@ def test_capped_lead_keeps_completed_source_backed_worker_reply(tmp_path):
 
 
 @pytest.mark.parametrize("result, expected", [
-    ("Book One by Writer One, illustrated narrative.\n\nBook Two by Writer Two.\n\n"
+    ("Book One by Writer One, illustrated narrative.\n\nBook Two by Writer Two, a comic strip.\n\n"
      "Sources:\nhttps://example.org/one\nhttps://example.org/two", 2),
-    ("Book One by Writer One. Source: https://example.org/one\n\n"
-     "Book Two by Writer Two. Source: https://example.org/two", 2),
+    ("Book One by Writer One, chapter-book prose. Source: https://example.org/one\n\n"
+     "Book Two by Writer Two, a visual comic. Source: https://example.org/two", 2),
     ("Recommend Book One and Book Two by Unknown Writer.\n\n"
      "Author directory: Writer One, Writer Two.\n\n"
      "Sources:\nhttps://example.org/one\nhttps://example.org/two", 0),
-    ("Book One by Writer One. Source: https://example.org/two\n\n"
-     "Book Two by Writer Two. Source: https://example.org/one\n\n"
+    ("Book One by Writer One, narrative prose. Source: https://example.org/two\n\n"
+     "Book Two by Writer Two, a comic strip. Source: https://example.org/one\n\n"
      "Sources:\nhttps://example.org/one\nhttps://example.org/two", 0),
-    ("Book One by Writer One.\n\nBook Two by Writer Two.\n\n"
+    ("Book One by Writer One, narrative prose.\n\nBook Two by Writer Two, a comic strip.\n\n"
      "Sources:\nhttps://example.org/one", 1),
     ("## Titles\nBook One\nBook Two\n## Authors\nWriter One\nWriter Two\n"
      "## Sources\nhttps://example.org/one\nhttps://example.org/two", 0),
     ("Some illustrated chapter books.\n\n"
      "Sources:\nBook One by Writer One https://example.org/one\n"
      "Book Two by Writer Two https://example.org/two", 0),
+    ("The child enjoys chapter books.\n\nBook One by Writer One.\n\nBook Two by Writer Two.\n\n"
+     "Sources:\nhttps://example.org/one\nhttps://example.org/two", 0),
+    ("Book One by Writer One.\n\nA continuous narrative in prose.\n\n"
+     "Book Two by Writer Two.\n\nA visual comic-strip introduction.\n\n"
+     "Sources:\nhttps://example.org/one\nhttps://example.org/two", 2),
+    ("Book One by Writer One.\n\nBook Two by Writer Two, narrative prose.\n\n"
+     "Sources:\nhttps://example.org/one\nhttps://example.org/two", 0),
+    ("Book One by Writer One.\n\nNarrative prose. Source: https://example.org/two\n\n"
+     "Book Two by Writer Two.\n\nVisual comic. Source: https://example.org/one\n\n"
+     "Sources:\nhttps://example.org/one\nhttps://example.org/two", 0),
 ])
-def test_recommendation_validation_pairs_identity_and_source(result, expected):
+def test_recommendation_validation_pairs_identity_source_and_format(result, expected):
     from edd.eval.test_research_generation import _count_sourced_recommendations
-    recommendations = [("Writer One", "Book One", "https://example.org/one"),
-                       ("Writer Two", "Book Two", "https://example.org/two")]
+    recommendations = [("Writer One", "Book One", "https://example.org/one", r"chapter|narrative|prose"),
+                       ("Writer Two", "Book Two", "https://example.org/two", r"comic|visual")]
     assert _count_sourced_recommendations(result, recommendations) == expected
