@@ -76,7 +76,7 @@ where reliability is harder than with frontier APIs.
     existing `ASSIST_LLM_READ_TIMEOUT_S` override remain effective. A capped
     reply is labeled partial and includes collected source responses/previews,
     source extracts, and completed specialist replies;
-    incomplete tool calls are never executed.
+    generated tool calls are discarded without execution.
   - **Context agent** for read-only filesystem exploration — finds the
     right file, surfaces evidence, never modifies.
   - **Dev skill** for code work by the general agent — TDD-style
