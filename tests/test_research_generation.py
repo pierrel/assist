@@ -205,3 +205,25 @@ def test_recommendation_validation_pairs_identity_source_and_format(result, expe
     recommendations = [("Writer One", "Book One", "https://example.org/one", r"chapter|narrative|prose"),
                        ("Writer Two", "Book Two", "https://example.org/two", r"comic|visual")]
     assert _count_sourced_recommendations(result, recommendations) == expected
+
+
+@pytest.mark.parametrize("marker", ["-", "*", "+", "1.", "1)", "  -", "  1)", "|", ""])
+def test_recommendation_format_does_not_cross_markdown_items(marker):
+    from edd.eval.test_research_generation import _count_sourced_recommendations
+    if marker in ("|", ""):
+        result = f"{marker}Book One|Writer One|https://example.org/one|\n{marker}Book Two|Writer Two|https://example.org/two|narrative prose and visual comic|"
+    else:
+        result = f"{marker} Book One by Writer One.\n{marker} Book Two by Writer Two, narrative prose and visual comic."
+    result += "\n\nSources:\nhttps://example.org/one\nhttps://example.org/two"
+    recommendations = [("Writer One", "Book One", "https://example.org/one", r"narrative|prose"),
+                       ("Writer Two", "Book Two", "https://example.org/two", r"comic|visual")]
+    assert _count_sourced_recommendations(result, recommendations) == 1
+
+
+@pytest.mark.parametrize("following", ["- Unrelated narrative prose.", "1) Unrelated narrative prose.",
+                                      "## Unrelated narrative prose", "Other|Writer|narrative prose"])
+def test_recommendation_does_not_borrow_new_item_without_known_identity(following):
+    from edd.eval.test_research_generation import _count_sourced_recommendations
+    result = "Book One by Writer One.\n" + following + "\n\nSources:\nhttps://example.org/one"
+    assert _count_sourced_recommendations(result, [
+        ("Writer One", "Book One", "https://example.org/one", r"narrative|prose")]) == 0

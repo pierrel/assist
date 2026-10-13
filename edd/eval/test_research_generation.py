@@ -36,9 +36,10 @@ def _count_sourced_recommendations(result, recommendations):
     """Count sourced book identities with their own supported format information."""
     body, *sources = re.split(
         r"(?im)^\s*(?:#{1,6}\s*)?(?:\*\*)?Sources:?(?:\*\*)?\s*$", result, maxsplit=1)
-    url_pattern = r"https?://[^\s\])>]+"
+    url_pattern = r"https?://[^\s\])>|]+"
     source_urls = set(re.findall(url_pattern, sources[0])) if sources else set()
-    paragraphs = re.split(r"\n\s*\n|\n(?=\s*#{1,6}\s)", body)
+    item_start = r"[ \t]*(?:#{1,6}\s|[-*+]\s|\d{1,9}[.)]\s|[^\n]*\|)"
+    paragraphs = re.split(r"\n\s*\n|\n(?=" + item_start + ")", body)
     count = 0
     for author, title, url, format_pattern in recommendations:
         for index, paragraph in enumerate(paragraphs):
@@ -47,8 +48,9 @@ def _count_sourced_recommendations(result, recommendations):
             description = paragraph
             if index + 1 < len(paragraphs):
                 following = paragraphs[index + 1]
-                if not any(next_title in following and next_author in following
-                           for next_author, next_title, _, _ in recommendations):
+                if not re.match(item_start, following) and not any(
+                        next_title in following and next_author in following
+                        for next_author, next_title, _, _ in recommendations):
                     description += "\n\n" + following
             # Support the worker's final Sources list, but an explicit inline
             # link in the identity or its description must match this book.
