@@ -43,8 +43,9 @@ Strategy — three stages:
 
 Composition notes:
 
-- Position: **innermost** ``wrap_model_call`` middleware in every
-  agent's stack.  Recovery should react to the final model response
+- Position: close to the model response in each agent stack. Research
+  generation-limit handling sits inside recovery so a capped response becomes
+  explicit partial evidence before recovery can retry it. Recovery reacts to the final model response
   *after* outer middleware (``BadRequestRetryMiddleware``,
   deepagents' ``SummarizationMiddleware``) has had its turn.  If
   ``BadRequestRetryMiddleware`` exhausts retries it returns a

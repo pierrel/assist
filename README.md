@@ -70,7 +70,13 @@ where reliability is harder than with frontier APIs.
 
 - **Specialized agents and skills out of the box.**
   - **Research agent** rigorous fact-checking and critiquing with
-    internet search (`search_internet`) and URL fetch (`read_url`).
+    internet search (`search_internet`) and URL fetch (`read_url`). Qwen3.8
+    research allows 16,384 tokens per thinking block and 24,576 per completion,
+    with a 900-second default read allowance. Smaller caller budgets and the
+    existing `ASSIST_LLM_READ_TIMEOUT_S` override remain effective. A capped
+    reply is labeled partial and includes collected source responses/previews,
+    source extracts, and completed specialist replies;
+    incomplete tool calls are never executed.
   - **Context agent** for read-only filesystem exploration — finds the
     right file, surfaces evidence, never modifies.
   - **Dev skill** for code work by the general agent — TDD-style

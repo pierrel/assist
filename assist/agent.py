@@ -54,6 +54,7 @@ from assist.middleware.loop_detection import LoopDetectionMiddleware
 from assist.middleware.search_unavailable_breaker import SearchUnavailableBreakerMiddleware
 from assist.middleware.search_runaway_breaker import SearchRunawayBreakerMiddleware
 from assist.middleware.empty_response_recovery import EmptyResponseRecoveryMiddleware
+from assist.middleware.research_generation import ResearchGenerationMiddleware
 from assist.middleware.read_only_enforcer import ReadOnlyEnforcerMiddleware
 from assist.middleware.git_push_blocker import GitPushBlockerMiddleware
 from assist.middleware.url_provenance import UrlProvenanceMiddleware
@@ -827,6 +828,7 @@ def create_research_agent(model: BaseChatModel,
     base_mw.append(LoopDetectionMiddleware())
     base_mw.append(ThreadQueueMiddleware())
     base_mw.append(EmptyResponseRecoveryMiddleware())
+    base_mw.append(ResearchGenerationMiddleware())
 
     # Confine the research agent's filesystem reach to <working_dir>/references/.
     # The agent (and its critique/fact-check sub-sub-agents, which inherit
@@ -934,7 +936,8 @@ def create_research_agent(model: BaseChatModel,
                 # fact-check) — same uniform-stack posture as the unavailable breaker.
                 SearchRunawayBreakerMiddleware(),
                 ThreadQueueMiddleware(),
-                EmptyResponseRecoveryMiddleware()]
+                EmptyResponseRecoveryMiddleware(),
+                ResearchGenerationMiddleware()]
 
     research_sub_agent = {
         "name": "research-agent",
@@ -1020,8 +1023,8 @@ def create_research_agent(model: BaseChatModel,
     # — a true-150 was really ~1050). 300 is the true effective ceiling, restored
     # from the pre-2026-06-06 value: the recursion baseline (2026-07-02) showed a
     # true-150 cut off legit research turns (2 hits across the contract tests),
-    # so 150 was too tight once the ~7x cushion was removed. 300 still bounds a
-    # runaway to ~5 min (vs the 70-min incident) with room for thorough research.
+    # so 150 was too tight once the ~7x cushion was removed. This bounds graph
+    # steps; individual model requests have separate generation and timeout limits.
     rollback_runnable = RollbackRunnable(agent, recursion_limit=300)
 
     # Wrap with the references-cleanup runnable so intermediate drafts
