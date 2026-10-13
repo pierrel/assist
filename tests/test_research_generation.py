@@ -169,3 +169,29 @@ def test_capped_lead_keeps_completed_source_backed_worker_reply(tmp_path):
     assert "Gillian Cross" in messages[-1].content
     assert "untrusted worker output" in messages[-1].content
     assert not messages[-1].tool_calls
+
+
+@pytest.mark.parametrize("result, expected", [
+    ("Book One by Writer One, illustrated narrative.\n\nBook Two by Writer Two.\n\n"
+     "Sources:\nhttps://example.org/one\nhttps://example.org/two", 2),
+    ("Book One by Writer One. Source: https://example.org/one\n\n"
+     "Book Two by Writer Two. Source: https://example.org/two", 2),
+    ("Recommend Book One and Book Two by Unknown Writer.\n\n"
+     "Author directory: Writer One, Writer Two.\n\n"
+     "Sources:\nhttps://example.org/one\nhttps://example.org/two", 0),
+    ("Book One by Writer One. Source: https://example.org/two\n\n"
+     "Book Two by Writer Two. Source: https://example.org/one\n\n"
+     "Sources:\nhttps://example.org/one\nhttps://example.org/two", 0),
+    ("Book One by Writer One.\n\nBook Two by Writer Two.\n\n"
+     "Sources:\nhttps://example.org/one", 1),
+    ("## Titles\nBook One\nBook Two\n## Authors\nWriter One\nWriter Two\n"
+     "## Sources\nhttps://example.org/one\nhttps://example.org/two", 0),
+    ("Some illustrated chapter books.\n\n"
+     "Sources:\nBook One by Writer One https://example.org/one\n"
+     "Book Two by Writer Two https://example.org/two", 0),
+])
+def test_recommendation_validation_pairs_identity_and_source(result, expected):
+    from edd.eval.test_research_generation import _count_sourced_recommendations
+    recommendations = [("Writer One", "Book One", "https://example.org/one"),
+                       ("Writer Two", "Book Two", "https://example.org/two")]
+    assert _count_sourced_recommendations(result, recommendations) == expected

@@ -32,6 +32,21 @@ _BOOKS = [
 ]
 
 
+def _count_sourced_recommendations(result, recommendations):
+    body, *sources = re.split(
+        r"(?im)^\s*(?:#{1,6}\s*)?(?:\*\*)?Sources:?(?:\*\*)?\s*$", result, maxsplit=1)
+    url_pattern = r"https?://[^\s\])>]+"
+    source_urls = set(re.findall(url_pattern, sources[0])) if sources else set()
+    paragraphs = [(paragraph, set(re.findall(url_pattern, paragraph)))
+                  for paragraph in re.split(r"\n\s*\n|\n(?=\s*#{1,6}\s)", body)]
+    # The worker supports a final Sources list. An explicit inline link must
+    # match the recommendation rather than being rescued by that common list.
+    return sum(any(title in paragraph and author in paragraph
+                   and url in (inline_urls or source_urls)
+                   for paragraph, inline_urls in paragraphs)
+               for author, title, url in recommendations)
+
+
 class TestResearchGeneration(TestCase):
     def test_recommends_illustrated_retellings(self):
         prompt = ("Recommend a few illustrated retellings of the Iliad or Odyssey "
@@ -50,11 +65,8 @@ class TestResearchGeneration(TestCase):
             ("Mary Pope Osborne", "Tales from the Odyssey", _BOOKS[2]["url"]),
             ("Marcia Williams", "The Iliad and the Odyssey", _BOOKS[3]["url"]),
         )
-        self.assertGreaterEqual(sum(author in result and title in result and url in result
-                                    for author, title, url in recommendations), 2)
+        self.assertGreaterEqual(_count_sourced_recommendations(result, recommendations), 2,
+                                "Each recommendation needs its author and matching source: " + result)
         self.assertRegex(result.lower(), r"chapter.books?|comic.strip|narrative")
-        cited = set(re.findall(r"https?://[^\s\])>]+", result))
-        self.assertGreaterEqual(len(cited & {book["url"] for book in _BOOKS}), 2,
-                                "Useful recommendations must retain their source URLs")
         self.assertFalse(spy.guessed_fetches(), "Fetched URLs must come from source results")
         self.assertNotIn("timed out", result.lower())
