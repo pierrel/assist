@@ -225,6 +225,265 @@ def test_thread_list_normalizes_only_leading_pictographs(tmp_path, monkeypatch):
     assert response.json()["threads"][0]["search_description"] == "#release check"
 
 
+def test_thread_list_exposes_urgent_and_unmerged_from_state(tmp_path, monkeypatch):
+    thread_dir = _thread_environment(tmp_path, monkeypatch, [])
+    from assist.git_sync import bind
+    bind(str(thread_dir), "https://example.com/repo.git")
+    monkeypatch.setattr(state.MANAGER, "list", lambda: ["thread-a"])
+    monkeypatch.setattr(state, "_get_status", lambda tid: {"stage": "ready"})
+
+    # A settled (ready, no urgent/new) thread runs the git check: True -> true.
+    monkeypatch.setattr(state, "_has_urgent", lambda tid: False)
+    monkeypatch.setattr(state, "_has_unseen_response", lambda tid: False)
+    monkeypatch.setattr(state, "_has_unmerged_changes", lambda tid, cache=None: True)
+
+    thread = _client(monkeypatch).get(
+        "/api/v1/phone/threads", headers=_auth()).json()["threads"][0]
+    assert thread["urgent"] is False
+    assert thread["unmerged"] is True
+
+    # Same settled thread, clean working tree -> False (checked, confirmed clean).
+    monkeypatch.setattr(state, "_has_unmerged_changes", lambda tid, cache=None: False)
+    thread = _client(monkeypatch).get(
+        "/api/v1/phone/threads", headers=_auth()).json()["threads"][0]
+    assert thread["urgent"] is False
+    assert thread["unmerged"] is False
+
+    # A settled thread whose check could not run (no repo / git failure) -> None.
+    # Distinct from False: the phone must not present a broken check as a
+    # confirmed-clean tree.
+    monkeypatch.setattr(state, "_has_unmerged_changes", lambda tid, cache=None: None)
+    thread = _client(monkeypatch).get(
+        "/api/v1/phone/threads", headers=_auth()).json()["threads"][0]
+    assert thread["urgent"] is False
+    assert thread["unmerged"] is None
+
+
+def test_thread_list_short_circuits_unmerged_behind_a_stronger_pill(tmp_path, monkeypatch):
+    thread_dir = _thread_environment(tmp_path, monkeypatch, [])
+    from assist.git_sync import bind
+    bind(str(thread_dir), "https://example.com/repo.git")
+    monkeypatch.setattr(state.MANAGER, "list", lambda: ["thread-a"])
+    calls = []
+    monkeypatch.setattr(state, "_has_unmerged_changes",
+                        lambda tid, cache=None: calls.append(tid) or True)
+
+    # URGENT is a stronger pill than unmerged: the git check must be skipped,
+    # and the wire says "not checked" (None), NOT "confirmed clean" (False).
+    monkeypatch.setattr(state, "_get_status", lambda tid: {"stage": "ready"})
+    monkeypatch.setattr(state, "_has_urgent", lambda tid: True)
+    monkeypatch.setattr(state, "_has_unseen_response", lambda tid: False)
+    thread = _client(monkeypatch).get(
+        "/api/v1/phone/threads", headers=_auth()).json()["threads"][0]
+    assert thread["urgent"] is True
+    assert thread["unmerged"] is None
+    assert calls == []
+
+    # A BUSY stage also short-circuits (web shows the busy pill, not unmerged).
+    calls.clear()
+    monkeypatch.setattr(state, "_get_status", lambda tid: {"stage": "processing"})
+    monkeypatch.setattr(state, "_has_urgent", lambda tid: False)
+    thread = _client(monkeypatch).get(
+        "/api/v1/phone/threads", headers=_auth()).json()["threads"][0]
+    assert thread["status"] == "processing"
+    assert thread["unmerged"] is None
+    assert calls == []
+
+    # An UNREAD ("new") reply also short-circuits.
+    calls.clear()
+    monkeypatch.setattr(state, "_get_status", lambda tid: {"stage": "ready"})
+    monkeypatch.setattr(state, "_has_urgent", lambda tid: False)
+    monkeypatch.setattr(state, "_has_unseen_response", lambda tid: True)
+    thread = _client(monkeypatch).get(
+        "/api/v1/phone/threads", headers=_auth()).json()["threads"][0]
+    assert thread["unmerged"] is None
+    assert calls == []
+
+
+def test_phone_index_unmerged_state_when_domain_manager_raises(tmp_path, monkeypatch):
+    # Regression: _get_domain_manager itself can fail (broken cache, I/O).
+    # That failure must yield None ("not checked"), not escape and 500 the
+    # index.  Main's _has_unmerged_changes wraps the call in a try, so the
+    # raise degrades to None here.
+    thread_dir = _thread_environment(tmp_path, monkeypatch, [])
+    from assist.git_sync import bind
+    bind(str(thread_dir), "https://example.com/repo.git")
+    monkeypatch.setattr(state.MANAGER, "list", lambda: ["thread-a"])
+    monkeypatch.setattr(state, "_get_status", lambda tid: {"stage": "ready"})
+    monkeypatch.setattr(state, "_has_urgent", lambda tid: False)
+    monkeypatch.setattr(state, "_has_unseen_response", lambda tid: False)
+    monkeypatch.setattr(state, "_review_base",
+                        lambda tid, cache=None: "deadbeef")
+
+    def _raise(_tid):
+        raise OSError("domain manager cache is broken")
+
+    monkeypatch.setattr(state, "_get_domain_manager", _raise)
+
+    thread = _client(monkeypatch).get(
+        "/api/v1/phone/threads", headers=_auth()).json()["threads"][0]
+    # A raised domain-manager failure degrades to None (not checked), not a 500.
+    assert thread["unmerged"] is None
+
+
+def test_phone_thread_open_clears_unread_and_urgent(tmp_path, monkeypatch):
+    thread_dir = _thread_environment(tmp_path, monkeypatch, [
+        {"content": "hi", "role": "user"},
+        {"content": "answer A", "role": "assistant"},
+    ])
+    # The phone's "view" is the dedicated open endpoint — it reuses the SAME
+    # helpers the web thread page clears through, so the unseen ("new") +
+    # urgent flags drop there. The ack carries the revision of the settled
+    # snapshot it actually rendered, so a matching (current) revision clears.
+    client = _client(monkeypatch)
+    viewed_revision = client.get(
+        "/api/v1/phone/threads/thread-a", headers=_auth()
+    ).json()["thread"]["revision"]
+
+    state._mark_unseen_response("thread-a")
+    state._mark_urgent("thread-a")
+    assert state._has_unseen_response("thread-a")
+    assert state._has_urgent("thread-a")
+
+    response = client.post(
+        "/api/v1/phone/threads/thread-a/open",
+        headers=_auth(), json={"revision": viewed_revision})
+
+    assert response.status_code == 200
+    assert response.json()["cleared"] is True
+    assert not state._has_unseen_response("thread-a")
+    assert not state._has_urgent("thread-a")
+    assert not (thread_dir / "unseen_response").exists()
+    assert not (thread_dir / "urgent_response").exists()
+
+
+def test_phone_thread_open_without_revision_still_clears(tmp_path, monkeypatch):
+    # A legacy phone that predates the revision token sends no body.  The
+    # endpoint must keep the historical unconditional clear (not 422 on an
+    # empty body), so an out-of-date client still reads the thread.
+    _thread_environment(tmp_path, monkeypatch, [
+        {"content": "hi", "role": "user"},
+    ])
+    state._mark_unseen_response("thread-a")
+    state._mark_urgent("thread-a")
+
+    response = _client(monkeypatch).post(
+        "/api/v1/phone/threads/thread-a/open", headers=_auth())
+
+    assert response.status_code == 200
+    assert response.json()["cleared"] is True
+    assert not state._has_unseen_response("thread-a")
+    assert not state._has_urgent("thread-a")
+
+
+def test_phone_open_ack_with_stale_revision_keeps_newer_unread(tmp_path, monkeypatch):
+    # The read-receipt race: the phone snapshots view A, then a NEWER response
+    # arrives (and re-marks the thread unread) before the phone's ack reaches
+    # the server.  The ack carries A's revision; the server recomputes the
+    # current revision (now B's), sees they differ, and must NOT clear — the
+    # unread flag for the response the user hasn't seen survives.
+    messages = [
+        {"content": "hi", "role": "user"},
+        {"content": "answer A", "role": "assistant"},
+    ]
+    _thread_environment(tmp_path, monkeypatch, messages)
+    client = _client(monkeypatch)
+
+    # 1. The phone fetches and displays view A (GET never clears flags).
+    first = client.get("/api/v1/phone/threads/thread-a", headers=_auth())
+    assert first.status_code == 200
+    viewed_revision = first.json()["thread"]["revision"]
+    assert not state._has_unseen_response("thread-a")
+
+    # 2. A newer response B arrives between the snapshot and the ack; the
+    #    fixture history returns this same list, so appending B is what the
+    #    server sees on its recompute, and it marks the thread unread.
+    messages.append({"content": "answer B", "role": "assistant"})
+    state._mark_unseen_response("thread-a")
+    assert state._has_unseen_response("thread-a")
+    current_revision = client.get(
+        "/api/v1/phone/threads/thread-a", headers=_auth()
+    ).json()["thread"]["revision"]
+    assert current_revision != viewed_revision  # the new response bumped it
+
+    # 3. The phone's ack for A (stale revision) reaches the server.
+    response = client.post(
+        "/api/v1/phone/threads/thread-a/open",
+        headers=_auth(), json={"revision": viewed_revision})
+
+    # 4. The flag for B is NOT cleared — the user hasn't seen it.
+    assert response.status_code == 200
+    assert response.json()["cleared"] is False
+    assert state._has_unseen_response("thread-a")
+
+
+def test_phone_open_ack_with_current_revision_after_newer_response_clears(
+        tmp_path, monkeypatch):
+    # The inverse of the race: after the phone refreshes and renders the newer
+    # view, its ack carries the CURRENT revision and the flags do clear.
+    messages = [
+        {"content": "hi", "role": "user"},
+        {"content": "answer A", "role": "assistant"},
+    ]
+    _thread_environment(tmp_path, monkeypatch, messages)
+    client = _client(monkeypatch)
+    client.get("/api/v1/phone/threads/thread-a", headers=_auth())
+    # Newer response arrives, thread marked unread, phone re-snapshots B.
+    messages.append({"content": "answer B", "role": "assistant"})
+    state._mark_unseen_response("thread-a")
+    current_revision = client.get(
+        "/api/v1/phone/threads/thread-a", headers=_auth()
+    ).json()["thread"]["revision"]
+
+    response = client.post(
+        "/api/v1/phone/threads/thread-a/open",
+        headers=_auth(), json={"revision": current_revision})
+
+    assert response.status_code == 200
+    assert response.json()["cleared"] is True
+    assert not state._has_unseen_response("thread-a")
+
+
+def test_phone_snapshot_get_never_clears_unread_or_urgent(tmp_path, monkeypatch):
+    thread_dir = _thread_environment(tmp_path, monkeypatch, [
+        {"content": "hi", "role": "user"},
+    ])
+    state._mark_unseen_response("thread-a")
+    state._mark_urgent("thread-a")
+
+    # GET /threads/{tid} is overloaded: clients also use it for auth probes
+    # and busy-check polls that must never clear a flag.  Only the dedicated
+    # open endpoint clears.
+    response = _client(monkeypatch).get(
+        "/api/v1/phone/threads/thread-a", headers=_auth())
+
+    assert response.status_code == 200
+    assert state._has_unseen_response("thread-a")
+    assert state._has_urgent("thread-a")
+    assert (thread_dir / "unseen_response").exists()
+    assert (thread_dir / "urgent_response").exists()
+
+
+def test_phone_history_page_does_not_clear_unread_or_urgent(tmp_path, monkeypatch):
+    thread_dir = _thread_environment(tmp_path, monkeypatch, [
+        {"content": "one", "role": "user"},
+        {"content": "two", "role": "assistant"},
+    ])
+    state._mark_unseen_response("thread-a")
+    state._mark_urgent("thread-a")
+    cursor = phone_api._message_id("thread-a", {"content": "one", "role": "user"}, 1)
+
+    # History pagination (before is set) is still a read: the user is scrolling
+    # an already-opened view, and clearing belongs to the dedicated open
+    # endpoint, not to any snapshot GET.
+    response = _client(monkeypatch).get(
+        f"/api/v1/phone/threads/thread-a/history?before={cursor}", headers=_auth())
+
+    assert response.status_code == 200
+    assert state._has_unseen_response("thread-a")
+    assert state._has_urgent("thread-a")
+
+
 def test_create_queues_initialization_on_the_dedicated_scheduler(monkeypatch):
     scheduled = []
     monkeypatch.setattr(phone_api, "_create_and_submit",
