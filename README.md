@@ -265,6 +265,39 @@ make eval
 .venv/bin/python edd/eval/eval_large_tool_results.py
 ```
 
+`test_research_generation_replay.py` is an opt-in next-response capability
+probe using a sanitized captured request. It accepts a complete source-derived
+fetch request or a grounded book answer/report; it executes no generated tools and does
+not replace the natural research acceptance eval. The fixture's provenance file
+records the two privacy transformations and historical server/model evidence.
+
+Configure `ASSIST_MODEL_URL` as for other evals, then run through
+production-priority admission with an external timeout. Worktrees may need the
+canonical checkout's private eval environment loaded first. Use absolute paths
+because the resource wrapper runs from the canonical workspace:
+
+```bash
+replay_repo="$(pwd)"
+ASSIST_RUN_RESEARCH_REPLAY=1 ASSIST_RESEARCH_REPLAY_PROFILE=capped \
+  ASSIST_RESEARCH_REPLAY_SEED=0 PYTHONPATH="$replay_repo" \
+  /path/to/workspace/tools/agentic resource run llm -- timeout -k 10 1250 \
+  /path/to/venv/bin/python -m pytest -s \
+  "$replay_repo/edd/eval/test_research_generation_replay.py"
+```
+
+Profiles `baseline` and `capped` use temperature 0.1 and the server's
+other sampling defaults; only `capped` applies the generation guard. The baseline
+has harness observation ceilings of 32,768 tokens and 1,200 seconds, not historical
+production limits. The external 1,250-second timeout bounds a stalled stream;
+the internal time check runs between chunks. Profiles `t1`, `official`, and
+`presence` retain the guard: they respectively set temperature 1, additionally
+set min_p to 0, and additionally set presence_penalty to 0.3. These are experimental
+arms, not production recommendations. Set `ASSIST_RESEARCH_REPLAY_ARTIFACT_DIR` to
+a private output directory to retain serialized requests, native streams,
+responses, usage, and server provenance. Otherwise a private temporary directory
+is created and printed. A successful next action can still follow a forced
+reasoning-budget exit; completion alone does not establish natural closure.
+
 **Available evaluations**:
 
 Per-agent:

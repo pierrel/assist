@@ -1,0 +1,518 @@
+{
+  "messages": [
+    {
+      "content": [
+        {
+          "type": "text",
+          "text": "You are a research worker. You search the web, read the pages your searches return, and hand back a focused set of VERIFIED findings — each fact paired with the source you found it in. You report only what your sources actually say; you never answer from your own knowledge.\n\n## How to search: start broad, then narrow\nYour FIRST search should be a short, broad query (a few words). Long, over-specific queries return few results — the most common mistake is to open with a narrow query and get nothing back. See what the broad search returns, then run a narrower query to close the specific gap. After each search, take a beat: what did I learn, what's still missing, what should the next query be.\n\nIf a search returns NO results, do NOT re-run it or a lightly-reworded version — a reworded empty query almost always comes back empty too. Change the *angle*: broaden it, drop a constraint, or try adjacent terms. If two or three different angles for the same specific thing all come back empty, treat that thing as not findable — say so plainly and move on; do not keep searching for it.\n\nRead a page with `read_url` only when a search snippet isn't enough to state a finding precisely. Most findings come straight from the snippets — you usually don't need to open the page.\n\n## When to stop (stop at the FIRST of these — you do NOT need exhaustive coverage)\n- You can answer the question comprehensively from what you've gathered, OR\n- You have 3 or more relevant sources you actually read or confirmed (not just one broad result list), OR\n- Your last two searches returned basically the same information (you've hit diminishing returns).\n\nSearch-count guide: a simple question usually needs 2–3 searches; a complex, multi-part one, up to about 5. For a simple bounded question, one authoritative result that answers it is enough: use its exact returned URL if a page is needed, then stop. Never repeat a successful query or substitute a remembered URL variant. You do not need a better source once you have a usable one — once you can answer, stop and write it.\n\n## Source quality\nPrefer primary and authoritative sources — the official docs, the original publisher, an expert or academic page — over SEO content farms and aggregators. A plain authoritative page beats a slick one that just repackages it.\n\n## Reading pages with `read_url` (follow this procedure)\n1. `search_internet` returns a list of `{title, url, content}` — `content` is a snippet of each page. Use the snippets when they're enough; they usually are.\n2. To read a page's full text, copy ONE `url` value VERBATIM from a results list and pass that to `read_url`. Read at most 2 pages.\n3. The `url` you pass MUST be one you copied from a results list — you do not know what URLs exist, only the search results do. To find more pages, run another `search_internet`; never type a URL yourself.\n4. If a `read_url` errors, do NOT call it again or a variant of it — move to a different result URL. One page failing to load is minor and recoverable; it is not a reason to stop.\n5. For a long page, `read_url` returns a short PREVIEW plus a file path (full text saved there). When you need a specific fact — an exact number, date, name, or quote — not in the preview, do NOT answer from the preview: `grep(pattern=\"<keyword>\", path=\"<returned path>\")` and read around the match.\n\nExample — suppose `search_internet` returned `[{\"title\": \"Casio F-91W\", \"url\": \"https://shop.example/f91w\", \"content\": \"...\"}]`\n- Correct: `read_url(\"https://shop.example/f91w\")`   ← copied from the results\n- WRONG:   `read_url(\"https://www.casio.com/watch/f-91w/\")`   ← typed from memory; a guess, it will fail\n\n## What you hand back\nOnly your final message is passed on — whoever reads it has NO access to your searches or the pages you read. So every finding AND its source must be IN that message.\n- Before finishing, challenge your own answer: remove any claim that is not supported by a result you actually saw, and call out conflicting sources or material gaps rather than smoothing them over.\n- Report each finding you verified, and name the source it came from. Nothing in your report may come from your own knowledge — only from a search result or a page you actually read. If you didn't find something in a source, you don't have it: leave the gap, don't fill it from memory.\n- End your message with a `Sources:` list containing, verbatim, every source URL you used (copy each `url` exactly as it appeared).\n\n## Being honest about gaps — the one rule that matters most\nBefore you write your final message, count the searches this turn that returned at least one real result.\n\n- **If that count is 1 or more:** your final message MUST be built from those results. Report the findings you gathered, then — if any search came back rate-limited or unavailable — add ONE plain sentence that some searches couldn't complete, so coverage may be partial. Getting a real result and THEN hitting an unavailable search does not erase the result you got. You may NOT say \"web search is unavailable\", \"I couldn't look this up\", or \"I can't provide a report\" when you already found something — a later failure never undoes an earlier success. Report what you found.\n- **Only if that count is 0** (every search returned nothing all turn): say plainly that you couldn't look this up right now. Do not invent a finding or a source to fill the gap — an honest \"I couldn't verify this\" always beats a guess from memory.\n\nYou are a deep agent, an AI assistant that helps users accomplish tasks using tools. You respond with text and tool calls. The user can see your responses and tool outputs in real time.\n\n## Core Behavior\n\n- Be concise and direct. Don't over-explain unless asked.\n- NEVER add unnecessary preamble (\"Sure!\", \"Great question!\", \"I'll now...\").\n- Don't say \"I'll now do X\" — just do it.\n- If the request is underspecified, ask only the minimum followup needed to take the next useful action.\n- If asked how to approach something, explain first, then act.\n\n## Professional Objectivity\n\n- Prioritize accuracy over validating the user's beliefs\n- Disagree respectfully when the user is incorrect\n- Avoid unnecessary superlatives, praise, or emotional validation\n\n## Doing Tasks\n\nWhen the user asks you to do something:\n\n1. **Understand first** — read relevant files, check existing patterns. Quick but thorough — gather enough evidence to start, then iterate.\n2. **Act** — implement the solution. Work quickly but accurately.\n3. **Verify** — check your work against what was asked, not against your own output. Your first attempt is rarely correct — iterate.\n\nKeep working until the task is fully complete. Don't stop partway and explain what you would do — just do it. Only yield back to the user when the task is done or you're genuinely blocked.\n\n**When things go wrong:**\n- If something fails repeatedly, stop and analyze *why* — don't keep retrying the same approach.\n- If you're blocked, tell the user what's wrong and ask for guidance.\n\n## Clarifying Requests\n\n- Do not ask for details the user already supplied.\n- Use reasonable defaults when the request clearly implies them.\n- Prioritize missing semantics like content, delivery, detail level, or alert criteria.\n- Avoid opening with a long explanation of tool, scheduling, or integration limitations when a concise blocking followup question would move the task forward.\n- Ask domain-defining questions before implementation questions.\n- For monitoring or alerting requests, ask what signals, thresholds, or conditions should trigger an alert.\n\n## Progress Updates\n\nFor longer tasks, provide brief progress updates at reasonable intervals — a concise sentence recapping what you've done and what's next."
+        },
+        {
+          "type": "text",
+          "text": "\n\n## `write_todos`\n\nYou have access to the `write_todos` tool to help you manage and plan complex objectives.\nUse this tool for complex objectives to ensure that you are tracking each necessary step and giving the user visibility into your progress.\nThis tool is very helpful for planning complex objectives, and for breaking down these larger complex objectives into smaller steps.\n\nIt is critical that you mark todos as completed as soon as you are done with a step. Do not batch up multiple steps before marking them as completed.\nFor simple objectives that only require a few steps, it is better to just complete the objective directly and NOT use this tool.\nWriting todos takes time and tokens, use it when it is helpful for managing complex many-step problems! But not for simple few-step requests.\n\n## Important To-Do List Usage Notes to Remember\n- The `write_todos` tool should never be called multiple times in parallel.\n- Don't be afraid to revise the To-Do list as you go. New information may reveal new tasks that need to be done, or old tasks that are irrelevant."
+        },
+        {
+          "type": "text",
+          "text": "\n\n## Following Conventions\n\n- Read files before editing — understand existing content before making changes\n- Mimic existing style, naming conventions, and patterns\n\n## Filesystem Tools `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`\n\nYou have access to a filesystem which you can interact with using these tools.\nAll file paths must start with a /. Follow the tool docs for the available tools, and use pagination (offset/limit) when reading large files.\n\n- ls: list files in a directory (requires absolute path)\n- read_file: read a file from the filesystem\n- write_file: write to a file in the filesystem\n- edit_file: edit a file in the filesystem\n- glob: find files matching a pattern (e.g., \"**/*.py\")\n- grep: search for text within files\n\n## Large Tool Results\n\nWhen a tool result is too large, it may be offloaded into the filesystem instead of being returned inline. In those cases, use `read_file` to inspect the saved result in chunks, or use `grep` within `/large_tool_results/` if you need to search across offloaded tool results and do not know the exact file path. Offloaded tool results are stored under `/large_tool_results/<tool_call_id>`.\n\n## Execute Tool `execute`\n\nYou have access to an `execute` tool for running shell commands in a sandboxed environment.\nUse this tool to run commands, scripts, tests, builds, and other shell operations.\n\n- execute: run a shell command in the sandbox (returns output and exit code)"
+        },
+        {
+          "type": "text",
+          "text": "\n\n\n\n## Skills\n\nYou have access to named skills. Each skill is a self-contained set of\nrules for a specific domain. The list below shows each skill's *name*\nand *description*; the rules themselves are revealed only when you load\nthe skill.\n\n**Available skills:**\n\n- **egress**: Sandbox commands and the turn browser share exact-host egress approvals. EXAMPLES — curl/pip/git gets a proxy 403; browser_preflight reports host_not_approved; auditing or reducing this thread's grants. MUST load before requesting new network access.\n\n### How to use a skill\n\n1. **Match.** If a skill's description fits what you're about to do, continue to step 2.\n2. **Load.** Call `load_skill(name=\"<skill name>\")`. Make it the only tool call in that response and wait for its result.\n3. **Apply.** On the next response, use the newly available tools and the loaded rules.\n\nThe descriptions only summarize *when* to load. You will not know the rules\nuntil the load completes. A referential follow-up such as \"make it 8 instead\"\nstill matches the skill for the active task established by the conversation.\n\n### Pre-action check (MANDATORY — apply on every turn before any tool call)\n\nBefore issuing your first tool call on a turn, scan the user's latest message\nand its active task against every skill description above. A matching skill may\nalready have tools available; use them directly. Reload the skill when you need\noperating guidance that is no longer in context. If a skill must be\nloaded, call only `load_skill(name=\"<matched skill>\")` in that response. Do not\ncombine it with `ls`, `read_file`, `task`, `edit_file`, or a newly disclosed\ntool. Only if no skill matches may you proceed directly to the task.\n\nTools available for this response: write_todos, ls, read_file, write_file, edit_file, glob, grep, execute, load_skill, search_internet, read_url.\n"
+        }
+      ],
+      "role": "system"
+    },
+    {
+      "content": "Find children's books about the Iliad or the Odyssey that are similar in style and age level to the \"Adventures in Time\" series (Usborne, Gareth Williams, chapter books for ages 7-10, illustrated, narrative retellings of historical/mythological stories).\n\nThe user has a children's book on Alexander the Great from the \"Adventures in Time\" series and wants a similar children's book about the Iliad or the Odyssey.\n\nPlease research and return:\n1. The best-matching children's books (ages ~7-10 or similar) that retell the Iliad and/or the Odyssey in an accessible narrative style. Include title, author, publisher, target age, and a short description of each.\n2. Note any that are part of a series similar to \"Adventures in Time\" (e.g., Usborne, Oxford Reading Tree, or other illustrated chapter-book series covering Greek myths).\n3. Include clickable URLs (publisher page, Amazon, or other book page) for each book.\n4. Rank or highlight the top recommendation(s) that best match the \"Adventures in Time\" feel: illustrated, narrative, age-appropriate, standalone.\n\nReturn the findings with sources.",
+      "role": "user"
+    },
+    {
+      "content": null,
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "type": "function",
+          "id": "eoxAj0TJzqjMkspsp9X3qHiBpDHUfQ1f",
+          "function": {
+            "name": "write_todos",
+            "arguments": "{\"todos\": [{\"content\": \"Broad search: children's books retelling Odyssey/Iliad ages 7-10\", \"status\": \"in_progress\"}, {\"content\": \"Search for series similar to Adventures in Time (Usborne, Oxford Reading Tree, illustrated chapter books on Greek myths)\", \"status\": \"pending\"}, {\"content\": \"Verify details (publisher, age, series) via page reads\", \"status\": \"pending\"}, {\"content\": \"Compile ranked recommendations with URLs and sources\", \"status\": \"pending\"}]}"
+          }
+        },
+        {
+          "type": "function",
+          "id": "dSFT5aw2qMiymjY0K743gmD50mYLnUeW",
+          "function": {
+            "name": "search_internet",
+            "arguments": "{\"query\": \"children's book retelling of the Odyssey for ages 7-10 illustrated\", \"max_results\": 8}"
+          }
+        },
+        {
+          "type": "function",
+          "id": "SW12PP6EZhVL7RJXnc2rE1kpcppuxeqh",
+          "function": {
+            "name": "search_internet",
+            "arguments": "{\"query\": \"\\\"Adventures in Time\\\" Usborne Gareth Williams series\", \"max_results\": 8}"
+          }
+        }
+      ]
+    },
+    {
+      "content": "Updated todo list to [{'content': \"Broad search: children's books retelling Odyssey/Iliad ages 7-10\", 'status': 'in_progress'}, {'content': 'Search for series similar to Adventures in Time (Usborne, Oxford Reading Tree, illustrated chapter books on Greek myths)', 'status': 'pending'}, {'content': 'Verify details (publisher, age, series) via page reads', 'status': 'pending'}, {'content': 'Compile ranked recommendations with URLs and sources', 'status': 'pending'}]",
+      "role": "tool",
+      "tool_call_id": "eoxAj0TJzqjMkspsp9X3qHiBpDHUfQ1f"
+    },
+    {
+      "content": "[{'title': 'The Odyssey For Kids', 'url': 'https://www.amazon.com/odyssey-kids/s?k=the+odyssey+for+kids', 'content': \"The Odyssey: (An Illustrated Retelling of Homer's Epic About Odysseus, Greek Mythology & Ancient Greece for Grades 3-7 Classroom Study and Children Ages 8-12).\"}, {'title': 'Greek Mythology Books for Kids: 18 Odyssey Movie Picks', 'url': 'https://gloobooks.com/blogs/gloo-reads/greek-mythology-books-for-kids-odyssey-movie', 'content': 'Shop this book The Odyssey illustrated retelling by Gillian Cross and Neil Packer, y, illustrated by Neil Packer Gillian Cross · Ages 8 to 12 ·'}, {'title': 'The Odyssey - Los Angeles', 'url': 'https://childrensbookworld.com/list/odyssey', 'content': \"The Odyssey: (An Illustrated Retelling of Homer's Epic About Odysseus, Greek Mythology & Ancient Greece for Grades 3-7 Classroom Study and Children Ages 8-12).\"}, {'title': 'Graphic Novels, Picture Books, and Illustrated Editions', 'url': 'https://bookshop.org/lists/the-odyssey-graphic-novels-picture-books-and-illustrated-editions', 'content': \"These accessible and illustrated editions of the Odyssey bring Homer's epic poem to vivid, exciting life!\"}, {'title': 'The Odyssey: A Modern Retelling', 'url': 'https://covertocoverchildrensbooks.com/book/9798217138456', 'content': \"Hugely informative, stunningly illustrated and packed with fascinating facts, this is a joyful, exuberant ode to Homer's Odyssey that will\"}, {'title': \"A great book here for our young readers to learn all about 'The ...\", 'url': 'https://www.facebook.com/theennisbookshop/videos/a-great-book-here-for-our-young-readers-to-learn-all-about-the-odyssey-this-stun/879591058148466', 'content': 'The book is illustrated with beautiful pictures of Homer, Odysseus, and other mythological creatures.'}, {'title': 'Readers who enjoyed The Odyssey', 'url': 'https://www.goodreads.com/book/similar/19092684-the-odyssey-an-illustrated-retelling-of-homer-s-epic-about-odysseus-g', 'content': \"Find books like The Odyssey: (An Illustrated Retelling of Homer's Epic About Odysseus, Greek Mythology & Ancient Greece for Grades 3-7 Classroom Study an\"}, {'title': 'Odyssey and Iliad for kids - which edition? : r/classics', 'url': 'https://www.reddit.com/r/classics/comments/1ese9a5/odyssey_and_iliad_for_kids_which_edition', 'content': \"I'd like to read these stories to my kids (both under 10 but with relatively high levels of comprehension and language).\\n\\nWhich would be the most fun for\"}]",
+      "role": "tool",
+      "tool_call_id": "dSFT5aw2qMiymjY0K743gmD50mYLnUeW"
+    },
+    {
+      "content": "[{'title': 'Garth Williams - Wikipedia', 'url': 'https://en.wikipedia.org/wiki/Garth_Williams', 'content': 'Williams drew few straight lines. He used charcoal and graphite pencils, from fine to very soft, to illustrate the Little House books. The \"youngest\" book in the series, Little House in the Big Woods, is nearly lamplit in its coziness, almost an echo of the small-animal sensibilities of The Fur Family or his deeply colored Little Golden Books. He used pen and ink for The Cricket in Times Square, the Rescuers books, Charlotte\\'s Web, and Stuart Little. The Giant Golden Book of Elves and Fairies, [...] Selden, George (1987). The Old Meadow.\\n Sharp, Margery. The Rescuers: A Fantasy.\\n Sharp, Margery. Miss Bianca.\\n Sharp, Margery (1966). Miss Bianca in the Salt Mines.\\n Sharp, Margery (1963). The Turret.\\n Stoltz, Mary. Emmet\\'s Pig.\\n Stoltz, Mary. King Emmett the Second.\\n Wahl, Jan (1968). Push Kitty.\\n Werner, Jane (ed.) (1950). The Tall Book of Make-Believe.\\n Werner, Jane (ed.) (1951). The Giant Golden Book of Elves and Fairies.\\n White, E. B. (1945). Stuart Little. [...] Le Gallienne, Eva (1949) Flossie and Bossie\\n Leader, Pauline 1946 A Room for the Night Vanguard.\\n Lindquist, Jennie D\") (1955) The Golden Name Day.\\n Lindquist, Jennie D (1959). The Little Silver House.\\n Minarik, Else H. (1963). The Little Giant Girl and the Elf Boy.\\n Prelutsky, Jack Ride a Purple Pelican.\\n Prelutsky, Jack (1990). Beneath a Blue Umbrella.\\n Moore, Lilian (1957). My First Counting Book.\\n Norton, Miriam\") (1954). The Kitten Who Thought He Was a Mouse.'}, {'title': 'Gareth Williams | Official Publisher Page', 'url': 'https://www.simonandschuster.com/authors/Gareth-Williams/214855836', 'content': 'With over 1000 things to find! Illustrated by Gareth Williams. Step into a magical world of castles, magical friends, and royal adventures with over 1,000'}, {'title': 'Gareth Williams', 'url': 'https://www.penguinrandomhouse.com/authors/2066741/gareth-williams', 'content': \"Gareth Williams lives in London with his amazing wife. From an early age he's loved to draw, and that passion continues to this day.\"}, {'title': 'Books on the Loch Ness Monster 2: Gareth Williams’s A Monstrous Commotion — Tetrapod Zoology', 'url': 'https://tetzoo.com/blog/2019/3/29/books-on-the-loch-ness-monster-2-gareth-williamss-a-monstrous-commotion', 'content': \"Post-Gould, Williams discusses Constance Whyte’s More Than a Legend and the way LNM news was received at the time before going on to discuss the pop-culture backdrop to the events of the 1960s and 70s, somehow weaving in David Attenborough and Zoo Quest for a Dragon, Jacques Cousteau and Hans Hass. After a brief skip through the adventures of Torquil MacLeod and Peter Macnab (both are among those ‘classic’ eyewitnesses who claimed, respectively, a remarkable sighting and a remarkable photo… of [...] + Apr 19, 2020  Stop Saying That There Are Too Many Sauropod Dinosaurs, Part 2  Apr 19, 2020\\n  + Apr 17, 2020  Stop Saying That There Are Too Many Sauropod Dinosaurs, Part 1  Apr 17, 2020\\n  + Mar 30, 2020  Professor Jenny Clack, 1947-2020  Mar 30, 2020\\n  + Mar 24, 2020  Theropod Dinosaurs of the English Wealden, Some Questions (Part 1)  Mar 24, 2020\\n  + Mar 11, 2020  Minuscule Hummingbird-Sized Archaic Birds Existed During the Cretaceous  Mar 11, 2020 [...] + Oct 16, 2023  Birdwatching in Tajikistan, Part 1  Oct 16, 2023\\n  + Oct 3, 2023  Alan Feduccia’s Romancing the Birds and Dinosaurs: Forays in Postmodern Paleontology  Oct 3, 2023\\n  + Sep 17, 2023  The Remarkable Muscovy Duck  Sep 17, 2023\\n  + Sep 8, 2023  The Strange Case of the Minnesota Iceman, Part 2: A Review of Heuvelmans's Neanderthal  Sep 8, 2023\\n  + Aug 14, 2023  The Strange Case of the Minnesota Iceman, Part 1  Aug 14, 2023\"}, {'title': 'Books by Gareth Williams', 'url': 'https://www.harpercollins.com/collections/books-by-gareth-williams', 'content': \"Usborne Children's Books · HarperStacks · ICanRead.com · Christian · Romance · Avon ... Home > Books by Gareth Williams. Books by Gareth Williams. CONTACT US.\"}, {'title': 'Gareth Williams', 'url': 'https://www.imdb.com/name/nm0930617', 'content': 'Gareth Williams. Actor: Monster. Gareth Williams career stretches back to 1981 where he gained his Equity Card in a production of \"Little Mary Sunshine\" at'}, {'title': 'Gareth Williams: books, biography, latest update', 'url': 'https://www.amazon.com/Gareth-Williams/e/B00F6MPUBG', 'content': \"Follow Gareth Williams and explore their bibliography from Amazon's Gareth Williams Author Page.\"}, {'title': 'Gareth Williams', 'url': 'https://www.collinsbooks.com.au/catalog/author/gareth-williams', 'content': 'Category: Non-Fiction. The Loch Ness Monster: a creature that should have died out with the dinosaurs, or a legend built on hoaxes and wishful thinking?'}]",
+      "role": "tool",
+      "tool_call_id": "SW12PP6EZhVL7RJXnc2rE1kpcppuxeqh"
+    },
+    {
+      "content": null,
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "type": "function",
+          "id": "qI7Y1IY3yEeB7MXwvyqwc79EU8FATCYx",
+          "function": {
+            "name": "search_internet",
+            "arguments": "{\"query\": \"\\\"Adventures in Time\\\" Usborne series Alexander the Great\", \"max_results\": 8}"
+          }
+        },
+        {
+          "type": "function",
+          "id": "DwbIJZ54SzjEdeyc4Qip8kdhb1FLLjcb",
+          "function": {
+            "name": "search_internet",
+            "arguments": "{\"query\": \"Odyssey children's book chapter book ages 7-10 retelling\", \"max_results\": 8}"
+          }
+        }
+      ]
+    },
+    {
+      "content": "[{'title': 'Adventures in Time: Alexander the Great', 'url': 'https://www.amazon.co.uk/Adventures-Time-Alexander-Dominic-Sandbrook/dp/0241469740', 'content': \"Part of the 'Adventures in Time' series, following Alexander the Great as he marches from Ancient Greece through Egypt and Persia to India, pursuing his\"}, {'title': 'Adventures in Time: Alexander the Great', 'url': 'https://www.penguinrandomhouse.ca/books/712028/adventures-in-time-alexander-the-great-by-dominic-sandbrook/9780141994307', 'content': \"Take a journey to a vanished world with the ADVENTURES IN TIME series - stories so exciting you won't believe they're all true.\"}, {'title': 'Adventures in Time: Alexander the Great', 'url': 'https://www.audible.com/pd/Adventures-in-Time-Alexander-the-Great-Audiobook/B09C92F9SW', 'content': 'With historian Dominic Sandbrook as our guide, join Alexander on his incredible journey, travelling through the deserts of Egypt and over the snow-capped'}, {'title': 'Adventures in Time: Alexander the Great By Dominic ...', 'url': 'https://schoolreadinglist.co.uk/childrens-book-reviews/alexander-the-great', 'content': 'Alexander the Great By Dominic Sandbrook is full of fascinating facts and valuable life lessons and is hugely enjoyable to read.'}, {'title': 'All the Adventures in Time Books in Order', 'url': 'https://toppsta.com/books/series/6447/adventures-in-time', 'content': 'Book 1. Adventures in Time: Alexander the Great ; Book 2. Adventures in Time: The First World War ; Book 3. Adventures in Time: The Second World War ; Book 4.'}, {'title': 'Review: Adventures in Time Alexander the Great by ...', 'url': 'https://vsviewfromthebookshelves.home.blog/2021/10/19/review-adventures-in-time-alexander-the-great-by-dominic-sandbrook', 'content': 'The compelling narrative explains how the vast wealth of Persia under the reign of King Darius III paid for a fearsome military strength, and'}, {'title': 'Write Your Own History', 'url': 'https://www.facebook.com/Writeyourownhistory.amazon/posts/%EF%B8%8F-alexander-the-great-has-officially-joined-our-youtube-reading-adventuresjoin-a/122174507996971360', 'content': 'The Alexander the Great reading series is available now on YouTube! Click the link below to start! https://www.youtube. com/watch?v'}, {'title': 'Alexander the Great - Dominic Sandbrook', 'url': 'https://dominicsandbrook.com/adventures-in-time/alexander-the-great', 'content': \"Almost every chapter bursts with staggering details, from Alexander's quest to find the Oracle of Siwa to his battles with the Persians, his expedition into\"}]",
+      "role": "tool",
+      "tool_call_id": "qI7Y1IY3yEeB7MXwvyqwc79EU8FATCYx"
+    },
+    {
+      "content": "[{'title': 'Which Odyssey novel? - K-8 Curriculum Board', 'url': 'https://forums.welltrainedmind.com/topic/736234-which-odyssey-novel', 'content': \"- Samuel Butler's The Odyssey = for grades 7-10. No illustrations. Detailed prose retelling; story is reordered into chronological order of\"}, {'title': 'Odyssey Retellings for Kids — a staff-created list from ...', 'url': 'https://fulcolibrary.bibliocommons.com/v2/list/display/1627777480/3058636507', 'content': \"Odyssey Retellings for Kids Like this list. Homer's epic poem is retold for children, including graphic novel and early chapter book versions.\"}, {'title': \"A great book here for our young readers to learn all about 'The ...\", 'url': 'https://www.facebook.com/theennisbookshop/videos/a-great-book-here-for-our-young-readers-to-learn-all-about-the-odyssey-this-stun/879591058148466', 'content': \"This animated retelling of Homer the Odyssey chronicles the Greek warrior Odysseus's epic journey home. After the Trojan War, Odysseus travels\"}, {'title': \"New retelling of Homer's Odyssey for young readers\", 'url': 'https://www.facebook.com/groups/childrensillustrator/posts/1757323235287057', 'content': 'New Kids on the Block with Great Classics Retold for new generations\\nHi everyone — new here, excited to connect with fellow book lovers.\\n\\nFunny timing:'}, {'title': 'The Odyssey For Kids Age 8-10', 'url': 'https://www.amazon.com/odyssey-kids-age-8-10/s?k=the+odyssey+for+kids+age+8-10', 'content': '10-Minute Stories From Greek Mythology - The Iliad and The Odyssey: Timeless Legendary Tales To Inspire Kids Of All Ages (Ancient Mythology Collections'}, {'title': 'Best Illiad/Odyssey read aloud for a 2nd grader?', 'url': 'https://simplycharlottemason.com/scmforum/topic/best-illiadodyssey-read-aloud-for-a-2nd-grader', 'content': \"We're enjoying “The Adventures of Odysseus and the Tales of Troy by Padriac Collum. I think it's the same as The Children's Homer (retelling of Illiad and\"}, {'title': 'The Odyssey: A Modern Retelling', 'url': 'https://covertocoverchildrensbooks.com/book/9798217138456', 'content': 'A complex hero: This fresh perspective portrays Odysseus as he really was: a complex man who did many great things... and just as many bad.'}, {'title': 'Best translation of the Odyssey for children? : r/classics', 'url': 'https://www.reddit.com/r/classics/comments/1hlnj39/best_translation_of_the_odyssey_for_children', 'content': 'I know there is a really good post on here already comparing translations of the Odyssey, but I was hoping for recommendations for children specifically.'}]",
+      "role": "tool",
+      "tool_call_id": "DwbIJZ54SzjEdeyc4Qip8kdhb1FLLjcb"
+    },
+    {
+      "content": null,
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "type": "function",
+          "id": "YKkeKcBP1rNPc34URpFQctQuMlQtHAi1",
+          "function": {
+            "name": "search_internet",
+            "arguments": "{\"query\": \"\\\"Adventures of Odysseus\\\" Padraic Collum children's book\", \"max_results\": 8}"
+          }
+        },
+        {
+          "type": "function",
+          "id": "2yOOqHrfKfQSDSXHQmmu6MMaOvnCofFH",
+          "function": {
+            "name": "search_internet",
+            "arguments": "{\"query\": \"children's book Iliad retelling ages 8-12 illustrated\", \"max_results\": 8}"
+          }
+        }
+      ]
+    },
+    {
+      "content": "[{'title': \"The Children's Homer - Homer in Print - UChicago Library\", 'url': 'https://www.lib.uchicago.edu/collex/exhibits/homer-print-transmission-and-reception-homers-works/childrens-homer', 'content': 'Padraic Colum (1881–1972) The Adventures of Odysseus. This is the story of Odysseus, a number of children\\'s books. Odyssey in one volume, has e title \"The'}, {'title': 'The Adventures of Odysseus and The Tales of Troy by ...', 'url': 'https://www.gutenberg.org/ebooks/16867', 'content': '\"The Adventures of Odysseus and The Tale of Troy\" by Padraic Colum is a retelling of classic Greek mythology, specifically focused on the'}, {'title': \"The Children's Homer: The Adventures of… by Padraic Colum\", 'url': 'https://www.youtube.com/watch?v=kNV2BNeUcQQ', 'content': \"Padraic Colum's classic retelling combines the immortal stories from Homer's Iliad and Odyssey into one glorious saga of heroism and magical\"}, {'title': \"The Children's Homer: The adventures of Odysseus and ...\", 'url': 'https://www.amazon.com/Childrens-Homer-adventures-Odysseus-tale/dp/B0006AXXQ2', 'content': \"A retelling of Homer's classic tales adapted for children, featuring the legendary adventures of Odysseus and the epic story of the Trojan War.\"}, {'title': \"Children's Homer / Padraic Colum\", 'url': 'https://www.rainbowresource.com/013768.html', 'content': 'Includes both the Iliad and the Odyssey … comes a collection of fifteen timeless stories inspired by classic Greek literature. Ages: 10 - 14 Edition:'}, {'title': \"The Children's Homer: The Adventures of Odysseus and ...\", 'url': 'https://www.goodreads.com/en/book/show/1491184.The_Children_s_Homer', 'content': 'Travel back to a mythical time when Achilles, aided by the gods, waged war against the Trojans. And join Odysseus on his journey through murky waters,'}, {'title': \"The Children's Homer : the adventures of Odysseus and ...\", 'url': 'https://archive.org/details/childrenshomerad00colu', 'content': \"A retelling of the events of the Trojan War and the wanderings of Odysseus based on Homer's Iliad and Odyssey.\"}, {'title': 'The Adventures of Odysseus and the Tale of Troy', 'url': 'https://clunymedia.com/products/the-adventures-of-odysseus-and-the-tale-of-troy', 'content': 'Here is the story of the wise Odysseus, who bids goodbye to his infant son, Telemachus, his young wife Penelope, First published in 1918, The Adventures of'}]",
+      "role": "tool",
+      "tool_call_id": "YKkeKcBP1rNPc34URpFQctQuMlQtHAi1"
+    },
+    {
+      "content": "[{'title': 'The Iliad and the Odyssey Retold by Marcia Williams Book ...', 'url': 'https://www.facebook.com/61556983804449/videos/the-iliad-and-the-odyssey-retold-and-illustrated-by-marcia-williams-this-is-a-bo/2864365507080033', 'content': 'This post is a book review and recommendation for the children\\'s book \"The Iliad and The Odyssey,\" retold and illustrated by Marcia Williams.'}, {'title': 'Amazon.com : the odyssey for kids', 'url': 'https://www.amazon.com/odyssey-kids/s?k=the+odyssey+for+kids', 'content': \"## More results\\n\\nThe Iliad/The Odyssey Boxed Set: (Two Illustrated Epic Retellings of Homer's Greek Myths Featuring Gods, Heroes, Battles, ...\\n\\n## The Iliad/The Odyssey Boxed Set: (Two Illustrated Epic Retellings of Homer's Greek Myths Featuring Gods, Heroes, Battles, and Legendary Journeys for Young Readers and Mythology Fans)\\n\\nThe Odyssey: An Exciting Greek Mythology Graphic Novel Tale for Kids (Ages 7+) (Usborne Graphic Novels) [...] The Iliad: A Graphic Novel: (A Modern Visual Adaptation of Homer's Epic War Story of Greek Mythology for Young Adults)\\n\\n## The Iliad: A Graphic Novel: (A Modern Visual Adaptation of Homer's Epic War Story of Greek Mythology for Young Adults)\\n\\nThe Odyssey for Kids: The Gripping, Easy-to-Read Retelling of Homer’s Epic Adventure That Turns Reluctant Readers Into Sto...\\nThe Odyssey for Kids: The Gripping, Easy-to-Read Retelling of Homer’s Epic Adventure That Turns Reluctant Readers Into Sto... [...] 10-Minute Stories From Greek Mythology - The Iliad and The Odyssey: Timeless Legendary Tales To Inspire Kids Of All Ages (...\\n\\n## 10-Minute Stories From Greek Mythology - The Iliad and The Odyssey: Timeless Legendary Tales To Inspire Kids Of All Ages (Ancient Mythology Collections Around The World)\\n\\nKindle Unlimited\\nThe Odyssey: (An Illustrated Retelling of Homer's Epic About Odysseus, Greek Mythology & Ancient Greece for Grades 3-7 Cla...\"}, {'title': 'The Iliad/The Odyssey Boxed Set: (Two Illustrated Epic ...', 'url': 'https://www.alibris.com/The-Iliad-The-Odyssey-Boxed-Set-Two-Illustrated-Epic-Retellings-of-Homers-Greek-Myths-Featuring-Gods-Heroes-Battles-and-Legendary-Journeys-for-Young-Readers-and-Mythology-Fans-Gillian-Cross/book/56943958', 'content': \"The Iliad/The Odyssey Boxed Set: (Two Illustrated Epic Retellings of Homer's Greek Myths Featuring Gods, Heroes, Battles, and Legendary Journeys for Young\"}, {'title': 'The Iliad and the Odyssey', 'url': 'https://www.penguinrandomhouseretail.com/book?isbn=9798896231134', 'content': \"This iconic edition of The Iliad and the Odyssey, illustrated by the renowned Alice and Martin Provensen, is a superb introduction to Homer's\"}, {'title': \"Ranking My Favorite Children's Versions of The Iliad\", 'url': 'https://roadstainedfeet.wordpress.com/2019/06/23/ranking-my-favorite-childrens-versions-of-the-iliad', 'content': \"#1. Black Ships Before Troy: 5/5 stars By Rosemary Sutcliffe This was far and away my favorite children's retelling of The Iliad. m Lord of the\"}, {'title': \"The Iliad - Parents' Guide & Book Review | Common Sense Media\", 'url': 'https://www.commonsensemedia.org/book-reviews/the-iliad', 'content': \"### 50 Books All Kids Should Read Before They're 12\\n Gaming\\n  + App Reviews and Lists\\n    - Fortnite\\n    - Minecraft\\n    - Roblox\\n    - All Game Reviews\\n Social Media\\n  + Podcast Reviews and Lists\\n    - Social Media\\n    - Snapchat\\n    - Instagram\\n    - TikTok\\n Parents' Guides\\n  + By Age & Stage\\n    - Preschoolers (2-4)\\n    - Little Kids (5-7)\\n    - Big Kids (7-9)\\n    - Tweens (10-12)\\n    - Teens (13-15)\\n  + By Topic\\n    - Digital Parenting Anxiety\\n    - First Phones\\n    - Social Media [...] but Achilles loves the woman and wants her to be returned. Achilles refuses to fight until the woman is restored to him, and the gods choose sides. At the core of the war is the fact that Paris, a Trojan prince, has stolen Helen, the wife of Menelaos. Menelaos doesn't want to return home until his army has sacked Troy and he has retrieved Helen. Other key players in the drama are the great strategist/soldier Odysseus and Troy's brave warrior Hektor, who use their superior intelligence and [...] When Homer's ILIAD begins, the Trojans and Achaians are already at war. Throughout the poem, the advantage shifts from one side to the other as gods and goddesses interfere, men and/or gods call temporary truces, and mortals jockey for power. A key issue that carries through the poem involves a conflict between Agamemnon, the brother of Achaian king Menelaos, and the great warrior Achilles. Agamemnon steals a woman who had been awarded to Achilles as a prize for battles won, but Achilles loves\"}, {'title': 'Odyssey and Iliad for kids - which edition? : r/classics', 'url': 'https://www.reddit.com/r/classics/comments/1ese9a5/odyssey_and_iliad_for_kids_which_edition', 'content': \"I'd like to read these stories to my kids (both under 10 but with relatively high levels of comprehension and language).\\n\\nWhich would be the most fun for\"}, {'title': 'The Odyssey retold for children with honest storytelling and ...', 'url': 'https://www.facebook.com/groups/142991674418124/posts/1341998347850778', 'content': \"new here, and happy to finally join this community.\\nA little over a year ago, my brother and I started a project we couldn't stop\"}]",
+      "role": "tool",
+      "tool_call_id": "2yOOqHrfKfQSDSXHQmmu6MMaOvnCofFH"
+    },
+    {
+      "content": null,
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "type": "function",
+          "id": "55c9gSopH45gwX3xip57m8ijAeSyyJGY",
+          "function": {
+            "name": "search_internet",
+            "arguments": "{\"query\": \"Usborne \\\"The Odyssey\\\" graphic novel ages 7+\", \"max_results\": 8}"
+          }
+        },
+        {
+          "type": "function",
+          "id": "joUEEeumyZTLEV4G9UoCxsZQ2AjcG9Rt",
+          "function": {
+            "name": "search_internet",
+            "arguments": "{\"query\": \"Marcia Williams \\\"The Iliad and the Odyssey\\\" retold illustrated children\", \"max_results\": 8}"
+          }
+        }
+      ]
+    },
+    {
+      "content": "[{'title': 'The Odyssey', 'url': 'https://usborne.com/us/the-odyssey-9781806460526', 'content': 'The Odyssey. By: Russell Punter. Illustrated by Fabiano Fiorin. Series : Usborne Graphic Novels. Age 7+.'}, {'title': 'The Odyssey Graphic Novel', 'url': 'https://www.amazon.com/odyssey-graphic-novel/s?k=the+odyssey+graphic+novel', 'content': 'THE ODYSSEY GRAPHIC NOVEL (Usborne Graphic Novels) ... The Odyssey: An Exciting Greek Mythology Graphic Novel Tale for Kids (Ages 7+) (Usborne Graphic Novels).'}, {'title': 'The Odyssey: An Exciting Greek Mythology Graphic Novel ...', 'url': 'https://www.abebooks.com/Odyssey-Exciting-Greek-Mythology-Graphic-Novel/32468531796/bd', 'content': 'The Odyssey: An Exciting Greek Mythology Graphic Novel Tale for Kids (Ages 7+) (Usborne Graphic Novels, 1); Publisher: Usborne Books; Publication Date: 2026'}, {'title': 'The Odyssey', 'url': 'https://www.harpercollins.com/products/the-odyssey-russell-punter', 'content': 'Usborne Graphic Novels. The Odyssey. By Russell Punter, Illustrated by ... Age: 7 to 10. BISAC1: JUVENILE FICTION / Holidays'}, {'title': 'The Odyssey by Homer (Usborne Graphic Legends)', 'url': 'https://www.rainbowresource.com/074962.html', 'content': 'The timeless Greek legend of gods and monsters comes to life in this action-packed graphic novel adaptation ... Junior High - Adult Grades (7-AD) · Odyssey'}, {'title': '(Usborne Graphic Novels) by Russell Punter (Paperback)', 'url': 'https://www.target.com/p/odyssey-usborne-graphic-novels-by-russell-punter-paperback/-/A-1009439290', 'content': 'Suggested Age: 7-10 Years ; Number of Pages: 104 ; Genre: Juvenile Fiction ; Sub-Genre: Comics & Graphic Novels ; Series Title: Usborne Graphic Novels'}, {'title': 'The Odyssey - Quicklinks', 'url': 'https://usborne.com/us/quicklinks/quicklink/the-odyssey-graphic-novel-hcus', 'content': 'Age: 7+ · Explore a clickable timeline of Ancient Greece. · Make a Cyclops mask. · Meet gods and goddesses.'}, {'title': \"Reviewing THE ODYSSEY Graphic Novel: Usborne's Take\", 'url': 'https://greekgodsparadise.com/2025/03/04/usborne-the-odyssey-review', 'content': 'A review of Usborne\\'s graphic novel adaptation of THE ODYSSEY: Will this retelling, \"Usborne: The Odyssey,\" captivate young readers?'}]",
+      "role": "tool",
+      "tool_call_id": "55c9gSopH45gwX3xip57m8ijAeSyyJGY"
+    },
+    {
+      "content": "[{'title': 'The Iliad and the Odyssey Retold by Marcia Williams Book ...', 'url': 'https://www.facebook.com/61556983804449/videos/the-iliad-and-the-odyssey-retold-and-illustrated-by-marcia-williams-this-is-a-bo/2864365507080033', 'content': 'This post is a book review and recommendation for the children\\'s book \"The Iliad and The Odyssey,\" retold and illustrated by Marcia Williams.'}, {'title': 'The Iliad and the Odyssey by Marcia Williams', 'url': 'https://www.booktopia.com.au/the-iliad-and-the-odyssey-marcia-williams/book/9781406303483.html', 'content': 'These classic Greek stories have been retold with lively text and a dramatic cartoon style, making them accessible and fun for young children.'}, {'title': 'The Iliad and the Odyssey by Marcia Williams', 'url': 'https://www.goodreads.com/en/book/show/162806.The_Iliad_and_the_Odyssey', 'content': \"Homer's epics become tales of adventure and marvel for the youngest readers in these remarkable retellings. Illustrated in Williams' well-loved comic-strip\"}, {'title': 'Marcia Williams The Iliad and the Odyssey (Paperback)', 'url': 'https://www.ebay.com/itm/407007252546', 'content': \"From the Trojan War to Odysseus's action-packed journey home, discover two of the greatest stories in history, retold for a new generation and perfect to share\"}, {'title': 'Greek Myths - Marcia Williams: Books', 'url': 'https://www.amazon.com/Greek-Myths-Marcia-Williams/dp/140630347X', 'content': \"What's it about? This book contains eight myths retold in lively words and illustrated in dramatic cartoon style, including the stories of Theseus, Heracles,\"}, {'title': 'Books by Marcia Williams and Complete Book Reviews', 'url': 'https://www.publishersweekly.com/pw/authorpage/marcia-williams.html', 'content': \"As in her earlier works, Williams's (The Iliad and the Odyssey; Greek Myths for Young Children) comic-strip style pictures--riddled with silly asides and puns--\"}, {'title': 'The Iliad and the Odyssey', 'url': 'https://www.walker.co.uk/9781406303483/the-iliad-and-the-odyssey', 'content': 'Comic-strip retellings of the epic ancient Greek myths – exciting stories perfect to enjoy at home or in the Key Stage 2 classroom · More Titles'}, {'title': 'The Iliad - General Education Discussion Board', 'url': 'https://forums.welltrainedmind.com/topic/678139-the-iliad', 'content': \"I'm looking for a decent retelling of The Iliad for a 4th grader. She inhaled Mary Pope Osborne's The Odyssey and liked both of those books\"}]",
+      "role": "tool",
+      "tool_call_id": "joUEEeumyZTLEV4G9UoCxsZQ2AjcG9Rt"
+    },
+    {
+      "content": null,
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "type": "function",
+          "id": "3DDalxYz8PrvPo07T7VAfMsT6gJCzfgZ",
+          "function": {
+            "name": "read_url",
+            "arguments": "{\"url\": \"https://toppsta.com/books/series/6447/adventures-in-time\"}"
+          }
+        },
+        {
+          "type": "function",
+          "id": "iIK8hn6UlhVQsUXtfnrIfk4jcm5OrfNs",
+          "function": {
+            "name": "search_internet",
+            "arguments": "{\"query\": \"Usborne \\\"The Iliad\\\" graphic novel\", \"max_results\": 8}"
+          }
+        }
+      ]
+    },
+    {
+      "content": "Error fetching URL: 403 Client Error: Forbidden for url: https://toppsta.com/books/series/6447/adventures-in-time",
+      "role": "tool",
+      "tool_call_id": "3DDalxYz8PrvPo07T7VAfMsT6gJCzfgZ"
+    },
+    {
+      "content": "[{'title': 'Usborne Graphic Novels', 'url': 'https://www.amazon.com/usborne-graphic-novels/s?k=usborne+graphic+novels', 'content': \"The Iliad: A Graphic Novel: (A Modern Visual Adaptation of Homer's Epic War Story of Greek Mythology for Young Adults) by Gareth Hinds Paperback\"}, {'title': 'The Iliad', 'url': 'https://garethhinds.com/iliad', 'content': \"This stunning graphic novel adaptation captures all the grim glory of Homer's epic. Dynamic illustrations take readers directly to the plains of Troy,\"}, {'title': 'Usborne: The Odyssey Graphic Novel', 'url': 'https://www.youtube.com/watch?v=sYqKiVwPxNY', 'content': 'Usborne: The Odyssey Graphic Novel. The Entire Story of The Trojan War & Iliad Explained (Before The Odyssey)'}, {'title': 'The Iliad: A Graphic Novel by Gareth Hinds', 'url': 'https://www.goodreads.com/en/book/show/40910448-the-iliad', 'content': 'More than three thousand years ago, two armies faced each other in an epic battle that rewrote history and came to be known as the Trojan War.'}, {'title': 'The Iliad: A Graphic Novel Adaptation', 'url': 'https://firstbook.org/us/marketplace/the-iliad-119007', 'content': \"This companion volume to Hinds' award-winning adaptation of The Odyssey features notes, maps, a cast of characters, and other tools to help readers understand\"}, {'title': 'Usborne Graphic Novels - Series - Books | Usborne | Be Curious', 'url': 'https://usborne.com/us/books/series/usborne-graphic-novels', 'content': \"# Usborne Graphic Novels\\n\\nThe Odyssey book cover\\nThe Hound of the Baskervilles book cover\\nThe Odyssey book cover\\nDracula book cover\\nThe Wizard of Oz Graphic Novel book cover\\nThe Adventures of Robin Hood Graphic Novel book cover\\nAdventures of King Arthur Graphic Novel book cover\\nAlice in Wonderland Graphic Novel book cover\\nAdventures of Thor Graphic Novel book cover\\nThree Musketeers Graphic Novel book cover\\n\\nUseful Links\\n\\nMenu\\n\\nContact\\n\\nFAQ and Help\\n\\nTrade Enquiries\\n\\nPress Information\\n\\nConnect [...] Connect\\n\\nAbout Us\\n\\nUsborne is one of the world’s leading independent book publishers. We are proud to be a family business that aims to create brilliant books for children of all ages.\\n\\nSite by Superb [...] Tummy Time\\nFoil Art - Dragons\\nFairy Ponies Story Collection\\nHow to be a Pharaoh\\nPrincess (Apparently)\\nIt's For Your Own Good\\nCute Stickers Unicorns\\nSticker Dolly Dressing Magical Fairy Ball Activity Book\\nWorld Kitchen - Celebrations\\nAlways Angel\\nBig Sparkly Christmas Sticker Book\\nStrange and Mysterious: Ghosts\\nWrite Your Own Family History\\nPeep Inside How a Submarine Works\\nI'm (Mostly) Happy Being ME\\nWrite Your Own Story Word Book\\n100 Things to Know About Saving the Planet\"}, {'title': 'Graphic Novels | Usborne Books & Kane Miller', 'url': 'https://www.kidsbookfort.com/usborne-books-categories/graphic-novels', 'content': '.  \\nUsborne Publishing Ltd. and PaperPie does not support or sponsor the content of these pages.'}, {'title': 'Are the iliad and odyssey graphic novels accurate', 'url': 'https://www.reddit.com/r/GreekMythology/comments/1ikdpap/are_the_iliad_and_odyssey_graphic_novels_accurate', 'content': 'I just find reading chapter books boring but I want something accurate'}]",
+      "role": "tool",
+      "tool_call_id": "iIK8hn6UlhVQsUXtfnrIfk4jcm5OrfNs"
+    }
+  ],
+  "model": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+  "stream": false,
+  "temperature": 0.1,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "write_todos",
+        "description": "Use this tool to create and manage a structured task list for your current work session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.\n\nOnly use this tool if you think it will be helpful in staying organized. If the user's request is trivial and takes less than 3 steps, it is better to NOT use this tool and just do the task directly.\n\n## When to Use This Tool\nUse this tool in these scenarios:\n\n1. Complex multi-step tasks - When a task requires 3 or more distinct steps or actions\n2. Non-trivial and complex tasks - Tasks that require careful planning or multiple operations\n3. User explicitly requests todo list - When the user directly asks you to use the todo list\n4. User provides multiple tasks - When users provide a list of things to be done (numbered or comma-separated)\n5. The plan may need future revisions or updates based on results from the first few steps\n\n## How to Use This Tool\n1. When you start working on a task - Mark it as in_progress BEFORE beginning work.\n2. After completing a task - Mark it as completed and add any new follow-up tasks discovered during implementation.\n3. You can also update future tasks, such as deleting them if they are no longer necessary, or adding new tasks that are necessary. Don't change previously completed tasks.\n4. You can make several updates to the todo list at once. For example, when you complete a task, you can mark the next task you need to start as in_progress.\n\n## When NOT to Use This Tool\nIt is important to skip using this tool when:\n1. There is only a single, straightforward task\n2. The task is trivial and tracking it provides no benefit\n3. The task can be completed in less than 3 trivial steps\n4. The task is purely conversational or informational\n\n## Task States and Management\n\n1. **Task States**: Use these states to track progress:\n   - pending: Task not yet started\n   - in_progress: Currently working on (you can have multiple tasks in_progress at a time if they are not related to each other and can be run in parallel)\n   - completed: Task finished successfully\n\n2. **Task Management**:\n   - Update task status in real-time as you work\n   - Mark tasks complete IMMEDIATELY after finishing (don't batch completions)\n   - Complete current tasks before starting new ones\n   - Remove tasks that are no longer relevant from the list entirely\n   - IMPORTANT: When you write this todo list, you should mark your first task (or tasks) as in_progress immediately!.\n   - IMPORTANT: Unless all tasks are completed, you should always have at least one task in_progress to show the user that you are working on something.\n\n3. **Task Completion Requirements**:\n   - ONLY mark a task as completed when you have FULLY accomplished it\n   - If you encounter errors, blockers, or cannot finish, keep the task as in_progress\n   - When blocked, create a new task describing what needs to be resolved\n   - Never mark a task as completed if:\n     - There are unresolved issues or errors\n     - Work is partial or incomplete\n     - You encountered blockers that prevent completion\n     - You couldn't find necessary resources or dependencies\n     - Quality standards haven't been met\n\n4. **Task Breakdown**:\n   - Create specific, actionable items\n   - Break complex tasks into smaller, manageable steps\n   - Use clear, descriptive task names\n\nBeing proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully\nRemember: If you only need to make a few tool calls to complete a task, and it is clear what you need to do, it is better to just do the task directly and NOT call this tool at all.",
+        "parameters": {
+          "properties": {
+            "todos": {
+              "items": {
+                "description": "A single todo item with content and status.",
+                "properties": {
+                  "content": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "enum": [
+                      "pending",
+                      "in_progress",
+                      "completed"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "content",
+                  "status"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "todos"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ls",
+        "description": "Lists all files in a directory.\n\nThis is useful for exploring the filesystem and finding the right file to read or edit.\nYou should almost ALWAYS use this tool before using the read_file or edit_file tools.",
+        "parameters": {
+          "properties": {
+            "path": {
+              "description": "Absolute path to the directory to list. Must be absolute, not relative.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "Reads a file from the filesystem.\n\nAssume this tool is able to read all files. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.\n\nUsage:\n- By default, it reads up to 100 lines starting from the beginning of the file\n- **IMPORTANT for large files and codebase exploration**: Use pagination with offset and limit parameters to avoid context overflow\n  - First scan: read_file(path, limit=100) to see file structure\n  - Read more sections: read_file(path, offset=100, limit=200) for next 200 lines\n  - Only omit limit (read full file) when necessary for editing\n- Specify offset and limit: read_file(path, offset=0, limit=100) reads first 100 lines\n- Results are returned using cat -n format, with line numbers starting at 1\n- Lines longer than 5,000 characters will be split into multiple lines with continuation markers (e.g., 5.1, 5.2, etc.). When you specify a limit, these continuation lines count towards the limit.\n- You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple files as a batch that are potentially useful.\n- If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.\n- Image files (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, etc.), audio and video files, and PDFs are returned as multimodal content blocks (see https://docs.langchain.com/oss/python/langchain/messages#multimodal).\n\nFor multimodal reads (image, audio, video, PDF, etc.):\n- Use `read_file(file_path=...)`\n- Do NOT use `offset`/`limit` for images (pagination is text-only)\n- If file details were compacted from history, call `read_file` again on the same path\n\n- You should ALWAYS make sure a file has been read before editing it.",
+        "parameters": {
+          "properties": {
+            "file_path": {
+              "description": "Absolute path to the file to read. Must be absolute, not relative.",
+              "type": "string"
+            },
+            "offset": {
+              "default": 0,
+              "description": "Line number to start reading from (0-indexed). Use for pagination of large files.",
+              "type": "integer"
+            },
+            "limit": {
+              "default": 100,
+              "description": "Maximum number of lines to read. Use for pagination of large files.",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "file_path"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "write_file",
+        "description": "Writes to a new file in the filesystem.\n\nUsage:\n- The write_file tool will create the a new file.\n- Prefer to edit existing files (with the edit_file tool) over creating new ones when possible.",
+        "parameters": {
+          "properties": {
+            "file_path": {
+              "description": "Absolute path where the file should be created. Must be absolute, not relative.",
+              "type": "string"
+            },
+            "content": {
+              "description": "The text content to write to the file. This parameter is required.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "file_path",
+            "content"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "edit_file",
+        "description": "Performs exact string replacements in files.\n\nUsage:\n- You must read the file before editing. This tool will error if you attempt an edit without reading the file first.\n- When editing, preserve the exact indentation (tabs/spaces) from the read output. Never include line number prefixes in old_string or new_string.\n- ALWAYS prefer editing existing files over creating new ones.\n- Only use emojis if the user explicitly requests it.",
+        "parameters": {
+          "properties": {
+            "file_path": {
+              "description": "Absolute path to the file to edit. Must be absolute, not relative.",
+              "type": "string"
+            },
+            "old_string": {
+              "description": "The exact text to find and replace. Must be unique in the file unless replace_all is True.",
+              "type": "string"
+            },
+            "new_string": {
+              "description": "The text to replace old_string with. Must be different from old_string.",
+              "type": "string"
+            },
+            "replace_all": {
+              "default": false,
+              "description": "If True, replace all occurrences of old_string. If False (default), old_string must be unique.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "file_path",
+            "old_string",
+            "new_string"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "glob",
+        "description": "Find files matching a glob pattern.\n\nSupports standard glob patterns: `*` (any characters), `**` (any directories), `?` (single character).\nReturns a list of absolute file paths that match the pattern.\n\nExamples:\n- `**/*.py` - Find all Python files\n- `*.txt` - Find all text files in root\n- `/subdir/**/*.md` - Find all markdown files under /subdir",
+        "parameters": {
+          "properties": {
+            "pattern": {
+              "description": "Glob pattern to match files (e.g., '**/*.py', '*.txt', '/subdir/**/*.md').",
+              "type": "string"
+            },
+            "path": {
+              "default": "/",
+              "description": "Base directory to search from. Defaults to root '/'.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "grep",
+        "description": "Search for a text pattern across files.\n\nSearches for literal text (not regex) and returns matching files or content based on output_mode.\nSpecial characters like parentheses, brackets, pipes, etc. are treated as literal characters, not regex operators.\n\nExamples:\n- Search all files: `grep(pattern=\"TODO\")`\n- Search Python files only: `grep(pattern=\"import\", glob=\"*.py\")`\n- Show matching lines: `grep(pattern=\"error\", output_mode=\"content\")`\n- Search for code with special chars: `grep(pattern=\"def __init__(self):\")`",
+        "parameters": {
+          "properties": {
+            "pattern": {
+              "description": "Text pattern to search for (literal string, not regex).",
+              "type": "string"
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Directory to search in. Defaults to current working directory."
+            },
+            "glob": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Glob pattern to filter which files to search (e.g., '*.py')."
+            },
+            "output_mode": {
+              "default": "files_with_matches",
+              "description": "Output format: 'files_with_matches' (file paths only, default), 'content' (matching lines with context), 'count' (match counts per file).",
+              "enum": [
+                "files_with_matches",
+                "content",
+                "count"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "execute",
+        "description": "Executes a shell command in an isolated sandbox environment.\n\nUsage:\nExecutes a given command in the sandbox environment with proper handling and security measures.\nBefore executing the command, please follow these steps:\n1. Directory Verification:\n   - If the command will create new directories or files, first use the ls tool to verify the parent directory exists and is the correct location\n   - For example, before running \"mkdir foo/bar\", first use ls to check that \"foo\" exists and is the intended parent directory\n2. Command Execution:\n   - Always quote file paths that contain spaces with double quotes (e.g., cd \"path with spaces/file.txt\")\n   - Examples of proper quoting:\n     - cd \"/Users/name/My Documents\" (correct)\n     - cd /Users/name/My Documents (incorrect - will fail)\n     - python \"/path/with spaces/script.py\" (correct)\n     - python /path/with spaces/script.py (incorrect - will fail)\n   - After ensuring proper quoting, execute the command\n   - Capture the output of the command\nUsage notes:\n  - Commands run in an isolated sandbox environment\n  - Returns combined stdout/stderr output with exit code\n  - If the output is very large, it may be truncated\n  - For long-running commands, use the optional timeout parameter to override the default timeout (e.g., execute(command=\"make build\", timeout=300))\n  - A timeout of 0 may disable timeouts on backends that support no-timeout execution\n  - VERY IMPORTANT: You MUST avoid using search commands like find and grep. Instead use the grep, glob tools to search. You MUST avoid read tools like cat, head, tail, and use read_file to read files.\n  - When issuing multiple commands, use the ';' or '&&' operator to separate them. DO NOT use newlines (newlines are ok in quoted strings)\n    - Use '&&' when commands depend on each other (e.g., \"mkdir dir && cd dir\")\n    - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail\n  - Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of cd\n\nExamples:\n  Good examples:\n    - execute(command=\"pytest /foo/bar/tests\")\n    - execute(command=\"python /path/to/script.py\")\n    - execute(command=\"npm install && npm test\")\n    - execute(command=\"make build\", timeout=300)\n\n  Bad examples (avoid these):\n    - execute(command=\"cd /foo/bar && pytest tests\")  # Use absolute path instead\n    - execute(command=\"cat file.txt\")  # Use read_file tool instead\n    - execute(command=\"find . -name '*.py'\")  # Use glob tool instead\n    - execute(command=\"grep -r 'pattern' .\")  # Use grep tool instead\n\nNote: This tool is only available if the backend supports execution (SandboxBackendProtocol).\nIf execution is not supported, the tool will return an error message.",
+        "parameters": {
+          "properties": {
+            "command": {
+              "description": "Shell command to execute in the sandbox environment.",
+              "type": "string"
+            },
+            "timeout": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional timeout in seconds for this command. Overrides the default timeout. Use 0 for no-timeout execution on backends that support it."
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "load_skill",
+        "description": "Load and return the complete named skill file.\n\nUse this whenever a skill description matches your task. Pass\nonly the skill's short name (e.g. \"org-format\") — no paths.\nReturns the full SKILL.md content and the tools newly available\nafter the load.",
+        "parameters": {
+          "properties": {
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "search_internet",
+        "description": "Search the web via the self-hosted SearXNG metasearch at\n``ASSIST_SEARCH_URL`` (private, multi-engine, no key).\n\nQueries ONE engine at a time in ``_ROTATION_ENGINES`` order and returns the FIRST\nengine that yields results (deterministic). Returns ``_SEARCH_UNAVAILABLE_MESSAGE``\n(logged) only if every engine is unreachable/throttled/malformed — a broken backend\nfails LOUDLY but as a relayable tool result, not an exception. Returns\n``_SEARCH_EMPTY_GUIDANCE`` (a \"no results — don't repeat this query\" steer) when the\nengines are healthy but genuinely have no results for this query.",
+        "parameters": {
+          "properties": {
+            "query": {
+              "type": "string"
+            },
+            "max_results": {
+              "default": 5,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read_url",
+        "description": "Extract the readable content from the given url.\n\nReturns the page's main article text where the page marks one\n(``<article>``/``<main>``) so the char budget holds signal, not nav/footer\nchrome; degrades to a whole-page text strip (scripts/styles removed) when\nthe page marks no article. A compact ``Links on this page:`` list (absolute\nURLs) follows the text, so this tool can NAVIGATE a site — find the page or\ndownloadable file to fetch — without reading raw HTML. Returns the FULL\nextracted text (not truncated) —\nthe offload middleware saves a large result to a file and hands the agent a\npreview + path to grep, so full page content stays reachable without flooding\ncontext. The error path returns a short ``Error fetching URL:`` string inline.\n\nPer-host throttled (~1s between calls to the same host) so a burst of\nfetches to different sites isn't artificially serialised, but a tight\nloop against one bot-protected site is rate-limited locally.",
+        "parameters": {
+          "properties": {
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "type": "object"
+        }
+      }
+    }
+  ]
+}
