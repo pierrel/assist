@@ -296,10 +296,9 @@ def _build_openai_chat_model(
     False, the chat-template kwarg ``enable_thinking=false`` is passed
     via ``extra_body``, which prefills the assistant message with an
     empty ``<think></think>`` block — the canonical way to disable
-    Qwen3 chain-of-thought.  When None or True, no ``extra_body`` is
-    set: True is Qwen3's own default, and None means "leave the upstream
-    behavior alone" so non-Qwen3 backends don't see a kwarg they may
-    not understand.
+    Qwen3 chain-of-thought. Qwen3.8 thinking requests use the published
+    sampling profile across callers; explicit non-thinking and other
+    models keep their caller-supplied sampling settings.
     """
 
     extra_body = None
@@ -320,6 +319,9 @@ def _build_openai_chat_model(
         "base_url": base_url,
         "api_key": api_key,
     }
+    if "qwen3.8" in model.lower() and enable_thinking is not False:
+        kwargs.update(temperature=1.0, top_p=0.95, presence_penalty=0.0)
+        extra_body = {"top_k": 20, "min_p": 0.0, "repeat_penalty": 1.0}
     if extra_body is not None:
         kwargs["extra_body"] = extra_body
 
@@ -343,9 +345,9 @@ def select_chat_model(
     ``_build_openai_chat_model``.  Most callers should use
     :func:`select_assistant_model` instead, which disables reasoning for
     Qwen3.6 and preserves Qwen3.8's native thinking mode.  This
-    lower-level entry point leaves upstream behavior alone unless told
-    otherwise and is for callers that need that (e.g. the
-    reasoning-impact A/B eval, which passes an explicit flag).
+    lower-level entry point uses the Qwen3.8 thinking sampling profile
+    unless thinking is explicitly disabled; it also supports the
+    reasoning-impact A/B eval, which passes an explicit flag.
     """
 
     config = _get_config()
