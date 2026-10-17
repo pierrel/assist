@@ -1244,7 +1244,8 @@ def _asset_response(tid: str, path: str, validator: str | None) -> Response:
     etag = '"' + hashlib.sha256(data).hexdigest() + '"'
     headers = {"ETag": etag, "Cache-Control": "no-store",
                "X-Content-Type-Options": "nosniff"}
-    if validator == etag:
+    if validator and (validator.strip() == "*" or any(
+            tag.strip().removeprefix("W/") == etag for tag in validator.split(","))):
         return Response(status_code=304, headers=headers)
     return Response(data, media_type="application/octet-stream", headers=headers)
 

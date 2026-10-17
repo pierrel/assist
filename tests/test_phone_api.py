@@ -2072,6 +2072,13 @@ def test_asset_bytes_validators_and_persistent_thread_tmp(tmp_path, monkeypatch)
     unchanged = client.get(url, params={"path": "/user/chart.png"},
                            headers={**_auth(), "If-None-Match": etag})
     assert unchanged.status_code == 304 and unchanged.content == b""
+    for condition in ("W/" + etag, '"stale", ' + etag, "*", '"stale", W/' + etag):
+        conditional = client.get(url, params={"path": "/workspace/chart.png"},
+                                 headers={**_auth(), "If-None-Match": condition})
+        assert conditional.status_code == 304 and conditional.content == b""
+    nonmatching = client.get(url, params={"path": "/workspace/chart.png"},
+                             headers={**_auth(), "If-None-Match": '"stale"'})
+    assert nonmatching.status_code == 200 and nonmatching.content == png
     (directory / "workspace" / "chart.png").write_bytes(b"changed")
     changed = client.get(url, params={"path": "chart.png"},
                          headers={**_auth(), "If-None-Match": etag})
