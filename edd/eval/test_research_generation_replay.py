@@ -67,6 +67,10 @@ def _grounded_answer(text, sources):
         ("Marcia Williams", "The Iliad and the Odyssey", r"comic|cartoon|visual"),
         ("Russell Punter", "The Odyssey", r"comic|graphic|illustrat"),
     ]
+    names = sorted({name for author, title, _ in identities for name in (author, title)},
+                   key=len, reverse=True)
+    text = re.sub("|".join(f"({re.escape(name)})" for name in names),
+                  lambda match: names[match.lastindex - 1], text, flags=re.I)
     rows = []
     for author, title, pattern in identities:
         urls = [row["url"] for row in sources
@@ -75,8 +79,6 @@ def _grounded_answer(text, sources):
         if urls:
             url = next((url for url in urls if url in text), urls[0])
             rows.append((author, title, url, pattern))
-        text = re.sub(re.escape(author), author, text, flags=re.I)
-        text = re.sub(re.escape(title), title, text, flags=re.I)
     return _count_sourced_recommendations(text, rows) >= 1
 
 

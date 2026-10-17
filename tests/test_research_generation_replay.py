@@ -128,3 +128,16 @@ def test_valid_search_companion_does_not_discard_source_backed_fetch(captured, s
         calls.append({"name": "read_url", "id": "fetch", "args": {"url": url}})
     message = AIMessage("", tool_calls=calls, response_metadata={"finish_reason": "tool_calls"})
     assert replay._useful(message, sources, failed) == expected
+
+
+@pytest.mark.parametrize("kind", ["answer", "report"])
+def test_longer_williams_identity_survives_shorter_title_normalization(captured, kind):
+    _, sources, failed = captured
+    url = next(row["url"] for row in sources if "booktopia" in row["url"]
+               and "Marcia Williams" in (row["title"] + " " + row["content"]))
+    answer = "The Iliad and the Odyssey by Marcia Williams is a comic-strip retelling. Source: " + url
+    message = (AIMessage(answer, response_metadata={"finish_reason": "stop"}) if kind == "answer" else
+               AIMessage("", tool_calls=[{"name": "write_file", "id": "report",
+                   "args": {"file_path": "/report.md", "content": answer}}],
+                   response_metadata={"finish_reason": "tool_calls"}))
+    assert replay._useful(message, sources, failed)
