@@ -269,7 +269,13 @@ make eval
 probe using a sanitized captured request. It accepts a complete source-derived
 fetch request or a grounded book answer/report; it executes no generated tools and does
 not replace the natural research acceptance eval. The fixture's provenance file
-records the two privacy transformations and historical server/model evidence.
+records the two privacy transformations and historical server/model evidence. The
+default seed 42 was predeclared alongside seed 0: the sanitized uncapped seed-42
+run exhausted 32,768 tokens without useful output; its capped counterpart reached
+valid source-backed requests at 16,515 tokens. Seed 0 progressed naturally in both
+arms, and the private original-context seed-0 baseline also progressed. This is a
+matched budget-bundle recovery case, not evidence of natural convergence, complete
+research, or a general success rate.
 
 Configure `ASSIST_MODEL_URL` as for other evals, then run through
 production-priority admission with an external timeout. Worktrees may need the
@@ -279,7 +285,7 @@ because the resource wrapper runs from the canonical workspace:
 ```bash
 replay_repo="$(pwd)"
 ASSIST_RUN_RESEARCH_REPLAY=1 ASSIST_RESEARCH_REPLAY_PROFILE=capped \
-  ASSIST_RESEARCH_REPLAY_SEED=0 PYTHONPATH="$replay_repo" \
+  ASSIST_RESEARCH_REPLAY_SEED=42 PYTHONPATH="$replay_repo" \
   /path/to/workspace/tools/agentic resource run llm -- timeout -k 10 1250 \
   /path/to/venv/bin/python -m pytest -s \
   "$replay_repo/edd/eval/test_research_generation_replay.py"

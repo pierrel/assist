@@ -2,7 +2,7 @@
 
 Opt in with ASSIST_RUN_RESEARCH_REPLAY=1 through ``resource run llm``. Choose
 ASSIST_RESEARCH_REPLAY_PROFILE (baseline/capped/t1/official/presence) and SEED
-(ASSIST_RESEARCH_REPLAY_SEED, default 0). The baseline's 32768-token/1200-second
+(ASSIST_RESEARCH_REPLAY_SEED, default from fixture provenance). The baseline's 32768-token/1200-second
 observation ceilings are harness bounds, not historical production defaults.
 No generated tool is executed. Native stream events and provenance stay private.
 """
@@ -173,7 +173,7 @@ def test_seeded_replay_makes_source_backed_progress():
     assert _context_sha(fixture) == provenance["sanitized_context_sha256"]
     profile = os.environ.get("ASSIST_RESEARCH_REPLAY_PROFILE", "capped")
     temperature, extra = _PROFILES[profile]
-    seed = int(os.environ.get("ASSIST_RESEARCH_REPLAY_SEED", "0"))
+    seed = int(os.environ.get("ASSIST_RESEARCH_REPLAY_SEED", str(provenance["default_replay_seed"])))
     artifact_root = os.environ.get("ASSIST_RESEARCH_REPLAY_ARTIFACT_DIR")
     if artifact_root:
         Path(artifact_root).mkdir(parents=True, exist_ok=True, mode=0o700)

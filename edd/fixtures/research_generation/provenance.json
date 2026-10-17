@@ -8,7 +8,6 @@
     "Model absolute host path replaced by GGUF basename.",
     "Removed one opaque ic_referral tracking query parameter from a bookstore URL; all remaining messages, tools, source text, ordering and tool-call IDs retained."
   ],
-  "seed": 0,
   "temperature": 0.1,
   "model": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
   "recorded_weights_sha256": "3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e",
@@ -32,5 +31,7 @@
     "seconds": 1200
   },
   "candidate": "Existing ResearchGenerationMiddleware; 16,384 thinking and 24,576 completion tokens. A/B compares the deployed budget bundle, not thinking budget alone.",
-  "historical_diagnostic": "Before referral sanitation: seed 0 repeated through 24,576 tokens/728.4s without useful output; budgeted seed 0 returned two source-derived read_url calls at 16,505 tokens/477s. Historical evidence, not the new sanitized replay result."
+  "historical_diagnostic": "Before referral sanitation: seed 0 repeated through 24,576 tokens/728.4s without useful output; budgeted seed 0 returned two source-derived read_url calls at 16,505 tokens/477s. Historical evidence, not the new sanitized replay result.",
+  "default_replay_seed": 42,
+  "regression_seed_basis": "Predeclared seeds 0/42: seed 0 sanitized and private-original baselines progressed naturally. Sanitized seed 42 exhausted 32,768 tokens with no useful output; the capped counterpart returned valid source-backed requests at 16,515 tokens. This one matched budget-bundle comparison establishes bounded next-response recovery, not natural convergence, completed research, or a general success rate."
 }
