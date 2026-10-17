@@ -447,3 +447,23 @@ def test_bounded_summary_disables_thinking_without_changing_the_parent_model(asy
         assert summary["chat_template_kwargs"]["reasoning_effort"] == "xhigh"
     assert model.extra_body == original
     assert requests[-1].get("chat_template_kwargs") == (original or {}).get("chat_template_kwargs")
+
+
+def test_qwen38_summary_keeps_nonthinking_sampling():
+    from assist.model_manager import OpenAIConfig, select_assistant_model
+
+    calls = []
+    def provider(request):
+        calls.append(json.loads(request.content))
+        return _response("summary")
+    with patch("assist.model_manager._get_config", return_value=OpenAIConfig(
+            "http://unit.test/v1", "Qwen3.8-27B.gguf", "EMPTY", LIMIT)):
+        model = select_assistant_model(0.1)
+    with httpx.Client(transport=httpx.MockTransport(provider)) as client:
+        root = model.root_client.with_options(http_client=client)
+        model = model.model_copy(update={"root_client": root, "client": root.chat.completions})
+        BoundedSummarizationMiddleware(model, StateBackend())._summary_model.invoke("Summarize")
+    assert calls[0]["temperature"] == 0.1
+    assert calls[0]["min_p"] == 0.05
+    assert calls[0]["chat_template_kwargs"]["enable_thinking"] is False
+    assert calls[0]["max_tokens"] == 2048

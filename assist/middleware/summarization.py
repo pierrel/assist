@@ -35,6 +35,9 @@ class BoundedSummarizationMiddleware(SummarizationMiddleware):
             # reads max_tokens. Keep bounded summaries out of hidden reasoning
             # so their output budget is available for the visible summary.
             extra_body = model.extra_body or {}
+            if "qwen3.8" in model.model_name.lower():
+                settings["temperature"] = 0.1
+                extra_body = {**extra_body, "min_p": 0.05}
             settings["extra_body"] = {**extra_body, "max_tokens": output_limit,
                 "chat_template_kwargs": {**extra_body.get("chat_template_kwargs", {}),
                                          "enable_thinking": False}}

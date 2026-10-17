@@ -1,7 +1,7 @@
 """Unit tests for the auto-discovery / cache / cache-buster machinery.
 
-No LLM, no network.  All HTTP calls are intercepted via monkeypatch on
-``httpx.get``; the conftest autouse fixture stubs ``_probe_endpoint`` for
+No LLM, no network. Probes use patched ``httpx.get`` and provider requests
+use MockTransport; the conftest autouse fixture stubs ``_probe_endpoint`` for
 tests that don't override it explicitly.
 """
 from __future__ import annotations
@@ -355,8 +355,7 @@ class TestSelectChatModel(TestCase):
         self.assertFalse(eb, f"Expected no extra_body; got {eb!r}")
 
     def test_enable_thinking_false_sets_chat_template_kwargs(self):
-        """``enable_thinking=False`` is the only path that should mutate
-        the request — passes ``chat_template_kwargs.enable_thinking=False``
+        """For the non-Qwen3.8 fixture, disabling thinking passes ``chat_template_kwargs.enable_thinking=False``
         through ``extra_body`` to llama.cpp's chat template.
         """
         with patch.dict("os.environ", {"ASSIST_MODEL_URL": "http://x/v1"}):
@@ -369,10 +368,7 @@ class TestSelectChatModel(TestCase):
         )
 
     def test_enable_thinking_true_omits_extra_body(self):
-        """``True`` is Qwen3's own default — no need to set anything.
-
-        We only ever opt OUT of thinking; opting in is the upstream
-        behavior and shouldn't add a payload.
+        """For the non-Qwen3.8 fixture, True adds no sampling overrides.
         """
         with patch.dict("os.environ", {"ASSIST_MODEL_URL": "http://x/v1"}):
             llm = model_manager.select_chat_model(0.1, enable_thinking=True)
@@ -430,6 +426,44 @@ class TestSelectAssistantModel(TestCase):
              patch.object(model_manager, "select_chat_model") as select:
             model_manager.select_assistant_model(0.1)
         select.assert_called_once_with(0.1, enable_thinking=True)
+
+
+    def test_sampling_profile_on_provider_wire(self):
+        import json
+        import httpx
+
+        for name, thinking in (("Qwen3.8-27B.gguf", None), ("Qwen3.8-27B.gguf", True),
+                               ("Qwen3.8-27B.gguf", False), ("Qwen3.6-27B.gguf", None),
+                               ("other-model", True)):
+            with self.subTest(model=name, thinking=thinking):
+                config = OpenAIConfig("http://test/v1", name, "EMPTY", 131072)
+                with patch.object(model_manager, "_get_config", return_value=config):
+                    model = model_manager.select_assistant_model(0.1, enable_thinking=thinking)
+                bodies = []
+
+                def respond(request):
+                    bodies.append(json.loads(request.content))
+                    return httpx.Response(200, json={"id": "test", "object": "chat.completion",
+                        "created": 0, "model": name, "choices": [{"index": 0,
+                        "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]})
+
+                with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+                    root = model.root_client.with_options(http_client=client)
+                    model.model_copy(update={"root_client": root, "client": root.chat.completions}).invoke("Hi")
+                body = bodies[0]
+                if "qwen3.8" in name.lower() and thinking is not False:
+                    for key, value in {"temperature": 1.0, "top_p": 0.95, "top_k": 20,
+                                       "min_p": 0.0, "presence_penalty": 0.0,
+                                       "repeat_penalty": 1.0}.items():
+                        self.assertEqual(body[key], value)
+                else:
+                    self.assertEqual(body["temperature"], 0.1)
+                    self.assertNotIn("min_p", body)
+                    self.assertNotIn("top_p", body)
+                for key in ("max_tokens", "max_completion_tokens", "thinking_budget"):
+                    self.assertNotIn(key, body)
+                self.assertEqual(body.get("chat_template_kwargs", {}).get("enable_thinking"),
+                                 False if thinking is False or "qwen3.6" in name.lower() else None)
 
 
 class TestRequestTimeoutAndRetries(TestCase):
