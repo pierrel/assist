@@ -62,6 +62,7 @@ MAX_HISTORY_SCAN_BYTES = 4 * 1024 * 1024
 MAX_THREADS = 500
 MAX_ARCHIVE_BYTES = 32 * 1024 * 1024
 MAX_ARCHIVE_FILE_BYTES = 4 * 1024 * 1024
+MAX_ASSET_BYTES = 1024 * 1024
 MAX_DESCRIPTION_CHARS = 120
 MAX_PHONE_THREADS = 200
 MAX_PHONE_PENDING_RUNS = 4
@@ -1162,7 +1163,10 @@ def _workspace_manifest(tid: str) -> dict[str, Any]:
 
 
 def _open_workspace_file(root_fd: int, relative: str) -> int:
-    """Open one manifest path without following a symlink at any component."""
+    """Open a relative path beneath ROOT_FD without following any symlink.
+
+    Nonblocking leaf opens let callers reject FIFOs before attempting a read.
+    """
     parts = Path(relative).parts
     if not parts or any(part in {"", ".", ".."} for part in parts):
         raise OSError("invalid workspace path")
@@ -1173,9 +1177,77 @@ def _open_workspace_file(root_fd: int, relative: str) -> int:
                               dir_fd=directory_fd)
             os.close(directory_fd)
             directory_fd = next_fd
-        return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                       dir_fd=directory_fd)
     finally:
         os.close(directory_fd)
+
+
+
+def _asset_response(tid: str, path: str, validator: str | None) -> Response:
+    """Read one bounded thread asset through no-follow directory descriptors.
+
+    Workspace/user aliases expose only the working directory; /tmp exposes the
+    persistent thread scratch directory, independently of any running sandbox.
+    Validators describe these exact bytes, with no per-client server state.
+    """
+    directory = _thread_dir(tid)
+    if (not path or len(path) > 4096 or "\\" in path
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)):
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if path.startswith("/tmp/"):
+        root = state.MANAGER.thread_tmp_dir(tid)
+        relative = path[5:]
+    else:
+        root = state.MANAGER.thread_default_working_dir(tid)
+        if path.startswith("/workspace/"):
+            relative = path[11:]
+        elif path.startswith("/user/"):
+            relative = path[6:]
+        elif path.startswith("/"):
+            raise HTTPException(status_code=404, detail="Asset not found")
+        else:
+            relative = path
+    parts = relative.split("/")
+    if any(not part or part.startswith(".") or ":" in part for part in parts):
+        raise HTTPException(status_code=404, detail="Asset not found")
+    # Anchor the namespace beneath the authorized thread, including if a root
+    # is replaced with a symlink while another request is reading it.
+    root_name = os.path.relpath(root, directory)
+    if root_name in {".", ".."} or os.sep in root_name:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    try:
+        with ExitStack() as cleanup:
+            thread_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            cleanup.callback(os.close, thread_fd)
+            root_fd = os.open(root_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                              dir_fd=thread_fd)
+            cleanup.callback(os.close, root_fd)
+            fd = _open_workspace_file(root_fd, relative)
+            cleanup.callback(os.close, fd)
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise HTTPException(status_code=404, detail="Asset not found")
+            if metadata.st_size > MAX_ASSET_BYTES:
+                raise HTTPException(status_code=413, detail="Asset exceeds 1 MiB")
+            content = bytearray()
+            while len(content) <= MAX_ASSET_BYTES:
+                chunk = os.read(fd, min(64 * 1024, MAX_ASSET_BYTES + 1 - len(content)))
+                if not chunk:
+                    break
+                content.extend(chunk)
+            if len(content) > MAX_ASSET_BYTES:
+                raise HTTPException(status_code=413, detail="Asset exceeds 1 MiB")
+    except OSError as error:
+        raise HTTPException(status_code=404, detail="Asset not found") from error
+    data = bytes(content)
+    etag = '"' + hashlib.sha256(data).hexdigest() + '"'
+    headers = {"ETag": etag, "Cache-Control": "no-store",
+               "X-Content-Type-Options": "nosniff"}
+    if validator and (validator.strip() == "*" or any(
+            tag.strip().removeprefix("W/") == etag for tag in validator.split(","))):
+        return Response(status_code=304, headers=headers)
+    return Response(data, media_type="application/octet-stream", headers=headers)
 
 
 def _workspace_archive(tid: str) -> bytes:
@@ -1500,3 +1572,10 @@ async def get_workspace_archive(tid: str) -> Response:
     return Response(data, media_type="application/gzip",
                     headers={"Content-Disposition": 'attachment; filename="workspace.tar.gz"',
                              "Cache-Control": "no-store"})
+
+
+@router.get("/threads/{tid}/assets")
+async def get_asset(tid: str, path: str, request: Request) -> Response:
+    """Serve only one authorized, bounded file; never inventory or synchronize."""
+    return await anyio.to_thread.run_sync(
+        _asset_response, tid, path, request.headers.get("if-none-match"))
