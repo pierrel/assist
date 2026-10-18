@@ -24,6 +24,7 @@ import threading
 import unicodedata
 import uuid
 from contextlib import ExitStack, nullcontext
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -71,6 +72,8 @@ PHONE_SSE_SEND_TIMEOUT_SECONDS = 5
 PHONE_SSE_LIFETIME_SECONDS = 30 * 60
 _SSE_SLOTS = threading.BoundedSemaphore(4)
 _ARCHIVE_SLOTS = threading.BoundedSemaphore(1)
+_GIT_STATUS_SLOTS = threading.BoundedSemaphore(2)
+_MERGE_SLOTS = threading.BoundedSemaphore(1)
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _MESSAGE_SOURCE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,199}\Z")
 _HISTORY_CURSOR_RE = re.compile(r"(?:m-[0-9a-f]{32}|c-[A-Za-z0-9_-]{24,240})\Z")
@@ -419,6 +422,36 @@ def _file_references(text: str, known_paths: set[str]) -> list[dict[str, str]]:
 def _thread_workspace(tid: str) -> dict[str, Any]:
     from assist.git_sync import workspace
     return workspace(state.MANAGER.thread_dir(tid), state.MANAGER.thread_default_working_dir(tid))
+
+
+def _thread_git_status(tid: str) -> dict[str, Any]:
+    """Sample the configured source's thread ref, not a cached tracking ref."""
+    from assist.git_sync import GitSyncError, read_state
+    from assist.local_git import LocalGit
+
+    directory = _thread_dir(tid)
+    result: dict[str, Any] = {
+        "thread_id": tid, "repo_key": None, "branch": None,
+        "published_revision": None, "state": "unavailable",
+        "observed_at": None,
+    }
+    try:
+        binding = read_state(directory)
+        if binding is None or binding["source"] not in state.DOMAINS:
+            return result
+        branch = binding.get("branch")
+        if branch is None:
+            return result
+        result.update(repo_key=_repo_key(binding["source"]), branch=branch)
+        with LocalGit(binding["source"]) as repository:
+            published = repository.remote_ref(branch)
+        result.update(published_revision=published,
+                      state="available" if published else "unpublished",
+                      observed_at=datetime.now(timezone.utc).isoformat())
+    except (GitSyncError, OSError, UnicodeError):
+        # A failed remote sample is unavailable, never an old local ref called fresh.
+        pass
+    return result
 
 
 def _thread_messages(tid: str) -> list[dict]:
@@ -1237,6 +1270,44 @@ async def list_threads() -> dict[str, Any]:
 @router.get("/threads/{tid}")
 async def get_thread(tid: str) -> dict[str, Any]:
     return await anyio.to_thread.run_sync(_snapshot, tid)
+
+
+@router.get("/threads/{tid}/git")
+async def get_thread_git(tid: str) -> dict[str, Any]:
+    if not _GIT_STATUS_SLOTS.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="Git status is already being checked")
+    try:
+        return await anyio.to_thread.run_sync(_thread_git_status, tid)
+    finally:
+        _GIT_STATUS_SLOTS.release()
+
+
+@router.post("/threads/{tid}/merge")
+async def merge_thread(tid: str, request: Request) -> Response:
+    if (request.headers.get("content-length") not in (None, "0")
+            or request.headers.get("transfer-encoding")):
+        raise HTTPException(status_code=422, detail="Merge and Push takes no request body")
+    _thread_dir(tid)
+    expected = request.headers.get("x-assist-expected-commit")
+    if expected is None:
+        raise HTTPException(status_code=428, detail="Refresh Git status before merging")
+    if not re.fullmatch(r"[0-9a-f]{40}", expected):
+        raise HTTPException(status_code=422, detail="Confirmed Git commit is invalid")
+    if not _MERGE_SLOTS.acquire(blocking=False):
+        return JSONResponse({"outcome": "busy"}, status_code=409)
+    try:
+        outcome = await anyio.to_thread.run_sync(threads._merge_thread_result, tid, expected)
+    except threads.MergeBusyError:
+        return JSONResponse({"outcome": "busy"}, status_code=409)
+    except threads.MergeGitConflictError:
+        return JSONResponse({"outcome": "conflict"}, status_code=409)
+    except threads.MergeStaleError:
+        return JSONResponse({"outcome": "stale"}, status_code=409)
+    except HTTPException as error:
+        return JSONResponse({"outcome": "error"}, status_code=error.status_code)
+    finally:
+        _MERGE_SLOTS.release()
+    return JSONResponse({"outcome": outcome}, status_code=409 if outcome == "conflict" else 200)
 
 
 @router.get("/threads/{tid}/history")

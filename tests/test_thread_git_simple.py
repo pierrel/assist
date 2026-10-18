@@ -11,7 +11,7 @@ import pytest
 from assist.git_sync import (GitSyncError, _initial_binding, _write_state, authorize_branch,
                              bind, identity, publish_initial_branch)
 from assist.domain_manager import git_diff_main
-from assist.thread_git import ThreadGit
+from assist.thread_git import GitExpectedRefChangedError, ThreadGit
 from manage.web import review
 from manage.web.thread_git_lifecycle import ThreadGitLifecycle
 from tests.test_local_git import commit, git, repositories  # noqa: F401
@@ -343,6 +343,20 @@ def test_merge_import_failure_does_not_publish_main(bound_thread):
     assert git("rev-parse", "refs/heads/main", cwd=source) == original
 
 
+def test_merge_confirmation_refuses_newer_published_tip(bound_thread, tmp_path):
+    owner, source, server, phone = bound_thread
+    commit(server, "thread.txt", "thread\n")
+    owner.publish()
+    observed = git("rev-parse", "refs/heads/assist/thread", cwd=source)
+    main = git("rev-parse", "refs/heads/main", cwd=source)
+    git("pull", "--ff-only", "origin", "assist/thread", cwd=phone)
+    commit(phone, "phone.txt", "later\n")
+    git("push", "origin", "assist/thread", cwd=phone)
+    with pytest.raises(GitSyncError, match="changed"):
+        owner.plan_merge_main(observed)
+    assert git("rev-parse", "refs/heads/main", cwd=source) == main
+
+
 def test_merge_teardown_failure_does_not_publish_main(
         bound_thread, tmp_path, monkeypatch):
     owner, source, server, _ = bound_thread
@@ -373,6 +387,6 @@ def test_merge_holds_when_published_thread_advances_during_import(
     git("pull", "--ff-only", "origin", "assist/thread", cwd=phone)
     commit(phone, "phone.txt", "later\n")
     git("push", "origin", "assist/thread", cwd=phone)
-    with pytest.raises(GitSyncError, match="advanced"):
+    with pytest.raises(GitExpectedRefChangedError, match="changed"):
         owner.publish_merge(plan)
     assert git("rev-parse", "refs/heads/main", cwd=source) == original_main

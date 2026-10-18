@@ -10,6 +10,14 @@ from assist.git_sync import (GitSyncError, _WORKTREE_GIT, _sandbox_git, identity
 from assist.local_git import LocalGit
 
 
+class GitMergeConflictError(GitSyncError):
+    """The published refs have a merge-tree conflict, not a transport failure."""
+
+
+class GitExpectedRefChangedError(GitSyncError):
+    """The published thread tip differs from the expected commit."""
+
+
 @dataclass(frozen=True)
 class PreparePlan:
     main: str
@@ -123,7 +131,7 @@ class ThreadGit:
             repository.publish(result, desired, create_only=True)
             return result
 
-    def plan_merge_main(self) -> MergePlan:
+    def plan_merge_main(self, expected_thread: str | None = None) -> MergePlan:
         """Build a published-ref merge and its bounded checkout object import."""
         branch, local = identity(self.worktree)
         if branch != self.branch:
@@ -132,12 +140,14 @@ class ThreadGit:
             main, thread = repository.fetch(self.branch)
             if thread is None:
                 raise GitSyncError("Published thread branch is unavailable")
+            if expected_thread is not None and thread != expected_thread:
+                raise GitExpectedRefChangedError("Published thread branch changed; refresh Git status")
             if repository.ancestor(thread, main):
                 raise ValueError("No published thread changes to merge")
-            try:
-                tree = repository.git("merge-tree", "--write-tree", main, thread)
-            except GitSyncError as error:
-                raise GitSyncError("Main integration conflicted; resolve locally") from error
+            tree = repository.git("merge-tree", "--write-tree", main, thread,
+                                  allowed=(0, 1))
+            if repository._last_exit_code == 1:
+                raise GitMergeConflictError("Main integration conflicted; resolve locally")
             merged = repository.git("-c", "user.name=Assist", "-c",
                                     "user.email=assist@localhost", "commit-tree", tree,
                                     "-p", main, "-p", thread,
@@ -171,7 +181,8 @@ class ThreadGit:
             if not repository.has(plan.merged):
                 raise GitSyncError("Merged Git objects are unavailable")
             if repository.remote_ref(self.branch) != plan.thread:
-                raise GitSyncError("Published thread branch advanced during main integration")
+                raise GitExpectedRefChangedError(
+                    "Published thread branch changed; refresh Git status")
             if repository.publish("main", plan.merged) != plan.merged:
                 raise GitSyncError("Published main advanced after this integration")
         return "Merged published thread " + self.branch

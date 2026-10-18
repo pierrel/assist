@@ -115,6 +115,10 @@ where reliability is harder than with frontier APIs.
   repository. It imports the merged Git objects into the server checkout
   before publication so the immediate web diff works, without moving either
   working checkout or the thread branch.
+  The authenticated phone API can sample the configured source's published
+  thread ref and invoke the same explicit server Merge & Push operation as the
+  web button, conditional on the displayed published commit still being the
+  fetched tip. It never merges local device work or selects a caller-supplied ref.
 
 - **Multiple frontends, one Deep Agents core.** Web UI, CLI, and an Emacs
   integration share the standard agent runtime, memory, and domain repos.

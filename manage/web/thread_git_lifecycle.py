@@ -211,11 +211,11 @@ class ThreadGitLifecycle:
         if not self.bound:
             raise GitSyncError("Thread merge source is unavailable")
 
-    def merge_and_push(self) -> str:
+    def merge_and_push(self, expected_thread: str | None = None) -> str:
         if not self.bound:
             raise GitSyncError("Thread merge validation is unavailable")
         with self._host_fence():
-            plan = self._owner.plan_merge_main()
+            plan = self._owner.plan_merge_main(expected_thread)
         backend = self._backend(None)
         try:
             self._owner.import_merge(backend, plan)
