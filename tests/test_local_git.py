@@ -114,6 +114,31 @@ def test_main_only_movement_during_fetch_is_not_thread_stale(
     assert moved
 
 
+def test_thread_and_main_movement_during_fetch_is_thread_stale(
+        repositories, tmp_path, monkeypatch):
+    source, _server, phone = repositories
+    main_client = tmp_path / "main-client"
+    git("clone", "--no-hardlinks", "-b", "main", source, main_client)
+    commit(main_client, "main.txt", "new main\n")
+    commit(phone, "phone.txt", "new thread\n")
+    original = LocalGit.git
+    moved = False
+
+    def move_both_before_fetch(host, *arguments, **options):
+        nonlocal moved
+        if arguments and arguments[0] == "fetch" and not moved:
+            moved = True
+            git("push", "origin", "main", cwd=main_client)
+            git("push", "origin", "assist/thread", cwd=phone)
+        return original(host, *arguments, **options)
+
+    monkeypatch.setattr(LocalGit, "git", move_both_before_fetch)
+    with LocalGit(str(source)) as host:
+        with pytest.raises(GitRemoteThreadChangedError, match="thread branch moved"):
+            host.fetch("assist/thread")
+    assert moved
+
+
 def test_concurrent_phone_push_preserves_server_result_branch(repositories):
     source, server, phone = repositories
     desired = commit(server, "server.txt", "server edit\n")

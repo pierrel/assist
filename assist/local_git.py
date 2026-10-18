@@ -203,11 +203,11 @@ class LocalGit:
             if current != thread:
                 raise GitRemoteThreadChangedError("Remote Git thread branch moved during fetch") from error
             raise
-        if self.git("rev-parse", "refs/remotes/origin/main") != main:
-            raise GitSyncError("Remote Git branch moved during fetch")
         if (thread is not None
                 and self.git("rev-parse", "refs/remotes/origin/thread") != thread):
             raise GitRemoteThreadChangedError("Remote Git thread branch moved during fetch")
+        if self.git("rev-parse", "refs/remotes/origin/main") != main:
+            raise GitSyncError("Remote Git branch moved during fetch")
         return main, thread
 
     def incoming_bundle(self, local: str, thread: str | None) -> bytes | None:
