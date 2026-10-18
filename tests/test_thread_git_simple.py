@@ -11,6 +11,7 @@ import pytest
 from assist.git_sync import (GitSyncError, _initial_binding, _write_state, authorize_branch,
                              bind, identity, publish_initial_branch)
 from assist.domain_manager import git_diff_main
+from assist.local_git import LocalGit
 from assist.thread_git import GitExpectedRefChangedError, ThreadGit
 from manage.web import review
 from manage.web.thread_git_lifecycle import ThreadGitLifecycle
@@ -354,6 +355,44 @@ def test_merge_confirmation_refuses_newer_published_tip(bound_thread, tmp_path):
     git("push", "origin", "assist/thread", cwd=phone)
     with pytest.raises(GitSyncError, match="changed"):
         owner.plan_merge_main(observed)
+    assert git("rev-parse", "refs/heads/main", cwd=source) == main
+
+
+def test_merge_confirmation_reports_deleted_published_branch_as_stale(bound_thread):
+    owner, source, server, _ = bound_thread
+    commit(server, "thread.txt", "thread\n")
+    owner.publish()
+    observed = git("rev-parse", "refs/heads/assist/thread", cwd=source)
+    main = git("rev-parse", "refs/heads/main", cwd=source)
+    git("update-ref", "-d", "refs/heads/assist/thread", cwd=source)
+    with pytest.raises(GitExpectedRefChangedError, match="changed"):
+        owner.plan_merge_main(observed)
+    assert git("rev-parse", "refs/heads/main", cwd=source) == main
+
+
+def test_merge_confirmation_reports_thread_move_during_fetch_as_stale(
+        bound_thread, monkeypatch):
+    owner, source, server, phone = bound_thread
+    commit(server, "thread.txt", "thread\n")
+    owner.publish()
+    observed = git("rev-parse", "refs/heads/assist/thread", cwd=source)
+    main = git("rev-parse", "refs/heads/main", cwd=source)
+    git("pull", "--ff-only", "origin", "assist/thread", cwd=phone)
+    commit(phone, "phone.txt", "later\n")
+    original = LocalGit.git
+    moved = False
+
+    def move_before_fetch(host, *arguments, **options):
+        nonlocal moved
+        if arguments and arguments[0] == "fetch" and not moved:
+            moved = True
+            git("push", "origin", "assist/thread", cwd=phone)
+        return original(host, *arguments, **options)
+
+    monkeypatch.setattr(LocalGit, "git", move_before_fetch)
+    with pytest.raises(GitExpectedRefChangedError, match="changed"):
+        owner.plan_merge_main(observed)
+    assert moved
     assert git("rev-parse", "refs/heads/main", cwd=source) == main
 
 

@@ -7,7 +7,7 @@ import shlex
 
 from assist.git_sync import (GitSyncError, _WORKTREE_GIT, _sandbox_git, identity,
                              read_state, require_clean)
-from assist.local_git import LocalGit
+from assist.local_git import GitRemoteThreadChangedError, LocalGit
 
 
 class GitMergeConflictError(GitSyncError):
@@ -137,11 +137,17 @@ class ThreadGit:
         if branch != self.branch:
             raise GitSyncError("Thread branch changed during main integration")
         with LocalGit(self.source) as repository:
-            main, thread = repository.fetch(self.branch)
-            if thread is None:
-                raise GitSyncError("Published thread branch is unavailable")
+            try:
+                main, thread = repository.fetch(self.branch)
+            except GitRemoteThreadChangedError as error:
+                if expected_thread is not None:
+                    raise GitExpectedRefChangedError(
+                        "Published thread branch changed; refresh Git status") from error
+                raise
             if expected_thread is not None and thread != expected_thread:
                 raise GitExpectedRefChangedError("Published thread branch changed; refresh Git status")
+            if thread is None:
+                raise GitSyncError("Published thread branch is unavailable")
             if repository.ancestor(thread, main):
                 raise ValueError("No published thread changes to merge")
             tree = repository.git("merge-tree", "--write-tree", main, thread,

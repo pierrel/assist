@@ -1287,7 +1287,6 @@ async def merge_thread(tid: str, request: Request) -> Response:
     if (request.headers.get("content-length") not in (None, "0")
             or request.headers.get("transfer-encoding")):
         raise HTTPException(status_code=422, detail="Merge and Push takes no request body")
-    _thread_dir(tid)
     expected = request.headers.get("x-assist-expected-commit")
     if expected is None:
         raise HTTPException(status_code=428, detail="Refresh Git status before merging")
@@ -1296,6 +1295,7 @@ async def merge_thread(tid: str, request: Request) -> Response:
     if not _MERGE_SLOTS.acquire(blocking=False):
         return JSONResponse({"outcome": "busy"}, status_code=409)
     try:
+        await anyio.to_thread.run_sync(_thread_dir, tid)
         outcome = await anyio.to_thread.run_sync(threads._merge_thread_result, tid, expected)
     except threads.MergeBusyError:
         return JSONResponse({"outcome": "busy"}, status_code=409)

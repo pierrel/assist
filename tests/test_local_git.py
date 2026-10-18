@@ -7,7 +7,7 @@ import pytest
 
 from assist.git_sync import GitSyncError, identity
 from assist import local_git
-from assist.local_git import LocalGit
+from assist.local_git import GitRemoteThreadChangedError, LocalGit
 
 
 def git(*arguments, cwd=None):
@@ -69,6 +69,49 @@ def test_phone_publish_incoming_bundle_and_server_push(repositories, tmp_path):
         assert host.same_tip() == ("assist/thread", desired)
         assert host.publish("assist/thread", desired) == desired
     assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == desired
+
+
+def test_deleted_thread_ref_during_fetch_has_distinct_error(repositories, monkeypatch):
+    source, _server, _phone = repositories
+    original = LocalGit.git
+    deleted = False
+
+    def delete_before_fetch(host, *arguments, **options):
+        nonlocal deleted
+        if arguments and arguments[0] == "fetch" and not deleted:
+            deleted = True
+            git("--git-dir", source, "update-ref", "-d", "refs/heads/assist/thread")
+        return original(host, *arguments, **options)
+
+    monkeypatch.setattr(LocalGit, "git", delete_before_fetch)
+    with LocalGit(str(source)) as host:
+        with pytest.raises(GitRemoteThreadChangedError, match="thread branch moved"):
+            host.fetch("assist/thread")
+    assert deleted
+
+
+def test_main_only_movement_during_fetch_is_not_thread_stale(
+        repositories, tmp_path, monkeypatch):
+    source, _server, _phone = repositories
+    main_client = tmp_path / "main-client"
+    git("clone", "--no-hardlinks", "-b", "main", source, main_client)
+    commit(main_client, "main.txt", "new main\n")
+    original = LocalGit.git
+    moved = False
+
+    def move_main_before_fetch(host, *arguments, **options):
+        nonlocal moved
+        if arguments and arguments[0] == "fetch" and not moved:
+            moved = True
+            git("push", "origin", "main", cwd=main_client)
+        return original(host, *arguments, **options)
+
+    monkeypatch.setattr(LocalGit, "git", move_main_before_fetch)
+    with LocalGit(str(source)) as host:
+        with pytest.raises(GitSyncError, match="Remote Git branch moved during fetch") as error:
+            host.fetch("assist/thread")
+    assert not isinstance(error.value, GitRemoteThreadChangedError)
+    assert moved
 
 
 def test_concurrent_phone_push_preserves_server_result_branch(repositories):

@@ -34,6 +34,10 @@ _OUTPUT_LIMIT = 1024 * 1024
 _BUNDLE_LIMIT = 128 * 1024 * 1024
 
 
+class GitRemoteThreadChangedError(GitSyncError):
+    """The configured thread ref changed across an exact fetch attempt."""
+
+
 def _validated_objects(worktree: str) -> str:
     """Admit independent Git objects and inert maintenance files; never follow links."""
     total = count = 0
@@ -189,11 +193,21 @@ class LocalGit:
         refspecs = ["refs/heads/main:refs/remotes/origin/main"]
         if thread is not None:
             refspecs.append("refs/heads/" + branch + ":refs/remotes/origin/thread")
-        self.git("fetch", "--no-tags", "--no-auto-maintenance", self.source, *refspecs)
-        if (self.git("rev-parse", "refs/remotes/origin/main") != main
-                or thread is not None
-                and self.git("rev-parse", "refs/remotes/origin/thread") != thread):
+        try:
+            self.git("fetch", "--no-tags", "--no-auto-maintenance", self.source, *refspecs)
+        except GitSyncError as error:
+            try:
+                current = self.remote_ref(branch)
+            except GitSyncError:
+                raise error
+            if current != thread:
+                raise GitRemoteThreadChangedError("Remote Git thread branch moved during fetch") from error
+            raise
+        if self.git("rev-parse", "refs/remotes/origin/main") != main:
             raise GitSyncError("Remote Git branch moved during fetch")
+        if (thread is not None
+                and self.git("rev-parse", "refs/remotes/origin/thread") != thread):
+            raise GitRemoteThreadChangedError("Remote Git thread branch moved during fetch")
         return main, thread
 
     def incoming_bundle(self, local: str, thread: str | None) -> bytes | None:

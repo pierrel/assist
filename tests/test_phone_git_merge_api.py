@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -110,6 +111,28 @@ def test_phone_merge_calls_same_web_operation_once_and_rejects_caller_input(tmp_
     assert calls == [("thread-a", expected)]
 
 
+def test_phone_merge_validates_thread_directory_off_event_loop(tmp_path, monkeypatch):
+    _source, _thread, seed = _setup(tmp_path, monkeypatch)
+    original = phone_api._thread_dir
+    worker_checked = []
+
+    def checked_directory(tid):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            worker_checked.append(True)
+        return original(tid)
+
+    monkeypatch.setattr(phone_api, "_thread_dir", checked_directory)
+    monkeypatch.setattr(threads, "_merge_thread_result", lambda _tid, _oid: "merged")
+    response = TestClient(app).post(
+        "/api/v1/phone/threads/thread-a/merge",
+        headers={"Authorization": "Bearer test-token",
+                 "X-Assist-Expected-Commit": _git("-C", str(seed), "rev-parse", "HEAD")})
+    assert response.status_code == 200
+    assert worker_checked == [True]
+
+
 def test_phone_merge_reports_exact_conflict_and_busy(tmp_path, monkeypatch):
     _source, _thread, seed = _setup(tmp_path, monkeypatch)
     client = TestClient(app)
@@ -130,10 +153,15 @@ def test_phone_merge_reports_exact_conflict_and_busy(tmp_path, monkeypatch):
     response = client.post(path, headers=headers)
     assert (response.status_code, response.json()) == (409, {"outcome": "stale"})
     monkeypatch.setattr(threads, "_merge_thread_result", lambda _tid, _oid: "merged")
+    validated = []
+    original_directory = phone_api._thread_dir
+    monkeypatch.setattr(phone_api, "_thread_dir",
+                        lambda tid: validated.append(tid) or original_directory(tid))
     assert phone_api._MERGE_SLOTS.acquire(blocking=False)
     try:
         response = client.post(path, headers=headers)
         assert (response.status_code, response.json()) == (409, {"outcome": "busy"})
+        assert validated == []
     finally:
         phone_api._MERGE_SLOTS.release()
 
