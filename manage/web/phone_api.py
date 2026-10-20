@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import anyio
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.messages import convert_to_messages
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -134,12 +134,13 @@ class _SendMessage(_StrictModel):
 
 
 class _ApprovalDecision(_StrictModel):
-    kind: Literal["send_email", "email_archive", "email_delete"]
+    kind: Literal["send_email", "email_archive", "email_delete", "send_reply", "egress", "geo_download"]
     token: Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")]
-    decision: Literal["approve", "reject", "edit"]
+    decision: Literal["approve", "reject", "edit", "hour", "always", "decline", "revoke"]
     to: Annotated[str, Field(max_length=320)] = ""
     subject: Annotated[str, Field(max_length=998)] = ""
     body: Annotated[str, Field(max_length=64 * 1024)] = ""
+    text: Annotated[str, Field(max_length=64 * 1024)] = ""
 
 
 async def _validated_body(request: Request, model: type[_StrictModel],
@@ -602,6 +603,8 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
             "description": _stored_thread_title(tid),
             "harness": read_thread_engine(_thread_dir(tid)).name,
             "status": status.get("stage", "ready"),
+            "approval_count": _approval_count(tid, status),
+            "approval_results": _approval_results(tid),
             "error": ("Thread failed; inspect Assist Web for details."
                       if status.get("error") else None),
             "publication_notice": status.get("git_notice"),
@@ -1339,8 +1342,57 @@ def _approval_preview(tid: str) -> dict[str, Any]:
         return value
 
 
+def _approval_collection(tid: str) -> dict[str, Any]:
+    """Project existing approval services without treating Run state as discovery."""
+    _thread_dir(tid)
+    from manage.web import egress, geo
+    proposals = []
+    if not threads._is_pi_thread(tid):
+        try:
+            mail = _approval_preview(tid)["proposal"]
+        except HTTPException as error:
+            if error.status_code != 413:
+                raise
+            from manage.web.approval_tokens import review_token
+            mail = {"kind": "send_email", "token": review_token("unavailable", tid),
+                    "state": "unavailable", "error": "Complete Email preview exceeds the client limit; review in Assist Web.",
+                    "decisions": []}
+        if mail is not None:
+            proposals.append({"state": "pending", **mail})
+        elif (reply := threads.reply_approval_preview(tid)) is not None:
+            proposals.append(reply)
+        proposals.extend(egress.approval_previews(tid))
+        proposals.extend(geo.approval_previews(tid))
+    value = {"thread_id": tid, "proposals": proposals}
+    if len(json.dumps(value).encode()) > MAX_APPROVAL_BYTES:
+        raise HTTPException(status_code=413, detail="Complete approvals exceed client limit; review in Assist Web")
+    return value
+
+
+def _approval_count(tid: str, status: dict) -> int:
+    """Summarize independent pending cards without caching their sensitive previews."""
+    from manage.web import egress, geo
+    return (int(status.get("stage") == "awaiting_approval")
+            + sum(value["state"] == "pending" for value in egress.approval_previews(tid))
+            + sum(value["state"] == "pending" for value in geo.approval_previews(tid)))
+
+
+def _approval_results(tid: str) -> bool:
+    """Keep existing independent service results discoverable after Run completion."""
+    from manage.web import egress, geo
+    return any(value["state"] != "pending" for value in
+               [*egress.approval_previews(tid), *geo.approval_previews(tid)])
+
+
+@router.get("/threads/{tid}/approvals")
+async def get_approvals(tid: str) -> dict[str, Any]:
+    return await anyio.to_thread.run_sync(_approval_collection, tid)
+
+
 def _approval_decision(tid: str, body: _ApprovalDecision):
     _thread_dir(tid)
+    if body.decision not in {"approve", "reject", "edit"} or body.text:
+        raise HTTPException(status_code=422, detail="Invalid Email decision fields")
     if body.decision != "edit" and (body.to or body.subject or body.body):
         raise HTTPException(status_code=422, detail="Only edited email decisions accept content")
     if body.kind == "send_email":
@@ -1361,9 +1413,30 @@ async def get_approval(tid: str) -> dict[str, Any]:
 
 
 @router.post("/threads/{tid}/approval")
-async def decide_approval(tid: str, request: Request) -> dict[str, Any]:
+async def decide_approval(tid: str, request: Request, background_tasks: BackgroundTasks) -> dict[str, Any]:
     body = await _validated_body(request, _ApprovalDecision, MAX_APPROVAL_BYTES)
     assert isinstance(body, _ApprovalDecision)
+    if body.kind in {"egress", "geo_download", "send_reply"}:
+        await anyio.to_thread.run_sync(_thread_dir, tid)
+        if body.to or body.subject or body.body or body.kind != "send_reply" and body.text:
+            raise HTTPException(status_code=422, detail="Decision contains unrelated edited fields")
+        if body.kind == "egress":
+            from manage.web import egress
+            value, ready = await anyio.to_thread.run_sync(
+                egress.approval_decision, tid, body.token, body.decision)
+            if ready:
+                background_tasks.add_task(egress._dispatch_egress_resolution, tid)
+                background_tasks.add_task(egress._resume_egress_waiters, tid)
+            return value
+        if body.kind == "geo_download":
+            from manage.web import geo
+            return await anyio.to_thread.run_sync(geo.approval_decision, tid, body.token, body.decision)
+        run, replayed = await anyio.to_thread.run_sync(
+            threads.reply_decision_core, tid, body.decision, body.token, body.text)
+        if not replayed or run.status == "pending":
+            await anyio.to_thread.run_sync(
+                lambda: threads._RESUME_SCHEDULER.submit(run.id, tid, user_priority=True))
+        return {"thread_id": tid, "run_id": run.id, "status": run.status, "replayed": replayed}
     try:
         run, replayed = await anyio.to_thread.run_sync(_approval_decision, tid, body)
     except RunStoreUnavailable as error:

@@ -736,12 +736,15 @@ def test_approve_batch_dispatches_once(wired_web, monkeypatch):
     c = TestClient(web.app)
     tok = egress_routes.EGRESS_CSRF
     r = c.post("/egress/hour", data={"token": tok, "tid": tid,
+                                     "review": egress_routes.approval_previews(tid)[0]["token"],
                                      "host": "a.example.com", "port": "443",
                                      "redirect": f"/thread/{tid}"},
                follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"] == f"/thread/{tid}"
     assert dispatched == []                     # b still pending — no dispatch
     c.post("/egress/decline", data={"token": tok, "tid": tid,
+                                    "review": next(p["token"] for p in egress_routes.approval_previews(tid)
+                                                   if p["host"] == "b.example.com"),
                                     "host": "b.example.com", "port": "443"},
            follow_redirects=False)
     assert len(dispatched) == 1                 # pending set emptied → ONE turn
@@ -762,6 +765,7 @@ def test_approve_requires_csrf_and_live_thread(wired_web):
                                         "port": "443"}).status_code == 403
     # deleted thread: record dropped, nothing granted
     c.post("/egress/hour", data={"token": egress_routes.EGRESS_CSRF,
+                                 "review": egress_routes.approval_previews("t-gone")[0]["token"],
                                  "tid": "t-gone", "host": "a.example.com",
                                  "port": "443"}, follow_redirects=False)
     assert st.all() == [] and dispatched == []

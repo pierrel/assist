@@ -20,9 +20,11 @@ web restart (C1); the Provisioner deletes it once the completion is delivered.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -47,6 +49,14 @@ class Proposal:
     origin_tid: str                 # thread to notify when the import completes
     user_request: str               # the ask that triggered the proposal (A1: code carries intent)
     created_at: str
+
+    @property
+    def identity(self) -> str:
+        """Bind a job result to the complete proposal, including its generation."""
+        value = self.to_dict()
+        value["bbox"] = [float(coordinate) for coordinate in self.bbox]
+        return hashlib.sha256(json.dumps(value, sort_keys=True,
+                                        separators=(",", ":")).encode()).hexdigest()
 
     def to_dict(self) -> dict:
         return {"slug": self.slug, "display_name": self.display_name,
@@ -87,7 +97,13 @@ class ProposalStore:
 
     def __init__(self, geo_dir: str):
         self._path = os.path.join(geo_dir, PROPOSALS_FILE)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+
+    @contextmanager
+    def locked(self):
+        """Serialize proposal publication with a reviewed admission/registry claim."""
+        with self._lock:
+            yield
 
     def _read(self) -> dict[str, Proposal]:
         try:
@@ -128,8 +144,12 @@ class ProposalStore:
             self._write(props)
             return proposal
 
-    def remove(self, slug: str) -> None:
+    def remove(self, slug: str, *, expected: Proposal | None = None) -> bool:
         with self._lock:
             props = self._read()
+            if expected is not None and props.get(slug) != expected:
+                return False
             if props.pop(slug, None) is not None:
                 self._write(props)
+                return True
+            return False

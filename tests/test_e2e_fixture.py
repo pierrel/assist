@@ -148,7 +148,7 @@ from tests.e2e import server
 assert [route.path for route in app.routes] == before
 server.install()
 assert sorted(route.path for route in app.routes if route.path.startswith('/__e2e/')) == [
-    '/__e2e/child/{tid}', '/__e2e/release', '/__e2e/state/{tid}']
+        '/__e2e/approval/{tid}', '/__e2e/child/{tid}', '/__e2e/release', '/__e2e/state/{tid}']
 """], capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
 

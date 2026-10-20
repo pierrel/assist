@@ -56,3 +56,29 @@ Source hashes, native image import receipts, build/container logs and smoke
 receipts survive in the log directory; source-only build images remain cached. `--assist-source` selects
 an existing runtime checkout for a readonly snapshot, allowing a separately
 reviewed Root composition; the fixture files come from this launcher checkout.
+
+## Shared client HITL capability panel
+
+Use the same standalone fixture and companion client driver with `--hitl-only`:
+
+```sh
+python tests/e2e/start.py --logs /tmp/assist-hitl-fixture --seconds 1800
+# From the EmacsOS checkout, while the fixture remains running:
+python tests/phone-assist-e2e/run.py --fixture /tmp/assist-hitl-fixture/fixture.json --logs /tmp/assist-hitl-client --hitl-only
+```
+
+The explicit fixture setup creates only synthetic proposals. The panel exercises
+all six concrete kinds on both the phone entry and the desktop loader: send Email,
+archive, recoverable Trash, SMS reply, exact-host egress and region download.
+It activates the canonical discovery button, reviews complete native content,
+uses two taps and retains an unsent draft. Mail flows start with a real client
+send, stop on their original Run receipt, approve, and reconcile that same logical
+Run to success. Independent egress/download discovery is asserted with Run status
+ready. Fresh synthetic hosts/slugs keep retained results from colliding with the
+next surface's requests. The fixture counts fake provider/download effects.
+
+Inference, mailbox preview and external effect boundaries are synthetic; Run,
+checkpoint, admission, HTTP/TLS, client UI and existing service storage are real.
+This is an explicit capability panel, not a natural model acceptance test or a
+proof of production sandbox security, provider delivery or physical touch UI.
+The same private-daemon bounds, ownership checks, logs and teardown apply.
