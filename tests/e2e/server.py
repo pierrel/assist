@@ -151,13 +151,20 @@ def propose_approval(tid: str, body: dict, request: Request):
                             created_at=datetime.now(timezone.utc).isoformat())
         if egress.EGRESS_STORE.add_pending(rec) is not None:
             raise HTTPException(409, 'Synthetic request already exists')
-        return {'kind': kind, 'status': 'pending'}
+        return {'kind': kind, 'status': 'pending',
+                'expected_preview': [f'Network access: {rec.host}:{rec.port}\n', 'For this thread only.\n',
+                                     f"Agent's stated reason (not verified):\n{rec.task}\n",
+                                     'Allow for 1 hour', 'Allow for this thread', 'Decline']}
     if kind == 'geo_download':
         from assist.geo.proposals import Proposal
         from datetime import datetime, timezone
-        geo.GEO_PROPOSALS.put(Proposal('test/synthetic-' + uuid.uuid4().hex[:12], 'Synthetic region', (0, 0, 1, 1),
-            1200, tid, 'Plan a synthetic route', datetime.now(timezone.utc).isoformat()))
-        return {'kind': kind, 'status': 'pending'}
+        from assist.geo.tools import DEGRADATION_WARNING
+        proposal = Proposal('test/synthetic-' + uuid.uuid4().hex[:12], 'Synthetic region', (0, 0, 1, 1),
+            1200, tid, 'Plan a synthetic route', datetime.now(timezone.utc).isoformat())
+        geo.GEO_PROPOSALS.put(proposal)
+        return {'kind': kind, 'status': 'pending',
+                'expected_preview': ['Download: Synthetic region\n', f'Region: {proposal.slug}\n',
+                                     'Size: 1200 bytes\n', DEGRADATION_WARNING + '\n', 'Approve download', 'Decline']}
     if kind not in {'send_email', 'email_archive', 'email_delete', 'send_reply'}:
         raise HTTPException(422, 'Unsupported synthetic kind')
     run = threads._create_run(tid, 'Synthetic approval:' + kind,

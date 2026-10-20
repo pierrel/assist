@@ -20,7 +20,7 @@ from assist.thread import Thread
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
-from langgraph.types import interrupt
+from langgraph.types import Command, interrupt
 from manage.web import egress, geo, phone_api, state, threads
 from manage.web.app import app
 
@@ -129,7 +129,7 @@ def test_geo_proposal_is_discoverable_on_ready_thread(parity, tmp_path, monkeypa
 
 
 @pytest.fixture
-def sqlite_reply(parity, tmp_path, monkeypatch):
+def sqlite_reply(parity, tmp_path, monkeypatch, request):
     client, _, runs, _ = parity
     effects = []
     action = {"name": "send_reply", "args": {"text": "Complete synthetic reply"}}
@@ -152,7 +152,8 @@ def sqlite_reply(parity, tmp_path, monkeypatch):
     runs.claim("parity-thread", owner.id)
     config = {"configurable": {"thread_id": "parity-thread", "work_id": owner.work_id}}
     graph.invoke({"messages": [HumanMessage(owner.text)]}, config, durability="sync")
-    runs.transition("parity-thread", owner.id, "awaiting_approval")
+    if getattr(request, "param", None) != "running":
+        runs.transition("parity-thread", owner.id, "awaiting_approval")
 
     def get(tid, configurable=None, **kwargs):
         chat = Thread.__new__(Thread)
@@ -209,6 +210,45 @@ def test_reply_conflicting_decision_and_sender_change_are_refused(sqlite_reply):
                       pending_sender="+15555550101")
     threads._execute_run(first.json()["run_id"], "parity-thread")
     assert runs.get("parity-thread", first.json()["run_id"]).status == "cancelled"
+    assert effects == []
+
+
+@pytest.mark.parametrize("sqlite_reply", ["running"], indirect=True)
+def test_reply_publication_window_retains_checkpoint_work_and_original_receipt(sqlite_reply):
+    client, runs, owner, effects, _, _ = sqlite_reply
+    assert runs.get("parity-thread", owner.id).status == "running"
+    proposal, = proposals(client)
+    response = client.post(BASE + "/approval", headers=HEADERS, json={
+        "kind": "send_reply", "token": proposal["token"], "decision": "approve"})
+    assert response.status_code == 200
+    accepted = runs.get("parity-thread", response.json()["run_id"])
+    assert accepted.work_id == owner.work_id
+    runs.transition("parity-thread", owner.id, "awaiting_approval")
+    threads._execute_run(accepted.id, "parity-thread")
+    original = client.get(BASE + "/runs/" + owner.id, headers=HEADERS)
+    assert original.status_code == 200 and original.json()["status"] == "success"
+    assert effects == ["Complete synthetic reply"]
+
+
+def test_consumed_reply_gate_does_not_hide_independent_approvals(sqlite_reply, monkeypatch):
+    client, _, _, effects, graph, config = sqlite_reply
+    independent = request(egress.EGRESS_STORE)
+    chat = state.MANAGER.get("parity-thread")
+    pending = chat.pending_reply
+
+    def consume_after_read():
+        args = pending()
+        if args:
+            graph.invoke(Command(resume={"decisions": [{"type": "reject"}, {"type": "reject"}]}),
+                         config, durability="sync")
+        return args
+
+    chat.pending_reply = consume_after_read
+    monkeypatch.setattr(state.MANAGER, "get", lambda *args, **kwargs: chat)
+    value, = proposals(client)
+    assert value["kind"] == "egress" and value["host"] == independent.host
+    assert threads.reply_approval_preview("parity-thread") is None
+    threads.render_thread("parity-thread", chat)
     assert effects == []
 
 

@@ -10,6 +10,26 @@ from tests.e2e.start import Fixture, LABEL
 
 
 class FixtureTests(unittest.TestCase):
+    def test_independent_approval_setup_supplies_exact_preview_expectations(self):
+        from tests.e2e import server
+        from assist.egress.store import EgressStore
+        from assist.geo.proposals import ProposalStore
+        from assist.geo.tools import DEGRADATION_WARNING
+        with tempfile.TemporaryDirectory() as temporary:
+            store, proposals = EgressStore(temporary), ProposalStore(temporary)
+            with (patch.object(server, '_authenticate'),
+                  patch.object(server.threads, '_existing_thread_dir'),
+                  patch.object(server.egress, 'EGRESS_STORE', store),
+                  patch.object(server.geo, 'GEO_PROPOSALS', proposals)):
+                network = server.propose_approval('thread-1', {'kind': 'egress'}, None)
+                rec = store.for_thread('thread-1')[0]
+                self.assertIn(f'Network access: {rec.host}:{rec.port}\n', network['expected_preview'])
+                self.assertIn(f"Agent's stated reason (not verified):\n{rec.task}\n", network['expected_preview'])
+                region = server.propose_approval('thread-1', {'kind': 'geo_download'}, None)
+                proposal = proposals.all()[0]
+                self.assertIn(f'Region: {proposal.slug}\n', region['expected_preview'])
+                self.assertIn(DEGRADATION_WARNING + '\n', region['expected_preview'])
+
     def test_smoke_rejects_incorrect_idempotent_replay_flags(self):
         from io import BytesIO
         from unittest.mock import Mock

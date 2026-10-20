@@ -2139,9 +2139,10 @@ def _pending_gmail(chat) -> dict | None:
     return None
 
 
-def _checkpoint_review(chat, action: dict) -> tuple[str, str | None, str, list[dict]]:
+def _checkpoint_review(chat, action: dict, *, snapshot=None) -> tuple[str, str | None, str, list[dict]]:
     """Read exact checkpoint authority; read failures are never consumption evidence."""
-    snapshot = chat.agent.get_state(chat.runconfig)
+    if snapshot is None:
+        snapshot = chat.agent.get_state(chat.runconfig)
     requests = [dict(request) for intr in snapshot.interrupts
                 for request in intr.value.get("action_requests", [])]
     interrupt_id = next(intr.id for intr in snapshot.interrupts
@@ -4904,8 +4905,12 @@ def _reply_review(chat, status: dict) -> dict | None:
     args = chat.pending_reply()
     if not args or not status.get("pending_sender"):
         return None
-    interrupt, checkpoint, namespace, requests = _checkpoint_review(chat, {"name": "send_reply", "args": args})
     snapshot = chat.agent.get_state(chat.runconfig)
+    try:
+        interrupt, checkpoint, namespace, requests = _checkpoint_review(
+            chat, {"name": "send_reply", "args": args}, snapshot=snapshot)
+    except StopIteration:
+        return None
     return {"sender": status["pending_sender"], "text": args.get("text", ""),
             "interrupt_id": interrupt, "checkpoint_id": checkpoint, "checkpoint_ns": namespace,
             "requests": requests, "work_id": (snapshot.metadata or {}).get("work_id")}
@@ -4973,7 +4978,7 @@ def reply_decision_core(tid: str, decision: str, token: str, text: str = "") -> 
         if owner is None and review["work_id"] is None and len(owners) == 1:
             owner = owners[0]
         run = _create_run(tid, None, sender=review["sender"],
-                          work_id=owner.work_id if owner else None,
+                          work_id=review["work_id"] or (owner.work_id if owner else None),
                           resume_decision={**value, "reply_review": review}, dispatch_key=dispatch_key)
         return run, False
 
