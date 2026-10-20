@@ -133,6 +133,7 @@ def inspect_state(tid: str, request: Request):
                           and tid not in threads._BROWSER_RETRY_DUE)
     return {'runs': [asdict(r) for r in threads._runs().list(tid)], 'holds': list(HOLDS),
             'synthetic_effects': list(EFFECTS),
+            'queue_holder': threads.THREAD_QUEUE.peek_holder(),
             'lease': lease, 'live_registered_generation': generation,
             'reset_worker_idle': reset_idle}
 
