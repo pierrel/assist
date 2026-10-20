@@ -184,6 +184,52 @@ def test_dirty_retained_commit_cannot_publish_before_preflight(bound_thread, mon
     assert (server / "unsaved.txt").read_text() == "user draft\n"
 
 
+def test_unmerged_index_cannot_be_committed_or_published(bound_thread, tmp_path):
+    owner, source, server, _ = bound_thread
+    commit(server, "README", "thread side\n")
+    published = git("rev-parse", "refs/heads/assist/thread", cwd=source)
+    local = git("rev-parse", "HEAD", cwd=server)
+    main = tmp_path / "main"
+    git("clone", "-b", "main", source, main)
+    commit(main, "README", "main side\n")
+    git("push", "origin", "main", cwd=main)
+    git("fetch", "origin", "main", cwd=server)
+    merge = subprocess.run(["git", "merge", "--no-edit", "origin/main"],
+                           cwd=server, capture_output=True, check=False)
+    assert merge.returncode != 0
+    unmerged = git("ls-files", "-u", cwd=server)
+    assert unmerged
+
+    with pytest.raises(GitSyncError, match="needs reconciliation"):
+        owner.commit(LocalSandbox(), "must not publish conflict markers")
+
+    assert git("ls-files", "-u", cwd=server) == unmerged
+    assert git("rev-parse", "HEAD", cwd=server) == local
+    assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == published
+
+
+def test_resolved_merge_can_finish_with_both_parents(bound_thread, tmp_path):
+    owner, source, server, _ = bound_thread
+    thread_tip = commit(server, "README", "thread side\n")
+    main = tmp_path / "main"
+    git("clone", "-b", "main", source, main)
+    main_tip = commit(main, "README", "main side\n")
+    git("push", "origin", "main", cwd=main)
+    git("fetch", "origin", "main", cwd=server)
+    merge = subprocess.run(["git", "merge", "--no-edit", "origin/main"],
+                           cwd=server, capture_output=True, check=False)
+    assert merge.returncode != 0
+    (server / "README").write_text("thread and main side\n")
+    git("add", "README", cwd=server)
+    assert not git("ls-files", "-u", cwd=server)
+
+    owner.commit(LocalSandbox(), "resolved merge")
+
+    assert git("rev-list", "--parents", "-n", "1", "HEAD", cwd=server).split() == [
+        git("rev-parse", "HEAD", cwd=server), thread_tip, main_tip,
+    ]
+
+
 def test_prepare_holds_same_tree_ref_rewrite_after_sandbox_check(bound_thread, monkeypatch):
     owner, source, server, _ = bound_thread
     original = identity(str(server))[1]
@@ -205,8 +251,8 @@ def test_prepare_holds_same_tree_ref_rewrite_after_sandbox_check(bound_thread, m
     assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == original
 
 
-def test_resume_holds_checkout_outside_authorized_history(bound_thread, monkeypatch):
-    owner, _, server, _ = bound_thread
+def test_rewritten_local_tip_cannot_replace_divergent_published_ref(bound_thread, monkeypatch):
+    owner, source, server, _ = bound_thread
     original = identity(str(server))[1]
     tree = git("rev-parse", original + "^{tree}", cwd=server)
     rewritten = git("-c", "user.name=Test", "-c", "user.email=test@localhost",
@@ -214,8 +260,11 @@ def test_resume_holds_checkout_outside_authorized_history(bound_thread, monkeypa
     git("update-ref", "refs/heads/assist/thread", rewritten, original, cwd=server)
     lifecycle = ThreadGitLifecycle(owner, str(server))
     monkeypatch.setattr(lifecycle, "_host_fence", nullcontext)
-    with pytest.raises(GitSyncError, match="authorized history"):
-        lifecycle.resume()
+    lifecycle.resume()
+    with pytest.raises(GitSyncError, match="Previous committed result"):
+        owner.plan_prepare()
+    assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == original
+    assert git("rev-parse", "refs/heads/assist-result/" + rewritten, cwd=source) == rewritten
 
 
 def test_child_handoff_keeps_parent_base_and_holds_partial_edits(bound_thread, monkeypatch):

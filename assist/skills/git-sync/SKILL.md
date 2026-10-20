@@ -1,50 +1,53 @@
 ---
 name: git-sync
-description: Bring this thread's branch up to date with the latest main AND resolve git rebase conflicts — rebase onto main, working through any conflict markers. Use when the user asks to sync with main, get the latest, rebase onto main, update the branch, land recent changes, OR to resolve a merge/rebase conflict (files under Unmerged paths, a Merge & Push conflict banner). Load before running any git rebase.
+description: Bring the current thread branch up to date with main or resolve its merge conflict without rewriting published thread history. Use when the user asks to sync with main, get the latest, update the branch, or resolve a Merge & Push conflict. Do not rebase a thread branch.
 ---
 
 # Sync this thread's branch with main
 
-## main is already current here — do NOT fetch
-- The host refreshes `origin/main` for you before your turn. `git fetch` does NOT work in
-  this sandbox and is not needed — rebase directly onto the local `origin/main`.
-- You do not push. The user pushes manually.
+## Keep the published branch's ancestry
+- Git-bound turn admission refreshes `origin/main`. A legacy Merge & Push
+  conflict also follows a host fetch. Other legacy turns and resumed Git-bound
+  turns may have a stale tracking ref. If freshness is unconfirmed, do not
+  claim the branch is current. Do not fetch in this sandbox.
+- Work only on the current thread branch in `/workspace`. Do not switch to `main`.
+- You do not push. The Git-bound host publishes after successful finalization;
+  legacy publication is best-effort and may need operator follow-up.
+- If a rebase is already in progress, stop and report it. Do not continue or rewrite it.
 
-## Decision tree (run in order; do not improvise)
-1. Run: `git -C /workspace rev-list --count HEAD..origin/main`
-   - output is `0`  → main has NOT advanced; you are up to date. STOP.
-   - output is `> 0` → main advanced. Go to step 2.
-2. Run: `git -C /workspace rebase origin/main`
-   - exit 0               → success. Report "synced". STOP.
-   - output has `CONFLICT` → go to CONFLICT LOOP.
-   - any other non-zero    → go to STUCK.
+## Merge the current main
+1. Run `git -C /workspace status`. If any tracked or untracked work is dirty,
+   stop and ask how to preserve it. If a merge is already in progress, stop and
+   report it; do not continue a merge this skill did not start. A legacy
+   Merge & Push banner means the host already aborted its rebase, not that a
+   merge is in progress.
+2. Only after confirming the tracking ref is fresh, run
+   `git -C /workspace rev-list --count HEAD..origin/main`.
+   - `0`: main has not advanced beyond this branch at that fetch. Report that
+     no sync is needed relative to the fetched main tip.
+   - Greater than `0`: run `git -C /workspace -c user.name=Assist -c user.email=assist@localhost -c commit.gpgsign=false merge --no-edit --no-gpg-sign origin/main`.
+3. If the merge succeeds, report what changed. If it reports `CONFLICT`, use the
+   conflict loop. For any other failure, stop and report the exact error.
 
-## CONFLICT LOOP (repeat until the rebase reports success)
-a. Run: `git -C /workspace status` — read the `Unmerged paths` list.
-b. For EACH unmerged file:
-   - `read_file` it.
-   - Resolve every `<<<<<<<` / `=======` / `>>>>>>>` block with `edit_file`; leave ZERO
-     conflict markers.
-   - Run: `git -C /workspace add <file>`
-c. Run: `git -C /workspace rebase --continue`
-   - exit 0                → success. Report what you resolved. STOP.
-   - output has `CONFLICT` → a later commit also conflicts; go back to (a).
-   - any other error       → go to STUCK.
+## Conflict loop
+1. Run `git -C /workspace status` to identify unmerged files.
+2. Read each conflicted file. Resolve every conflict marker while preserving the
+   user's intended changes; ask the user if the correct result is unclear.
+3. Stage only the resolved files with `git -C /workspace add <file>`.
+4. Run `git -C /workspace -c user.name=Assist -c user.email=assist@localhost -c commit.gpgsign=false -c core.editor=true merge --continue`. If another
+   conflict remains, repeat. If continuation fails for another reason and your
+   merge is still in progress, follow the abort rule below.
+5. Report the resolution and that the branch still contains its earlier commits.
 
-## STUCK (the escape hatch — this is how you stay un-stuck)
-If you cannot resolve the conflict, run: `git -C /workspace rebase --abort`
-Your committed work is preserved on the branch. Tell the user exactly which files
-conflicted and ask which side to keep. Do not guess.
+If you cannot resolve a conflict from the merge you started here, run
+`git -C /workspace merge --abort` before the turn ends, then report that the
+sync did not complete. The checkout was clean before this merge, so this only
+discards your attempted merge resolution. If abort fails, report that the
+checkout needs operator verification; do not stage conflict markers or claim
+success. Never abort a merge that was already in progress when you arrived.
 
-## Discard and restart from main (only on explicit request)
-ONLY if the user explicitly asks to throw away this thread's changes and start over from
-the latest main: run `git -C /workspace reset --hard origin/main`. This resets the THREAD
-BRANCH (never `main`) — the thread's work is gone. Never do this as part of a normal sync.
-
-## HARD RULES (never put these in a command)
-- never `git fetch` — it fails in this sandbox; `origin/main` is already current
-- never `git push`, `push --force`, `send-pack` — the user pushes manually
-- never `git rebase --skip` — it drops a commit (lost work)
-- never `git checkout main` or otherwise touch the `main` branch
-- never `git reset --hard` except the explicit discard-and-restart above
-- only ever operate on `/workspace`
+## Hard rules
+- Never rebase, reset, or force-push this published thread branch. Those rewrite
+  its authorized history and can strand future turns.
+- Never fetch, push, checkout `main`, or discard work while syncing in this sandbox.
+- Never use `git merge -s ours` to hide a conflict. Resolve the actual content.

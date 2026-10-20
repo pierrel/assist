@@ -1110,6 +1110,9 @@ process with a normal non-force push. No-change turns verify publication too.
 When a phone push races a server turn, the completed server commit remains on
 `assist-result/<commit>` and the successful Run names it for manual merge.
 The server does not rebase, reset, force-push, or discard client work.
+The initial binding revision is not a permanent local-history floor. A local
+branch rewrite can be inspected, but it cannot replace a divergent published
+thread ref: reconcile both histories before another turn.
 
 Dirty or divergent server work, an unverified sandbox teardown, missing
 operator-verified binding, or uncertain publication holds before another model

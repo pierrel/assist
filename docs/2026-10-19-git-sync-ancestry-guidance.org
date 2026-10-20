@@ -1,0 +1,42 @@
+#+TITLE: Git sync guidance for published thread branches
+#+DATE: 2026-10-19
+
+* Scope
+The active =git-sync= skill now describes an ordinary merge of a confirmed
+fresh =origin/main= into the checked-out thread branch. It no longer directs an
+agent to rebase or force-push a published branch. Host publication remains
+separate; the skill does not authorize an agent-side fetch or push.
+
+Git-bound turn admission refreshes the tracking ref. A legacy Merge & Push
+conflict follows a host fetch, but other legacy turns and Git-bound handoffs may
+retain an older ref. The agent must not claim currency without that provenance.
+Pre-existing merges and rebases are not owned by this skill. A merge started by
+the skill is completed with a per-command identity or aborted if unresolved.
+
+This guidance does not repair an already-rebased thread branch, alter the
+legacy host main-merge algorithm, or permit rewriting published commits.
+
+* Current runtime ancestry rule
+The private source and branch binding remain authoritative, but the binding's
+initial revision is no longer a permanent ancestor requirement for local HEAD.
+The old floor field remains readable for existing sidecars and initial branch
+publication; it is not a turn-time gate. An existing published thread ref still
+advances only by ordinary fast-forward publication. A divergent local rewrite
+is held on a result branch until both histories are reconciled. If a remote
+ref is absent, the existing initial-publication path can create it from the
+current bound local tip; absence alone does not distinguish a never-published
+ref from a later deletion.
+
+* Historical supersessions
+This document supersedes only the =Deferred model guidance= section of
+=2026-09-26-direct-thread-git-sync-review-r2.org= as to =git-sync= rebase
+instructions: the skill now gives ancestry-preserving merge instructions.
+The older document's separate =git-history= reset-guidance concern remains
+deferred.
+It also supersedes only the permanent-floor interpretation of =Boundaries=
+and =Publication and failure= in =2026-09-26-direct-thread-git-sync.org=.
+That document's =Scope and authority= statement that a deleted remote ref
+always holds, and its =Publication and failure= statement that absent-ref
+publication is only for a never-published branch, do not describe the current
+republication path. Its fixed-source/branch and existing-ref fast-forward
+rules remain.

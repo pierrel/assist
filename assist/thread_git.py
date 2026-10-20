@@ -38,7 +38,7 @@ class ThreadGit:
 
     def __init__(self, thread_dir: str, worktree: str, configured_sources: tuple[str, ...]):
         self.worktree = worktree
-        self.branch, self.initial_revision = identity(worktree)
+        self.branch, _ = identity(worktree)
         binding = read_state(thread_dir)
         if binding is None:
             raise GitSyncError("Existing Git repository needs an operator-verified source binding")
@@ -49,14 +49,11 @@ class ThreadGit:
         if binding.get("branch") != self.branch:
             raise GitSyncError("Thread branch needs operator verification")
         self.source = binding["source"]
-        self.floor = binding.get("floor") or binding.get("local_revision")
 
     def _verified_tip(self, repository: LocalGit) -> str:
         branch, tip = repository.same_tip()
         if branch != self.branch:
             raise GitSyncError("Thread branch changed during this turn")
-        if self.floor and not repository.ancestor(self.floor, tip):
-            raise GitSyncError("Thread branch left its authorized history")
         return tip
 
     def verify_checkout_tip(self) -> str:
@@ -108,7 +105,9 @@ class ThreadGit:
         """Stage and commit only inside the credential-free restricted sandbox."""
         if identity(self.worktree)[0] != self.branch:
             raise GitSyncError("Thread branch changed during this turn")
-        _sandbox_git(sandbox, _WORKTREE_GIT + " add -A && { " + _WORKTREE_GIT
+        # An unresolved merge must not let add -A stage conflict markers as a commit.
+        _sandbox_git(sandbox, _WORKTREE_GIT + " diff --quiet --diff-filter=U && "
+                     + _WORKTREE_GIT + " add -A && { " + _WORKTREE_GIT
                      + " diff --cached --quiet; code=$?; if [ \"$code\" = 1 ]; then "
                      + "GIT_AUTHOR_NAME=Assist GIT_AUTHOR_EMAIL=assist@localhost "
                      + "GIT_COMMITTER_NAME=Assist GIT_COMMITTER_EMAIL=assist@localhost "
