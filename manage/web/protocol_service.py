@@ -49,7 +49,6 @@ class WebAgentProtocolService:
     """Map protocol operations onto the web app's sole durable run service."""
 
     MAX_THREADS = 1024
-    MAX_HIDDEN_THREADS = 256
     MAX_ACTIVE_TASKS_PER_PARENT = 32
     MAX_RETAINED_TASKS_PER_PARENT = 128
     MAX_LISTED_TERMINAL_TASKS = 32
@@ -186,11 +185,6 @@ class WebAgentProtocolService:
                             for child in latest_by_task.values())
                             >= self.MAX_ACTIVE_TASKS_PER_PARENT):
                         raise HTTPException(status_code=429, detail="Active task limit reached")
-                    hidden_count = sum(
-                        os.path.isfile(os.path.join(MANAGER.root_dir, name, ".subagent"))
-                        for name in os.listdir(MANAGER.root_dir))
-                    if not existing and hidden_count >= self.MAX_HIDDEN_THREADS:
-                        raise HTTPException(status_code=429, detail="Task limit reached")
                     return self._reserve_thread(thread_id, metadata)
             return self._reserve_thread(thread_id, None)
 

@@ -1,3 +1,5 @@
+import asyncio
+import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -676,6 +678,67 @@ def test_active_task_limit_is_parent_scoped(monkeypatch, tmp_path):
             "parent_run_id": parent.id,
             "dispatch_key": "second",
         })
+
+
+def test_256_terminal_tasks_do_not_block_new_task_or_delete_history(
+        monkeypatch, tmp_path):
+    _, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect 0", metadata=metadata)
+    threads._runs().claim(child.thread_id, child.id)
+    child = threads._runs().transition(
+        child.thread_id, child.id, "success", result="result 0")
+    terminal = child.to_dict()
+    task_ids = [child.thread_id]
+    for index in range(1, 256):
+        task_id = f"sub-terminal-{index}"
+        metadata = {
+            "parent_thread_id": "parent",
+            "parent_run_id": parent.id,
+            "dispatch_key": f"terminal-{index}",
+        }
+        task_dir = threads.MANAGER.thread_dir(task_id)
+        os.mkdir(task_dir)
+        with open(os.path.join(task_dir, ".subagent"), "w") as stream:
+            json.dump(metadata, stream)
+        run = dict(terminal)
+        run.update({
+            "thread_id": task_id,
+            "id": f"terminal-run-{index}",
+            "work_id": task_id,
+            "dispatch_key": metadata["dispatch_key"],
+            "text": f"inspect {index}",
+            "result": f"result {index}",
+        })
+        with open(os.path.join(task_dir, "runs.json"), "w") as stream:
+            json.dump([run], stream)
+        task_ids.append(task_id)
+
+    async def create_thread(**kwargs):
+        return SERVICE.create_thread(kwargs["thread_id"], kwargs["metadata"])
+
+    async def create_run(task_id, assistant_id, *, input, metadata):
+        return SERVICE.create_run(
+            task_id, assistant_id, input["messages"][0]["content"], metadata=metadata)
+
+    client = SimpleNamespace(
+        threads=SimpleNamespace(create=create_thread),
+        runs=SimpleNamespace(create=create_run))
+    monkeypatch.setattr(
+        async_tasks, "_run", lambda operation: asyncio.run(operation(client)))
+    with async_task_context(AsyncTaskContext("parent", parent.id, parent.work_id)):
+        launched = TOOLS["start_async_task"].func(
+            "inspect the next item", "context-agent",
+            SimpleNamespace(tool_call_id="after-terminal-history"))
+
+    new_task_id = launched.split("task_id: ", 1)[1].split(".", 1)[0]
+    assert os.path.isdir(threads.MANAGER.thread_dir(new_task_id))
+    assert launched.startswith(f"Started subagent. task_id: {new_task_id}.")
+    assert threads._runs().list(new_task_id)[-1].status == "pending"
+    assert all(os.path.isdir(threads.MANAGER.thread_dir(task_id))
+               for task_id in task_ids)
+    assert threads._runs().list(task_ids[0])[-1].result == "result 0"
+    assert threads._runs().list(task_ids[-1])[-1].result == "result 255"
 
 
 def test_retention_never_prunes_result_before_completion_wake_is_consumed(
