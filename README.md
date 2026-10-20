@@ -547,6 +547,15 @@ the [deleted-thread closure amendment](docs/2026-09-09-phone-run-deletion-closur
 the [cancellation receipt amendment](docs/2026-09-09-phone-run-cancellation-receipt-amendment.org),
 and the [initializer-cancellation amendment](docs/2026-09-09-phone-initializer-cancellation-amendment.org).
 
+The authenticated phone API serves individual referenced files through
+`GET /api/v1/phone/threads/<id>/assets?path=/tmp/chart.png`. Workspace and user
+paths resolve under that thread's working directory; `/tmp` resolves under its
+persistent scratch directory without requiring a running sandbox. Regular files
+are limited to 1 MiB; traversal, hidden paths and symlinks are refused. Responses
+contain raw bytes and a content-derived ETag; a matching `If-None-Match` returns
+304. The server stores no client inventory or asset-sync state. Clients own
+refresh timing and disposable caches, independently of editable Git checkouts.
+
 ### Voice calls
 
 The `/call` transport stays inert until all of these production-only values are

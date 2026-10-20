@@ -2054,3 +2054,127 @@ def test_workspace_manifest_bounds_empty_directory_traversal(tmp_path, monkeypat
         "/api/v1/phone/threads/thread-a/workspace", headers=_auth())
 
     assert response.json()["truncated"] is True
+
+
+def test_asset_bytes_validators_and_persistent_thread_tmp(tmp_path, monkeypatch):
+    directory = _thread_environment(tmp_path, monkeypatch, [])
+    (directory / "tmp").mkdir()
+    png = b"\x89PNG\r\n\x1a\n\x00\xff"
+    (directory / "workspace" / "chart.png").write_bytes(png)
+    (directory / "tmp" / "chart.png").write_bytes(b"scratch")
+    client = _client(monkeypatch)
+    url = "/api/v1/phone/threads/thread-a/assets"
+    response = client.get(url, params={"path": "/workspace/chart.png"}, headers=_auth())
+    assert response.status_code == 200 and response.content == png
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert response.headers["cache-control"] == "no-store"
+    etag = response.headers["etag"]
+    unchanged = client.get(url, params={"path": "/user/chart.png"},
+                           headers={**_auth(), "If-None-Match": etag})
+    assert unchanged.status_code == 304 and unchanged.content == b""
+    for condition in ("W/" + etag, '"stale", ' + etag, "*", '"stale", W/' + etag):
+        conditional = client.get(url, params={"path": "/workspace/chart.png"},
+                                 headers={**_auth(), "If-None-Match": condition})
+        assert conditional.status_code == 304 and conditional.content == b""
+    nonmatching = client.get(url, params={"path": "/workspace/chart.png"},
+                             headers={**_auth(), "If-None-Match": '"stale"'})
+    assert nonmatching.status_code == 200 and nonmatching.content == png
+    (directory / "workspace" / "chart.png").write_bytes(b"changed")
+    changed = client.get(url, params={"path": "chart.png"},
+                         headers={**_auth(), "If-None-Match": etag})
+    assert changed.status_code == 200 and changed.content == b"changed"
+    assert changed.headers["etag"] != etag
+    scratch = client.get(url, params={"path": "/tmp/chart.png"}, headers=_auth())
+    assert scratch.status_code == 200 and scratch.content == b"scratch"
+    assert client.get(url, params={"path": "/tmp/chart.png"}).status_code == 401
+    assert client.get(url.replace("thread-a", "other-thread"),
+                      params={"path": "chart.png"}, headers=_auth()).status_code == 404
+
+
+@pytest.mark.parametrize("path", [
+    "/workspace/../description.txt", "/tmp/../description.txt", "../description.txt",
+    "/etc/passwd", "/workspace/.git/config", "/workspace/.GIT/config", ".env",
+    "/workspace/a//b", "/workspace/a/./b", "/workspace/x\x00.png", "\\private",
+])
+def test_asset_rejects_paths_outside_public_roots(tmp_path, monkeypatch, path):
+    _thread_environment(tmp_path, monkeypatch, [])
+    response = _client(monkeypatch).get(
+        "/api/v1/phone/threads/thread-a/assets", params={"path": path}, headers=_auth())
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "root"])
+def test_asset_never_follows_symlinks(tmp_path, monkeypatch, kind):
+    directory = _thread_environment(tmp_path, monkeypatch, [])
+    workspace = directory / "workspace"
+    outside = tmp_path / "private"
+    outside.mkdir()
+    (outside / "secret").write_bytes(b"private")
+    if kind == "file":
+        (workspace / "secret").symlink_to(outside / "secret")
+        path = "secret"
+    elif kind == "directory":
+        (workspace / "escape").symlink_to(outside, target_is_directory=True)
+        path = "escape/secret"
+    else:
+        (workspace / "notes.md").unlink()
+        workspace.rmdir()
+        workspace.symlink_to(outside, target_is_directory=True)
+        path = "secret"
+    response = _client(monkeypatch).get(
+        "/api/v1/phone/threads/thread-a/assets", params={"path": path}, headers=_auth())
+    assert response.status_code == 404
+
+
+def test_asset_bounds_files_growth_and_nonregular_files(tmp_path, monkeypatch):
+    directory = _thread_environment(tmp_path, monkeypatch, [])
+    workspace = directory / "workspace"
+    (workspace / "large").write_bytes(b"x" * (phone_api.MAX_ASSET_BYTES + 1))
+    os.mkfifo(workspace / "pipe")
+    client = _client(monkeypatch)
+    url = "/api/v1/phone/threads/thread-a/assets"
+    assert client.get(url, params={"path": "large"}, headers=_auth()).status_code == 413
+    assert client.get(url, params={"path": "pipe"}, headers=_auth()).status_code == 404
+    assert client.get(url, params={"path": "missing"}, headers=_auth()).status_code == 404
+    original_read = phone_api.os.read
+    target = (workspace / "notes.md").stat().st_ino
+    read_bytes = 0
+    def growing(fd, count):
+        nonlocal read_bytes
+        if os.fstat(fd).st_ino == target:
+            read_bytes += count
+            return b"x" * count
+        return original_read(fd, count)
+    monkeypatch.setattr(phone_api.os, "read", growing)
+    assert client.get(url, params={"path": "notes.md"}, headers=_auth()).status_code == 413
+    assert read_bytes == phone_api.MAX_ASSET_BYTES + 1
+
+
+def test_asset_read_cannot_block_the_single_event_loop(tmp_path, monkeypatch):
+    import httpx
+    directory = _thread_environment(tmp_path, monkeypatch, [])
+    monkeypatch.setenv(phone_api.PHONE_API_TOKEN_ENV, "phone-test-token")
+    inode = (directory / "workspace" / "notes.md").stat().st_ino
+    entered, release = threading.Event(), threading.Event()
+    original_read = phone_api.os.read
+    def blocked_read(fd, count):
+        if os.fstat(fd).st_ino == inode:
+            entered.set()
+            assert release.wait(3), "asset read was not released"
+        return original_read(fd, count)
+    monkeypatch.setattr(phone_api.os, "read", blocked_read)
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://test") as client:
+            download = asyncio.create_task(client.get(
+                "/api/v1/phone/threads/thread-a/assets", params={"path": "notes.md"},
+                headers=_auth()))
+            try:
+                assert await asyncio.to_thread(entered.wait, 1)
+                assert not download.done()
+                other = await asyncio.wait_for(client.get("/api/v1/phone/not-a-route"), 0.5)
+                assert other.status_code == 404
+            finally:
+                release.set()
+            assert (await download).content == b"hello"
+    asyncio.run(exercise())
