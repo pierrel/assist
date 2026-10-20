@@ -234,22 +234,60 @@ def test_consumed_reply_gate_does_not_hide_independent_approvals(sqlite_reply, m
     client, _, _, effects, graph, config = sqlite_reply
     independent = request(egress.EGRESS_STORE)
     chat = state.MANAGER.get("parity-thread")
-    pending = chat.pending_reply
+    read = graph.get_state
+    consumed = False
 
-    def consume_after_read():
-        args = pending()
-        if args:
+    def read_after_consumption(*args, **kwargs):
+        nonlocal consumed
+        if not consumed:
+            consumed = True
             graph.invoke(Command(resume={"decisions": [{"type": "reject"}, {"type": "reject"}]}),
                          config, durability="sync")
-        return args
+        return read(*args, **kwargs)
 
-    chat.pending_reply = consume_after_read
+    monkeypatch.setattr(graph, "get_state", read_after_consumption)
     monkeypatch.setattr(state.MANAGER, "get", lambda *args, **kwargs: chat)
     value, = proposals(client)
     assert value["kind"] == "egress" and value["host"] == independent.host
     assert threads.reply_approval_preview("parity-thread") is None
     threads.render_thread("parity-thread", chat)
     assert effects == []
+
+
+def test_reply_first_checkpoint_read_failure_is_not_a_vanished_gate(sqlite_reply, monkeypatch):
+    _, _, _, effects, graph, _ = sqlite_reply
+    reads = []
+    original = graph.get_state
+
+    def fail_first_read(*args, **kwargs):
+        reads.append(True)
+        if len(reads) == 1:
+            raise RuntimeError("synthetic SQLite read failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(graph, "get_state", fail_first_read)
+    with pytest.raises(RuntimeError, match="synthetic SQLite read failure"):
+        threads.reply_approval_preview("parity-thread")
+    assert reads == [True] and effects == []
+
+
+def test_bound_reply_worker_read_failure_is_error_not_stale_cancellation(sqlite_reply, monkeypatch):
+    client, runs, _, effects, graph, config = sqlite_reply
+    proposal, = proposals(client)
+    response = client.post(BASE + "/approval", headers=HEADERS, json={
+        "kind": "send_reply", "token": proposal["token"], "decision": "approve"})
+    assert response.status_code == 200
+    original = graph.get_state
+
+    def fail_read(*args, **kwargs):
+        raise RuntimeError("synthetic bound worker checkpoint failure")
+
+    monkeypatch.setattr(graph, "get_state", fail_read)
+    threads._execute_run(response.json()["run_id"], "parity-thread")
+    execution = runs.get("parity-thread", response.json()["run_id"])
+    assert execution.status == "error"
+    assert "synthetic bound worker checkpoint failure" in execution.error
+    assert original(config).interrupts and effects == []
 
 
 @pytest.fixture
@@ -387,6 +425,78 @@ def test_geo_delayed_failure_delivery_cannot_describe_a_running_generation(downl
     provisioner._health_check = lambda: True
     provisioner._deliver(original.slug, failed=True)
     assert sent == [] and props.get(original.slug) == original
+
+
+def test_geo_health_probe_cannot_deliver_a_replaced_failure(download):
+    _, props, registry, original, provisioner, release, started, _ = download
+    job = provisioner._run_job
+    provisioner._run_job = lambda *args: False
+    provisioner.decide(original, "approve")
+    provisioner._executor.submit(lambda: None).result(timeout=2)
+    assert registry.get(original.slug).state == "failed"
+    probe, finish_probe = threading.Event(), threading.Event()
+    sent = []
+
+    def health():
+        probe.set()
+        assert finish_probe.wait(2)
+        return True
+
+    provisioner._health_check = health
+    provisioner._on_complete = lambda *args: sent.append(args)
+    delivery = threading.Thread(target=provisioner.deliver_pending)
+    delivery.start()
+    try:
+        assert probe.wait(1)
+        replacement = replace(original, created_at="2026-10-20T03:00:00+00:00")
+        props.put(replacement)
+        provisioner._run_job = job
+        provisioner.decide(replacement, "approve")
+        assert started.wait(1)
+        finish_probe.set()
+        delivery.join(timeout=1)
+        assert not delivery.is_alive()
+        assert sent == []
+        assert registry.get(original.slug).state == "importing"
+        assert props.get(original.slug) == replacement
+    finally:
+        finish_probe.set()
+        delivery.join(timeout=2)
+        release.set()
+
+
+def test_geo_completion_queues_durable_work_without_running_graph_under_store_locks(download, monkeypatch, tmp_path):
+    _, props, _, original, provisioner, _, _, _ = download
+    provisioner._run_job = lambda *args: False
+    provisioner.decide(original, "approve")
+    provisioner._executor.submit(lambda: None).result(timeout=2)
+    replacement = replace(original, created_at="2026-10-20T04:00:00+00:00")
+    published, queued = threading.Event(), []
+    workers = []
+
+    def enqueue(run_id, tid):
+        queued.append((run_id, tid))
+        worker = threading.Thread(target=lambda: (props.put(replacement), published.set()))
+        workers.append(worker)
+        worker.start()
+
+    monkeypatch.setattr(threads, "_last_visible_user_timezone", lambda tid: None)
+    monkeypatch.setattr(threads, "_mark_urgent", lambda tid: None)
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit", enqueue)
+    monkeypatch.setattr(threads, "_execute_run", lambda *args: pytest.fail("graph ran during admission"))
+    provisioner._health_check = lambda: True
+    provisioner._on_complete = threads._geo_on_complete
+    try:
+        provisioner.deliver_pending()
+        assert published.wait(1)
+        (run_id, tid), = queued
+        run = RunService(str(tmp_path)).get(tid, run_id)
+        assert run.status == "pending" and run.origin == "system"
+        assert "download failed" in run.text
+        assert props.get(original.slug) == replacement
+    finally:
+        for worker in workers:
+            worker.join(timeout=2)
 
 
 def test_web_reply_content_and_token_come_from_same_preview(sqlite_reply, monkeypatch):

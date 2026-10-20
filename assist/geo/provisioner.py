@@ -10,8 +10,8 @@ take a shared flock with the weekly refresh cron. Add/remove claim via the persi
 it must not risk a reconcile→failed on a restart).
 
 Wiring (its own increment): the web builds this with ``run_job`` = a blocking
-``subprocess.run`` of the provisioning script, ``on_complete`` = ``_scheduled_dispatch``
-+ ``_mark_urgent``, ``health_check`` = the LLM-reachable probe, and drives
+``subprocess.run`` of the provisioning script, ``on_complete`` = bounded durable
+Run admission and queue notification, ``health_check`` = the LLM-reachable probe, and drives
 ``reconcile`` / ``deliver_pending`` at startup + on a tick.
 
 All web coupling is INJECTED callables (the ``Scheduler(store, dispatch, health_check)``
@@ -20,8 +20,9 @@ All web coupling is INJECTED callables (the ``Scheduler(store, dispatch, health_
 - ``run_job(op, slug) -> bool`` — the heavy work; the web wires a blocking
   ``subprocess.run`` of the provisioning script (add / remove / transit). Bounded,
   validate-before-swap, blocks to completion (T5).
-- ``on_complete(tid, message)`` — post a completion message to the originating thread
-  (the web wires ``_scheduled_dispatch`` + ``_mark_urgent``). The message CARRIES the
+- ``on_complete(tid, message)`` — admit a durable completion for the originating
+  thread without running a graph or waiting for queue ownership. Called under
+  publication/admission exclusion; it must return promptly. The message CARRIES the
   user's original request (A1): a bare "download finished" would make the small model
   re-derive intent from stale history. It is NOT an automatic re-run — the agent
   decides what to do with it.
@@ -212,24 +213,29 @@ class Provisioner:
             p = self._proposals.get(slug)
             if p is None or not p.origin_tid:
                 return
-            admitted = self._registry.get(slug)
-            if (admitted is None or admitted.state != (STATE_FAILED if failed else STATE_READY)
-                    or admitted.approval_id is not None and admitted.approval_id != p.identity):
-                return
             if not self._health_check():
                 logger.info("geo: LLM not reachable; holding completion for %s", slug)
                 return   # stays undelivered; deliver_pending() retries
-            msg = (_failure_message(p.display_name) if failed
-                   else _completion_message(p.display_name, p.user_request))
-            try:
-                self._on_complete(p.origin_tid, msg)
-            except Exception:
-                logger.exception("geo: completion dispatch for %s failed; will retry", slug)
-                return
-            if not failed:
-                self._registry.update(slug, lambda r: replace(r, completion_delivered=True)
-                                      if r.approval_id == admitted.approval_id else r)
-            self._proposals.remove(slug, expected=p)
+            # The probe may block while a new proposal is published and approved.
+            # Keep the final check and bounded durable admission atomic with both.
+            with self._submit_lock, self._proposals.locked():
+                if self._proposals.get(slug) != p:
+                    return
+                admitted = self._registry.get(slug)
+                if (admitted is None or admitted.state != (STATE_FAILED if failed else STATE_READY)
+                        or admitted.approval_id is not None and admitted.approval_id != p.identity):
+                    return
+                msg = (_failure_message(p.display_name) if failed
+                       else _completion_message(p.display_name, p.user_request))
+                try:
+                    self._on_complete(p.origin_tid, msg)
+                except Exception:
+                    logger.exception("geo: completion admission for %s failed; will retry", slug)
+                    return
+                if not failed:
+                    self._registry.update(slug, lambda r: replace(r, completion_delivered=True)
+                                          if r.approval_id == admitted.approval_id else r)
+                self._proposals.remove(slug, expected=p)
 
     def close_delivery(self) -> None:
         """Wait through callback and acknowledgment, then defer later attempts."""

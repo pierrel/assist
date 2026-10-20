@@ -580,6 +580,13 @@ fresh review; the client never automatically repeats an approval POST. An
 oversized Email preview is explicitly unavailable in the collection and cannot
 hide independent network or download requests.
 
+SMS previews read the action and its binding from one checkpoint snapshot; a
+checkpoint read failure remains an error rather than an absent proposal. Region
+completion rechecks proposal generation and terminal state after the health probe,
+then admits a durable notification Run while publication and admission are excluded.
+The existing scheduler executes that Run independently; admission never executes
+the graph or waits for queue ownership under store locks.
+
 New reply decisions persist the exact sender, text, ordered requests, interrupt,
 checkpoint, namespace and work binding in the existing execution Run. Admission
 returns the same accepted receipt and rejects conflicting decisions. The worker

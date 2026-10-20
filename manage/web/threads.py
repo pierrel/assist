@@ -3504,12 +3504,25 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # Unlinked legacy Runs may authorize only the existing reply path.
                 # Mail decisions require a durable Approval and its exact execution link.
                 pending_chat = MANAGER.get(tid, sandbox_backend=None)
-                pending_gmail = _pending_gmail(pending_chat)
-                matches = (not pending_gmail and decision_kind == "reply"
-                           and pending_chat.pending_reply())
                 review = resume_decision.get("reply_review")
-                if matches and review is not None:
-                    matches = _reply_review(pending_chat, _get_status(tid)) == review
+                if review is not None:
+                    try:
+                        matches = (decision_kind == "reply"
+                                   and _reply_review(pending_chat, _get_status(tid)) == review)
+                    except Exception as error:
+                        # A failed authority read is unavailable, not stale. This
+                        # accepted slice owns the queue but has not reached claim.
+                        if _run is not None:
+                            with _RUN_ADMISSION_LOCK:
+                                current = _runs().get(tid, _run.id)
+                                if current.status == "pending":
+                                    current = _runs().claim(tid, current.id)
+                                if current.status == "running":
+                                    _runs().transition(tid, current.id, "error", error=str(error))
+                        raise
+                else:
+                    matches = (not _pending_gmail(pending_chat) and decision_kind == "reply"
+                               and pending_chat.pending_reply())
                 if not matches:
                     if _run is not None:
                         with _RUN_ADMISSION_LOCK:
@@ -4792,12 +4805,8 @@ def _llm_reachable() -> bool:
         return False
 
 
-def _scheduled_dispatch(tid: str, prompt: str, tz: str | None) -> None:
-    """Run a schedule's prompt as a turn IN its own thread via the normal run path, so
-    THREAD_QUEUE serializes it (overlap waits) and the per-turn sandbox + middleware
-    apply. An explicit schedule zone wins; another trigger uses the latest visible-user
-    zone. A time-only rider gives the turn 'now' in that zone. No _mark_pending —
-    there's no waiting render to win."""
+def _scheduled_run(tid: str, prompt: str, tz: str | None) -> Run:
+    """Admit a durable system Run with its trigger or latest visible-user zone."""
     _require_deep_thread(tid)
     effective_tz = tz or _last_visible_user_timezone(tid)
     rider = (_build_rider(datetime.now(timezone.utc).isoformat(), effective_tz)
@@ -4806,7 +4815,12 @@ def _scheduled_dispatch(tid: str, prompt: str, tz: str | None) -> None:
     # continuations (only a USER message supersedes the agent's plan) nor counts
     # as one (no marker prefix; it breaks the chain's trailing run, an accepted
     # accounting reset — the cap is a runaway backstop, not billing).
-    run = _create_run(tid, prompt, rider=rider, origin="system")
+    return _create_run(tid, prompt, rider=rider, origin="system")
+
+
+def _scheduled_dispatch(tid: str, prompt: str, tz: str | None) -> None:
+    """Run a schedule prompt through normal queue ownership and sandbox boundaries."""
+    run = _scheduled_run(tid, prompt, tz)
     _execute_run(run.id, tid)
 
 
@@ -4902,15 +4916,16 @@ _REPLY_DECISIONS = {
 
 def _reply_review(chat, status: dict) -> dict | None:
     """Bind the displayed sender and complete draft to its exact checkpoint gate."""
-    args = chat.pending_reply()
-    if not args or not status.get("pending_sender"):
+    if not status.get("pending_sender"):
         return None
     snapshot = chat.agent.get_state(chat.runconfig)
-    try:
-        interrupt, checkpoint, namespace, requests = _checkpoint_review(
-            chat, {"name": "send_reply", "args": args}, snapshot=snapshot)
-    except StopIteration:
+    args = next((dict(action["args"]) for intr in snapshot.interrupts
+                 for action in (intr.value or {}).get("action_requests", [])
+                 if action.get("name") == "send_reply" and isinstance(action.get("args"), dict)), None)
+    if not args:
         return None
+    interrupt, checkpoint, namespace, requests = _checkpoint_review(
+        chat, {"name": "send_reply", "args": args}, snapshot=snapshot)
     return {"sender": status["pending_sender"], "text": args.get("text", ""),
             "interrupt_id": interrupt, "checkpoint_id": checkpoint, "checkpoint_ns": namespace,
             "requests": requests, "work_id": (snapshot.metadata or {}).get("work_id")}
@@ -5312,9 +5327,9 @@ def _remove_egress_waiter(run: Run) -> None:
 
 
 def _geo_on_complete(tid: str, message: str) -> None:
-    """on_complete: deliver the region-ready (or -failed) message into the thread as a
-    fresh turn + mark it urgent, so the agent picks the original request back up."""
-    _scheduled_dispatch(tid, message, _GEO_TZ)
+    """Admit and queue a durable completion; never execute a graph under geo locks."""
+    run = _scheduled_run(tid, message, _GEO_TZ)
+    _RESUME_SCHEDULER.submit(run.id, tid)
     _mark_urgent(tid)
 
 
@@ -5954,9 +5969,9 @@ _GEO_DELIVER_THREAD: threading.Thread | None = None
 
 def _geo_startup() -> None:
     """Seed + reconcile once, then periodically deliver held completions. Runs on its OWN
-    thread — NEVER the asyncio lifespan thread — because delivery goes through
-    ``_scheduled_dispatch`` → durable Run → ``_execute_run`` (a full agent turn) plus a blocking
-    health probe, which would stall uvicorn startup on the loop. The retry loop makes D4
+    thread — NEVER the asyncio lifespan thread — because the health probe and
+    local store access block. Delivery admits a durable Run and notifies the resume
+    scheduler; it does not execute a graph here. The retry loop makes D4
     real: an LLM-down-at-completion is held and re-attempted until the LLM is back (a
     cheap no-op when nothing is held)."""
     try:
