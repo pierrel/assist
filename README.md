@@ -1107,6 +1107,8 @@ fast-forwards its clean checkout to include user-pushed commits. Hidden resumes
 and child handoffs retain their admitted base. Successful work is committed in
 the restricted sandbox and published by a private, config-clean host Git
 process with a normal non-force push. No-change turns verify publication too.
+Git decides a non-fast-forward refusal; the server verifies the remote ref
+before reporting publication or preserving a divergent result branch.
 When a phone push races a server turn, the completed server commit remains on
 `assist-result/<commit>` and the successful Run names it for manual merge.
 The server does not rebase, reset, force-push, or discard client work.

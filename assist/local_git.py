@@ -38,6 +38,10 @@ class GitRemoteThreadChangedError(GitSyncError):
     """The configured thread ref changed across an exact fetch attempt."""
 
 
+class GitPublishedRefDivergedError(GitSyncError):
+    """A verified remote ref contains work unrelated to the local result."""
+
+
 def _validated_objects(worktree: str) -> str:
     """Admit independent Git objects and inert maintenance files; never follow links."""
     total = count = 0
@@ -250,8 +254,6 @@ class LocalGit:
                 return previous
             if create_only:
                 raise GitSyncError("Result branch already names different work")
-            if not self.ancestor(previous, desired):
-                raise GitSyncError("Remote Git branch diverged; local commit is preserved")
         if previous != desired:
             lease = (["--force-with-lease=" + ref + ":"]
                      if previous is None else [])
@@ -269,5 +271,8 @@ class LocalGit:
             self.git("fetch", "--no-tags", self.source,
                      ref + ":refs/remotes/origin/verified")
             if not self.ancestor(desired, latest):
+                if not self.ancestor(latest, desired):
+                    raise GitPublishedRefDivergedError(
+                        "Remote Git branch diverged; local commit is preserved")
                 raise GitSyncError("Git publication is not verified")
         return latest

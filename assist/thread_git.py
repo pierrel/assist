@@ -7,7 +7,7 @@ import shlex
 
 from assist.git_sync import (GitSyncError, _WORKTREE_GIT, _sandbox_git, identity,
                              read_state, require_clean)
-from assist.local_git import GitRemoteThreadChangedError, LocalGit
+from assist.local_git import GitPublishedRefDivergedError, GitRemoteThreadChangedError, LocalGit
 
 
 class GitMergeConflictError(GitSyncError):
@@ -65,8 +65,11 @@ class ThreadGit:
         with LocalGit(self.source, self.worktree) as repository:
             local = self._verified_tip(repository)
             main, remote = repository.fetch(self.branch)
-            if remote is None or remote != local and repository.ancestor(remote, local):
-                repository.publish(self.branch, local)
+            if remote is None or not repository.ancestor(local, remote):
+                result = self._publish_thread(repository, local)
+                if result is not None:
+                    raise GitSyncError("Previous committed result is on " + result
+                                       + "; fetch and merge it locally before the next turn")
                 main, remote = repository.fetch(self.branch)
             if remote is None:
                 raise GitSyncError("Published thread branch is unavailable")
@@ -117,18 +120,19 @@ class ThreadGit:
         require_clean(sandbox)
 
     def publish(self) -> str | None:
-        """Return a result branch only when the exact thread ref lost a race."""
+        """Return a result branch only for verified remote divergence."""
         with LocalGit(self.source, self.worktree) as repository:
             desired = self._verified_tip(repository)
-            _, remote = repository.fetch(self.branch)
-            if remote == desired or remote is not None and repository.ancestor(desired, remote):
-                return None
-            if remote is None or repository.ancestor(remote, desired):
-                repository.publish(self.branch, desired)
-                return None
+            return self._publish_thread(repository, desired)
+
+    def _publish_thread(self, repository: LocalGit, desired: str) -> str | None:
+        try:
+            repository.publish(self.branch, desired)
+        except GitPublishedRefDivergedError:
             result = "assist-result/" + desired
             repository.publish(result, desired, create_only=True)
             return result
+        return None
 
     def plan_merge_main(self, expected_thread: str | None = None) -> MergePlan:
         """Build a published-ref merge and its bounded checkout object import."""

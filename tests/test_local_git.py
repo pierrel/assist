@@ -7,7 +7,7 @@ import pytest
 
 from assist.git_sync import GitSyncError, identity
 from assist import local_git
-from assist.local_git import GitRemoteThreadChangedError, LocalGit
+from assist.local_git import GitPublishedRefDivergedError, GitRemoteThreadChangedError, LocalGit
 
 
 def git(*arguments, cwd=None):
@@ -193,6 +193,62 @@ def test_existing_thread_ref_rejects_non_fast_forward_push(repositories, monkeyp
         with pytest.raises(GitSyncError, match="not verified"):
             host.publish("assist/thread", desired)
     assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == remote
+
+
+def test_native_non_fast_forward_refusal_preserves_both_tips(repositories, monkeypatch):
+    source, server, phone = repositories
+    desired = commit(server, "server.txt", "server work\n")
+    remote = commit(phone, "phone.txt", "phone work\n")
+    git("push", "origin", "assist/thread", cwd=phone)
+    original = LocalGit.git
+    pushes = []
+
+    def observe_push(host, *arguments, **options):
+        if arguments[0] == "push":
+            pushes.append(arguments)
+        return original(host, *arguments, **options)
+
+    monkeypatch.setattr(LocalGit, "git", observe_push)
+    with LocalGit(str(source), str(server)) as host:
+        with pytest.raises(GitPublishedRefDivergedError, match="diverged"):
+            host.publish("assist/thread", desired)
+    assert len(pushes) == 1
+    assert "--force" not in " ".join(pushes[0])
+    assert pushes[0][-1] == desired + ":refs/heads/assist/thread"
+    assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == remote
+    assert identity(str(server))[1] == desired
+
+
+def test_native_nonforce_descendant_push_succeeds(repositories, monkeypatch):
+    source, server, _ = repositories
+    desired = commit(server, "server.txt", "server work\n")
+    original = LocalGit.git
+    pushes = []
+
+    def observe_push(host, *arguments, **options):
+        if arguments[0] == "push":
+            pushes.append(arguments)
+        return original(host, *arguments, **options)
+
+    monkeypatch.setattr(LocalGit, "git", observe_push)
+    with LocalGit(str(source), str(server)) as host:
+        assert host.publish("assist/thread", desired) == desired
+    assert len(pushes) == 1
+    assert "--force" not in " ".join(pushes[0])
+    assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == desired
+
+
+def test_refused_push_with_remote_still_behind_is_not_divergence(repositories):
+    source, server, _ = repositories
+    desired = commit(server, "server.txt", "server work\n")
+    hook = source / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o700)
+    with LocalGit(str(source), str(server)) as host:
+        with pytest.raises(GitSyncError, match="not verified") as error:
+            host.publish("assist/thread", desired)
+    assert not isinstance(error.value, GitPublishedRefDivergedError)
+    assert git("rev-parse", "refs/heads/assist/thread", cwd=source) != desired
 
 
 def test_workspace_config_hooks_and_alternates_never_cross_host_boundary(

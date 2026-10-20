@@ -55,7 +55,7 @@ def bound_thread(tmp_path, repositories, monkeypatch):
     return ThreadGit(str(directory), str(server), (str(source),)), source, server, phone
 
 
-def test_phone_before_turn_and_during_turn_then_user_merge(bound_thread):
+def test_phone_before_turn_and_during_turn_then_user_merge(bound_thread, monkeypatch):
     owner, source, server, phone = bound_thread
     first = commit(phone, "before.txt", "before\n")
     git("push", "origin", "assist/thread", cwd=phone)
@@ -66,8 +66,21 @@ def test_phone_before_turn_and_during_turn_then_user_merge(bound_thread):
     server_result = commit(server, "server.txt", "server\n")
     commit(phone, "during.txt", "during\n")
     git("push", "origin", "assist/thread", cwd=phone)
+    original_git = LocalGit.git
+    pushes = []
+
+    def observe_push(host, *arguments, **options):
+        if arguments[0] == "push":
+            pushes.append(arguments)
+        return original_git(host, *arguments, **options)
+
+    monkeypatch.setattr(LocalGit, "git", observe_push)
     result_branch = owner.publish()
     assert result_branch == "assist-result/" + server_result
+    assert len(pushes) == 2
+    assert pushes[0][-1] == server_result + ":refs/heads/assist/thread"
+    assert "--force" not in " ".join(pushes[0])
+    assert pushes[1][-1] == server_result + ":refs/heads/" + result_branch
     assert git("rev-parse", "refs/heads/assist/thread", cwd=source) != server_result
     git("fetch", "origin", result_branch, cwd=phone)
     git("-c", "user.name=Phone", "-c", "user.email=phone@localhost",
@@ -266,10 +279,36 @@ def test_rewritten_local_tip_cannot_replace_divergent_published_ref(bound_thread
     lifecycle = ThreadGitLifecycle(owner, str(server))
     monkeypatch.setattr(lifecycle, "_host_fence", nullcontext)
     lifecycle.resume()
+    original_git = LocalGit.git
+    pushes = []
+
+    def observe_push(host, *arguments, **options):
+        if arguments[0] == "push":
+            pushes.append(arguments)
+        return original_git(host, *arguments, **options)
+
+    monkeypatch.setattr(LocalGit, "git", observe_push)
     with pytest.raises(GitSyncError, match="Previous committed result"):
         owner.plan_prepare()
+    assert pushes[0][-1] == rewritten + ":refs/heads/assist/thread"
+    assert "--force" not in " ".join(pushes[0])
     assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == original
     assert git("rev-parse", "refs/heads/assist-result/" + rewritten, cwd=source) == rewritten
+
+
+def test_rejected_thread_push_without_remote_divergence_keeps_result_unpublished(
+        bound_thread):
+    owner, source, server, _ = bound_thread
+    desired = commit(server, "server.txt", "saved result\n")
+    hook = source / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o700)
+    with pytest.raises(GitSyncError, match="not verified"):
+        owner.publish()
+    assert identity(str(server))[1] == desired
+    assert git("rev-parse", "refs/heads/assist/thread", cwd=source) != desired
+    assert git("for-each-ref", "--format=%(refname)", "refs/heads/assist-result",
+               cwd=source) == ""
 
 
 def test_child_handoff_keeps_parent_base_and_holds_partial_edits(bound_thread, monkeypatch):
