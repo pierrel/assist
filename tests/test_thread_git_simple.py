@@ -194,7 +194,9 @@ def test_unmerged_index_cannot_be_committed_or_published(bound_thread, tmp_path)
     commit(main, "README", "main side\n")
     git("push", "origin", "main", cwd=main)
     git("fetch", "origin", "main", cwd=server)
-    merge = subprocess.run(["git", "merge", "--no-edit", "origin/main"],
+    merge = subprocess.run(["git", "-c", "user.name=Test", "-c",
+                            "user.email=test@localhost", "merge", "--no-edit",
+                            "origin/main"],
                            cwd=server, capture_output=True, check=False)
     assert merge.returncode != 0
     unmerged = git("ls-files", "-u", cwd=server)
@@ -216,9 +218,12 @@ def test_resolved_merge_can_finish_with_both_parents(bound_thread, tmp_path):
     main_tip = commit(main, "README", "main side\n")
     git("push", "origin", "main", cwd=main)
     git("fetch", "origin", "main", cwd=server)
-    merge = subprocess.run(["git", "merge", "--no-edit", "origin/main"],
+    merge = subprocess.run(["git", "-c", "user.name=Test", "-c",
+                            "user.email=test@localhost", "merge", "--no-edit",
+                            "origin/main"],
                            cwd=server, capture_output=True, check=False)
     assert merge.returncode != 0
+    assert git("ls-files", "-u", cwd=server)
     (server / "README").write_text("thread and main side\n")
     git("add", "README", cwd=server)
     assert not git("ls-files", "-u", cwd=server)
