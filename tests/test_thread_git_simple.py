@@ -11,7 +11,8 @@ import pytest
 from assist.git_sync import (GitSyncError, _initial_binding, _write_state, authorize_branch,
                              bind, identity, publish_initial_branch)
 from assist.domain_manager import git_diff_main
-from assist.thread_git import ThreadGit
+from assist.local_git import LocalGit
+from assist.thread_git import GitExpectedRefChangedError, ThreadGit
 from manage.web import review
 from manage.web.thread_git_lifecycle import ThreadGitLifecycle
 from tests.test_local_git import commit, git, repositories  # noqa: F401
@@ -54,7 +55,7 @@ def bound_thread(tmp_path, repositories, monkeypatch):
     return ThreadGit(str(directory), str(server), (str(source),)), source, server, phone
 
 
-def test_phone_before_turn_and_during_turn_then_user_merge(bound_thread):
+def test_phone_before_turn_and_during_turn_then_user_merge(bound_thread, monkeypatch):
     owner, source, server, phone = bound_thread
     first = commit(phone, "before.txt", "before\n")
     git("push", "origin", "assist/thread", cwd=phone)
@@ -65,8 +66,21 @@ def test_phone_before_turn_and_during_turn_then_user_merge(bound_thread):
     server_result = commit(server, "server.txt", "server\n")
     commit(phone, "during.txt", "during\n")
     git("push", "origin", "assist/thread", cwd=phone)
+    original_git = LocalGit.git
+    pushes = []
+
+    def observe_push(host, *arguments, **options):
+        if arguments[0] == "push":
+            pushes.append(arguments)
+        return original_git(host, *arguments, **options)
+
+    monkeypatch.setattr(LocalGit, "git", observe_push)
     result_branch = owner.publish()
     assert result_branch == "assist-result/" + server_result
+    assert len(pushes) == 2
+    assert pushes[0][-1] == server_result + ":refs/heads/assist/thread"
+    assert "--force" not in " ".join(pushes[0])
+    assert pushes[1][-1] == server_result + ":refs/heads/" + result_branch
     assert git("rev-parse", "refs/heads/assist/thread", cwd=source) != server_result
     git("fetch", "origin", result_branch, cwd=phone)
     git("-c", "user.name=Phone", "-c", "user.email=phone@localhost",
@@ -183,6 +197,57 @@ def test_dirty_retained_commit_cannot_publish_before_preflight(bound_thread, mon
     assert (server / "unsaved.txt").read_text() == "user draft\n"
 
 
+def test_unmerged_index_cannot_be_committed_or_published(bound_thread, tmp_path):
+    owner, source, server, _ = bound_thread
+    commit(server, "README", "thread side\n")
+    published = git("rev-parse", "refs/heads/assist/thread", cwd=source)
+    local = git("rev-parse", "HEAD", cwd=server)
+    main = tmp_path / "main"
+    git("clone", "-b", "main", source, main)
+    commit(main, "README", "main side\n")
+    git("push", "origin", "main", cwd=main)
+    git("fetch", "origin", "main", cwd=server)
+    merge = subprocess.run(["git", "-c", "user.name=Test", "-c",
+                            "user.email=test@localhost", "merge", "--no-edit",
+                            "origin/main"],
+                           cwd=server, capture_output=True, check=False)
+    assert merge.returncode != 0
+    unmerged = git("ls-files", "-u", cwd=server)
+    assert unmerged
+
+    with pytest.raises(GitSyncError, match="needs reconciliation"):
+        owner.commit(LocalSandbox(), "must not publish conflict markers")
+
+    assert git("ls-files", "-u", cwd=server) == unmerged
+    assert git("rev-parse", "HEAD", cwd=server) == local
+    assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == published
+
+
+def test_resolved_merge_can_finish_with_both_parents(bound_thread, tmp_path):
+    owner, source, server, _ = bound_thread
+    thread_tip = commit(server, "README", "thread side\n")
+    main = tmp_path / "main"
+    git("clone", "-b", "main", source, main)
+    main_tip = commit(main, "README", "main side\n")
+    git("push", "origin", "main", cwd=main)
+    git("fetch", "origin", "main", cwd=server)
+    merge = subprocess.run(["git", "-c", "user.name=Test", "-c",
+                            "user.email=test@localhost", "merge", "--no-edit",
+                            "origin/main"],
+                           cwd=server, capture_output=True, check=False)
+    assert merge.returncode != 0
+    assert git("ls-files", "-u", cwd=server)
+    (server / "README").write_text("thread and main side\n")
+    git("add", "README", cwd=server)
+    assert not git("ls-files", "-u", cwd=server)
+
+    owner.commit(LocalSandbox(), "resolved merge")
+
+    assert git("rev-list", "--parents", "-n", "1", "HEAD", cwd=server).split() == [
+        git("rev-parse", "HEAD", cwd=server), thread_tip, main_tip,
+    ]
+
+
 def test_prepare_holds_same_tree_ref_rewrite_after_sandbox_check(bound_thread, monkeypatch):
     owner, source, server, _ = bound_thread
     original = identity(str(server))[1]
@@ -204,8 +269,8 @@ def test_prepare_holds_same_tree_ref_rewrite_after_sandbox_check(bound_thread, m
     assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == original
 
 
-def test_resume_holds_checkout_outside_authorized_history(bound_thread, monkeypatch):
-    owner, _, server, _ = bound_thread
+def test_rewritten_local_tip_cannot_replace_divergent_published_ref(bound_thread, monkeypatch):
+    owner, source, server, _ = bound_thread
     original = identity(str(server))[1]
     tree = git("rev-parse", original + "^{tree}", cwd=server)
     rewritten = git("-c", "user.name=Test", "-c", "user.email=test@localhost",
@@ -213,8 +278,37 @@ def test_resume_holds_checkout_outside_authorized_history(bound_thread, monkeypa
     git("update-ref", "refs/heads/assist/thread", rewritten, original, cwd=server)
     lifecycle = ThreadGitLifecycle(owner, str(server))
     monkeypatch.setattr(lifecycle, "_host_fence", nullcontext)
-    with pytest.raises(GitSyncError, match="authorized history"):
-        lifecycle.resume()
+    lifecycle.resume()
+    original_git = LocalGit.git
+    pushes = []
+
+    def observe_push(host, *arguments, **options):
+        if arguments[0] == "push":
+            pushes.append(arguments)
+        return original_git(host, *arguments, **options)
+
+    monkeypatch.setattr(LocalGit, "git", observe_push)
+    with pytest.raises(GitSyncError, match="Previous committed result"):
+        owner.plan_prepare()
+    assert pushes[0][-1] == rewritten + ":refs/heads/assist/thread"
+    assert "--force" not in " ".join(pushes[0])
+    assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == original
+    assert git("rev-parse", "refs/heads/assist-result/" + rewritten, cwd=source) == rewritten
+
+
+def test_rejected_thread_push_without_remote_divergence_keeps_result_unpublished(
+        bound_thread):
+    owner, source, server, _ = bound_thread
+    desired = commit(server, "server.txt", "saved result\n")
+    hook = source / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o700)
+    with pytest.raises(GitSyncError, match="not verified"):
+        owner.publish()
+    assert identity(str(server))[1] == desired
+    assert git("rev-parse", "refs/heads/assist/thread", cwd=source) != desired
+    assert git("for-each-ref", "--format=%(refname)", "refs/heads/assist-result",
+               cwd=source) == ""
 
 
 def test_child_handoff_keeps_parent_base_and_holds_partial_edits(bound_thread, monkeypatch):
@@ -343,6 +437,58 @@ def test_merge_import_failure_does_not_publish_main(bound_thread):
     assert git("rev-parse", "refs/heads/main", cwd=source) == original
 
 
+def test_merge_confirmation_refuses_newer_published_tip(bound_thread, tmp_path):
+    owner, source, server, phone = bound_thread
+    commit(server, "thread.txt", "thread\n")
+    owner.publish()
+    observed = git("rev-parse", "refs/heads/assist/thread", cwd=source)
+    main = git("rev-parse", "refs/heads/main", cwd=source)
+    git("pull", "--ff-only", "origin", "assist/thread", cwd=phone)
+    commit(phone, "phone.txt", "later\n")
+    git("push", "origin", "assist/thread", cwd=phone)
+    with pytest.raises(GitSyncError, match="changed"):
+        owner.plan_merge_main(observed)
+    assert git("rev-parse", "refs/heads/main", cwd=source) == main
+
+
+def test_merge_confirmation_reports_deleted_published_branch_as_stale(bound_thread):
+    owner, source, server, _ = bound_thread
+    commit(server, "thread.txt", "thread\n")
+    owner.publish()
+    observed = git("rev-parse", "refs/heads/assist/thread", cwd=source)
+    main = git("rev-parse", "refs/heads/main", cwd=source)
+    git("update-ref", "-d", "refs/heads/assist/thread", cwd=source)
+    with pytest.raises(GitExpectedRefChangedError, match="changed"):
+        owner.plan_merge_main(observed)
+    assert git("rev-parse", "refs/heads/main", cwd=source) == main
+
+
+def test_merge_confirmation_reports_thread_move_during_fetch_as_stale(
+        bound_thread, monkeypatch):
+    owner, source, server, phone = bound_thread
+    commit(server, "thread.txt", "thread\n")
+    owner.publish()
+    observed = git("rev-parse", "refs/heads/assist/thread", cwd=source)
+    main = git("rev-parse", "refs/heads/main", cwd=source)
+    git("pull", "--ff-only", "origin", "assist/thread", cwd=phone)
+    commit(phone, "phone.txt", "later\n")
+    original = LocalGit.git
+    moved = False
+
+    def move_before_fetch(host, *arguments, **options):
+        nonlocal moved
+        if arguments and arguments[0] == "fetch" and not moved:
+            moved = True
+            git("push", "origin", "assist/thread", cwd=phone)
+        return original(host, *arguments, **options)
+
+    monkeypatch.setattr(LocalGit, "git", move_before_fetch)
+    with pytest.raises(GitExpectedRefChangedError, match="changed"):
+        owner.plan_merge_main(observed)
+    assert moved
+    assert git("rev-parse", "refs/heads/main", cwd=source) == main
+
+
 def test_merge_teardown_failure_does_not_publish_main(
         bound_thread, tmp_path, monkeypatch):
     owner, source, server, _ = bound_thread
@@ -373,6 +519,6 @@ def test_merge_holds_when_published_thread_advances_during_import(
     git("pull", "--ff-only", "origin", "assist/thread", cwd=phone)
     commit(phone, "phone.txt", "later\n")
     git("push", "origin", "assist/thread", cwd=phone)
-    with pytest.raises(GitSyncError, match="advanced"):
+    with pytest.raises(GitExpectedRefChangedError, match="changed"):
         owner.publish_merge(plan)
     assert git("rev-parse", "refs/heads/main", cwd=source) == original_main

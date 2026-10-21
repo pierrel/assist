@@ -37,6 +37,10 @@ class GitSyncError(RuntimeError):
     """Git sync is unavailable; preserve the worktree and show a fixed reason."""
 
 
+class GitWorkspaceBusyError(GitSyncError):
+    """Another turn currently owns the same checkout fence."""
+
+
 def _read_at(directory: int, name: str, limit: int = 65_536, *, independent=False) -> bytes:
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
     try:
@@ -674,7 +678,7 @@ def _workspace_lock(thread_dir: str):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise GitSyncError("A previous turn still owns this Git workspace") from error
+            raise GitWorkspaceBusyError("A previous turn still owns this Git workspace") from error
         except OSError as error:
             raise GitSyncError("Git workspace ownership is unavailable") from error
         yield

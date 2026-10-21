@@ -34,6 +34,14 @@ _OUTPUT_LIMIT = 1024 * 1024
 _BUNDLE_LIMIT = 128 * 1024 * 1024
 
 
+class GitRemoteThreadChangedError(GitSyncError):
+    """The configured thread ref changed across an exact fetch attempt."""
+
+
+class GitPublishedRefDivergedError(GitSyncError):
+    """A verified remote ref contains work unrelated to the local result."""
+
+
 def _validated_objects(worktree: str) -> str:
     """Admit independent Git objects and inert maintenance files; never follow links."""
     total = count = 0
@@ -189,10 +197,20 @@ class LocalGit:
         refspecs = ["refs/heads/main:refs/remotes/origin/main"]
         if thread is not None:
             refspecs.append("refs/heads/" + branch + ":refs/remotes/origin/thread")
-        self.git("fetch", "--no-tags", "--no-auto-maintenance", self.source, *refspecs)
-        if (self.git("rev-parse", "refs/remotes/origin/main") != main
-                or thread is not None
+        try:
+            self.git("fetch", "--no-tags", "--no-auto-maintenance", self.source, *refspecs)
+        except GitSyncError as error:
+            try:
+                current = self.remote_ref(branch)
+            except GitSyncError:
+                raise error
+            if current != thread:
+                raise GitRemoteThreadChangedError("Remote Git thread branch moved during fetch") from error
+            raise
+        if (thread is not None
                 and self.git("rev-parse", "refs/remotes/origin/thread") != thread):
+            raise GitRemoteThreadChangedError("Remote Git thread branch moved during fetch")
+        if self.git("rev-parse", "refs/remotes/origin/main") != main:
             raise GitSyncError("Remote Git branch moved during fetch")
         return main, thread
 
@@ -236,8 +254,6 @@ class LocalGit:
                 return previous
             if create_only:
                 raise GitSyncError("Result branch already names different work")
-            if not self.ancestor(previous, desired):
-                raise GitSyncError("Remote Git branch diverged; local commit is preserved")
         if previous != desired:
             lease = (["--force-with-lease=" + ref + ":"]
                      if previous is None else [])
@@ -255,5 +271,8 @@ class LocalGit:
             self.git("fetch", "--no-tags", self.source,
                      ref + ":refs/remotes/origin/verified")
             if not self.ancestor(desired, latest):
+                if not self.ancestor(latest, desired):
+                    raise GitPublishedRefDivergedError(
+                        "Remote Git branch diverged; local commit is preserved")
                 raise GitSyncError("Git publication is not verified")
         return latest

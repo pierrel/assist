@@ -46,10 +46,12 @@ from assist.domain_manager import (
     MergeConflictError,
     OriginAdvancedError,
 )
-from assist.git_sync import (GitSyncError, _workspace_lock as git_workspace_lock,
+from assist.git_sync import (GitSyncError, GitWorkspaceBusyError,
+                             _workspace_lock as git_workspace_lock,
                              authorize_branch, bind as bind_git,
                              publish_initial_branch,
                              read_state as read_git_binding)
+from assist.thread_git import GitExpectedRefChangedError, GitMergeConflictError
 from langgraph.errors import GraphRecursionError
 import anyio
 import anyio.to_thread
@@ -6900,23 +6902,43 @@ def _git_merge_has_unfinished_work(tid: str) -> bool:
                    for run in latest.values())
 
 
+class MergeBusyError(HTTPException):
+    """Unfinished work or checkout ownership prevents the merge action."""
+
+    def __init__(self, detail: str):
+        super().__init__(status_code=409, detail=detail)
+
+
+class MergeGitConflictError(HTTPException):
+    """The bound published refs have a merge-tree conflict."""
+
+    def __init__(self, detail: str):
+        super().__init__(status_code=409, detail=detail)
+
+
+class MergeStaleError(HTTPException):
+    """The published commit differs from the request's expected OID."""
+
+    def __init__(self, detail: str):
+        super().__init__(status_code=409, detail=detail)
+
+
 @app.post("/thread/{tid}/merge")
 def merge_thread(tid: str):
-    """Merge & Push integrates a bound thread without rewriting its branch.
+    """Map the shared Merge and Push result to the browser's existing redirect."""
+    outcome = _merge_thread_result(tid)
+    return RedirectResponse(
+        url=f"/thread/{tid}?{'conflict' if outcome == 'conflict' else 'merged'}=1",
+        status_code=303,
+    )
 
-    Declared SYNC (not ``async def``) on purpose: it acquires ``MERGE_LOCK`` and runs
-    blocking git subprocesses, so FastAPI must run it in the threadpool — an ``async def``
-    would block the single-worker event loop for the whole merge (a full outage). Same
-    reason ``/show`` is sync.
 
-    Holds ``MERGE_LOCK`` for the duration so two web requests merging or
-    pushing at the same instant don't race the host's git operations.
-    Legacy non-bound merges retain their conflict marker; a bound merge
-    reports an integration hold without changing the thread checkout.
+def _merge_thread_result(tid: str, expected_thread: str | None = None) -> str:
+    """Run one web/phone Merge and Push under the existing locks and fences.
 
-    Refuses with 409 at the busy-status precheck. Git-backed threads also
-    acquire the shared workspace ownership fence, covering sandbox writers
-    even after a queue lease expires; its conflict also returns 409.
+    The browser uses its ordinary latest-ref behavior. Phone confirmation also
+    requires its displayed published OID; the fetched tip must still match.
+    Git subprocesses remain in a worker thread so the event loop is not blocked.
     """
     _require_deep_thread(tid)
     try:
@@ -6925,10 +6947,8 @@ def merge_thread(tid: str):
         raise HTTPException(status_code=404, detail="Thread not found")
 
     if _get_status(tid).get("stage") in BUSY_STAGES:
-        raise HTTPException(
-            status_code=409,
-            detail="Thread is busy. Wait for the current turn to finish before merging.",
-        )
+        raise MergeBusyError(
+            "Thread is busy. Wait for the current turn to finish before merging.")
 
     dm = _get_domain_manager(tid)
     with MERGE_LOCK, ExitStack() as merge_scope:
@@ -6939,25 +6959,29 @@ def merge_thread(tid: str):
             if not git_lifecycle.bound and (not dm or not dm.repo):
                 raise ValueError("No git repository configured for this thread")
             if _git_merge_has_unfinished_work(tid):
-                raise GitSyncError("Thread has unfinished work; finish it before merging")
+                raise MergeBusyError("Thread has unfinished work; finish it before merging")
+            if expected_thread is not None and not git_lifecycle.bound:
+                raise GitSyncError("Phone merge requires a bound published Git source")
             git_lifecycle.validate_merge_candidate()
             if git_lifecycle.bound:
-                git_lifecycle.merge_and_push()
+                git_lifecycle.merge_and_push(expected_thread)
             else:
                 dm.merge_and_push()
             _clear_conflict(tid)
-            return RedirectResponse(
-                url=f"/thread/{tid}?merged=1",
-                status_code=303,
-            )
+            return "merged"
+        except MergeBusyError:
+            raise
+        except GitWorkspaceBusyError as e:
+            raise MergeBusyError(str(e)) from e
+        except GitMergeConflictError as e:
+            raise MergeGitConflictError(str(e)) from e
+        except GitExpectedRefChangedError as e:
+            raise MergeStaleError(str(e)) from e
         except GitSyncError as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
         except MergeConflictError as e:
             _set_conflict(tid, e.branch, e.files)
-            return RedirectResponse(
-                url=f"/thread/{tid}?conflict=1",
-                status_code=303,
-            )
+            return "conflict"
         except OriginAdvancedError as e:
             # origin/main isn't a fast-forward from local main. Often transient (retry via
             # Merge & Push); if it persists the two genuinely diverged and need manual

@@ -1,0 +1,25 @@
+#+TITLE: Git sync ancestry eval and prompt-census alignment
+#+DATE: 2026-10-20
+
+* Scope
+The real-agent Git-sync eval now publishes the pre-turn thread tip to its
+disposable bare origin. Successful clean and conflict-resolved syncs must keep
+both that tip and fetched =origin/main= in local HEAD's ancestry. The no-op,
+push-refusal, and pre-existing-merge rows check their distinct outcomes without
+claiming a successful sync. This measures the guidance, not a new runtime guard.
+
+The two ordinary merge-conflict fixtures set a per-command test identity and
+prove that an unmerged index actually exists before testing finalization. A
+runner without a global Git identity therefore reaches the intended conflict.
+
+Changing the =git-sync= catalog description changed the deterministic prompt
+census. The measured block transition chain is
+=429d4045ce9b641ff86a070c84268cfe8f4f08419ee4a0033b0a8b3d46d15bf0=;
+the current web-main-core prompt is 27,272 characters. The ToolNode history,
+scenario inventory, and historical P0-P2b3 prompt records did not change.
+
+* Historical supersessions
+This document supersedes only the =Deterministic fixture alignment= section of
+=2026-10-06-browser-landed-email-alignment.org= as a statement of the current
+prompt length and block-chain digest. Its recorded browser/Email composition
+and point-in-time measurements remain historical evidence for that tree.

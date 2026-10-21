@@ -115,6 +115,10 @@ where reliability is harder than with frontier APIs.
   repository. It imports the merged Git objects into the server checkout
   before publication so the immediate web diff works, without moving either
   working checkout or the thread branch.
+  The authenticated phone API can sample the configured source's published
+  thread ref and invoke the same explicit server Merge & Push operation as the
+  web button, conditional on the displayed published commit still being the
+  fetched tip. It never merges local device work or selects a caller-supplied ref.
 
 - **Multiple frontends, one Deep Agents core.** Web UI, CLI, and an Emacs
   integration share the standard agent runtime, memory, and domain repos.
@@ -1172,9 +1176,14 @@ fast-forwards its clean checkout to include user-pushed commits. Hidden resumes
 and child handoffs retain their admitted base. Successful work is committed in
 the restricted sandbox and published by a private, config-clean host Git
 process with a normal non-force push. No-change turns verify publication too.
+Git decides a non-fast-forward refusal; the server verifies the remote ref
+before reporting publication or preserving a divergent result branch.
 When a phone push races a server turn, the completed server commit remains on
 `assist-result/<commit>` and the successful Run names it for manual merge.
 The server does not rebase, reset, force-push, or discard client work.
+The initial binding revision is not a permanent local-history floor. A local
+branch rewrite can be inspected, but it cannot replace a divergent published
+thread ref: reconcile both histories before another turn.
 
 Dirty or divergent server work, an unverified sandbox teardown, missing
 operator-verified binding, or uncertain publication holds before another model
