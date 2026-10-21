@@ -2542,3 +2542,17 @@ def test_web_thread_clear_wait_does_not_block_event_loop(tmp_path, monkeypatch):
         assert locked.wait(2)
         asyncio.run(exercise())
         writer.result(timeout=2)
+
+
+@pytest.mark.parametrize("payload", [{}, {"revision": None}])
+def test_phone_open_nonempty_json_requires_a_revision(tmp_path, monkeypatch, payload):
+    directory = _thread_environment(tmp_path, monkeypatch, [])
+    state._mark_unseen_response("thread-a")
+    state._mark_urgent("thread-a")
+    response = _client(monkeypatch).post(
+        "/api/v1/phone/threads/thread-a/open", headers=_auth(), json=payload)
+    assert response.status_code == 422
+    assert state._has_unseen_response("thread-a")
+    assert state._has_urgent("thread-a")
+    assert (directory / "unseen_response").exists()
+    assert (directory / "urgent_response").exists()

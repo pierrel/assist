@@ -139,9 +139,9 @@ class _SendMessage(_StrictModel):
 class _OpenThread(_StrictModel):
     # The revision of the settled snapshot the phone actually rendered, so the
     # server can tell "the user saw exactly this view" from "something newer
-    # arrived since". Optional: a legacy client that predates the token sends no
-    # body, and the endpoint falls back to the previous unconditional clear.
-    revision: str | None = None
+    # arrived since". Legacy clients may omit the entire body; a nonempty
+    # JSON body requires a revision. Only empty bodies clear unconditionally.
+    revision: str
 
 
 class _ApprovalDecision(_StrictModel):
@@ -154,7 +154,7 @@ class _ApprovalDecision(_StrictModel):
 
 
 async def _validated_body(request: Request, model: type[_StrictModel],
-                          max_bytes: int = MAX_BODY_BYTES, *, allow_empty: bool = False) -> _StrictModel:
+                          max_bytes: int = MAX_BODY_BYTES, *, allow_empty: bool = False) -> _StrictModel | None:
     """Read one bounded strict JSON request without trusting Content-Length."""
     content_length = request.headers.get("content-length")
     if content_length:
@@ -169,7 +169,7 @@ async def _validated_body(request: Request, model: type[_StrictModel],
             raise HTTPException(status_code=413, detail="Request body too large")
         body.extend(chunk)
     if allow_empty and not body:
-        return model.model_validate({})
+        return None
     try:
         return model.model_validate_json(bytes(body))
     except ValidationError as error:
@@ -1438,8 +1438,9 @@ async def merge_thread(tid: str, request: Request) -> Response:
 async def open_thread(tid: str, request: Request) -> dict[str, Any]:
     """Acknowledge a rendered revision; actual empty bodies support old clients."""
     body = await _validated_body(request, _OpenThread, allow_empty=True)
-    assert isinstance(body, _OpenThread)
-    return await anyio.to_thread.run_sync(_open_thread, tid, body.revision)
+    assert body is None or isinstance(body, _OpenThread)
+    return await anyio.to_thread.run_sync(_open_thread, tid,
+                                         None if body is None else body.revision)
 
 
 @router.get("/threads/{tid}/history")
