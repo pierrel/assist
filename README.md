@@ -120,6 +120,12 @@ where reliability is harder than with frontier APIs.
   web button, conditional on the displayed published commit still being the
   fetched tip. It never merges local device work or selects a caller-supplied ref.
 
+The authenticated phone thread catalog includes urgent, unread, and nullable
+unmerged indicators. A rendered snapshot revision can be acknowledged through
+`POST /api/v1/phone/threads/{tid}/open`; newer notification identities remain
+unread even when history is unchanged or a mark races the acknowledgement.
+Snapshot reads and background probes do not clear notifications.
+
 - **Multiple frontends, one Deep Agents core.** Web UI, CLI, and an Emacs
   integration share the standard agent runtime, memory, and domain repos.
 

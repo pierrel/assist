@@ -154,7 +154,7 @@ class _ApprovalDecision(_StrictModel):
 
 
 async def _validated_body(request: Request, model: type[_StrictModel],
-                          max_bytes: int = MAX_BODY_BYTES) -> _StrictModel:
+                          max_bytes: int = MAX_BODY_BYTES, *, allow_empty: bool = False) -> _StrictModel:
     """Read one bounded strict JSON request without trusting Content-Length."""
     content_length = request.headers.get("content-length")
     if content_length:
@@ -168,6 +168,8 @@ async def _validated_body(request: Request, model: type[_StrictModel],
         if len(body) + len(chunk) > max_bytes:
             raise HTTPException(status_code=413, detail="Request body too large")
         body.extend(chunk)
+    if allow_empty and not body:
+        return model.model_validate({})
     try:
         return model.model_validate_json(bytes(body))
     except ValidationError as error:
@@ -570,6 +572,7 @@ def _thread_history(tid: str, before: str | None) -> tuple[list[dict], bool, boo
 
 def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
     _thread_dir(tid)
+    notification_revision = state._notification_revision(tid)
     if before is not None and not _HISTORY_CURSOR_RE.fullmatch(before):
         raise HTTPException(status_code=422, detail="Invalid history cursor")
     raw_messages, stored_has_more, checkpoint_backed = _thread_history(tid, before)
@@ -624,7 +627,7 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
         last_consumed_raw = raw, ordinal
     messages.reverse()
     revision = hashlib.sha256(json.dumps(
-        [status.get("stage", "ready"),
+        [status.get("stage", "ready"), notification_revision,
          *[(item["id"], item["role"], item["state"]) for item in messages]],
         separators=(",", ":")
     ).encode("utf-8")).hexdigest()[:24]
@@ -657,43 +660,27 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
 
 
 def _open_thread(tid: str, viewed_revision: str | None) -> dict[str, Any]:
-    """Acknowledge that the user opened the thread on the phone.
+    """Clear only the notifications represented by the rendered snapshot.
 
-    This is the phone's "view": it clears the unseen ("new") and urgent flags,
-    reusing the SAME helpers the web thread page (get_thread) calls, so the two
-    surfaces share the read-receipt/ack semantics instead of duplicating them.
-    It is a dedicated endpoint because GET /threads/{tid} is overloaded —
-    clients also use it for auth probes and busy-check polls that must never
-    clear a flag.  Both clears are missing-ok and never-raise, so a flag hiccup
-    can't 500 an open.
-
-    ``viewed_revision`` is the revision of the settled snapshot the phone
-    actually rendered.  When it is present, the flags clear ONLY if the
-    thread's current revision (recomputed through the same ``_snapshot`` path
-    the phone's GET used) still equals it: a newer response or a stage change
-    bumps the revision, so a stale ack can no longer wipe a notification the
-    user hasn't seen — the bad state is unreachable by construction.  A legacy
-    client that predates the token sends no revision and keeps the historical
-    unconditional clear (it is the deployed phone until it is updated, so this
-    branch is load-bearing for deploy skew, not defensive).
+    Snapshot/history reads remain outside the marker lock. A second identity
+    check under that lock makes a concurrent mark survive the acknowledgement.
+    Empty legacy bodies retain their unconditional clear behavior.
     """
     _thread_dir(tid)
-    if viewed_revision is None:
+    notification_revision = state._notification_revision(tid)
+    if viewed_revision is not None:
+        try:
+            current_revision = _snapshot(tid)["thread"]["revision"]
+        except Exception:
+            return {"thread_id": tid, "cleared": False}
+        if current_revision != viewed_revision:
+            return {"thread_id": tid, "cleared": False}
+    with state._NOTIFICATION_LOCK:
+        if (viewed_revision is not None
+                and notification_revision != state._notification_revision(tid)):
+            return {"thread_id": tid, "cleared": False}
         state._clear_unseen_response(tid)
         state._clear_urgent(tid)
-        return {"thread_id": tid, "cleared": True}
-    try:
-        current_revision = _snapshot(tid)["thread"]["revision"]
-    except Exception:
-        # Can't recompute the current view: don't clear.  A later settled
-        # refresh re-acks, so a hiccup only defers the flag clear.
-        return {"thread_id": tid, "cleared": False}
-    if current_revision != viewed_revision:
-        # The user's view is stale (something newer arrived since they rendered
-        # it): keep the flags so the new response stays visible as unread.
-        return {"thread_id": tid, "cleared": False}
-    state._clear_unseen_response(tid)
-    state._clear_urgent(tid)
     return {"thread_id": tid, "cleared": True}
 
 
@@ -1449,20 +1436,10 @@ async def merge_thread(tid: str, request: Request) -> Response:
 
 @router.post("/threads/{tid}/open")
 async def open_thread(tid: str, request: Request) -> dict[str, Any]:
-    """Clear the unseen/urgent flags once the user has opened the thread.
-
-    The body carries the ``revision`` of the settled snapshot the phone
-    rendered, so a stale ack can't clear a notification for a newer response
-    that arrived since.  A legacy client that predates the token sends no body
-    (empty Content-Length): that gets ``revision=None`` and the previous
-    unconditional clear, so an out-of-date phone still clears instead of 422ing.
-    """
-    revision = None
-    if request.headers.get("content-length", "0") not in ("", "0"):
-        body = await _validated_body(request, _OpenThread)
-        assert isinstance(body, _OpenThread)
-        revision = body.revision
-    return await anyio.to_thread.run_sync(_open_thread, tid, revision)
+    """Acknowledge a rendered revision; actual empty bodies support old clients."""
+    body = await _validated_body(request, _OpenThread, allow_empty=True)
+    assert isinstance(body, _OpenThread)
+    return await anyio.to_thread.run_sync(_open_thread, tid, body.revision)
 
 
 @router.get("/threads/{tid}/history")

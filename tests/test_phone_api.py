@@ -335,13 +335,13 @@ def test_phone_thread_open_clears_unread_and_urgent(tmp_path, monkeypatch):
     # helpers the web thread page clears through, so the unseen ("new") +
     # urgent flags drop there. The ack carries the revision of the settled
     # snapshot it actually rendered, so a matching (current) revision clears.
+    state._mark_unseen_response("thread-a")
+    state._mark_urgent("thread-a")
     client = _client(monkeypatch)
     viewed_revision = client.get(
         "/api/v1/phone/threads/thread-a", headers=_auth()
     ).json()["thread"]["revision"]
 
-    state._mark_unseen_response("thread-a")
-    state._mark_urgent("thread-a")
     assert state._has_unseen_response("thread-a")
     assert state._has_urgent("thread-a")
 
@@ -2437,3 +2437,108 @@ def test_asset_read_cannot_block_the_single_event_loop(tmp_path, monkeypatch):
                 release.set()
             assert (await download).content == b"hello"
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("mark", ["_mark_unseen_response", "_mark_urgent"])
+def test_phone_open_ack_keeps_notification_arriving_after_revision_check(
+        tmp_path, monkeypatch, mark):
+    directory = _thread_environment(tmp_path, monkeypatch, [])
+    client = _client(monkeypatch)
+    viewed = client.get("/api/v1/phone/threads/thread-a", headers=_auth()).json()["thread"]["revision"]
+    snapshot = phone_api._snapshot
+    checked, marked = threading.Event(), threading.Event()
+
+    def writer():
+        assert checked.wait(2)
+        getattr(state, mark)("thread-a")
+        marked.set()
+
+    def concurrent_notification(*args):
+        value = snapshot(*args)
+        checked.set()
+        assert marked.wait(2)
+        return value
+
+    monkeypatch.setattr(phone_api, "_snapshot", concurrent_notification)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(writer)
+        response = client.post("/api/v1/phone/threads/thread-a/open",
+                               headers=_auth(), json={"revision": viewed})
+        pending.result(timeout=2)
+    assert response.json()["cleared"] is False
+    filename = "unseen_response" if mark == "_mark_unseen_response" else "urgent_response"
+    assert (directory / filename).exists()
+
+
+def test_phone_open_ack_keeps_urgent_only_update(tmp_path, monkeypatch):
+    _thread_environment(tmp_path, monkeypatch, [])
+    client = _client(monkeypatch)
+    viewed = client.get('/api/v1/phone/threads/thread-a', headers=_auth()).json()['thread']['revision']
+    state._mark_urgent('thread-a')
+    response = client.post('/api/v1/phone/threads/thread-a/open',
+                           headers=_auth(), json={'revision': viewed})
+    assert response.json()['cleared'] is False
+    assert state._has_urgent('thread-a')
+
+
+def test_phone_open_chunked_body_honors_revision(tmp_path, monkeypatch):
+    _thread_environment(tmp_path, monkeypatch, [])
+    state._mark_unseen_response('thread-a')
+    response = _client(monkeypatch).post(
+        '/api/v1/phone/threads/thread-a/open', headers=_auth(),
+        content=iter([b'{"revision":', b'"stale"}']))
+    assert response.status_code == 200
+    assert response.json()['cleared'] is False
+    assert state._has_unseen_response('thread-a')
+
+
+@pytest.mark.parametrize("loader", ["load_unseen_cache", "load_urgent_cache"])
+def test_phone_open_ack_before_cache_reload_cannot_clear_reloaded_marks(
+        tmp_path, monkeypatch, loader):
+    _thread_environment(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(state.MANAGER, "list", lambda: ["thread-a"])
+    state._mark_unseen_response("thread-a")
+    state._mark_urgent("thread-a")
+    client = _client(monkeypatch)
+    viewed = client.get("/api/v1/phone/threads/thread-a", headers=_auth()).json()["thread"]["revision"]
+    getattr(state, loader)()
+    response = client.post("/api/v1/phone/threads/thread-a/open",
+                           headers=_auth(), json={"revision": viewed})
+    assert response.json()["cleared"] is False
+    assert state._has_unseen_response("thread-a")
+    assert state._has_urgent("thread-a")
+
+
+def test_phone_open_chunked_body_is_bounded(tmp_path, monkeypatch):
+    _thread_environment(tmp_path, monkeypatch, [])
+    response = _client(monkeypatch).post(
+        "/api/v1/phone/threads/thread-a/open", headers=_auth(),
+        content=iter([b"x" * (phone_api.MAX_BODY_BYTES + 1)]))
+    assert response.status_code == 413
+
+
+def test_web_thread_clear_wait_does_not_block_event_loop(tmp_path, monkeypatch):
+    _thread_environment(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(phone_api.threads, '_get_status', lambda _: {'stage': 'initializing'})
+    monkeypatch.setattr(phone_api.threads, 'render_thread', lambda *a, **k: 'rendered')
+    locked, release = threading.Event(), threading.Event()
+
+    def delayed_writer():
+        with state._NOTIFICATION_LOCK:
+            locked.set()
+            assert release.wait(3)
+
+    async def exercise():
+        rendering = asyncio.create_task(phone_api.threads.get_thread('thread-a'))
+        try:
+            await asyncio.sleep(0.02)
+            assert not rendering.done()  # The clear is waiting on the worker, not the loop.
+        finally:
+            release.set()
+        assert await rendering == 'rendered'
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        writer = pool.submit(delayed_writer)
+        assert locked.wait(2)
+        asyncio.run(exercise())
+        writer.result(timeout=2)

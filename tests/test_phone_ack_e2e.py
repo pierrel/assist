@@ -9,10 +9,10 @@ task → the real `_set_status("ready", mark_unseen=True)` → the real
 
 The revision the /open endpoint verifies is the SAME one the phone's GET
 snapshot returned.  `_snapshot` computes it as a content hash of
-``[stage, *message_tuples]`` where the message tuples come from the
+``[stage, notification_identity, *message_tuples]`` where the message tuples come from the
 checkpointer store the phone reads (``_checkpoint_history`` →
-``state.MANAGER.checkpointer``), NOT the directory mtime.  So the only thing
-that makes the phone's snapshot and the endpoint's recompute diverge is a new
+``state.MANAGER.checkpointer``), NOT the directory mtime.  A new notification identity also invalidates a receipt independently of history.
+Here the thing that makes the phone's snapshot and the endpoint's recompute diverge is a new
 response landing in that store in between — which is exactly what the real
 turn does here: the fake chat persists its reply into the store through the
 real checkpointer API, the way a real ``Thread.message()`` would.
