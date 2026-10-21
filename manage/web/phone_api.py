@@ -136,6 +136,14 @@ class _SendMessage(_StrictModel):
     message: Annotated[str, Field(min_length=1, max_length=MAX_MESSAGE_CHARS)]
 
 
+class _OpenThread(_StrictModel):
+    # The revision of the settled snapshot the phone actually rendered, so the
+    # server can tell "the user saw exactly this view" from "something newer
+    # arrived since". Optional: a legacy client that predates the token sends no
+    # body, and the endpoint falls back to the previous unconditional clear.
+    revision: str | None = None
+
+
 class _ApprovalDecision(_StrictModel):
     kind: Literal["send_email", "email_archive", "email_delete"]
     token: Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")]
@@ -648,6 +656,47 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
     }
 
 
+def _open_thread(tid: str, viewed_revision: str | None) -> dict[str, Any]:
+    """Acknowledge that the user opened the thread on the phone.
+
+    This is the phone's "view": it clears the unseen ("new") and urgent flags,
+    reusing the SAME helpers the web thread page (get_thread) calls, so the two
+    surfaces share the read-receipt/ack semantics instead of duplicating them.
+    It is a dedicated endpoint because GET /threads/{tid} is overloaded —
+    clients also use it for auth probes and busy-check polls that must never
+    clear a flag.  Both clears are missing-ok and never-raise, so a flag hiccup
+    can't 500 an open.
+
+    ``viewed_revision`` is the revision of the settled snapshot the phone
+    actually rendered.  When it is present, the flags clear ONLY if the
+    thread's current revision (recomputed through the same ``_snapshot`` path
+    the phone's GET used) still equals it: a newer response or a stage change
+    bumps the revision, so a stale ack can no longer wipe a notification the
+    user hasn't seen — the bad state is unreachable by construction.  A legacy
+    client that predates the token sends no revision and keeps the historical
+    unconditional clear (it is the deployed phone until it is updated, so this
+    branch is load-bearing for deploy skew, not defensive).
+    """
+    _thread_dir(tid)
+    if viewed_revision is None:
+        state._clear_unseen_response(tid)
+        state._clear_urgent(tid)
+        return {"thread_id": tid, "cleared": True}
+    try:
+        current_revision = _snapshot(tid)["thread"]["revision"]
+    except Exception:
+        # Can't recompute the current view: don't clear.  A later settled
+        # refresh re-acks, so a hiccup only defers the flag clear.
+        return {"thread_id": tid, "cleared": False}
+    if current_revision != viewed_revision:
+        # The user's view is stale (something newer arrived since they rendered
+        # it): keep the flags so the new response stays visible as unread.
+        return {"thread_id": tid, "cleared": False}
+    state._clear_unseen_response(tid)
+    state._clear_urgent(tid)
+    return {"thread_id": tid, "cleared": True}
+
+
 def _thread_repo_summary(tid: str, status: dict[str, Any]) -> tuple[str | None, str]:
     """Use the host-owned source binding, never the workspace's mutable origin."""
     from assist.git_sync import GitSyncError, read_state, source_label
@@ -665,21 +714,37 @@ def _thread_repo_summary(tid: str, status: dict[str, Any]) -> tuple[str | None, 
 
 def _list_threads() -> dict[str, Any]:
     values: list[tuple[int, dict[str, Any]]] = []
+    review_bases: dict[str, str | None] = {}
     for tid in state.MANAGER.list()[:MAX_THREADS]:
         try:
             status = state._get_status(tid)
+            stage = status.get("stage", "ready")
             repo_key, repo_label = _thread_repo_summary(tid, status)
             title = _stored_thread_title(tid)
             activity_at = os.stat(_thread_dir(tid)).st_mtime
-            values.append((threads._thread_status_rank(tid, status.get("stage", "ready")), {
+            unread = state._has_unseen_response(tid)
+            urgent = state._has_urgent(tid)
+            # The unmerged pill is masked by any stronger pill (a live busy
+            # stage, error, urgent, or an unread reply — the same precedence
+            # the web index's badge chain uses).  When one is present, skip the
+            # (expensive, git-subprocess) check entirely: the phone polls this
+            # catalog, and "not checked" (None) is the honest answer, never a
+            # false "no".  review_bases caches the bound main OID per list pass.
+            if stage in threads.BUSY_STAGES or stage == "error" or urgent or unread:
+                unmerged = None
+            else:
+                unmerged = state._has_unmerged_changes(tid, review_bases)
+            values.append((threads._thread_status_rank(tid, stage), {
                 "id": tid,
                 "description": title,
                 "search_description": _normalized_search_title(title),
                 "harness": read_thread_engine(_thread_dir(tid)).name,
-                "status": status.get("stage", "ready"),
+                "status": stage,
                 "repo_key": repo_key,
                 "repo_label": repo_label,
-                "unread": state._has_unseen_response(tid),
+                "unread": unread,
+                "urgent": urgent,
+                "unmerged": unmerged,
                 "activity_at": activity_at,
                 "revision": _thread_revision_cursor(tid),
             }))
@@ -1380,6 +1445,24 @@ async def merge_thread(tid: str, request: Request) -> Response:
     finally:
         _MERGE_SLOTS.release()
     return JSONResponse({"outcome": outcome}, status_code=409 if outcome == "conflict" else 200)
+
+
+@router.post("/threads/{tid}/open")
+async def open_thread(tid: str, request: Request) -> dict[str, Any]:
+    """Clear the unseen/urgent flags once the user has opened the thread.
+
+    The body carries the ``revision`` of the settled snapshot the phone
+    rendered, so a stale ack can't clear a notification for a newer response
+    that arrived since.  A legacy client that predates the token sends no body
+    (empty Content-Length): that gets ``revision=None`` and the previous
+    unconditional clear, so an out-of-date phone still clears instead of 422ing.
+    """
+    revision = None
+    if request.headers.get("content-length", "0") not in ("", "0"):
+        body = await _validated_body(request, _OpenThread)
+        assert isinstance(body, _OpenThread)
+        revision = body.revision
+    return await anyio.to_thread.run_sync(_open_thread, tid, revision)
 
 
 @router.get("/threads/{tid}/history")
