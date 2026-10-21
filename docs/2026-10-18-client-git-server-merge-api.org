@@ -1,0 +1,28 @@
+#+title: Authenticated Git facts and shared Merge and Push
+#+date: 2026-10-18
+
+* Contract
+
+The authenticated phone API samples the configured source's exact thread ref
+with the existing bounded, config-clean Git reader. =GET /api/v1/phone/threads/{tid}/git=
+returns the bound thread branch, published commit if it exists, observation
+time, and =available=, =unpublished=, or =unavailable=. An unavailable remote
+sample never promotes a cached tracking ref to fresh truth. The request has a
+two-slot admission cap and runs off the event loop.
+
+=POST /api/v1/phone/threads/{tid}/merge= takes no body or caller ref. Its
+=X-Assist-Expected-Commit= header must be the displayed published commit; a changed fetched
+tip returns =stale= without publishing main. It uses
+the same synchronous merge operation as the web button, including the Run,
+workspace and sandbox-generation guards. The browser keeps its redirects;
+the phone gets structured =merged=, =conflict=, =busy=, =stale=, or =error=
+when those outcomes are known. Ambiguous transport delivery is not success
+and must not be automatically retried. The phone route has a one-slot admission
+cap. No local device edits or commits are part of this server operation.
+
+* Verification
+
+Real local bare Git fixtures cover published and missing thread refs, remote
+failure, bearer authentication and caller input rejection. Focused merge tests
+cover the shared operation and web redirect mapping. Root owns composition,
+deployment and repository merge.

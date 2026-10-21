@@ -1,0 +1,61 @@
+#+TITLE: Native non-fast-forward refusal for thread publication
+#+DATE: 2026-10-20
+
+* Requirement and boundary
+For an existing published thread ref, the private host Git operation sends an
+ordinary non-forced push. Git decides whether the update is a fast-forward.
+The application verifies the observed remote result afterward and never
+reports an unverified push as success. A divergent completed local commit is
+still preserved on its create-only =assist-result/<commit>= branch. A clean-
+gated retained-commit retry uses the same publication path before any model
+turn; it does not replay that turn. Missing refs retain create-only semantics.
+
+This changes neither the fixed source/branch binding nor main-merge semantics,
+credential isolation, sandbox teardown, user work, or the existing result
+branch contract. It adds no force-overwrite of an existing ref.
+
+* Numbered implementation plan
+1. In =assist/local_git.py=, remove the duplicate pre-push ancestry rejection
+   in =LocalGit.publish= for both thread and main. Keep the existing ref fetch,
+   ordinary push invocation, bounded subprocess, post-push remote-ref read,
+   and conditional ancestry fetch. Give
+   the already-observed divergent result a narrow exception so thread callers do not
+   mistake a transport error or still-behind remote for a branch race. Keep
+   =create_only= collision refusal before any result-branch overwrite.
+2. In =assist/thread_git.py=, have both normal =publish= and =plan_prepare=
+   use one small helper: attempt =LocalGit.publish= on the actual thread ref;
+   only if the verified remote is divergent, publish the unchanged local tip
+   to the existing create-only result ref. =plan_prepare= turns that result
+   into its existing visible pre-model hold; ordinary =publish= returns it to
+   the completed Run. The subsequent fetched main/thread ancestry remains
+   necessary to select a safe incoming checkout fast-forward, not to decide
+   whether an outgoing push is allowed.
+3. In =tests/test_local_git.py= and =tests/test_thread_git_simple.py=, use
+   actual disposable bare/phone/server repositories. Observe that a divergent
+   existing-ref attempt reaches non-forced =git push=, is refused by Git,
+   leaves remote and local HEAD intact, and creates only the result ref. Prove
+   an ordinary descendant succeeds with exact remote OID, and a clean-gated
+   retained retry preserves the same exceptional hold without model replay.
+   A server hook refusal with the remote still behind must be a publication
+   error, not a divergent result branch; user-facing completion and pre-model
+   hold text retain their existing forms.
+4. Align the README and affected comments with the actual push/refusal route.
+   Run the affected and full deterministic Python suites, then independent
+   correctness, adversarial-security, concurrency/liveness and documentation
+   review before an exact successor seal and root handoff. Root alone composes
+   and deploys; PR #285 stays separate and unmerged.
+
+* Risks and limits
+The private Git command suppresses raw stderr, so code must classify only the
+verified ref relation, never infer a specific server refusal from text. If
+transport fails before the remote can be verified, it remains an error rather
+than a result-branch success. A remote branch already containing the desired
+commit needs no push; a missing branch uses the existing create-only lease.
+The post-publication fetch in =plan_prepare= can still observe later remote
+movement and must hold safely if the checkout cannot fast-forward.
+
+* Historical supersessions
+This supersedes only =docs/2026-09-26-direct-thread-git-sync.org=,
+=Publication and failure=, where an existing thread ref used an exact
+expected-OID lease. Existing refs now use an ordinary non-forced push and
+verified result; the absent-ref create-only lease and FF-only outcome remain.

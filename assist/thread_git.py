@@ -7,7 +7,15 @@ import shlex
 
 from assist.git_sync import (GitSyncError, _WORKTREE_GIT, _sandbox_git, identity,
                              read_state, require_clean)
-from assist.local_git import LocalGit
+from assist.local_git import GitPublishedRefDivergedError, GitRemoteThreadChangedError, LocalGit
+
+
+class GitMergeConflictError(GitSyncError):
+    """The published refs have a merge-tree conflict, not a transport failure."""
+
+
+class GitExpectedRefChangedError(GitSyncError):
+    """The published thread tip differs from the expected commit."""
 
 
 @dataclass(frozen=True)
@@ -30,7 +38,7 @@ class ThreadGit:
 
     def __init__(self, thread_dir: str, worktree: str, configured_sources: tuple[str, ...]):
         self.worktree = worktree
-        self.branch, self.initial_revision = identity(worktree)
+        self.branch, _ = identity(worktree)
         binding = read_state(thread_dir)
         if binding is None:
             raise GitSyncError("Existing Git repository needs an operator-verified source binding")
@@ -41,14 +49,11 @@ class ThreadGit:
         if binding.get("branch") != self.branch:
             raise GitSyncError("Thread branch needs operator verification")
         self.source = binding["source"]
-        self.floor = binding.get("floor") or binding.get("local_revision")
 
     def _verified_tip(self, repository: LocalGit) -> str:
         branch, tip = repository.same_tip()
         if branch != self.branch:
             raise GitSyncError("Thread branch changed during this turn")
-        if self.floor and not repository.ancestor(self.floor, tip):
-            raise GitSyncError("Thread branch left its authorized history")
         return tip
 
     def verify_checkout_tip(self) -> str:
@@ -60,8 +65,11 @@ class ThreadGit:
         with LocalGit(self.source, self.worktree) as repository:
             local = self._verified_tip(repository)
             main, remote = repository.fetch(self.branch)
-            if remote is None or remote != local and repository.ancestor(remote, local):
-                repository.publish(self.branch, local)
+            if remote is None or not repository.ancestor(local, remote):
+                result = self._publish_thread(repository, local)
+                if result is not None:
+                    raise GitSyncError("Previous committed result is on " + result
+                                       + "; fetch and merge it locally before the next turn")
                 main, remote = repository.fetch(self.branch)
             if remote is None:
                 raise GitSyncError("Published thread branch is unavailable")
@@ -100,7 +108,9 @@ class ThreadGit:
         """Stage and commit only inside the credential-free restricted sandbox."""
         if identity(self.worktree)[0] != self.branch:
             raise GitSyncError("Thread branch changed during this turn")
-        _sandbox_git(sandbox, _WORKTREE_GIT + " add -A && { " + _WORKTREE_GIT
+        # An unresolved merge must not let add -A stage conflict markers as a commit.
+        _sandbox_git(sandbox, _WORKTREE_GIT + " diff --quiet --diff-filter=U && "
+                     + _WORKTREE_GIT + " add -A && { " + _WORKTREE_GIT
                      + " diff --cached --quiet; code=$?; if [ \"$code\" = 1 ]; then "
                      + "GIT_AUTHOR_NAME=Assist GIT_AUTHOR_EMAIL=assist@localhost "
                      + "GIT_COMMITTER_NAME=Assist GIT_COMMITTER_EMAIL=assist@localhost "
@@ -110,34 +120,43 @@ class ThreadGit:
         require_clean(sandbox)
 
     def publish(self) -> str | None:
-        """Return a result branch only when the exact thread ref lost a race."""
+        """Return a result branch only for verified remote divergence."""
         with LocalGit(self.source, self.worktree) as repository:
             desired = self._verified_tip(repository)
-            _, remote = repository.fetch(self.branch)
-            if remote == desired or remote is not None and repository.ancestor(desired, remote):
-                return None
-            if remote is None or repository.ancestor(remote, desired):
-                repository.publish(self.branch, desired)
-                return None
+            return self._publish_thread(repository, desired)
+
+    def _publish_thread(self, repository: LocalGit, desired: str) -> str | None:
+        try:
+            repository.publish(self.branch, desired)
+        except GitPublishedRefDivergedError:
             result = "assist-result/" + desired
             repository.publish(result, desired, create_only=True)
             return result
+        return None
 
-    def plan_merge_main(self) -> MergePlan:
+    def plan_merge_main(self, expected_thread: str | None = None) -> MergePlan:
         """Build a published-ref merge and its bounded checkout object import."""
         branch, local = identity(self.worktree)
         if branch != self.branch:
             raise GitSyncError("Thread branch changed during main integration")
         with LocalGit(self.source) as repository:
-            main, thread = repository.fetch(self.branch)
+            try:
+                main, thread = repository.fetch(self.branch)
+            except GitRemoteThreadChangedError as error:
+                if expected_thread is not None:
+                    raise GitExpectedRefChangedError(
+                        "Published thread branch changed; refresh Git status") from error
+                raise
+            if expected_thread is not None and thread != expected_thread:
+                raise GitExpectedRefChangedError("Published thread branch changed; refresh Git status")
             if thread is None:
                 raise GitSyncError("Published thread branch is unavailable")
             if repository.ancestor(thread, main):
                 raise ValueError("No published thread changes to merge")
-            try:
-                tree = repository.git("merge-tree", "--write-tree", main, thread)
-            except GitSyncError as error:
-                raise GitSyncError("Main integration conflicted; resolve locally") from error
+            tree = repository.git("merge-tree", "--write-tree", main, thread,
+                                  allowed=(0, 1))
+            if repository._last_exit_code == 1:
+                raise GitMergeConflictError("Main integration conflicted; resolve locally")
             merged = repository.git("-c", "user.name=Assist", "-c",
                                     "user.email=assist@localhost", "commit-tree", tree,
                                     "-p", main, "-p", thread,
@@ -171,7 +190,8 @@ class ThreadGit:
             if not repository.has(plan.merged):
                 raise GitSyncError("Merged Git objects are unavailable")
             if repository.remote_ref(self.branch) != plan.thread:
-                raise GitSyncError("Published thread branch advanced during main integration")
+                raise GitExpectedRefChangedError(
+                    "Published thread branch changed; refresh Git status")
             if repository.publish("main", plan.merged) != plan.merged:
                 raise GitSyncError("Published main advanced after this integration")
         return "Merged published thread " + self.branch
