@@ -467,3 +467,94 @@ def test_qwen38_summary_keeps_nonthinking_sampling():
     assert calls[0]["min_p"] == 0.05
     assert calls[0]["chat_template_kwargs"]["enable_thinking"] is False
     assert calls[0]["max_tokens"] == 2048
+
+
+def test_observed_custom_endpoint_usage_triggers_compaction_before_context_fills():
+    """The observed SSE path must retain usage that the approximate count misses."""
+    from langchain_core.tools import tool
+    from assist import model_manager
+    from assist.thread import Thread
+
+    requests = []
+    summary_seen = False
+    main_calls = 0
+
+    @tool
+    def lookup_project_target() -> str:
+        """Read the synthetic project's current target."""
+        return "Retain the synthetic project goal."
+
+    def stream_response(delta, finish_reason, include_usage, usage):
+        chunks = [{"id": f"observed-{len(requests)}", "object": "chat.completion.chunk", "model": "test",
+                   "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
+                  {"id": f"observed-{len(requests)}", "object": "chat.completion.chunk", "model": "test",
+                   "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]}]
+        if include_usage:
+            chunks.append({"id": f"observed-{len(requests)}", "object": "chat.completion.chunk", "model": "test",
+                           "choices": [], "usage": usage})
+        body = "".join("data: " + json.dumps(chunk) + "\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    def provider(request):
+        nonlocal summary_seen, main_calls
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if "max_completion_tokens" in payload:
+            summary_seen = True
+            if payload.get("stream"):
+                return stream_response({"role": "assistant", "content": "Retain the synthetic project goal."},
+                    "stop", payload.get("stream_options", {}).get("include_usage") is True,
+                    {"prompt_tokens": 30000, "completion_tokens": 16, "total_tokens": 30016})
+            return _response("Retain the synthetic project goal.")
+        main_calls += 1
+        include_usage = payload.get("stream_options", {}).get("include_usage") is True
+        if main_calls == 1:
+            return stream_response({"role": "assistant", "content": "",
+                "tool_calls": [{"index": 0, "id": "lookup", "type": "function",
+                                "function": {"name": "lookup_project_target", "arguments": "{}"}}]},
+                "tool_calls", include_usage,
+                {"prompt_tokens": 128000, "completion_tokens": 926, "total_tokens": 128926})
+        return stream_response({"role": "assistant", "content": (
+            "Complete synthetic answer." if summary_seen else "Reply cut midway")},
+            "stop" if summary_seen else "length", include_usage,
+            {"prompt_tokens": 4096, "completion_tokens": 16, "total_tokens": 4112}
+            if summary_seen else {"prompt_tokens": 130329, "completion_tokens": 743, "total_tokens": 131072})
+
+    real_model = ChatOpenAI
+
+    def build(**kwargs):
+        return real_model(**kwargs,
+            http_client=httpx.Client(transport=httpx.MockTransport(provider)),
+            http_async_client=httpx.AsyncClient(transport=httpx.MockTransport(provider)))
+
+    with patch.object(model_manager, "ChatOpenAI", side_effect=build):
+        model = model_manager._build_openai_chat_model(
+            "test", temperature=0.1, base_url="http://unit.test/v1", api_key="EMPTY")
+    model.profile = {"max_input_tokens": LIMIT}
+    backend = StateBackend()
+    middleware = BoundedSummarizationMiddleware(model, backend)
+    graph = create_deep_agent(model, backend=backend, subagents=[], tools=[lookup_project_target],
+        middleware=[middleware], checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "observed-usage-compaction"}}
+    raw = [HumanMessage("Retain the synthetic project goal. " + "dense " * 27000),
+           AIMessage("Earlier project reply.")]
+    graph.invoke({"messages": raw}, config, interrupt_before=["model"])
+    assert not requests
+    chat = object.__new__(Thread)
+    chat.agent, chat.thread_id, chat.runconfig = graph, config["configurable"]["thread_id"], config
+    chat.on_queue_state = None
+    deltas = []
+
+    answer = chat.observe_message("What should I do next?", deltas.append)
+    state = graph.get_state(config).values
+    assert answer == "Complete synthetic answer."
+    assert state["messages"][:2] == raw
+    assert state["messages"][2].content == "What should I do next?"
+    assert state["messages"][3].usage_metadata["total_tokens"] == 128926
+    assert state["messages"][-1].response_metadata["finish_reason"] == "stop"
+    assert state["_summarization_event"]["file_path"] in state["files"]
+    assert "".join(deltas) == "Complete synthetic answer."
+    assert all(payload["stream_options"]["include_usage"] for payload in requests if payload.get("stream"))
+    main_requests = [payload for payload in requests if "max_completion_tokens" not in payload]
+    assert len(main_requests) == 2
+    assert all("max_tokens" not in payload for payload in main_requests)
