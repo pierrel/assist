@@ -440,6 +440,7 @@ def _evict_caches(tid: str) -> None:
     DESCRIPTION_CACHE.pop(tid, None)
     _UNSEEN.discard(tid)  # the marker file went with the dir; drop the set entry too
     _URGENT.discard(tid)  # same for the urgent flag
+    _NOTIFICATION_REVISIONS.pop(tid, None)
 
 
 # --- Thread status tracking ----------------------------------------------
@@ -555,9 +556,20 @@ def _append_timing(tid: str, ordinal: int, seconds: float) -> None:
 #   - a marker file per thread (durable — survives restart),
 #   - the _UNSEEN set (the badge READ PATH — render_index tests membership per row,
 #     O(1), no FS stat; Pierre's cache to keep list page-loads fast).
-# set add/discard/`in` are each atomic under the GIL, so no lock is needed across
-# the event loop (render_index read, get_thread clear) and the bg _process_message
-# thread (mark) — preserving event-loop liveness.
+# Read-receipt identities distinguish repeated marks, including urgent-only updates.
+# The short lock pairs marker/set mutations with conditional phone acknowledgments;
+# history and Git reads never run under it. Cache reads remain O(1).
+_NOTIFICATION_LOCK = threading.RLock()
+_NOTIFICATION_EPOCH = secrets.token_hex(16)
+_NOTIFICATION_REVISIONS: dict[str, str] = {}
+
+
+def _notification_revision(tid: str) -> str:
+    """Return the opaque read-receipt identity, including after process restart."""
+    with _NOTIFICATION_LOCK:
+        return _NOTIFICATION_REVISIONS.get(tid, _NOTIFICATION_EPOCH)
+
+
 _UNSEEN: set[str] = set()
 
 
@@ -568,28 +580,29 @@ def _unseen_path(tid: str) -> str:
 def _mark_unseen_response(tid: str) -> None:
     """Record an AI response the user hasn't seen: the live set + an idempotent
     marker file (existence is the whole signal — touch, tolerate exists)."""
-    _UNSEEN.add(tid)
-    # The durable marker is BEST-EFFORT: this runs in the terminal path (via
-    # _set_status on ready/awaiting_approval), so a file-write OSError must NEVER
-    # propagate and flip an otherwise-successful turn to error. The in-memory set
-    # carries the badge this session; on write failure we just lose restart-survival.
-    try:
-        open(_unseen_path(tid), "w").close()
-    except OSError:
-        pass
+    with _NOTIFICATION_LOCK:
+        _NOTIFICATION_REVISIONS[tid] = secrets.token_hex(16)
+        _UNSEEN.add(tid)
+        # The durable marker is BEST-EFFORT: this runs in the terminal path (via
+        # _set_status on ready/awaiting_approval), so a file-write OSError must NEVER
+        # propagate and flip an otherwise-successful turn to error. The in-memory set
+        # carries the badge this session; on write failure we just lose restart-survival.
+        try:
+            open(_unseen_path(tid), "w").close()
+        except OSError:
+            pass
 
 
 def _clear_unseen_response(tid: str) -> None:
     """Mark ``tid`` seen (its page was opened): drop the set entry + the marker.
-    Bare, missing-ok unlink — no _atomic_write, no lock (runs on the event loop)."""
-    _UNSEEN.discard(tid)
-    # Truly missing-ok AND never-raise: this runs on the event loop (get_thread), so
-    # neither a missing file nor any OSError may 500 the thread page. A try/remove
-    # (not isfile→remove) also avoids the TOCTOU race with the marker's writer.
-    try:
-        os.remove(_unseen_path(tid))
-    except OSError:
-        pass
+    Missing-ok unlink paired with the in-memory flag under the marker lock."""
+    with _NOTIFICATION_LOCK:
+        _UNSEEN.discard(tid)
+        # Missing files and durable-marker failures must not fail a thread view.
+        try:
+            os.remove(_unseen_path(tid))
+        except OSError:
+            pass
 
 
 def _has_unseen_response(tid: str) -> bool:
@@ -606,6 +619,7 @@ def load_unseen_cache() -> None:
         try:
             if os.path.isfile(_unseen_path(tid)):
                 _UNSEEN.add(tid)
+                _NOTIFICATION_REVISIONS[tid] = secrets.token_hex(16)
         except OSError:
             pass  # a per-thread dir hiccup must not abort startup
 
@@ -613,8 +627,8 @@ def load_unseen_cache() -> None:
 # --- "urgent" (agent notify-flagged) badge state --------------------------
 # The notify() agent tool flags a thread URGENT — a STRONGER signal than v1's
 # "unseen".  Same durable-marker + in-memory-set + startup-rebuild pattern as
-# _UNSEEN, lock-free (GIL-atomic set ops across the on-loop reads/clear and the
-# off-loop tool call).  Read path: _has_urgent (the thread-list "urgent" pill).
+# _UNSEEN, sharing its marker mutation lock and read-receipt identity.
+# Read path: _has_urgent (the thread-list "urgent" pill).
 _URGENT: set[str] = set()
 
 
@@ -625,21 +639,24 @@ def _urgent_path(tid: str) -> str:
 def _mark_urgent(tid: str) -> None:
     """Flag ``tid`` urgent (from the notify tool): the live set + a BEST-EFFORT
     durable marker (OSError swallowed — a marker write must never fail the turn)."""
-    _URGENT.add(tid)
-    try:
-        open(_urgent_path(tid), "w").close()
-    except OSError:
-        pass
+    with _NOTIFICATION_LOCK:
+        _NOTIFICATION_REVISIONS[tid] = secrets.token_hex(16)
+        _URGENT.add(tid)
+        try:
+            open(_urgent_path(tid), "w").close()
+        except OSError:
+            pass
 
 
 def _clear_urgent(tid: str) -> None:
     """Clear ``tid``'s urgent flag (its page was opened): drop the set entry + the
-    marker.  Bare, missing-ok, never-raise (runs on the event loop in get_thread)."""
-    _URGENT.discard(tid)
-    try:
-        os.remove(_urgent_path(tid))
-    except OSError:
-        pass
+    marker. Missing-ok and never-raise, paired under the marker lock."""
+    with _NOTIFICATION_LOCK:
+        _URGENT.discard(tid)
+        try:
+            os.remove(_urgent_path(tid))
+        except OSError:
+            pass
 
 
 def _has_urgent(tid: str) -> bool:
@@ -654,6 +671,7 @@ def load_urgent_cache() -> None:
         try:
             if os.path.isfile(_urgent_path(tid)):
                 _URGENT.add(tid)
+                _NOTIFICATION_REVISIONS[tid] = secrets.token_hex(16)
         except OSError:
             pass
 
