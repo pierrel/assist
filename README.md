@@ -110,7 +110,11 @@ where reliability is harder than with frontier APIs.
   of a configured "domain" repo (your life repo, your work repo, etc.)
   with edits isolated until you choose to merge. Multiple domains coexist.
   Fresh turns incorporate user-pushed branch commits; successful turns publish
-  normally without rewriting them. If a phone push races a server turn, the
+  normally without rewriting them. Failed turns save working files in a local
+  recovery commit after verified teardown, retaining the original error. The
+  next fresh turn publishes that commit normally. If recovery cannot commit,
+  the files remain and the error identifies the Git hold.
+  If a phone push races a server turn, the
   server saves its commit on an `assist-result/<commit>` branch for a local
   merge. Merge & Push uses only published main and thread commits in a private
   repository. It imports the merged Git objects into the server checkout
