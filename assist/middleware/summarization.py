@@ -14,6 +14,7 @@ from langchain_core.exceptions import ContextOverflowError
 from langchain_core.messages import HumanMessage, ToolMessage, get_buffer_string
 from langchain_openai import ChatOpenAI
 from langgraph.types import Command
+from langgraph.constants import TAG_NOSTREAM
 from openai import BadRequestError
 
 
@@ -41,7 +42,8 @@ class BoundedSummarizationMiddleware(SummarizationMiddleware):
             settings["extra_body"] = {**extra_body, "max_tokens": output_limit,
                 "chat_template_kwargs": {**extra_body.get("chat_template_kwargs", {}),
                                          "enable_thinking": False}}
-        self._summary_model = model.bind(**settings)
+        # Internal summaries must not appear in the observed answer stream.
+        self._summary_model = model.bind(**settings).with_config(tags=[TAG_NOSTREAM])
 
     def _summary_prompt(self, text):
         return self._lc_helper.summary_prompt.format(messages=text).rstrip()
