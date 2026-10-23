@@ -18,6 +18,7 @@ from __future__ import annotations
 import html
 import os
 import secrets
+import re
 
 from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -91,11 +92,11 @@ async def egress_view():
     return HTMLResponse(await run_in_threadpool(_render, grants))
 
 
-def _resolve_record(tid: str, host: str, port: int, decision: str) -> bool:
+def resolve_request(tid: str, host: str, port: int, decision: str, *, expected=None):
     """The FAST half of approve/decline, awaited so the redirect renders the
     card already gone: resolve the STORED record (never re-derived state) +
-    the event. Returns True when the thread's pending set has emptied — the
-    caller then dispatches the resolution TURN as a BackgroundTask (the
+    the event. Returns the resolved record and whether the thread's pending
+    set has emptied. The caller then dispatches the resolution TURN as a BackgroundTask (the
     reply_decision precedent): a full agent turn must never run where the
     HTTP response waits (it acquires THREAD_QUEUE — behind a running turn
     that's up to the 2h hold before the browser would get its 303)."""
@@ -105,14 +106,71 @@ def _resolve_record(tid: str, host: str, port: int, decision: str) -> bool:
         # the dead thread's records (projection-safe; also mops up anything
         # _evict_egress missed) instead of granting access nothing can use.
         EGRESS_STORE.remove_thread(tid)
-        return False
-    rec = EGRESS_STORE.resolve(request_key(tid, host, port), decision)
+        return None, False
+    rec = EGRESS_STORE.resolve(request_key(tid, host, port), decision, expected=expected)
     if rec is None:
-        return False   # unknown / already resolved (double-click) — no-op
+        return None, False   # unknown / already resolved (double-click) — no-op
     from assist.events.thread_log import append_event
     kind = ("egress_declined" if decision == "decline" else "egress_approved")
     append_event(MANAGER.thread_dir(tid), kind, host=host, port=port)
-    return not any(r.state == "pending" for r in EGRESS_STORE.for_thread(tid))
+    return rec, not any(r.state == "pending" for r in EGRESS_STORE.for_thread(tid))
+
+
+def _resolve_record(tid: str, host: str, port: int, decision: str) -> bool:
+    """Resolve a web form through the same service used by structured clients."""
+    return resolve_request(tid, host, port, decision)[1]
+
+
+def approval_previews(tid: str) -> list[dict]:
+    """Project this thread's requests and retained results independently of Run state."""
+    if EGRESS_STORE is None:
+        return []
+    from manage.web.approval_tokens import review_token
+    from assist.egress.store import _grant_live
+    from datetime import datetime, timezone
+    return [{"kind": "egress", "token": review_token("egress", rec.review_identity),
+             "host": rec.host, "port": rec.port, "task": rec.task,
+             "main_task": rec.main_task, "created_at": rec.created_at,
+             "state": "expired" if rec.state == "approved" and not _grant_live(rec, datetime.now(timezone.utc)) else rec.state,
+             "expires_at": rec.expires_at,
+             "lifetime": remaining_lifetime(rec) if rec.state == "approved" else "",
+             "decisions": ["hour", "always", "decline"] if rec.state == "pending" else
+                          ["revoke"] if rec.state == "approved" and _grant_live(rec, datetime.now(timezone.utc)) else []}
+            for rec in sorted(EGRESS_STORE.for_thread(tid), key=lambda item: item.created_at)]
+
+
+def approval_decision(tid: str, token: str, decision: str):
+    """Resolve only a reviewed request generation; replay never dispatches again."""
+    _require_egress()
+    _require_deep_thread(tid)
+    if re.fullmatch(r"[0-9a-f]{64}", token) is None:
+        raise HTTPException(status_code=409, detail="Network review is invalid; refresh and review")
+    if decision not in {"hour", "always", "decline", "revoke"}:
+        raise HTTPException(status_code=422, detail="Invalid network access decision")
+    from manage.web.approval_tokens import review_token
+    from assist.egress.store import REVOKED_ONLY
+    expected = next((rec for rec in EGRESS_STORE.for_thread(tid)
+                     if secrets.compare_digest(token, review_token("egress", rec.review_identity))), None)
+    if expected is None:
+        raise HTTPException(status_code=409, detail="Network request changed; refresh and review")
+    if decision == "revoke":
+        if not EGRESS_STORE.revoke(expected.key, expected=expected):
+            raise HTTPException(status_code=409, detail="Network grant changed; refresh and review")
+        from assist.events.thread_log import append_event
+        append_event(MANAGER.thread_dir(tid), "egress_revoked", host=expected.host, port=expected.port)
+        return {"thread_id": tid, "kind": "egress", "token": token,
+                "status": "revoked", "replayed": False}, False
+    rec, batch_ready = resolve_request(tid, expected.host, expected.port, decision, expected=expected)
+    replayed = rec is None
+    if replayed:
+        rec = EGRESS_STORE.get(expected.key)
+        matches = (rec is not None and rec.review_identity == expected.review_identity and
+                   (rec.state == "declined" if decision == "decline" else
+                    rec.state == "approved" and (rec.expires_at == REVOKED_ONLY) == (decision == "always")))
+        if not matches:
+            raise HTTPException(status_code=409, detail="Network decision changed; refresh and review")
+    return {"thread_id": tid, "kind": "egress", "token": token,
+            "status": rec.state, "replayed": replayed}, batch_ready and not replayed
 
 
 @app.post("/egress/{decision}")
@@ -148,8 +206,9 @@ async def egress_action(decision: str, request: Request,
                 append_event, MANAGER.thread_dir(tid), "egress_revoked",
                 host=host, port=port)
     else:
-        batch_ready = await run_in_threadpool(
-            _resolve_record, tid, host, port, decision)
+        # The exact review binds the target; posted host/port are only legacy form display fields.
+        _, batch_ready = await run_in_threadpool(
+            approval_decision, tid, str(form.get("review") or ""), decision)
         if batch_ready:
             background_tasks.add_task(_dispatch_egress_resolution, tid)
             background_tasks.add_task(_resume_egress_waiters, tid)

@@ -177,13 +177,17 @@ def geo_tools(registry: RegionRegistry, catalog: Catalog,
         if not tid:
             return "Couldn't record the proposal: no active thread."
         size = _head_size(entry.url)
-        proposals.put(Proposal(
-            slug=slug, display_name=entry.display_name, bbox=entry.bbox,
-            size_bytes=size, origin_tid=tid,
-            # collapse whitespace/newlines to a single line — it's later interpolated as a
-            # quoted string into the completion turn; control chars would garble it
-            user_request=" ".join(str(user_request or "").split())[:500],
-            created_at=datetime.now(timezone.utc).isoformat()))
+        with proposals.locked():
+            current = registry.get(slug)
+            if current is not None and current.state in {STATE_READY, STATE_IMPORTING}:
+                return f"{entry.display_name} is already loaded or downloading — no new proposal needed."
+            proposals.put(Proposal(
+                slug=slug, display_name=entry.display_name, bbox=entry.bbox,
+                size_bytes=size, origin_tid=tid,
+                # collapse whitespace/newlines to a single line — it's later interpolated as a
+                # quoted string into the completion turn; control chars would garble it
+                user_request=" ".join(str(user_request or "").split())[:500],
+                created_at=datetime.now(timezone.utc).isoformat()))
         return (f"Proposed downloading {entry.display_name} ({_fmt_size(size)}). "
                 f"{DEGRADATION_WARNING} Nothing downloads until the user approves the "
                 "proposal; tell them it's awaiting their approval.")

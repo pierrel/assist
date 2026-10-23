@@ -23,6 +23,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+from manage.web.approval_tokens import review_token
 from collections import deque
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
@@ -1152,12 +1153,15 @@ def render_thread(
           </form>
         </div>"""
     elif stage == "awaiting_approval":
-        draft = html.escape(status.get("pending_reply", ""))
-        to = html.escape(status.get("pending_sender", "") or "the sender")
+        reply_proposal = reply_approval_preview(tid)
+        draft = html.escape(reply_proposal["action"]["args"]["text"] if reply_proposal else "")
+        to = html.escape(reply_proposal["sender"] if reply_proposal else "unavailable")
+        reply_token = reply_proposal["token"] if reply_proposal else ""
         status_banner = f"""
         <div class="approval-banner">
           <div><strong>Reply awaiting your approval</strong> — to {to}:</div>
           <form action="/thread/{tid}/reply/edit" method="post" class="approval-form">
+            <input type="hidden" name="token" value="{reply_token}">
             <input type="hidden" name="seen" value="{draft}">
             <label for="reply-draft-{tid}">Proposed reply to {to} (edit before sending):</label>
             <textarea id="reply-draft-{tid}" name="text" rows="3" class="approval-draft">{draft}</textarea>
@@ -1170,6 +1174,8 @@ def render_thread(
             </div>
           </form>
         </div>"""
+        if reply_proposal is None:
+            status_banner = '<div class="approval-banner">Reply changed; refresh to review the current state.</div>'
 
     # Scheduled-but-not-started background work: an honest "will follow up" line so
     # the promise stays visible after the answering turn ends (the ready state alone
@@ -1215,6 +1221,7 @@ def render_thread(
             _reason = _er.task if _er.main_task in ("", _er.task) else (
                 f"{_er.task}\nMain agent: {_er.main_task}")
             _fields = (f'<input type="hidden" name="token" value="{EGRESS_CSRF}">'
+                       f'<input type="hidden" name="review" value="{review_token("egress", _er.review_identity)}">'
                        f'<input type="hidden" name="tid" value="{html.escape(tid)}">'
                        f'<input type="hidden" name="host" value="{_eh}">'
                        f'<input type="hidden" name="port" value="{_er.port}">'
@@ -1267,6 +1274,7 @@ def render_thread(
             else:
                 s = html.escape(prop.slug)
                 t = html.escape(tid)
+                geo_review = review_token("geo_download", prop.to_dict())
                 geo_banner = f"""
         <div class="approval-banner">
           <div><strong>Download proposal awaiting your approval</strong></div>
@@ -1274,11 +1282,13 @@ def render_thread(
                {html.escape(DEGRADATION_WARNING)}</div>
           <div class="approval-actions">
             <form action="/geo/{s}/approve" method="post" style="display:inline">
+              <input type="hidden" name="review" value="{geo_review}">
               <input type="hidden" name="token" value="{GEO_CSRF}">
               <input type="hidden" name="redirect" value="/thread/{t}">
               <button class="btn merge-btn" type="submit">Approve download</button>
             </form>
             <form action="/geo/{s}/decline" method="post" style="display:inline">
+              <input type="hidden" name="review" value="{geo_review}">
               <input type="hidden" name="token" value="{GEO_CSRF}">
               <input type="hidden" name="redirect" value="/thread/{t}">
               <button class="btn btn-secondary" type="submit">Decline</button>
@@ -2131,9 +2141,10 @@ def _pending_gmail(chat) -> dict | None:
     return None
 
 
-def _checkpoint_review(chat, action: dict) -> tuple[str, str | None, str, list[dict]]:
+def _checkpoint_review(chat, action: dict, *, snapshot=None) -> tuple[str, str | None, str, list[dict]]:
     """Read exact checkpoint authority; read failures are never consumption evidence."""
-    snapshot = chat.agent.get_state(chat.runconfig)
+    if snapshot is None:
+        snapshot = chat.agent.get_state(chat.runconfig)
     requests = [dict(request) for intr in snapshot.interrupts
                 for request in intr.value.get("action_requests", [])]
     interrupt_id = next(intr.id for intr in snapshot.interrupts
@@ -3495,9 +3506,25 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # Unlinked legacy Runs may authorize only the existing reply path.
                 # Mail decisions require a durable Approval and its exact execution link.
                 pending_chat = MANAGER.get(tid, sandbox_backend=None)
-                pending_gmail = _pending_gmail(pending_chat)
-                matches = (not pending_gmail and decision_kind == "reply"
-                           and pending_chat.pending_reply())
+                review = resume_decision.get("reply_review")
+                if review is not None:
+                    try:
+                        matches = (decision_kind == "reply"
+                                   and _reply_review(pending_chat, _get_status(tid)) == review)
+                    except Exception as error:
+                        # A failed authority read is unavailable, not stale. This
+                        # accepted slice owns the queue but has not reached claim.
+                        if _run is not None:
+                            with _RUN_ADMISSION_LOCK:
+                                current = _runs().get(tid, _run.id)
+                                if current.status == "pending":
+                                    current = _runs().claim(tid, current.id)
+                                if current.status == "running":
+                                    _runs().transition(tid, current.id, "error", error=str(error))
+                        raise
+                else:
+                    matches = (not _pending_gmail(pending_chat) and decision_kind == "reply"
+                               and pending_chat.pending_reply())
                 if not matches:
                     if _run is not None:
                         with _RUN_ADMISSION_LOCK:
@@ -3715,7 +3742,13 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     resp = chat.resume()
                 elif resume_decision is not None:
                     if decision_kind == "reply":
-                        resp = chat.resume_reply(resume_decision)
+                        decision = {key: value for key, value in resume_decision.items()
+                                    if key != "reply_review"}
+                        if (review := resume_decision.get("reply_review")) is not None:
+                            action = {"name": "send_reply", "args": {"text": review["text"]}}
+                            resp = chat.resume_actions(_decision_vector(action, review["requests"], decision))
+                        else:
+                            resp = chat.resume_reply(decision)
                     else:
                         resp = ""
                 else:
@@ -4774,12 +4807,8 @@ def _llm_reachable() -> bool:
         return False
 
 
-def _scheduled_dispatch(tid: str, prompt: str, tz: str | None) -> None:
-    """Run a schedule's prompt as a turn IN its own thread via the normal run path, so
-    THREAD_QUEUE serializes it (overlap waits) and the per-turn sandbox + middleware
-    apply. An explicit schedule zone wins; another trigger uses the latest visible-user
-    zone. A time-only rider gives the turn 'now' in that zone. No _mark_pending —
-    there's no waiting render to win."""
+def _scheduled_run(tid: str, prompt: str, tz: str | None) -> Run:
+    """Admit a durable system Run with its trigger or latest visible-user zone."""
     _require_deep_thread(tid)
     effective_tz = tz or _last_visible_user_timezone(tid)
     rider = (_build_rider(datetime.now(timezone.utc).isoformat(), effective_tz)
@@ -4788,7 +4817,12 @@ def _scheduled_dispatch(tid: str, prompt: str, tz: str | None) -> None:
     # continuations (only a USER message supersedes the agent's plan) nor counts
     # as one (no marker prefix; it breaks the chain's trailing run, an accepted
     # accounting reset — the cap is a runaway backstop, not billing).
-    run = _create_run(tid, prompt, rider=rider, origin="system")
+    return _create_run(tid, prompt, rider=rider, origin="system")
+
+
+def _scheduled_dispatch(tid: str, prompt: str, tz: str | None) -> None:
+    """Run a schedule prompt through normal queue ownership and sandbox boundaries."""
+    run = _scheduled_run(tid, prompt, tz)
     _execute_run(run.id, tid)
 
 
@@ -4881,6 +4915,90 @@ _REPLY_DECISIONS = {
                           "edited_action": {"name": "send_reply", "args": {"text": text}}},
 }
 
+
+def _reply_review(chat, status: dict) -> dict | None:
+    """Bind the displayed sender and complete draft to its exact checkpoint gate."""
+    if not status.get("pending_sender"):
+        return None
+    snapshot = chat.agent.get_state(chat.runconfig)
+    args = next((dict(action["args"]) for intr in snapshot.interrupts
+                 for action in (intr.value or {}).get("action_requests", [])
+                 if action.get("name") == "send_reply" and isinstance(action.get("args"), dict)), None)
+    if not args:
+        return None
+    interrupt, checkpoint, namespace, requests = _checkpoint_review(
+        chat, {"name": "send_reply", "args": args}, snapshot=snapshot)
+    return {"sender": status["pending_sender"], "text": args.get("text", ""),
+            "interrupt_id": interrupt, "checkpoint_id": checkpoint, "checkpoint_ns": namespace,
+            "requests": requests, "work_id": (snapshot.metadata or {}).get("work_id")}
+
+
+def reply_approval_preview(tid: str) -> dict | None:
+    """Read the real reply gate; a status-only or mailbox card cannot authorize SMS."""
+    status = _get_status(tid)
+    if (status.get("stage") != "awaiting_approval" or not status.get("pending_reply")
+            or status.get("pending_email_token") or status.get("pending_gmail_token")):
+        return None
+    from manage.web.approval_tokens import review_token
+    review = _reply_review(MANAGER.get(tid, sandbox_backend=None), status)
+    if review is None:
+        return None
+    accepted = next((run for run in _runs().list(tid)
+                     if (run.resume_decision or {}).get("reply_review") == review), None)
+    return {"kind": "send_reply", "token": review_token("send_reply", [tid, review]),
+            "action": {"name": "send_reply", "args": {"text": review["text"]}},
+            "sender": review["sender"], "state": "accepted" if accepted else "pending",
+            "run_id": accepted.id if accepted else None,
+            "decisions": [] if accepted else ["approve", "edit", "reject"]}
+
+
+def reply_decision_core(tid: str, decision: str, token: str, text: str = "") -> tuple[Run, bool]:
+    """Admit one exact reply decision without overriding newer inbound messages."""
+    _existing_thread_dir(tid)
+    _require_deep_thread(tid)
+    if re.fullmatch(r"[0-9a-f]{64}", token) is None:
+        raise HTTPException(status_code=409, detail="Reply review is invalid; refresh and review")
+    if decision not in _REPLY_DECISIONS or decision != "edit" and text:
+        raise HTTPException(status_code=422, detail="Invalid reply decision")
+    text = text.replace("\r\n", "\n")
+    if len(text.encode("utf-8")) > 65536 or decision == "edit" and not text.strip():
+        raise HTTPException(status_code=422, detail="Reply edit is empty or too large")
+    with _RUN_ADMISSION_LOCK:
+        dispatch_key = "reply-approval:" + token
+        previous = next((run for run in _runs().list(tid) if run.dispatch_key == dispatch_key), None)
+        value = _REPLY_DECISIONS[decision](text)
+        if previous is not None:
+            stored = {key: item for key, item in (previous.resume_decision or {}).items()
+                      if key != "reply_review"}
+            if stored != value:
+                raise HTTPException(status_code=409, detail="A different reply decision was already accepted")
+            return previous, True
+        proposal = reply_approval_preview(tid)
+        if proposal is None or not secrets.compare_digest(token, proposal["token"]):
+            raise HTTPException(status_code=409, detail="Reply changed; refresh and review")
+        status = _get_status(tid)
+        review = _reply_review(MANAGER.get(tid, sandbox_backend=None), status)
+        from manage.web.approval_tokens import review_token
+        if review is None or not secrets.compare_digest(token, review_token("send_reply", [tid, review])):
+            raise HTTPException(status_code=409, detail="Reply changed; refresh and review")
+        # A credential rotation may change the token, but never the already accepted decision.
+        previous = next((run for run in _runs().list(tid)
+                         if (run.resume_decision or {}).get("reply_review") == review), None)
+        if previous is not None:
+            stored = {key: item for key, item in previous.resume_decision.items() if key != "reply_review"}
+            if stored != value:
+                raise HTTPException(status_code=409, detail="A different reply decision was already accepted")
+            return previous, True
+        owners = [run for run in _runs().list(tid) if run.status == "awaiting_approval"
+                  and run.sender == review["sender"]]
+        owner = next((run for run in owners if run.work_id == review["work_id"]), None)
+        if owner is None and review["work_id"] is None and len(owners) == 1:
+            owner = owners[0]
+        run = _create_run(tid, None, sender=review["sender"],
+                          work_id=review["work_id"] or (owner.work_id if owner else None),
+                          resume_decision={**value, "reply_review": review}, dispatch_key=dispatch_key)
+        return run, False
+
 _EMAIL_DECISIONS = {
     "approve": lambda to, subject, body: {"type": "approve"},
     "reject": lambda to, subject, body: {
@@ -4893,7 +5011,8 @@ _EMAIL_DECISIONS = {
 
 @app.post("/thread/{tid}/reply/{decision}")
 def reply_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
-                   text: str = Form(default=""), seen: str = Form(default="")):
+                   text: str = Form(default=""), seen: str = Form(default=""),
+                   token: str = Form(default="")):
     """Approve / reject / edit a pending send_reply proposal, resuming the paused triage
     turn off the loop (the resume runs the tool → the outbound POST, so it must not run on
     the event loop; the BackgroundTask puts it in the threadpool)."""
@@ -4915,11 +5034,12 @@ def reply_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
             seen.replace("\r\n", "\n") != (status.get("pending_reply") or "").replace("\r\n", "\n"):
         raise HTTPException(status_code=409,
                             detail="This reply was updated by a newer message — reload and review it.")
-    sender = status.get("pending_sender") or ""
-    run = _create_run(tid, None, sender=sender,
-                      resume_decision=_REPLY_DECISIONS[decision](text),
-                      dispatch_key="reply-approval:" + secrets.token_urlsafe(16))
-    background_tasks.add_task(_execute_run, run.id, tid)
+    proposal = reply_approval_preview(tid)
+    if proposal is None:
+        raise HTTPException(status_code=409, detail="Reply preview is unavailable")
+    run, replayed = reply_decision_core(tid, decision, token, text if decision == "edit" else "")
+    if not replayed or run.status == "pending":
+        background_tasks.add_task(_execute_run, run.id, tid)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
@@ -5209,9 +5329,9 @@ def _remove_egress_waiter(run: Run) -> None:
 
 
 def _geo_on_complete(tid: str, message: str) -> None:
-    """on_complete: deliver the region-ready (or -failed) message into the thread as a
-    fresh turn + mark it urgent, so the agent picks the original request back up."""
-    _scheduled_dispatch(tid, message, _GEO_TZ)
+    """Admit and queue a durable completion; never execute a graph under geo locks."""
+    run = _scheduled_run(tid, message, _GEO_TZ)
+    _RESUME_SCHEDULER.submit(run.id, tid)
     _mark_urgent(tid)
 
 
@@ -5851,9 +5971,9 @@ _GEO_DELIVER_THREAD: threading.Thread | None = None
 
 def _geo_startup() -> None:
     """Seed + reconcile once, then periodically deliver held completions. Runs on its OWN
-    thread — NEVER the asyncio lifespan thread — because delivery goes through
-    ``_scheduled_dispatch`` → durable Run → ``_execute_run`` (a full agent turn) plus a blocking
-    health probe, which would stall uvicorn startup on the loop. The retry loop makes D4
+    thread — NEVER the asyncio lifespan thread — because the health probe and
+    local store access block. Delivery admits a durable Run and notifies the resume
+    scheduler; it does not execute a graph here. The retry loop makes D4
     real: an LLM-down-at-completion is held and re-attempted until the LLM is back (a
     cheap no-op when nothing is held)."""
     try:

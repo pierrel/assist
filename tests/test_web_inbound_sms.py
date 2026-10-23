@@ -5,7 +5,9 @@ scheduling); the triage turn itself (_dispatch_event → _process_message) is st
 spy so the LLM/sandbox isn't needed.
 """
 import pytest
+from types import SimpleNamespace
 from fastapi.testclient import TestClient
+from tests.approval_helpers import checkpoint_chat
 
 from manage import web
 from manage.web import threads
@@ -26,6 +28,13 @@ def client(tmp_path, monkeypatch):
 
 def _body(mid="abc123", sender="+15551234567", text="hi"):
     return {"message_id": mid, "sender": sender, "text": text}
+
+
+def _reply_chat(text):
+    """A route-only fake with the exact gate now required by shared admission."""
+    return checkpoint_chat(SimpleNamespace(
+        thread_id="t-sub", pending_reply=lambda: {"text": text},
+        pending_actions=lambda: [{"name": "send_reply", "args": {"text": text}}]))
 
 
 def test_inbound_503_when_secret_unset(client, monkeypatch):
@@ -78,7 +87,7 @@ def test_dispatch_no_matching_subscription_is_noop(client, monkeypatch):
 
 
 def test_reply_decision_gated_on_awaiting_approval(client, monkeypatch):
-    monkeypatch.setattr(web.MANAGER, "get", lambda tid, **k: object())
+    monkeypatch.setattr(web.MANAGER, "get", lambda tid, **k: _reply_chat("draft"))
     queued = []
     monkeypatch.setattr(threads, "_execute_run", lambda *a: queued.append(a))
     # not awaiting → 409
@@ -86,12 +95,15 @@ def test_reply_decision_gated_on_awaiting_approval(client, monkeypatch):
     assert client.post("/thread/t-sub/reply/approve").status_code == 409
     # awaiting → 303 + resume queued with an approve decision + the stored sender
     _set_status("t-sub", "awaiting_approval", pending_reply="draft", pending_sender="+1555")
-    r = client.post("/thread/t-sub/reply/approve", follow_redirects=False)
+    token = threads.reply_approval_preview("t-sub")["token"]
+    r = client.post("/thread/t-sub/reply/approve", data={"token": token}, follow_redirects=False)
     assert r.status_code == 303
     assert len(queued) == 1
     run = threads._runs().get("t-sub", queued[0][0])
     assert queued[0][1] == "t-sub"
-    assert run.sender == "+1555" and run.resume_decision == {"type": "approve"}
+    assert run.sender == "+1555" and run.resume_decision["type"] == "approve"
+    assert run.resume_decision["reply_review"]["text"] == "draft"
+    assert run.resume_decision["reply_review"]["sender"] == "+1555"
 
 
 def test_reply_decision_bad_verb(client, monkeypatch):
@@ -133,6 +145,7 @@ def test_triage_tools_exclude_host_effect_tools():
 def test_reply_approve_refuses_superseded_draft(client, monkeypatch):
     from manage.web.state import _set_status
     monkeypatch.setattr(threads, "_existing_thread_dir", lambda tid: str(tid))
+    monkeypatch.setattr(web.MANAGER, "get", lambda tid, **k: _reply_chat("NEW draft"))
     queued = []
     monkeypatch.setattr(threads, "_process_message", lambda *a, **k: queued.append(1))
     _set_status("t-sub", "awaiting_approval", pending_reply="NEW draft", pending_sender="+1")
@@ -140,7 +153,8 @@ def test_reply_approve_refuses_superseded_draft(client, monkeypatch):
     r = client.post("/thread/t-sub/reply/approve", data={"seen": "OLD draft"})
     assert r.status_code == 409 and queued == []
     # approving the current draft goes through
-    r2 = client.post("/thread/t-sub/reply/approve", data={"seen": "NEW draft"},
+    token = threads.reply_approval_preview("t-sub")["token"]
+    r2 = client.post("/thread/t-sub/reply/approve", data={"seen": "NEW draft", "token": token},
                      follow_redirects=False)
     assert r2.status_code == 303 and len(queued) == 1
 
