@@ -9,6 +9,12 @@ from assist.git_sync import (GitDirtyWorktreeError, GitSyncError, _workspace_loc
                              read_state, require_clean)
 from assist.sandbox_manager import SandboxManager
 from assist.thread_git import ThreadGit
+from assist.thread_queue import ThreadPauseRequested
+
+
+def error_notes(error: Exception) -> str:
+    """Expose recovery details without changing the primary exception routing."""
+    return "".join(" " + note for note in getattr(error, "__notes__", ()))
 
 
 def _legacy_hold(thread_dir: str, worktree: str) -> str | None:
@@ -180,7 +186,23 @@ class ThreadGitLifecycle:
         if self.bound:
             self._verify_clean(timezone)
 
-    def _finish(self, message: str, timezone: str | None) -> str | None:
+    @contextmanager
+    def preserve_on_error(self, timezone: str | None, *, control_errors=()):
+        """Commit failed-turn files after model teardown, preserving the failure."""
+        try:
+            yield
+        except (ThreadPauseRequested, *control_errors):
+            raise
+        except Exception as error:
+            try:
+                self._commit("Save working files after failed turn", timezone)
+            except Exception as recovery_error:
+                error.add_note(
+                    "Working-file commit could not be verified: " + str(recovery_error)
+                    + ". Files are preserved; reconcile the Git workspace before retrying.")
+            raise
+
+    def _commit(self, message: str, timezone: str | None) -> None:
         if not self.bound:
             return
         if self._teardown_failed:
@@ -191,6 +213,11 @@ class ThreadGitLifecycle:
         finally:
             self._cleanup(backend.container)
         self._verify_clean(timezone)
+
+    def _finish(self, message: str, timezone: str | None) -> str | None:
+        if not self.bound:
+            return
+        self._commit(message, timezone)
         with self._host_fence():
             return self._owner.publish()
 
