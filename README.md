@@ -99,7 +99,8 @@ where reliability is harder than with frontier APIs.
   and retried, and failed turns roll back to a checkpoint instead of
   ending the thread. Bounded conversation summaries disable hidden reasoning
   so the output budget is available for the summary; failed summaries preserve
-  the raw history.
+  the raw history. Streamed replies retain provider token usage so existing
+  compaction thresholds also use measured context consumption.
 
 - **Loop and stall guards.** Repeating tool calls and empty model
   responses are detected and recovered automatically — keeps small
