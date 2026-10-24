@@ -123,6 +123,12 @@ class EgressRequest:
     def key(self) -> str:
         return request_key(self.origin_tid, self.host, self.port)
 
+    @property
+    def review_identity(self) -> tuple:
+        """The exact request generation and reasons, independent of joined waiters."""
+        return (self.origin_tid, self.host, self.port, self.created_at,
+                self.task, self.main_task)
+
     def to_dict(self) -> dict:
         value = {"host": self.host, "port": self.port, "task": self.task,
                 "origin_tid": self.origin_tid, "created_at": self.created_at,
@@ -264,13 +270,15 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
             self._mutate(recs)
             return None
 
-    def resolve(self, key: str, decision: str) -> EgressRequest | None:
+    def resolve(self, key: str, decision: str, *,
+                expected: EgressRequest | None = None) -> EgressRequest | None:
         """Approve ("hour" | "always") or decline a pending request. Returns
         the updated record, or None when the key is unknown/not pending."""
         with self._lock:
             recs = self._load()
             rec = recs.get(key)
-            if rec is None or rec.state != "pending":
+            if (rec is None or rec.state != "pending"
+                    or expected is not None and rec.review_identity != expected.review_identity):
                 return None
             if decision == "hour":
                 exp = (datetime.now(timezone.utc) + GRANT_TTL).isoformat()
@@ -285,13 +293,14 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
             self._mutate(recs)
             return rec
 
-    def revoke(self, key: str) -> bool:
+    def revoke(self, key: str, *, expected: EgressRequest | None = None) -> bool:
         """Remove a grant (user revoke on /egress, or the agent's
         remove_allowed_host — privilege reduction either way)."""
         with self._lock:
             recs = self._load()
             rec = recs.get(key)
-            if rec is None or rec.state != "approved":
+            if (rec is None or rec.state != "approved"
+                    or expected is not None and rec.review_identity != expected.review_identity):
                 return False
             del recs[key]
             self._mutate(recs)
@@ -316,6 +325,8 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
         now = datetime.now(timezone.utc)
         with self._lock:
             recs = self._load()
+            if any(r.origin_tid == tid and r.state == "pending" for r in recs.values()):
+                return []
             # Consumed even if the process dies before the turn runs — at-most-
             # once by design (re-running an approved grant's task on retry
             # would be worse than losing one announcement; the BackgroundTask-

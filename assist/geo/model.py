@@ -69,16 +69,20 @@ class Region:
     last_used_at: str | None = None        # ISO-8601 UTC; None = never used
     completion_delivered: bool = True       # False only while a ready import owes a notice
     added_at: str | None = None            # ISO-8601 UTC
+    approval_id: str | None = None         # exact proposal admitted for the last add
 
     def with_state(self, state: str) -> "Region":
         return replace(self, state=state)
 
     def to_dict(self) -> dict:
-        return {"slug": self.slug, "display_name": self.display_name,
+        value = {"slug": self.slug, "display_name": self.display_name,
                 "bbox": list(self.bbox), "has_transit": self.has_transit,
                 "state": self.state, "last_used_at": self.last_used_at,
                 "completion_delivered": self.completion_delivered,
                 "added_at": self.added_at}
+        if self.approval_id is not None:
+            value["approval_id"] = self.approval_id
+        return value
 
     @classmethod
     def from_dict(cls, d: dict) -> "Region | None":
@@ -99,7 +103,8 @@ class Region:
             state=state if state in _STATES else STATE_FAILED,
             last_used_at=d.get("last_used_at"),
             completion_delivered=bool(d.get("completion_delivered", True)),
-            added_at=d.get("added_at"))
+            added_at=d.get("added_at"),
+            approval_id=d.get("approval_id") if isinstance(d.get("approval_id"), str) else None)
 
 
 @dataclass(frozen=True)

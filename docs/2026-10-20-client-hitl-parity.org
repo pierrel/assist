@@ -1,0 +1,71 @@
+#+title: Shared client HITL parity
+State: Reviewed implementation; connected acceptance pending (2026-10-20)
+
+* Outcome and scope
+Phone and desktop use one Emacs client for every currently supported server
+approval: send_email, email_archive, email_delete, send_reply, exact-host egress,
+and geographic downloads. No new store, server state machine, plugin registry or
+model-facing guidance. Existing Email binding and Git completion/recovery remain.
+Root owns deployment, integration, live verification and any authorized merge.
+
+* Implementation plan and ownership
+1. Extend manage/web/phone_api.py with an authenticated bounded plural collection
+   and decision dispatch. Preserve the singular mail GET and Email POST contracts.
+2. Reuse manage/web/threads.py reply admission and the existing execution Run:
+   persist exact gate/work/sender/text/request bindings, compare conflicting
+   replays, and verify again after queue acquisition. Preserve inbound supersede.
+3. Keep network records in EgressStore. Bind displayed generation/reasons and
+   compare under its mutation lock; retained results and revoke use the same
+   owner. Both main resolution and child waiters check the whole pending set.
+4. Keep downloads in ProposalStore, RegionRegistry and Provisioner. Publication
+   and admission serialize through the existing proposal lock. Region.approval_id
+   identifies the exact admitted proposal, including failure and completion
+   delivery. Remove only that delivered generation, never its replacement.
+5. Extend assist-web.el once for both clients: discovery, chooser, complete
+   previews, two-tap scope decisions and explicit service/Run acknowledgments.
+   Preserve auth/peer fences, unknown-outcome refresh and unsent drafts.
+6. Exercise real stores/checkpoints/worker/API paths with synthetic external
+   effects; extend the existing reusable E2E fixture rather than a second harness.
+
+* Contracts and rejected alternatives
+Independent egress/download cards are not Run states, so discovery cannot depend
+on awaiting_approval. The collection projects the existing owners' states; it
+never grants authority from assistant prose or client-submitted effect targets.
+A Run receipt remains a Run receipt; egress/download acknowledgments do not
+invent Runs. An oversize mail preview remains unavailable without hiding other
+cards. Human decisions are explicit, exact, bounded and authenticated.
+
+A fresh geo proposal and an earlier failed attempt must not share an outcome.
+The existing registry therefore retains a proposal digest rather than comparing
+wall-clock timestamps. Replays return the known terminal result; replacement
+requires a fresh review. Delivery verifies generation and terminal state again.
+New egress waiters do not invalidate an otherwise unchanged consent scope.
+
+* Verification and review
+Current evidence is recorded per exact candidate in the effort handoff. The
+synthetic API panel uses real EgressStore, ProposalStore/RegionRegistry/Provisioner,
+real SQLite checkpoints, durable Runs and the actual reply worker. External
+SMS/mail/download/model effects are fake. Existing Email tests remain applicable.
+The matched configured-target snapshot lacks the plural route and fails the
+new parity regressions; candidate checks pin the changed service boundaries.
+Independent server/security and client reviews produced concrete race/denial/
+compatibility corrections. Affected rereviews accepted the corrections; a
+separate documentation pass also completed. The full deterministic CPU suite
+passed 2,656 cases, with six skips and one deselection. The final 38-case
+boundary panel includes reopened SMS receipt/token rotation and a slow size
+probe racing geo admission. These are synthetic deterministic capability
+regressions, not model behavior evals.
+
+The existing private-daemon fixture's --hitl-only panel covers all six types
+through normal phone loading and the actual desktop loader. It activates the
+visible discovery control, verifies two taps and draft preservation, and retains
+original stopped mail Run receipts through completion. Execution receipts are
+required before claiming this end-to-end panel passed.
+
+* Limits and deferred observations
+No real user message, provider operation, geographic download or user egress
+grant is a test fixture. Local checks do not prove physical-device interaction,
+natural model behavior or production sandbox security. Existing egress resolution
+announcement has its prior at-most-once crash window. Pre-feature queued SMS
+Runs without reply_review retain the legacy worker behavior. Geo administrative
+commands and unrelated UI/Git work remain separate.

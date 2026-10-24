@@ -641,10 +641,11 @@ def test_geo_close_waits_through_proposal_ack_and_defers_later_delivery(
     finish_ack = threading.Event()
     original_remove = proposals.remove
 
-    def delayed_remove(slug):
+    def delayed_remove(slug, **kwargs):
+        assert kwargs["expected"] == proposal
         acknowledging.set()
         assert finish_ack.wait(5)
-        return original_remove(slug)
+        return original_remove(slug, **kwargs)
 
     monkeypatch.setattr(proposals, "remove", delayed_remove)
     assert provisioner.submit("add", proposal.slug) == "queued"

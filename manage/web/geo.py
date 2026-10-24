@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import html
 import secrets
+import re
 
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -22,6 +23,49 @@ from assist.geo.model import STATE_READY
 from manage.web.app import app
 from manage.web.state import GEO_CSRF, GEO_PROPOSALS, GEO_REGISTRY
 from manage.web.threads import _FAVICON_LINKS, _PROVISIONER, _PULL_TO_REFRESH_SCRIPT
+
+
+def approval_previews(tid: str) -> list[dict]:
+    """Read recorded proposals and actual job states, including while Runs are ready."""
+    if GEO_PROPOSALS is None or GEO_REGISTRY is None:
+        return []
+    from assist.geo.tools import DEGRADATION_WARNING
+    from manage.web.approval_tokens import review_token
+    values = []
+    for proposal in GEO_PROPOSALS.all():
+        if proposal.origin_tid != tid:
+            continue
+        region = GEO_REGISTRY.get(proposal.slug)
+        state = region.state if region is not None else "pending"
+        if state == "failed" and region.approval_id != proposal.identity:
+            state = "pending"
+        values.append({"kind": "geo_download", "token": review_token("geo_download", proposal.to_dict()),
+                       "slug": proposal.slug, "display_name": proposal.display_name,
+                       "size_bytes": proposal.size_bytes, "state": state,
+                       "warning": DEGRADATION_WARNING,
+                       "decisions": ["approve", "reject"] if state == "pending" else []})
+    return values
+
+
+def approval_decision(tid: str, token: str, decision: str) -> dict:
+    """Apply a reviewed download decision through the existing job owner."""
+    _require_geo()
+    if re.fullmatch(r"[0-9a-f]{64}", token) is None:
+        raise HTTPException(status_code=409, detail="Download review is invalid; refresh and review")
+    if decision not in {"approve", "reject"}:
+        raise HTTPException(status_code=422, detail="Invalid download decision")
+    from manage.web.approval_tokens import review_token
+    proposal = next((p for p in GEO_PROPOSALS.all() if p.origin_tid == tid
+                     and secrets.compare_digest(token, review_token("geo_download", p.to_dict()))), None)
+    if proposal is None:
+        raise HTTPException(status_code=409, detail="Download proposal changed; refresh and review")
+    try:
+        status, replayed = _PROVISIONER.decide(proposal, decision)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"thread_id": tid, "kind": "geo_download", "token": token,
+            "status": status, "replayed": replayed}
+
 
 
 def _require_geo():
@@ -41,9 +85,10 @@ def _fmt_size(n: int | None) -> str:
     return f"~{mb / 1000:.1f} GB" if mb >= 1000 else f"~{mb:.0f} MB"
 
 
-def _btn(action: str, label: str, cls: str = "btn-secondary") -> str:
+def _btn(action: str, label: str, cls: str = "btn-secondary", *, review: str = "") -> str:
     return (f'<form method="post" action="{action}" style="display:inline">'
             f'<input type="hidden" name="token" value="{GEO_CSRF}">'
+            f'<input type="hidden" name="review" value="{review}">'
             f'<button class="btn {cls}" type="submit">{label}</button></form>')
 
 
@@ -51,11 +96,13 @@ def _render(regions, proposals) -> str:
     prop_rows = ""
     for p in sorted(proposals, key=lambda p: p.created_at):
         s = html.escape(p.slug)
+        from manage.web.approval_tokens import review_token
+        review = review_token("geo_download", p.to_dict())
         prop_rows += (
             f"<tr><td>{html.escape(p.display_name)} <code>{s}</code></td>"
             f"<td>{_fmt_size(p.size_bytes)}</td>"
-            f"<td>{_btn(f'/geo/{s}/approve', 'Approve download', 'merge-btn')} "
-            f"{_btn(f'/geo/{s}/decline', 'Decline')}</td></tr>")
+            f"<td>{_btn(f'/geo/{s}/approve', 'Approve download', 'merge-btn', review=review)} "
+            f"{_btn(f'/geo/{s}/decline', 'Decline', review=review)}</td></tr>")
     prop_tbl = (f"<h2>Pending downloads</h2><p class='muted'>Approving starts a download + "
                 f"map-data rebuild (address lookups are degraded until it finishes).</p>"
                 f"<table><tbody>{prop_rows}</tbody></table>" if prop_rows else "")
@@ -113,7 +160,10 @@ async def geo_approve(slug: str, request: Request):
     form = await request.form()
     _check_csrf(form.get("token"))
     # fire the RECORDED slug's add (submit refuses without a pending proposal)
-    await run_in_threadpool(_PROVISIONER.submit, "add", slug)
+    proposal = await run_in_threadpool(GEO_PROPOSALS.get, slug)
+    if proposal is not None:
+        await run_in_threadpool(approval_decision, proposal.origin_tid,
+                               str(form.get("review") or ""), "approve")
     return RedirectResponse(_next(form), status_code=303)
 
 
@@ -122,7 +172,10 @@ async def geo_decline(slug: str, request: Request):
     _require_geo()
     form = await request.form()
     _check_csrf(form.get("token"))
-    await run_in_threadpool(GEO_PROPOSALS.remove, slug)
+    proposal = await run_in_threadpool(GEO_PROPOSALS.get, slug)
+    if proposal is not None:
+        await run_in_threadpool(approval_decision, proposal.origin_tid,
+                               str(form.get("review") or ""), "reject")
     return RedirectResponse(_next(form), status_code=303)
 
 

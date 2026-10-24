@@ -10,8 +10,8 @@ take a shared flock with the weekly refresh cron. Add/remove claim via the persi
 it must not risk a reconcile→failed on a restart).
 
 Wiring (its own increment): the web builds this with ``run_job`` = a blocking
-``subprocess.run`` of the provisioning script, ``on_complete`` = ``_scheduled_dispatch``
-+ ``_mark_urgent``, ``health_check`` = the LLM-reachable probe, and drives
+``subprocess.run`` of the provisioning script, ``on_complete`` = bounded durable
+Run admission and queue notification, ``health_check`` = the LLM-reachable probe, and drives
 ``reconcile`` / ``deliver_pending`` at startup + on a tick.
 
 All web coupling is INJECTED callables (the ``Scheduler(store, dispatch, health_check)``
@@ -20,8 +20,9 @@ All web coupling is INJECTED callables (the ``Scheduler(store, dispatch, health_
 - ``run_job(op, slug) -> bool`` — the heavy work; the web wires a blocking
   ``subprocess.run`` of the provisioning script (add / remove / transit). Bounded,
   validate-before-swap, blocks to completion (T5).
-- ``on_complete(tid, message)`` — post a completion message to the originating thread
-  (the web wires ``_scheduled_dispatch`` + ``_mark_urgent``). The message CARRIES the
+- ``on_complete(tid, message)`` — admit a durable completion for the originating
+  thread without running a graph or waiting for queue ownership. Called under
+  publication/admission exclusion; it must return promptly. The message CARRIES the
   user's original request (A1): a bare "download finished" would make the small model
   re-derive intent from stale history. It is NOT an automatic re-run — the agent
   decides what to do with it.
@@ -83,7 +84,7 @@ class Provisioner:
         # Makes the whole submit body (check → claim → enqueue) atomic, so two
         # concurrent approve POSTs can't both enqueue the same job. Held only for cheap
         # local-file I/O + a non-blocking executor submit — never loop-adjacent.
-        self._submit_lock = threading.Lock()
+        self._submit_lock = threading.RLock()
         # Serializes completion delivery: _run's inline delivery vs a concurrent
         # deliver_pending() tick can't both dispatch the same completion.
         self._deliver_lock = threading.Lock()
@@ -96,14 +97,40 @@ class Provisioner:
         self._transit_active: set[str] = set()
 
     # --- enqueue (called from a web worker thread; never blocks) -----------------
-    def submit(self, op: str, slug: str) -> str:
+    def decide(self, proposal, decision: str) -> tuple[str, bool]:
+        """Apply a reviewed decision while publication and job admission are excluded."""
+        if decision not in {"approve", "reject"}:
+            raise ValueError("Invalid download decision")
+        with self._submit_lock, self._proposals.locked():
+            if self._proposals.get(proposal.slug) != proposal:
+                raise ValueError("Download proposal changed; refresh and review")
+            region = self._registry.get(proposal.slug)
+            if region is not None and region.state == STATE_FAILED and region.approval_id == proposal.identity:
+                if decision == "approve":
+                    return STATE_FAILED, True
+                raise ValueError("Download already failed; request a fresh proposal")
+            if region is not None and region.state in {STATE_IMPORTING, STATE_READY}:
+                if decision == "approve":
+                    return region.state, True
+                raise ValueError("Download is already accepted")
+            if decision == "reject":
+                self._proposals.remove(proposal.slug)
+                return "declined", False
+            result = self.submit("add", proposal.slug, expected=proposal)
+            if result != "queued":
+                raise ValueError(result)
+            return STATE_IMPORTING, False
+
+    def submit(self, op: str, slug: str, *, expected=None) -> str:
         """Enqueue a region job. Returns a short human-readable status ("queued" /
         why-refused). For an ``add``, the proposal record must exist (the HITL gate:
         approve fires the RECORDED slug); its catalog metadata seeds the registry
         entry. The whole body is atomic under ``_submit_lock`` (no double-enqueue)."""
         if op not in OPS:
             return f"unknown operation: {op}"
-        with self._submit_lock:
+        with self._submit_lock, self._proposals.locked():
+            if expected is not None and self._proposals.get(slug) != expected:
+                return "proposal changed; refresh and review"
             current = self._registry.get(slug)
             if current is not None and current.state == STATE_IMPORTING:
                 return f"{slug} already has a job running"
@@ -130,6 +157,7 @@ class Provisioner:
                 self._registry.put(Region(
                     slug=slug, display_name=p.display_name, bbox=p.bbox,
                     state=STATE_IMPORTING, completion_delivered=True,
+                    approval_id=p.identity,
                     added_at=datetime.now(timezone.utc).isoformat()))
                 self._executor.submit(self._run, op, slug, None)
                 return "queued"
@@ -188,16 +216,26 @@ class Provisioner:
             if not self._health_check():
                 logger.info("geo: LLM not reachable; holding completion for %s", slug)
                 return   # stays undelivered; deliver_pending() retries
-            msg = (_failure_message(p.display_name) if failed
-                   else _completion_message(p.display_name, p.user_request))
-            try:
-                self._on_complete(p.origin_tid, msg)
-            except Exception:
-                logger.exception("geo: completion dispatch for %s failed; will retry", slug)
-                return
-            if not failed:
-                self._registry.update(slug, lambda r: replace(r, completion_delivered=True))
-            self._proposals.remove(slug)
+            # The probe may block while a new proposal is published and approved.
+            # Keep the final check and bounded durable admission atomic with both.
+            with self._submit_lock, self._proposals.locked():
+                if self._proposals.get(slug) != p:
+                    return
+                admitted = self._registry.get(slug)
+                if (admitted is None or admitted.state != (STATE_FAILED if failed else STATE_READY)
+                        or admitted.approval_id is not None and admitted.approval_id != p.identity):
+                    return
+                msg = (_failure_message(p.display_name) if failed
+                       else _completion_message(p.display_name, p.user_request))
+                try:
+                    self._on_complete(p.origin_tid, msg)
+                except Exception:
+                    logger.exception("geo: completion admission for %s failed; will retry", slug)
+                    return
+                if not failed:
+                    self._registry.update(slug, lambda r: replace(r, completion_delivered=True)
+                                          if r.approval_id == admitted.approval_id else r)
+                self._proposals.remove(slug, expected=p)
 
     def close_delivery(self) -> None:
         """Wait through callback and acknowledgment, then defer later attempts."""

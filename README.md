@@ -508,7 +508,7 @@ reapply any edits before approving again. The email tool checks that reviewed
 identity against its captured delivery configuration. Once a decision is accepted,
 phone Run cancellation returns HTTP 409, including after checkpoint recovery,
 without cancelling the work or losing its receipt.
-Approvals are first-class records owned by `RunService` in the existing `runs.json`.
+Email approvals are first-class records owned by `RunService` in the existing `runs.json`.
 Each review has its own token, with stable proposal, work, interrupt and checkpoint
 identities. A changed complete preview or fixed sender/Cc creates a new review;
 identical text at a later interrupt also needs a new decision. Accepting a decision
@@ -566,6 +566,66 @@ are limited to 1 MiB; traversal, hidden paths and symlinks are refused. Response
 contain raw bytes and a content-derived ETag; a matching `If-None-Match` returns
 304. The server stores no client inventory or asset-sync state. Clients own
 refresh timing and disposable caches, independently of editable Git checkouts.
+
+### Shared phone and desktop approvals
+
+The shared Emacs client reads `GET /threads/{tid}/approvals`. Its bounded
+`proposals` array includes every current server approval type, independently of
+ordinary Run status. The legacy singular `/approval` GET retains its complete,
+mail-only response and size errors. Decisions still POST to `/approval`.
+
+| Kind | Review and choices | Existing authority |
+| --- | --- | --- |
+| `send_email` | Complete sender/Cc/recipient/subject/body; approve, edit, reject | Run-owned Email Approval |
+| `email_archive`, `email_delete` | Exact complete messages; approve or reject; incomplete preview is reject-only | Run-owned Email Approval |
+| `send_reply` | Exact SMS recipient and full text; approve, edit, reject | Existing reply execution Run and checkpoint |
+| `egress` | Exact host/port and unverified agent reasons; one hour, until revoked or thread deletion, or decline; active grants can be revoked | Existing EgressStore and main/child continuations |
+| `geo_download` | Recorded region, size or unknown size, and geocoder rebuild warning; approve or decline | Existing ProposalStore, RegionRegistry and Provisioner |
+
+A thread snapshot exposes `approval_count` and `approval_results` without storing
+complete previews in the client cache. Ready threads can therefore offer review
+for independent network/download requests and retained results. Multiple cards
+open one native chooser. Phone and desktop load the same preview, edit, two-tap,
+peer-fence and acknowledgment code. Unsupported or unconfirmed responses require
+fresh review; the client never automatically repeats an approval POST. An
+oversized Email preview is explicitly unavailable in the collection and cannot
+hide independent network or download requests.
+
+SMS previews read the action and its binding from one checkpoint snapshot; a
+checkpoint read failure remains an error rather than an absent proposal. Region
+completion rechecks proposal generation and terminal state after the health probe,
+then admits a durable notification Run while publication and admission are excluded.
+The existing scheduler executes that Run independently; admission never executes
+the graph or waits for queue ownership under store locks.
+
+New reply decisions persist the exact sender, text, ordered requests, interrupt,
+checkpoint, namespace and work binding in the existing execution Run. Admission
+returns the same accepted receipt and rejects conflicting decisions. The worker
+rechecks after acquiring the queue and rejects unseen requests; a superseding
+inbound message cannot redirect an old decision. A new message retains the
+existing reply-supersession behavior. Pre-existing queued reply Runs retain their
+legacy worker path.
+
+Network review tokens bind the exact request generation and reasons. Resolving
+or revoking compares that binding under the existing store lock; adding another
+waiter does not change the grant scope. Main resolution and child resumes wait
+for the pending set to empty. Existing egress announcement delivery remains
+at-most-once across a crash, rather than a durable exactly-once effect promise.
+
+Download admission and proposal publication share the existing proposal lock.
+The registry records the admitted proposal identity, so failure replay cannot
+restart a job, and a fresh proposal is not mistaken for that earlier result.
+Completion delivery checks the same identity and terminal state and removes only
+the proposal it actually delivered. All store/checkpoint I/O runs off the event
+loop; provisioning and graph execution remain with their existing workers.
+These finite client projections introduce no additional store or server state
+machine. Pi preview retains its existing capability restrictions.
+
+The reusable fixture has an explicit `--hitl-only` client capability panel;
+see [the fixture instructions](tests/e2e/README.md). It uses synthetic proposals,
+inference and external effects. Its receipts demonstrate protocol and lifecycle
+coverage, not real model behavior, provider acceptance, sandbox security, or
+physical phone interaction.
 
 ### Voice calls
 
