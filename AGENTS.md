@@ -1,13 +1,5 @@
 # Assist agent guide
 
-# Workspace principles and process
-
-In the agentic workspace, read the canonical meta-repo `AGENTS.md` ("Design
-philosophy") and `coordination/PROCESS.md` for engineering principles, roles,
-review, delivery and merge ownership. These paths are relative to the canonical
-agentic root. A registered `.worktrees/<lane>/assist` checkout is an effort
-worktree, not that root. Project-specific contracts below supplement that policy.
-
 # Exploration guidelines
 Always read the README file before doing any work to understand project structure, patterns, and conventions.
 # Agent guidance philosophy and architecture
@@ -144,8 +136,7 @@ Before committing a script or example, grep your diff for your own `/home/<you>/
 
 Production runs the copy under `$DEPLOY_PATH`; a source merge alone does not
 update it. `make deploy-code` copies the code, and runtime changes need the
-appropriate restart and verification. Root owns deployment and live composition
-under the canonical process; use the meta-repo's operational guidance for the
-actual restart path. Verify installed source identity and service health.
+appropriate restart and verification. Verify installed source identity and
+service health after deployment.
 
 Caveat for in-repo skills specifically: the skill list is cached per session in the thread's checkpoint, so an **existing** thread won't pick up a newly-discovered domain skill even after deploy — a new chat will. New threads work immediately.
