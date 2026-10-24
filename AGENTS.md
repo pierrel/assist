@@ -1,120 +1,7 @@
+# Assist agent guide
+
 # Exploration guidelines
 Always read the README file before doing any work to understand project structure, patterns, and conventions.
-# Design guideline
-1. **Prime Directive: never design against the requirements**
-   Design the architecture to *absorb change*, not to mirror today’s use cases. ([InfoQ][1])
-
-2. **Decompose by volatility, not by function/domain**
-   Identify likely areas of change and make them your building blocks; avoid functional/domain decomposition. ([InfoQ][1], [idesign.net][2])
-
-3. **Encapsulate volatility (“vaults”)**
-   Each component/service contains a specific kind of change so requirement changes don’t ripple across the system. ([InfoQ][1], [idesign.net][2])
-
-4. **Compose behavior from stable building blocks**
-   Satisfy use cases by integrating services; the architecture stays static as use cases vary (“Composable Design,” “There Is No Feature”). ([PagePlace][3])
-
-5. **Use the standard roles to classify components**
-   Structure around Clients, Managers, Engines, Resource Access, Resources (+ Utilities) to reflect common volatilities. ([PagePlace][3], [idesign.net][4])
-
-6. **Keep business logic out of clients**
-   Clients are the most volatile; push rules and workflows into Managers/Engines. ([InfoQ][1], [Bookey][5])
-
-7. **Managers orchestrate, Engines decide**
-   Managers handle workflows/sequencing; Engines implement rules/algorithms. Mind the Managers-to-Engines ratio. ([PagePlace][3], [Bookey][5])
-
-8. **Isolate resource access as its own volatility**
-   Separate *how* you access resources from *what* the resources are; both can change. ([PagePlace][3], [se-radio.net][6])
-
-9. **Prefer closed (or semi-closed) architectures**
-   Constrain who can call whom to control coupling and keep independence/stability. ([PagePlace][3], [Bookey][5])
-
-10. **Layer consistently**
-    Typical layers: Client → Business Logic (Managers/Engines) → ResourceAccess → Resource, with a Utilities bar. ([PagePlace][3])
-
-11. **Classify responsibilities with the “Four Questions”**
-    Use Löwy’s classification questions to decide the right role for a capability. ([PagePlace][3])
-
-12. **Smallest useful set of services (\~order of 10)**
-    Aim for the minimal number of composable services that cover the *core* use cases. ([InfoQ][1])
-
-13. **Distinguish volatility vs. variability; map axes of volatility**
-    Hunt for true *volatility* (business change) vs. code-level variability; use explicit axes to find it. ([PagePlace][3], [InformIT][7])
-
-14. **Keep the architecture static across versions**
-    Contain change inside components; the high-level structure shouldn’t churn. ([PagePlace][3])
-
-15. **Resist functional/domain decomposition**
-    It creates either tiny fragments with high integration cost or blobs with high internal complexity and pollutes clients. ([InfoQ][1])
-
-16. **Design for communication and onboarding**
-    Using common roles/semantics accelerates comprehension and keeps teams aligned. ([idesign.net][2], [PagePlace][3])
-
-17. **Validate the system design early**
-    Separate architecture (fast, upfront) from detailed design (during development); avoid “big upfront *detailed* design.” ([idesign.net][2], [PagePlace][3])
-
-18. **Be microservice-agnostic**
-    Service granularity follows volatility and composition, not a “microservices first” rule. ([PagePlace][3])
-
-19. **Name and structure components explicitly**
-    Clear names and semantics (“What’s in a Name”) enforce intent and make designs reviewable. ([PagePlace][3])
-
-20. **Strive for symmetry**
-    Keep analogous parts shaped the same; symmetrical structures reduce accidental complexity. ([PagePlace][3])
-
-If you want, I can map these to your LangGraph agent platform with concrete examples of “Managers vs. Engines vs. ResourceAccess” nodes and how to keep clients thin.
-
-[1]: https://www.infoq.com/articles/book-review-righting-software/ "Q&A on the Book Righting Software - InfoQ"
-[2]: https://idesign.net/assets/documents/IDesign-Method-Management-Overview.pdf "Microsoft Word - IDesign-Method-Management-Overview.docx"
-[3]: https://api.pageplace.de/preview/DT0400.9780136523987_A41316644/preview-9780136523987_A41316644.pdf "Righting Software"
-[4]: https://www.idesign.net/Training/Architect-Master-Class?utm_source=chatgpt.com "Architect's Master Class"
-[5]: https://cdn.bookey.app/files/pdf/book/en/righting-software.pdf?utm_source=chatgpt.com "Righting Software PDF"
-[6]: https://se-radio.net/2020/04/episode-407-juval-lowy-on-righting-software/?utm_source=chatgpt.com "SE Radio 407: Juval Löwy on Righting Software"
-[7]: https://www.informit.com/articles/article.aspx?p=2995357&seqNum=3&utm_source=chatgpt.com "Identifying Volatility | Software System Decomposition - InformIT"
-
-
-# Coding guidelines
-Always follow these guidelines when writing code:
-1. Use intention-revealing names
-   — Pronounceable, searchable, no encodings; name by purpose.
-2. Keep functions small
-   — Few lines, minimal branches.
-3. Functions do one thing
-   — No mixed responsibilities; extract until each has a single concern.
-4. Minimize parameters
-   — Prefer 0–2 args; avoid boolean flags and long parameter lists.
-5. Separate command from query (CQS)
-   — A routine either changes state or returns information, not both.
-6. Avoid side effects; prefer immutability
-   — Eliminate hidden temporal coupling; limit shared mutable state.
-7. Make the code communicate
-   — Self-documenting structure; comments only for “why,” not “what/how.”
-8. Format for readability
-   — Consistent layout, sensible spacing/indentation, meaningful vertical ordering.
-9. Eliminate duplication (DRY)
-   — Factor out repeats; duplication breeds divergence.
-10. Prefer polymorphism/composition over conditionals
-    — Replace big switch/if chains with strategy, state, or polymorphic dispatch.
-11. Law of Demeter (“don’t talk to strangers”)
-    — Avoid train-wreck call chains; interact with immediate collaborators.
-12. Tell, don’t ask
-    — Expose behaviors, not data; choose objects vs. data structures deliberately.
-13. Handle errors with exceptions, not return codes
-    — Narrow try/catch blocks; add context; avoid swallowed errors.
-14. Isolate external boundaries
-    — Wrap third-party APIs; keep dependencies at the edges.
-15. Single Responsibility Principle (SRP)
-    — One reason to change per module/class.
-16. Open–Closed Principle (OCP)
-    — Open for extension, closed for modification.
-17. Liskov Substitution Principle (LSP)
-    — Subtypes must be substitutable for their base types without surprises.
-18. Interface Segregation Principle (ISP)
-    — Many small, focused interfaces over one “fat” interface.
-19. Dependency Inversion Principle (DIP)
-    — Depend on abstractions, not concretions; invert source-code dependencies.
-20. Simple, emergent design + keep it clean
-    — Follows Kent Beck’s four rules (passes tests, no duplication, expresses intent, minimal elements) and the Boy Scout Rule: leave the code cleaner than you found it.
-
 # Agent guidance philosophy and architecture
 
 This is the durable philosophy for Assist prompting. The model should see the
@@ -152,7 +39,9 @@ Apply this placement rule when changing model-facing behavior:
    force one eval through.
 
 ## Steering the small model: prefer guidance over middleware
-This project runs a small local model (Qwen3.6-27B). We shape its behavior primarily by **instructing it** (skills, prompts), not by wrapping it in deterministic middleware. Middleware guardrails are a last resort, not a first reflex.
+Code is run against Qwen3.6-27B (Q4_K_M gguf) on a local llama.cpp instance — OpenAI-compatible, served at `ASSIST_MODEL_URL`. It is a Qwen3 *reasoning* model (emits `<think>` / `reasoning_content`), so the streaming + empty-response handling account for thinking blocks. Prompt and tool-surface decisions optimize for this model's failure modes, not GPT-4-class behavior. When evidence is needed, run the eval rather than reasoning from training-data intuitions.
+
+We shape its behavior primarily by **instructing it** (skills, prompts), not by wrapping it in deterministic middleware. Middleware guardrails are a last resort, not a first reflex.
 
 1. **Guidance first; middleware only when guidance provably can't.** When the model misbehaves, fix it by changing what we tell it (a skill / prompt) before adding a middleware guard. Reach for middleware only after eval evidence shows guidance can't carry it — and even then, weigh it. A guard that has to re-do the model's task, or inspect state the model already has, is usually the wrong tool.
    - Worked example: the org mid-section insertion bug. A deterministic `edit_file` guard was leaky (blind to anything outside the edit's `old_string`) and amounted to "doing the agent's job for it"; an eval-driven **skill** rewrite took it from 0/5 to ~4/5 with no middleware. See `docs/2026-06-03-org-insertion-mid-section.org`.
@@ -185,6 +74,14 @@ When changing how the model behaves (a skill, a prompt, a tool surface):
    explicit capability contracts must pass completely. Put a baseline-versus-
    candidate table with every stage and pass count in the PR description.
 
+# Skill and eval contracts
+
+- **Eval-first contracts.** Tests in `edd/eval/` define what the system is supposed to do. When in doubt, the test wins. Don't change tests to accommodate the implementation; redesign the implementation to satisfy the existing tests.
+
+- **Generic skills/prompts; eval prompts probe cases the skill doesn't telegraph.** When you write or refine a skill description, prompt template, or example list, *check whether the wording is too closely aligned with the eval that validates it*. If a skill's examples mirror eval prompts almost verbatim, the eval mostly tests lexical proximity rather than the skill's actual generalization — and a high pass rate is misleading. Two consequences when you spot high alignment: (a) make the skill/prompt cover the *shape* of real user requests, not just the eval-shaped ones; (b) expand the eval suite with cases the skill's wording does **not** telegraph — that's how you actually probe generalization.
+
+- **Skill frontmatter is YAML — avoid `: ` (colon-space) in unquoted description values.** A colon-space inside an unquoted YAML scalar starts a new mapping, breaking the skill loader (silent failure: `deepagents.middleware.skills` logs a warning and the skill is unreachable, so it never loads). Bit the calculate migration on `"stdev of these nine measurements: ..."`. Either drop the colon, rephrase to avoid `: `, or quote the whole description value. Same applies to other YAML-special sequences (`#` comments, leading `-` / `?` / `*`, balanced `[`/`{`). Run `python -c "import yaml; yaml.safe_load(open('SKILL.md').read().split('---')[1])"` after any frontmatter edit if you used punctuation that might trip the parser.
+
 # Testing guidelines
 1. Always run python tests (`pytest`) whenever any python files are modified and iterate on any failures until tests pass.
 2. Always run the emacs linter (`eldev lint` or `eldev lint -f [file]`) whenever any elisp files are modified.
@@ -192,8 +89,27 @@ When changing how the model behaves (a skill, a prompt, a tool surface):
 4. Always run any new elisp functions for correct functionality (using `eldev eval [expression]`) and iterate on any failures until all tests pass.
 5. **ALWAYS MOCK the research subagent in evals — unless the eval specifically tests research/search behavior.** Real search hits the self-hosted SearXNG, which rate-limits under a burst (the whole suite grinds for hours + trips "search unavailable" false-negatives). Only a *few crucial* evals do real search (`test_research_agent`, `test_research_reliability`); every *other* eval that happens to trigger research must stub the research subagent to return canned findings immediately — use the shared `stub_research_subagent` helper (generalized from `test_context_agent`'s `_stub_subagent`). Mocking also adds determinism (canned findings vs stochastic search). See `docs/2026-07-06-research-eval-mocking.org`. When you DO run a real-search eval, run it slowly/serially and grep the log for rate-limit messages (`_SEARCH_UNAVAILABLE` / "search unavailable") so a throttled run isn't mistaken for a real failure.
 
+## Failure-condition verification
+
+Load-bearing paths include locks, `THREAD_QUEUE`, the single-worker uvicorn
+event loop, and the message-submit/render hot path (`manage/web/threads.py`
+`_process_message`). After a layout or packaging refactor, smoke
+`python -m manage.web`, the service entry point.
+
+Code reached inline from an async handler must not block the single-worker
+uvicorn event loop with locks, file/network I/O, subprocesses or sleeps. Use a
+lock-free path or move blocking work off the loop with `run_in_threadpool`;
+exercise actual contention and assert the handler returns promptly.
+
+- **Test the symptom, not the proxy.** When the bug is user-visible, the test must reproduce the user's actual symptom and assert it's gone — for a render bug, render the page and assert against the HTML (the element is present *and* in the right position), not an intermediate status field. Asserting `status == "queued"` is not the same as asserting the message appears where the user looks.
+- **Don't mock away the risk.** Name the risky interaction a change introduces (a lock, a shared resource, a concurrency edge) and exercise it **un-mocked** in at least one test. Mocking the very thing whose timing/contention is the hazard gives false confidence — mocking the queue handle hid the lock that deadlocked the loop. For an event-loop concern, hold the contended resource in another thread and assert the call still returns promptly.
+- **Verify under the failure condition, not idle.** Smoke (or `/verify`) a fix under the condition that triggered the bug, not a healthy idle path. "HTTP 200 on an idle box" can't surface a load-only deadlock; "a second prompt while a real long turn holds the queue" can. State the trigger and reproduce it.
+- *(Mechanical backstop for event-loop work.)* Run the web tests or a smoke with `PYTHONASYNCIODEBUG=1` — asyncio debug mode logs any callback that blocks the loop past `loop.slow_callback_duration`, so a stall trips a warning instead of waiting to be spotted by eye.
+
 # Documentation guidelines
 README files are always updated as new user-facing functionality is added or modified. Do not clutter the top-level README file(s) - always add sections as needed.
+
+Do not add tutorial docs, design docs or README sections that were not requested. For requested documentation, mirror the existing format.
 
 # Configuration & repository hygiene
 Host-specific values — absolute paths inside someone's home directory, deploy hosts, service-specific identifiers — must never land in committed files. They go in `.dev.env` (local development) or `.deploy.env` (production); both are gitignored. Use the existing patterns:
@@ -214,64 +130,13 @@ Host-specific values — absolute paths inside someone's home directory, deploy 
 
 Before committing a script or example, grep your diff for your own `/home/<you>/...` and any production hostnames; if anything matches, lift it into env first.
 
-# Deploying after a merge
-Whenever something lands on `main` — merged by Claude **or** by the user — deploy the latest `main` to prod as the next step: `make deploy-code` then `make restart`. A merge alone changes nothing live; prod runs the rsync'd copy under `$DEPLOY_PATH`, so runtime changes (agent, middleware, skills, sandbox image) have no effect until deployed. After deploying, verify the running code actually contains the change (e.g. `grep` the deployed file for a new symbol) and that the service is healthy.
+- **No real user/family PII in tracked or published artifacts.**  Never put real personal details — a child's or spouse's name, ages, birthdays, addresses — into source, **test fixtures**, prompt examples, eval queries, design docs, commit messages, or **GitHub PR descriptions / review comments**.  Invent synthetic personas (e.g. `Sam`, `Jordan`, a made-up age/date) for fixtures and examples from the start.  Before committing, grep the diff for real names/ages/identifying details.  Bit `edd/eval/test_context_agent.py` (a son's name + age, a spouse's name + birthdays), a `research_instructions.txt.j2` example (`kids_watch.md`), an eval query, a design doc, and PR #120's public description — which had also reached deployed prod code and `main`'s history; scrubbed 2026-06-01.  When PII has already leaked, scrubbing current files isn't enough: it persists in git history (usually on `main`, not just the branch) and in deployed code, so the cleanup needs a history rewrite + redeploy.
 
-Do not leave `main` ahead of prod silently: a "merged but not deployed" gap is invisible until a live thread hits the missing behavior. (This bit us: in-repo domain skills + the `elisp` skill were merged but undeployed, so a thread couldn't see a committed in-repo skill — prod had no discovery code.)
+# Runtime deployment facts
+
+Production runs the copy under `$DEPLOY_PATH`; a source merge alone does not
+update it. `make deploy-code` copies the code, and runtime changes need the
+appropriate restart and verification. Verify installed source identity and
+service health after deployment.
 
 Caveat for in-repo skills specifically: the skill list is cached per session in the thread's checkpoint, so an **existing** thread won't pick up a newly-discovered domain skill even after deploy — a new chat will. New threads work immediately.
-
-# Development workflow (three-phase) — the process any agent follows here
-
-Non-trivial changes follow **Design → Code → Review**. *Blast radius, not line count, sets
-rigor* — a 6-line change to a lock, `THREAD_QUEUE`, the asyncio event loop, or the
-message-submit hot path (`manage/web/`) gets the FULL treatment, *especially* a rushed
-regression fix. Trivial fixes / doc edits / single-file no-behavior refactors skip it.
-
-**Phase 1 — Design (before any code).** Produce a numbered implementation plan (files to
-touch, file:line refs, trade-offs, risks). Then run the **design-review lenses** in
-`.claude/agents/design-reviewer.md` — one reviewer per lens (simplicity, agentic-fit,
-user-intention, UX-walk-the-flow, clean-interfaces, threat-model, event-loop-liveness).
-Read every report; revise the plan where well-founded, justify where not.
-- *Codex:* `codex exec "<architect brief>" -C .` for the plan; `codex exec "<lens brief + the plan>"`
-  per lens (fan out in the background).
-- *Claude Code:* the `Plan` subagent for the plan; one `general-purpose` subagent per lens.
-- Each non-trivial feature gets a `docs/<date>-<slug>.org` state doc.
-
-**Phase 2 — Code.** Implement against the plan; run the tests/evals; then the **code-review
-lenses** in `.claude/agents/code-reviewer.md` (simplicity, clean-code, adversarial-security
-[HARD for new network/root/untrusted-input code], event-loop-liveness, readability, existing-
-patterns, design-adherence, docstring-alignment [its own pass], shared-logic/LOC). Fix
-BLOCKER/IMPORTANT, re-run.
-- *Codex:* `codex review "<lens instructions>" --uncommitted` (or `--base main`) per lens; fan out.
-- *Claude Code:* one `code-reviewer` subagent per lens.
-
-**Phase 3 — Review + ship.** Run the **local review loop to convergence** (the global
-`~/.codex/AGENTS.md` "The loop"). Then **deploy from the feature branch for parallel testing**
-(`make deploy-code` + `make restart` — see the `make restart` hang gotcha), tell Pierre it's
-live, and open the GitHub PR + run the **Copilot loop** (bridge period; cap 7 rounds; log
-meaningful comments to `~/src/agentic/review-bridge-log.md`). Redeploy on every review-driven
-change. Then Pierre merges (commits landing on `main` need his go-ahead); re-pin the agentic
-submodule; deploy `main`.
-
-**Eval cadence (assist-specific — evals are the contract):** follow the survey,
-N=3 baseline/testing, N=5 confidence, and N=10 stability requirement above.
-Treat any pass-rate drop versus baseline as a regression. **Reproduce the
-failure in an eval FIRST**; measure, don't argue. Change one thing at a time.
-Mock the research sub-agent unless the eval tests search. Baseline a NEW eval
-on `main` first. Run evals via the deploy venv; respect the eval duty-cycle +
-(when re-enabled) the nightly-cron window — see the meta `AGENTS.md` "Infra &
-ops facts".
-
-**Branching:** off `main` only, never off another feature branch (wait for the dependency to
-merge). Commit/push freely on feature branches; commits that land on `main` need explicit
-go-ahead. Prefer ff merges. Deploy from a feature branch is OK, but only one branch is prod's
-source at a time (`deploy-code` is `rsync --delete`).
-
-**Load-bearing paths (trigger full rigor):** locks, `THREAD_QUEUE`, the single-worker-uvicorn
-event loop, the message-submit hot path (`manage/web/threads.py` `_process_message` / render).
-Test the symptom not a proxy; don't mock away the risk; verify under the failure condition;
-smoke `python -m manage.web` (systemd's entry) after a layout/packaging refactor.
-
-**Testing hygiene:** `pytest tests/` (mocked, fast) always after Python changes; `eldev lint` +
-`eldev test` after elisp. See "Testing guidelines" above for the research-mock rule.
