@@ -99,7 +99,8 @@ where reliability is harder than with frontier APIs.
   and retried, and failed turns roll back to a checkpoint instead of
   ending the thread. Bounded conversation summaries disable hidden reasoning
   so the output budget is available for the summary; failed summaries preserve
-  the raw history.
+  the raw history. Streamed replies retain provider token usage so existing
+  compaction thresholds also use measured context consumption.
 
 - **Loop and stall guards.** Repeating tool calls and empty model
   responses are detected and recovered automatically — keeps small
@@ -119,6 +120,12 @@ where reliability is harder than with frontier APIs.
   thread ref and invoke the same explicit server Merge & Push operation as the
   web button, conditional on the displayed published commit still being the
   fetched tip. It never merges local device work or selects a caller-supplied ref.
+
+The authenticated phone thread catalog includes urgent, unread, and nullable
+unmerged indicators. A rendered snapshot revision can be acknowledged through
+`POST /api/v1/phone/threads/{tid}/open`; newer notification identities remain
+unread even when history is unchanged or a mark races the acknowledgement.
+Snapshot reads and background probes do not clear notifications.
 
 - **Multiple frontends, one Deep Agents core.** Web UI, CLI, and an Emacs
   integration share the standard agent runtime, memory, and domain repos.

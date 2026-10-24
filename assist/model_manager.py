@@ -314,6 +314,8 @@ def _build_openai_chat_model(
         # in one place gives uniform logging and predictable bounds
         # on per-call wall-clock.
         "max_retries": 0,
+        # Custom endpoints otherwise omit the usage that drives compaction.
+        "stream_usage": True,
         "timeout": request_timeout or _build_request_timeout(),
         "callbacks": [_ModelNotFoundCacheBuster()],
         "base_url": base_url,

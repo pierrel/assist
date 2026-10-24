@@ -136,6 +136,14 @@ class _SendMessage(_StrictModel):
     message: Annotated[str, Field(min_length=1, max_length=MAX_MESSAGE_CHARS)]
 
 
+class _OpenThread(_StrictModel):
+    # The revision of the settled snapshot the phone actually rendered, so the
+    # server can tell "the user saw exactly this view" from "something newer
+    # arrived since". Legacy clients may omit the entire body; a nonempty
+    # JSON body requires a revision. Only empty bodies clear unconditionally.
+    revision: str
+
+
 class _ApprovalDecision(_StrictModel):
     kind: Literal["send_email", "email_archive", "email_delete", "send_reply", "egress", "geo_download"]
     token: Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")]
@@ -147,7 +155,7 @@ class _ApprovalDecision(_StrictModel):
 
 
 async def _validated_body(request: Request, model: type[_StrictModel],
-                          max_bytes: int = MAX_BODY_BYTES) -> _StrictModel:
+                          max_bytes: int = MAX_BODY_BYTES, *, allow_empty: bool = False) -> _StrictModel | None:
     """Read one bounded strict JSON request without trusting Content-Length."""
     content_length = request.headers.get("content-length")
     if content_length:
@@ -161,6 +169,8 @@ async def _validated_body(request: Request, model: type[_StrictModel],
         if len(body) + len(chunk) > max_bytes:
             raise HTTPException(status_code=413, detail="Request body too large")
         body.extend(chunk)
+    if allow_empty and not body:
+        return None
     try:
         return model.model_validate_json(bytes(body))
     except ValidationError as error:
@@ -563,6 +573,7 @@ def _thread_history(tid: str, before: str | None) -> tuple[list[dict], bool, boo
 
 def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
     _thread_dir(tid)
+    notification_revision = state._notification_revision(tid)
     if before is not None and not _HISTORY_CURSOR_RE.fullmatch(before):
         raise HTTPException(status_code=422, detail="Invalid history cursor")
     raw_messages, stored_has_more, checkpoint_backed = _thread_history(tid, before)
@@ -617,7 +628,7 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
         last_consumed_raw = raw, ordinal
     messages.reverse()
     revision = hashlib.sha256(json.dumps(
-        [status.get("stage", "ready"),
+        [status.get("stage", "ready"), notification_revision,
          *[(item["id"], item["role"], item["state"]) for item in messages]],
         separators=(",", ":")
     ).encode("utf-8")).hexdigest()[:24]
@@ -651,6 +662,31 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
     }
 
 
+def _open_thread(tid: str, viewed_revision: str | None) -> dict[str, Any]:
+    """Clear only the notifications represented by the rendered snapshot.
+
+    Snapshot/history reads remain outside the marker lock. A second identity
+    check under that lock makes a concurrent mark survive the acknowledgement.
+    Empty legacy bodies retain their unconditional clear behavior.
+    """
+    _thread_dir(tid)
+    notification_revision = state._notification_revision(tid)
+    if viewed_revision is not None:
+        try:
+            current_revision = _snapshot(tid)["thread"]["revision"]
+        except Exception:
+            return {"thread_id": tid, "cleared": False}
+        if current_revision != viewed_revision:
+            return {"thread_id": tid, "cleared": False}
+    with state._NOTIFICATION_LOCK:
+        if (viewed_revision is not None
+                and notification_revision != state._notification_revision(tid)):
+            return {"thread_id": tid, "cleared": False}
+        state._clear_unseen_response(tid)
+        state._clear_urgent(tid)
+    return {"thread_id": tid, "cleared": True}
+
+
 def _thread_repo_summary(tid: str, status: dict[str, Any]) -> tuple[str | None, str]:
     """Use the host-owned source binding, never the workspace's mutable origin."""
     from assist.git_sync import GitSyncError, read_state, source_label
@@ -668,21 +704,37 @@ def _thread_repo_summary(tid: str, status: dict[str, Any]) -> tuple[str | None, 
 
 def _list_threads() -> dict[str, Any]:
     values: list[tuple[int, dict[str, Any]]] = []
+    review_bases: dict[str, str | None] = {}
     for tid in state.MANAGER.list()[:MAX_THREADS]:
         try:
             status = state._get_status(tid)
+            stage = status.get("stage", "ready")
             repo_key, repo_label = _thread_repo_summary(tid, status)
             title = _stored_thread_title(tid)
             activity_at = os.stat(_thread_dir(tid)).st_mtime
-            values.append((threads._thread_status_rank(tid, status.get("stage", "ready")), {
+            unread = state._has_unseen_response(tid)
+            urgent = state._has_urgent(tid)
+            # The unmerged pill is masked by any stronger pill (a live busy
+            # stage, error, urgent, or an unread reply — the same precedence
+            # the web index's badge chain uses).  When one is present, skip the
+            # (expensive, git-subprocess) check entirely: the phone polls this
+            # catalog, and "not checked" (None) is the honest answer, never a
+            # false "no".  review_bases caches the bound main OID per list pass.
+            if stage in threads.BUSY_STAGES or stage == "error" or urgent or unread:
+                unmerged = None
+            else:
+                unmerged = state._has_unmerged_changes(tid, review_bases)
+            values.append((threads._thread_status_rank(tid, stage), {
                 "id": tid,
                 "description": title,
                 "search_description": _normalized_search_title(title),
                 "harness": read_thread_engine(_thread_dir(tid)).name,
-                "status": status.get("stage", "ready"),
+                "status": stage,
                 "repo_key": repo_key,
                 "repo_label": repo_label,
-                "unread": state._has_unseen_response(tid),
+                "unread": unread,
+                "urgent": urgent,
+                "unmerged": unmerged,
                 "activity_at": activity_at,
                 "revision": _thread_revision_cursor(tid),
             }))
@@ -1383,6 +1435,15 @@ async def merge_thread(tid: str, request: Request) -> Response:
     finally:
         _MERGE_SLOTS.release()
     return JSONResponse({"outcome": outcome}, status_code=409 if outcome == "conflict" else 200)
+
+
+@router.post("/threads/{tid}/open")
+async def open_thread(tid: str, request: Request) -> dict[str, Any]:
+    """Acknowledge a rendered revision; actual empty bodies support old clients."""
+    body = await _validated_body(request, _OpenThread, allow_empty=True)
+    assert body is None or isinstance(body, _OpenThread)
+    return await anyio.to_thread.run_sync(_open_thread, tid,
+                                         None if body is None else body.revision)
 
 
 @router.get("/threads/{tid}/history")
