@@ -60,6 +60,10 @@ commit. A competing phone push leaves the server's completed commit on
 =assist-result/<commit>= and the Run names that branch for a local merge.
 New threads publish their branch before the first model turn, even when it
 initially points at main. No-change turns also verify publication.
+If a turn fails after writing files, verified sandbox teardown is followed by a
+local recovery commit. The Run keeps its error; the next fresh turn publishes
+the retained commit through normal preflight. A failed recovery commit preserves
+the files and reports the Git condition requiring reconciliation.
 
 The phone has its own Git credential and ordinary persistent checkout. Sending
 a message neither commits nor pulls phone files. A fresh phone fetch after a

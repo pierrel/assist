@@ -436,6 +436,9 @@ class TestPostReviewRoute:
         class Lifecycle:
             bound = False
 
+            def preserve_on_error(self, *_args, **_kwargs):
+                return nullcontext()
+
             def prepare(self, _timezone, *, terminalize_dirty=None):
                 observed[0] = changed
 
@@ -478,6 +481,9 @@ class TestPostReviewRoute:
 
         class Lifecycle:
             bound = False
+
+            def preserve_on_error(self, *_args, **_kwargs):
+                return nullcontext()
 
             def prepare(self, _timezone, *, terminalize_dirty=None):
                 pass

@@ -267,7 +267,7 @@ def test_sqlite_approval_end_waits_for_git_finalization(sqlite_approval, monkeyp
             raise GitSyncError("Git finalization failed")
     lifecycle = SimpleNamespace(bound=True, resume=lambda:None,
         require_sandbox=lambda value:None, cleanup_model=lambda value:None,
-        model_starting=lambda:None, finish_visible=finish)
+        model_starting=lambda:None, preserve_on_error=lambda *args, **kwargs:nullcontext(), finish_visible=finish)
     monkeypatch.setattr(threads.GitLifecycle, "acquire", lambda *args, **kwargs:nullcontext(lifecycle))
     try:
         threads._execute_run(accepted.id, tid)
@@ -374,7 +374,7 @@ def test_precompletion_git_error_is_atomically_repairable(sqlite_approval, monke
             raise GitSyncError(error)
     lifecycle = SimpleNamespace(bound=True, resume=lambda:boundary("resume"),
         require_sandbox=lambda value:boundary("sandbox"), cleanup_model=lambda value:None,
-        model_starting=lambda:None, finish_visible=lambda *args:None)
+        model_starting=lambda:None, preserve_on_error=lambda *args, **kwargs:nullcontext(), finish_visible=lambda *args:None)
     def acquire(*args, **kwargs):
         boundary("ownership")
         return nullcontext(lifecycle)

@@ -110,6 +110,7 @@ from edd.live_capture import CaptureStorageFull
 from manage.web.app import app
 from manage.web.thread_git_lifecycle import (
     ThreadGitLifecycle as GitLifecycle,
+    error_notes as git_error_notes,
     preflight_fence_error as git_preflight_fence_error,
     recovery_error as git_recovery_error,
 )
@@ -2660,11 +2661,12 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                         run.work_id,
                         thread_scope=(MANAGER.root_dir, run.parent_thread_id),
                         owner_run_id=run.id))
-                    if git_lifecycle.bound:
-                        child_scope.callback(cleanup_child_sandbox)
                     # The child shares its active parent's checkout. A phone
                     # push during that parent turn must not change this base.
                     git_lifecycle.resume()
+                    child_scope.enter_context(git_lifecycle.preserve_on_error(None))
+                    if git_lifecycle.bound:
+                        child_scope.callback(cleanup_child_sandbox)
                     try:
                         sandbox = _get_sandbox_backend(
                             run.parent_thread_id, include_agent=False,
@@ -2737,14 +2739,14 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
         if current.status in {"pending", "running"}:
             with _RUN_ADMISSION_LOCK:
                 run = _runs().transition(
-                    run.thread_id, run.id, "timeout", error=str(exc))
+                    run.thread_id, run.id, "timeout", error=str(exc) + git_error_notes(exc))
     except Exception as exc:
         logging.error("child run %s failed", run.id, exc_info=True)
         current = _runs().get(run.thread_id, run.id)
         if current.status == "running":
             with _RUN_ADMISSION_LOCK:
                 run = _runs().transition(
-                    run.thread_id, run.id, "error", error=str(exc))
+                    run.thread_id, run.id, "error", error=str(exc) + git_error_notes(exc))
         else:
             run = current
     finally:
@@ -3068,7 +3070,7 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
         with THREAD_QUEUE.acquire(tid, user_priority=user_priority), GitLifecycle.acquire(
                 MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid),
                 run.work_id, thread_scope=(MANAGER.root_dir, tid),
-                owner_run_id=run.id) as git_lifecycle:
+                owner_run_id=run.id) as git_lifecycle, ExitStack() as error_scope:
             # The selector's earlier check only permits reservation. This
             # authority-bearing recheck prevents a queued Pi Run from starting
             # after the operator disables the preview.
@@ -3110,6 +3112,8 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
                     result.evicted_skills, result.history_summary)
 
             _set_status(tid, "processing", pending_message=run.text, started_at=_now_ms())
+            error_scope.enter_context(
+                git_lifecycle.preserve_on_error((run.rider or {}).get("tz")))
             result = _PI_RUNTIME.run(
                 work_dir=MANAGER.thread_default_working_dir(tid), timezone=(run.rider or {}).get("tz"),
                 prompt=run.text, history=history, system_prompt=_pi_system_prompt(),
@@ -3143,11 +3147,11 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
             if current.status == "pending" and isinstance(error, GitSyncError):
                 current = _runs().claim(tid, run.id)
             if current.status == "running":
-                _runs().transition(tid, run.id, "error", error=str(error))
+                _runs().transition(tid, run.id, "error", error=str(error) + git_error_notes(error))
             other_running = any(candidate.id != run.id and candidate.status == "running"
                                 for candidate in _runs().list(tid))
         if not other_running:
-            _set_status(tid, "error", error=str(error), pending_message=run.text)
+            _set_status(tid, "error", error=str(error) + git_error_notes(error), pending_message=run.text)
     finally:
         _dispatch_pending_after(tid, run.id)
 
@@ -3484,7 +3488,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid),
                 _run.work_id if _run else tid,
                 thread_scope=(MANAGER.root_dir, tid),
-                owner_run_id=_run.id if _run else None) as git_lifecycle:
+                owner_run_id=_run.id if _run else None) as git_lifecycle, ExitStack() as error_scope:
             # A queued run remains pending until it actually owns THREAD_QUEUE. This
             # is what makes it visible to the active turn's interjection reader. Two
             # dispatchers for one run serialize here; only the first can claim it.
@@ -3617,6 +3621,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 if current_review != _run.review_snapshot:
                     raise GitSyncError("Review changed while queued; refresh and re-anchor. "
                                        "Your comments remain in the saved review Run.")
+            error_scope.enter_context(git_lifecycle.preserve_on_error(
+                rider.tz if rider else None, control_errors=(_SupersedeCapReached,)))
             sandbox = None
             sandbox_generation = None
             browser_session = None
@@ -4015,7 +4021,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                    "again to retry in a fresh sandbox."
                    + (" A follow-up this turn had scheduled was cancelled."
                       if _cancelled else "")
-                   + (_REJOURNAL_NOTE if _rejournaled else "")),
+                   + (_REJOURNAL_NOTE if _rejournaled else "")
+                   + git_error_notes(e)),
             **pending_kwargs,
         )
     except GraphRecursionError as e:
@@ -4033,11 +4040,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                    "into smaller parts."
                    + (" A follow-up this turn had scheduled was cancelled."
                       if _cancelled else "")
-                   + (_REJOURNAL_NOTE if _rejournaled else "")),
+                   + (_REJOURNAL_NOTE if _rejournaled else "")
+                   + git_error_notes(e)),
             **pending_kwargs,
         )
     except GitSyncError as error:
-        message = str(error)
+        message = str(error) + git_error_notes(error)
         if _terminal is not None:
             if _cancel_this_turns_continuations(tid, _pre_turn_conts):
                 message += " A follow-up this turn had scheduled was cancelled."
@@ -4087,7 +4095,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             _set_status(tid, "error",
                         error=("The background follow-up I promised couldn't be "
                                "completed. Ask me to retry it."
-                               + (_REJOURNAL_NOTE if _rejournaled else "")),
+                               + (_REJOURNAL_NOTE if _rejournaled else "")
+                               + git_error_notes(e)),
                         **pending_kwargs)
             append_event(MANAGER.thread_dir(tid), "continuation_failed",
                          id=event_id or "", error=str(e)[:300])
@@ -4096,7 +4105,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             _set_status(tid, "error",
                         error=str(e) + (" A follow-up this turn had scheduled "
                                         "was cancelled." if _cancelled else "")
-                        + (_REJOURNAL_NOTE if _rejournaled else ""),
+                        + (_REJOURNAL_NOTE if _rejournaled else "")
+                        + git_error_notes(e),
                         **pending_kwargs)
     finally:
         # Discard this completed slice's hold on terminal exit. A mailbox proposal

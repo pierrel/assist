@@ -51,6 +51,7 @@ def test_parent_hold_wakes_after_child_scope(monkeypatch, tmp_path, bound, outco
         monkeypatch.setattr(thread_git_lifecycle, "ThreadGit", lambda *_args: object())
         monkeypatch.setattr(threads.GitLifecycle, "resume", lambda _self: None)
         monkeypatch.setattr(threads.GitLifecycle, "finish_child", lambda *_args: None)
+        monkeypatch.setattr(threads.GitLifecycle, "_commit", lambda *_args: None)
     entered, release = Event(), Event()
 
     def stop(*_args, **_kwargs):
