@@ -175,14 +175,20 @@ def _sandbox_generations(threads_root: str,
                 if thread_id is not None else None)
     # The Engine list already includes mount metadata. A second inspect can
     # lose an auto-removed container between list and scope verification.
+    # Cap the entire streamed response before decoding, including other metadata.
     try:
-        snapshot = SandboxManager._get_docker_client().api.containers(
-            all=True, filters={"label": "assist.sandbox=true"})
+        api = SandboxManager._get_docker_client().api
+        with api._get(api._url("/containers/json"), stream=True,
+                      params={"all": 1, "filters": json.dumps({"label": ["assist.sandbox=true"]})},
+                      headers={"Accept-Encoding": "identity"}) as response:
+            response.raise_for_status()
+            payload = response.raw.read(262145, decode_content=False)
+            if len(payload) > 262144:
+                raise ValueError("sandbox snapshot exceeds limit")
+        snapshot = json.loads(payload)
         if not isinstance(snapshot, list):
             raise ValueError("invalid container list")
         mounts = [(entry["Id"], entry["Mounts"]) for entry in snapshot]
-        if len(json.dumps(mounts).encode("utf-8")) > 262144:
-            raise ValueError("sandbox mount snapshot exceeds limit")
     except Exception as error:
         raise BrowserUnavailable("sandbox generation scan is unavailable") from error
     found = set()

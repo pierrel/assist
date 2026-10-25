@@ -1,5 +1,6 @@
 """Host browser transport and exact Docker teardown stay bounded."""
 import fcntl
+from contextlib import closing
 import json
 import os
 import sys
@@ -282,7 +283,11 @@ def test_sandbox_generation_scan_matches_exact_thread_mount(
         {"Id": "other", "Mounts": [{"Destination": "/workspace",
             "Source": str(tmp_path / "other" / "domain")}]},
     ]
-    client = SimpleNamespace(api=SimpleNamespace(containers=lambda **kwargs: snapshot))
+    response = SimpleNamespace(
+        raw=SimpleNamespace(read=lambda size, **kwargs: json.dumps(snapshot).encode()[:size]),
+        raise_for_status=lambda: None, close=lambda: None)
+    client = SimpleNamespace(api=SimpleNamespace(
+        _url=lambda path: path, _get=lambda *args, **kwargs: closing(response)))
     monkeypatch.setattr(browser.SandboxManager, "_get_docker_client", lambda: client)
     assert browser._sandbox_generations(
         str(tmp_path), "target-thread") == {"target"}
