@@ -23,7 +23,6 @@ from logging.handlers import RotatingFileHandler
 from typing import Dict
 
 from fastapi import FastAPI
-from langgraph.config import get_config
 from starlette.concurrency import run_in_threadpool
 import anyio
 
@@ -37,6 +36,7 @@ from assist.schedule.tools import schedule_tools
 from assist.events.store import SubscriptionStore
 from assist.events.tools import subscription_tools
 from assist.events.quiet import quiet_tools
+from assist.events.thread_description import thread_description_tools
 from assist.events.reply import reply_tools, REPLY_INTERRUPT_ON
 from assist.events.email import email_tools, EMAIL_INTERRUPT_ON
 from assist.gmail import gmail_tools, GMAIL_INTERRUPT_ON
@@ -205,26 +205,6 @@ _egress_tools = (egress_tools(EGRESS_STORE, EGRESS_BASE_HOSTS,
                  if EGRESS_STORE else [])
 
 
-def update_thread_description(description: str) -> str:
-    """Set the current thread's description/title when the user asks to rename it.
-
-    Pass the requested one-line title. This changes only this thread.
-    """
-    tid = ((get_config() or {}).get("configurable") or {}).get("thread_id")
-    if not tid:
-        return "This tool is only available in a thread."
-
-    description = " ".join(description.split())[:120]
-    if not description:
-        return "The description cannot be empty; the current description was kept."
-
-    try:
-        set_description(tid, description)
-    except FileNotFoundError:
-        return "This thread no longer exists."
-    return "Updated this thread's description."
-
-
 def _request_quiet(tid: str, run_id: str) -> bool:
     from manage.web.threads import _runs
     return _runs().request_quiet(tid, run_id)
@@ -233,7 +213,8 @@ def _request_quiet(tid: str, run_id: str) -> bool:
 set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE)
               + notify_tools(lambda tid: _mark_urgent(tid))
               + quiet_tools(_request_quiet)
-              + [update_thread_description]
+              + thread_description_tools(
+                  lambda tid, description: set_description(tid, description))
               + _geo_tools + email_tools() + gmail_tools() + [get_location]
               + frequency_tools(FREQUENCY_STORE))
 set_execution_egress_tools(_egress_tools)
