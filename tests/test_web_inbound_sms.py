@@ -1,8 +1,7 @@
-"""Route tests for inbound-SMS + reply-approval: auth, dedup, dispatch queued, gating.
+"""SMS route authentication, durable archive/Run admission and reply approval.
 
-The route + dispatch are exercised for real (auth, the durable claim, BackgroundTask
-scheduling); the triage turn itself (_dispatch_event → _process_message) is stubbed to a
-spy so the LLM/sandbox isn't needed.
+Storage and admission run for real; _execute_run is stubbed so these tests
+need neither a model, sandbox container nor a real SMS transport.
 """
 import pytest
 from types import SimpleNamespace
@@ -20,9 +19,13 @@ def client(tmp_path, monkeypatch):
     tdir.mkdir()
     monkeypatch.setattr(web.MANAGER, "root_dir", str(tmp_path))
     monkeypatch.setattr(web.MANAGER, "thread_dir", lambda tid: str(tmp_path / tid))
-    # Repoint the durable inbound log at the tmp root so dedup is isolated per test.
-    from assist.events.inbound import InboundLog
-    monkeypatch.setattr(threads, "INBOUND_LOG", InboundLog(str(tmp_path)))
+    from assist.events.model import Subscription
+    from assist.events.store import SubscriptionStore
+    store = SubscriptionStore(str(tmp_path))
+    store.add(Subscription("subscription", "t-sub", ".*", "from {sender}: {text}"))
+    monkeypatch.setattr(threads, "SUBSCRIPTION_STORE", store)
+    monkeypatch.setenv("ASSIST_SMS_ARCHIVE_DIR", str(tmp_path / "sms-archive"))
+    monkeypatch.setenv("ASSIST_THREADS_DIR", str(tmp_path / "thread-workspaces"))
     return TestClient(web.app)
 
 
@@ -53,22 +56,82 @@ def test_inbound_401_bad_secret(client, monkeypatch):
 def test_inbound_accepts_and_dispatches(client, monkeypatch):
     monkeypatch.setenv("ASSIST_SMS_SECRET", "s3cret")
     calls = []
-    monkeypatch.setattr(threads, "_dispatch_event", lambda sender, text: calls.append((sender, text)))
+    def execute(run_id, tid):
+        run = threads._runs().get(tid, run_id)
+        calls.append((run.sender, run.text))
+    monkeypatch.setattr(threads, "_execute_run", execute)
     r = client.post("/inbound/sms", json=_body(), headers={"X-Assist-SMS-Secret": "s3cret"})
     assert r.status_code == 200 and r.json()["status"] == "accepted"
-    assert calls == [("+15551234567", "hi")]   # dispatched once, off the response path
+    assert calls == [("+15551234567", "from +15551234567: hi")]
 
 
 def test_inbound_dedup_same_message_id(client, monkeypatch):
     monkeypatch.setenv("ASSIST_SMS_SECRET", "s3cret")
     calls = []
-    monkeypatch.setattr(threads, "_dispatch_event", lambda sender, text: calls.append(1))
+    monkeypatch.setattr(threads, "_execute_run", lambda *_: calls.append(1))
     h = {"X-Assist-SMS-Secret": "s3cret"}
     first = client.post("/inbound/sms", json=_body(mid="dup1"), headers=h)
     second = client.post("/inbound/sms", json=_body(mid="dup1"), headers=h)
     assert first.json()["status"] == "accepted"
     assert second.json()["status"] == "duplicate"
     assert len(calls) == 1                       # the duplicate did NOT re-dispatch
+
+
+def test_archive_acceptance_interruption_recovers_same_run_once(client, monkeypatch):
+    from assist.events.sms_archive import configured_archive
+    monkeypatch.setenv("ASSIST_SMS_SECRET", "s3cret")
+    original = threads._create_run
+    monkeypatch.setattr(threads, "_create_run", lambda *a, **k: (_ for _ in ()).throw(OSError("interrupted")))
+    h = {"X-Assist-SMS-Secret": "s3cret"}
+    assert client.post("/inbound/sms", json=_body(), headers=h).status_code == 503
+    pending = configured_archive().read("abc123")
+    assert pending["handling"] == "pending"
+    monkeypatch.setattr(threads, "_create_run", original)
+    queued = []
+    monkeypatch.setattr(threads, "_execute_run", lambda *a: queued.append(a))
+    assert client.post("/inbound/sms", json=_body(), headers=h).status_code == 200
+    assert client.post("/inbound/sms", json=_body(), headers=h).json()["status"] == "duplicate"
+    assert len(queued) == 1 and len(threads._runs().list("t-sub")) == 1
+    assert configured_archive().read("abc123")["handling"] == "admitted"
+
+
+def test_interruption_after_run_creation_does_not_create_second_run(client, monkeypatch):
+    from assist.events.sms_archive import SmsArchive
+    monkeypatch.setenv("ASSIST_SMS_SECRET", "s3cret")
+    original = SmsArchive.mark_admitted
+    monkeypatch.setattr(SmsArchive, "mark_admitted", lambda *a: (_ for _ in ()).throw(OSError("interrupted")))
+    h = {"X-Assist-SMS-Secret": "s3cret"}
+    assert client.post("/inbound/sms", json=_body(), headers=h).status_code == 503
+    first = threads._runs().list("t-sub")[0]
+    monkeypatch.setattr(SmsArchive, "mark_admitted", original)
+    monkeypatch.setattr(threads, "_execute_run", lambda *a: None)
+    assert client.post("/inbound/sms", json=_body(), headers=h).status_code == 200
+    assert [run.id for run in threads._runs().list("t-sub")] == [first.id]
+
+
+def test_unmatched_archived_and_outgoing_receipts_never_dispatch(client, monkeypatch):
+    from assist.events.sms_archive import configured_archive
+    monkeypatch.setenv("ASSIST_SMS_SECRET", "s3cret")
+    monkeypatch.setattr(threads.SUBSCRIPTION_STORE, "route", lambda _: None)
+    monkeypatch.setattr(threads, "_execute_run", lambda *a: pytest.fail("unmatched receipt dispatched"))
+    h = {"X-Assist-SMS-Secret": "s3cret"}
+    assert client.post("/inbound/sms", json=_body(), headers=h).status_code == 200
+    assert configured_archive().read("abc123")["handling"] == "archive_only"
+    body = {"message_id": "outgoing1", "number": "+15551234567", "text": 'exact "quote"', "status": "sent"}
+    assert client.post("/sms/receipts", json=body, headers=h).json()["status"] == "sent"
+    assert client.post("/sms/receipts", json={**body, "status": "unknown"}, headers=h).json()["status"] == "sent"
+    assert client.post("/sms/receipts", json={**body, "text": "changed"}, headers=h).status_code == 409
+    assert client.post("/sms/receipts", json=body).status_code == 401
+    assert configured_archive().read("outgoing1")["text"] == 'exact "quote"'
+
+
+def test_sms_payload_bounded_and_archive_not_in_triage(client, monkeypatch):
+    monkeypatch.setenv("ASSIST_SMS_SECRET", "s3cret")
+    assert client.post("/inbound/sms", content=b"x" * (128 * 1024 + 1),
+                       headers={"X-Assist-SMS-Secret": "s3cret"}).status_code == 413
+    from assist import thread_manager as tm
+    assert {f.__name__ for f in tm._web_tools} >= {"search_sms_messages", "read_sms_message"}
+    assert not {"search_sms_messages", "read_sms_message"} & {f.__name__ for f in tm._web_triage_tools}
 
 
 def test_inbound_400_bad_message_id(client, monkeypatch):

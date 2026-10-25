@@ -1241,6 +1241,7 @@ def _write_skill(root: Path, name: str, description: str, marker: str,
 
 def _web_toolset(root: Path, *, full: bool) -> list:
     from assist.events.email import email_tools
+    from assist.events.sms_tools import sms_archive_tools
     from assist.gmail import gmail_tools
     from assist.events.notify import notify_tools
     from assist.events.quiet import quiet_tools
@@ -1255,6 +1256,7 @@ def _web_toolset(root: Path, *, full: bool) -> list:
     tools = (
         schedule_tools(ScheduleStore(str(root)))
         + subscription_tools(SubscriptionStore(str(root)))
+        + sms_archive_tools()
         + notify_tools(lambda _tid: None)
         + quiet_tools(lambda _tid, _run_id: False)
         + email_tools() + gmail_tools()
@@ -1662,6 +1664,8 @@ def _source_manifest(trace: CensusTrace) -> list[dict[str, Any]]:
 
 
 _TOOL_ORIGINS = {
+    "search_sms_messages": "assist.events.sms_tools",
+    "read_sms_message": "assist.events.sms_tools",
     "cancel_async_task": "assist.async_subagents",
     "get_async_task_status": "assist.async_subagents",
     "get_async_task_result": "assist.async_subagents",
@@ -2134,9 +2138,9 @@ _TOOL_RESULT_METADATA = {
 }
 
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "0d3f084d253d4728020d81a16c42b4da91b21463f7751d298c74ab218d443317"
+    "aa2516b9c0c6c1b29baa34f736825e21cafc9ed01684e0604c33488a521c4edd"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "429d4045ce9b641ff86a070c84268cfe8f4f08419ee4a0033b0a8b3d46d15bf0"
+    "1c3615e01ab356089c28080eb5d40dfc800eac00d96f5477068465f8f9b92a2a"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:

@@ -9,6 +9,7 @@ import os
 
 import pytest
 import requests
+from types import SimpleNamespace
 
 from manage import web
 from manage.web import state
@@ -18,6 +19,8 @@ from assist.events import notify as notify_mod
 
 @pytest.fixture
 def threads_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASSIST_SMS_ARCHIVE_DIR", str(tmp_path / "sms-archive"))
+    monkeypatch.setenv("ASSIST_THREADS_DIR", str(tmp_path / "thread-workspaces"))
     monkeypatch.setattr(web.MANAGER, "root_dir", str(tmp_path))
     monkeypatch.setattr("manage.web.threads._has_unmerged_changes", lambda tid, _cache=None: False)
     state.DESCRIPTION_CACHE.clear()
@@ -35,7 +38,8 @@ def _make_thread(root, tid, title="A thread"):
 
 
 def _notify_tool():
-    return notify_mod.notify_tools(state._mark_urgent)[0]
+    function = notify_mod.notify_tools(state._mark_urgent)[0]
+    return lambda message: function(message, SimpleNamespace(tool_call_id="synthetic-notify"))
 
 
 class TestNotifyTool:
@@ -44,18 +48,21 @@ class TestNotifyTool:
         monkeypatch.setattr(notify_mod, "_thread_id", lambda: "t1")
         monkeypatch.setenv("URGENT_SMS_RECIPIENT", "+15555550100")
         monkeypatch.setenv("URGENT_SMS_THREAD_URL_BASE", "https://web.example.test:5050/")
-        monkeypatch.setenv("ASSIST_SMS_OUTBOUND_URL", "http://phone.example.test/outbound/sms")
+        monkeypatch.setenv("ASSIST_SMS_OUTBOUND_URL", "http://phone.example.test/outbound/sms/v1")
         monkeypatch.setenv("ASSIST_SMS_SECRET", "test-secret")
         sent = {}
         monkeypatch.setattr(
             "assist.events.reply.requests.post",
-            lambda url, **kwargs: sent.update(url=url, **kwargs) or type("R", (), {"status_code": 200})())
+            lambda url, **kwargs: sent.update(url=url, **kwargs) or type("R", (), {"status_code": 200, "json": lambda self: {"message_id": kwargs["json"]["message_id"], "status": "sent"}})())
 
         out = _notify_tool()("Reply to the landlord by 5pm")
 
         assert out.endswith("SMS sent.")
         assert state._has_urgent("t1")
         assert os.path.isfile(state._urgent_path("t1"))
+        assert sent["json"]["message_id"]
+        assert sent["json"].pop("occurred_at")
+        sent["json"].pop("message_id")
         assert sent["json"] == {
             "to": "+15555550100",
             "text": "Reply to the landlord by 5pm\nhttps://web.example.test:5050/thread/t1",
@@ -95,7 +102,7 @@ class TestNotifyTool:
         monkeypatch.setattr(notify_mod, "_thread_id", lambda: "t1")
         monkeypatch.setenv("URGENT_SMS_RECIPIENT", "+15555550100")
         monkeypatch.setenv("URGENT_SMS_THREAD_URL_BASE", "https://web.example.test:5050")
-        monkeypatch.setenv("ASSIST_SMS_OUTBOUND_URL", "http://phone.example.test/outbound/sms")
+        monkeypatch.setenv("ASSIST_SMS_OUTBOUND_URL", "http://phone.example.test/outbound/sms/v1")
         monkeypatch.setenv("ASSIST_SMS_SECRET", "test-secret")
         monkeypatch.setattr(
             "assist.events.reply.requests.post",
@@ -103,7 +110,7 @@ class TestNotifyTool:
 
         out = _notify_tool()("Reply to the landlord by 5pm")
 
-        assert "SMS not sent" in out
+        assert "SMS outcome unknown" in out
         assert state._has_urgent("t1")
 
     def test_sms_exception_does_not_expose_endpoint(self, threads_root, monkeypatch):
@@ -111,7 +118,7 @@ class TestNotifyTool:
         monkeypatch.setattr(notify_mod, "_thread_id", lambda: "t1")
         monkeypatch.setenv("URGENT_SMS_RECIPIENT", "+15555550100")
         monkeypatch.setenv("URGENT_SMS_THREAD_URL_BASE", "https://web.example.test:5050")
-        monkeypatch.setenv("ASSIST_SMS_OUTBOUND_URL", "http://internal.phone.example.test/outbound/sms")
+        monkeypatch.setenv("ASSIST_SMS_OUTBOUND_URL", "http://internal.phone.example.test/outbound/sms/v1")
         monkeypatch.setenv("ASSIST_SMS_SECRET", "test-secret")
 
         def fail(*args, **kwargs):
@@ -121,7 +128,7 @@ class TestNotifyTool:
 
         out = _notify_tool()("Reply to the landlord by 5pm")
 
-        assert "reach the phone" in out
+        assert "outcome unknown" in out
         assert "internal.phone.example.test" not in out
         assert state._has_urgent("t1")
 

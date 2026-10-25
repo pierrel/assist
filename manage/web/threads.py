@@ -30,8 +30,9 @@ from datetime import datetime, timedelta, timezone
 
 import markdown
 import requests
-from pydantic import BaseModel
-from fastapi import BackgroundTasks, Form, Header, HTTPException
+import sqlite3
+from pydantic import BaseModel, ConfigDict, Field
+from fastapi import BackgroundTasks, Form, Header, HTTPException, Request
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -74,6 +75,7 @@ from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
 from assist.location import LOCATION_CONTEXT_KEY, LocationSnapshot
 from assist.frequency import FREQUENCY_RUN_ID_KEY
 from assist.events.reply import SMS_SENDER_KEY
+from assist.events.sms_archive import configured_archive, ID_RE as SMS_RECORD_ID_RE
 from assist.gmail import GMAIL_INTERRUPT_ON, GmailError, gmail_action_preview
 from assist.events.email import EMAIL_REVIEW_IDENTITY_KEY, email_identity, valid_email_content
 from assist.schedule.scheduler import Scheduler
@@ -136,7 +138,6 @@ from manage.web.state import (
     GEO_DIR,
     GEO_PROPOSALS,
     GEO_REGISTRY,
-    INBOUND_LOG,
     INIT_STAGES,
     LOCATION_STORE,
     MANAGER,
@@ -4882,40 +4883,105 @@ def _sms_secret_state(provided: str | None):
 
 
 class _InboundSms(BaseModel):
-    message_id: str
-    sender: str
-    text: str
+    model_config = ConfigDict(extra="forbid", strict=True)
+    message_id: str = Field(min_length=1, max_length=128)
+    sender: str = Field(min_length=1, max_length=20)
+    text: str = Field(max_length=16 * 1024)
+    occurred_at: str | None = Field(default=None, max_length=64)
+
+
+class _SmsReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    message_id: str = Field(min_length=1, max_length=128)
+    number: str = Field(min_length=1, max_length=20)
+    text: str = Field(max_length=16 * 1024)
+    status: str = Field(min_length=1, max_length=16)
+    occurred_at: str | None = Field(default=None, max_length=64)
+
+
+def _sms_archive():
+    try:
+        return configured_archive()
+    except (ValueError, OSError, sqlite3.Error) as error:
+        logging.error("SMS archive unavailable: %s", type(error).__name__)
+        raise HTTPException(status_code=503, detail="SMS archive is unavailable") from error
+
+
+def _admit_inbound_sms(payload: _InboundSms):
+    """Persist message and its stable Run admission before acknowledging the phone."""
+    archive = _sms_archive()
+    if not SMS_RECORD_ID_RE.fullmatch(payload.message_id):
+        raise HTTPException(status_code=400, detail="invalid message_id")
+    try:
+        with _RUN_ADMISSION_LOCK:
+            sub = SUBSCRIPTION_STORE.route(payload.sender)
+            handling = (sub.thread_id, sub.render(payload.sender, payload.text)) if sub else None
+            row, created = archive.record(payload.message_id, "incoming", payload.sender,
+                                           payload.text, "received", occurred_at=payload.occurred_at,
+                                           handling=handling)
+            if row["thread_id"] is None or row["admitted"]:
+                return {"status": "accepted" if created else "duplicate"}, None
+            _require_deep_thread(row["thread_id"])
+            run = _create_run(row["thread_id"], row["prompt"], sender=row["number"],
+                              run_id=row["run_id"], dispatch_key="sms:" + payload.message_id)
+            archive.mark_admitted(payload.message_id)
+            return {"status": "accepted"}, run
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except (OSError, sqlite3.Error) as error:
+        raise HTTPException(status_code=503, detail="SMS storage is unavailable") from error
+
+
+async def _sms_request_body(request: Request, model):
+    # Reuse the machine API's bounded reader; archive/Run work runs off the loop.
+    from manage.web.phone_api import _validated_body
+    try:
+        with anyio.fail_after(5):
+            return await _validated_body(request, model, 128 * 1024)
+    except TimeoutError as error:
+        raise HTTPException(status_code=408, detail="SMS body timed out") from error
 
 
 @app.post("/inbound/sms")
-def inbound_sms(payload: _InboundSms, background_tasks: BackgroundTasks,
+async def inbound_sms(request: Request, background_tasks: BackgroundTasks,
                 x_assist_sms_secret: str | None = Header(default=None)):
-    """Receive an inbound message forwarded from the phone: authenticate, record it durably
-    (so the 200 means "assist owns this text"), then dispatch a triage turn off the loop.
+    """Acknowledge only after non-Git archive and any matching Run are durable.
 
-    SYNC ``def`` (like ``/merge``) so auth + the durable record run in the threadpool, never
-    on the single-worker event loop. 200 accepted|duplicate → the phone deletes the SMS;
-    400 malformed (delete); 401 bad secret (retain); 503 disabled (retain)."""
+    The bounded request body is read asynchronously; blocking storage/admission
+    runs in the threadpool. A failed admission retains a pending archive record
+    and returns an error, so a phone handoff retry uses the same persisted Run id.
+    """
     auth = _sms_secret_state(x_assist_sms_secret)
     if auth is None:
         raise HTTPException(status_code=503, detail="Inbound SMS is not configured")
     if not auth:
         raise HTTPException(status_code=401, detail="Bad or missing X-Assist-SMS-Secret")
-    if not (payload.message_id and payload.sender and payload.text):
-        raise HTTPException(status_code=400, detail="message_id, sender and text are required")
-    # The sender becomes the reply recipient, folded into the phone's mmcli `number='…'`
-    # arg. Bound it to a phone-number/shortcode/sender-id shape so a crafted originating
-    # address (which can carry arbitrary chars) can't break out of that arg.
-    if not re.fullmatch(r"[+0-9A-Za-z]{1,20}", payload.sender):
-        raise HTTPException(status_code=400, detail="sender is not a valid number/shortcode")
-    try:
-        fresh = INBOUND_LOG.claim(payload.message_id, payload.sender, payload.text)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="invalid message_id")
-    if not fresh:
-        return {"status": "duplicate"}
-    background_tasks.add_task(_dispatch_event, payload.sender, payload.text)
-    return {"status": "accepted"}
+    payload = await _sms_request_body(request, _InboundSms)
+    response, run = await run_in_threadpool(_admit_inbound_sms, payload)
+    if run is not None:
+        background_tasks.add_task(_execute_run, run.id, run.thread_id)
+    return response
+
+
+@app.post("/sms/receipts")
+async def sms_receipt(request: Request, x_assist_sms_secret: str | None = Header(default=None)):
+    """Accept exact outgoing phone receipts without executing another SMS."""
+    auth = _sms_secret_state(x_assist_sms_secret)
+    if auth is None:
+        raise HTTPException(status_code=503, detail="SMS is not configured")
+    if not auth:
+        raise HTTPException(status_code=401, detail="Bad or missing X-Assist-SMS-Secret")
+    payload = await _sms_request_body(request, _SmsReceipt)
+    def store():
+        try:
+            row, _ = _sms_archive().record(payload.message_id, "outgoing", payload.number,
+                                            payload.text, payload.status, occurred_at=payload.occurred_at)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except (OSError, sqlite3.Error) as error:
+            raise HTTPException(status_code=503, detail="SMS storage is unavailable") from error
+        return {"message_id": row["id"], "status": row["status"]}
+    return await run_in_threadpool(store)
 
 
 _REPLY_DECISIONS = {

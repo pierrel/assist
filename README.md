@@ -1342,3 +1342,28 @@ make status
 # View service logs
 make logs
 ```
+
+
+### Private SMS history
+
+Set `ASSIST_SMS_ARCHIVE_DIR` to a dedicated absolute directory outside every Git
+repository and outside `ASSIST_THREADS_DIR`. It must be owned by the service,
+mode 0700; its SQLite database is mode 0600. Inbound SMS and outgoing attempts
+fail closed if this archive is unavailable. Configure `ASSIST_SMS_SECRET` on both
+sides and `ASSIST_SMS_OUTBOUND_URL` for the phone's authenticated `/outbound/sms/v1` endpoint. Legacy endpoint
+URLs are refused before any send; upgrade the phone journal transport before
+changing the host URL. Inbound ingestion and archive tools can be deployed first.
+The normal web profile exposes the `sms-history` skill and bounded search/read
+tools. Untrusted SMS-triage runs do not receive those tools.
+
+All received texts are archived even when no subscription matches. Matching
+messages receive a durable Run before acknowledgment. Outgoing receipts retain
+`sent` (ModemManager accepted), `not_sent` or `unknown`; `sent` does not prove
+carrier delivery. A timeout is unknown and must not be retried as another send.
+The phone retries only its journal handoff and keeps independent identical texts.
+Archive files are never automatically copied into source/thread Git workspaces.
+Explicit requests to quote or export SMS follow the existing privacy rules.
+
+Existing legacy inbound JSON files remain untouched. Migrate them only through
+an explicitly reviewed operator procedure, preserving their original identities;
+never replay messages to fill history.

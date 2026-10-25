@@ -14,6 +14,13 @@ from __future__ import annotations
 
 import logging
 import os
+import hashlib
+import sqlite3
+import uuid
+from dataclasses import dataclass
+from urllib.parse import urlsplit
+
+from assist.events.sms_archive import configured_archive
 
 import requests
 from langgraph.config import get_config
@@ -34,29 +41,56 @@ def _sender() -> str | None:
     return ((get_config() or {}).get("configurable") or {}).get(SMS_SENDER_KEY)
 
 
-def send_outbound_sms(recipient: str, text: str) -> str | None:
-    """Send one SMS through the configured phone endpoint.
+@dataclass(frozen=True)
+class SmsResult:
+    """Observed outcome of one immutable send attempt, never a delivery guarantee."""
 
-    Return ``None`` after a confirmed send, otherwise a corrective detail.  Callers own
-    their recipient-specific policy and presentation; this shared host-side boundary owns
-    endpoint authentication, bounded delivery, and redirect refusal.
+    status: str
+    detail: str = ""
+
+
+def send_outbound_sms(recipient: str, text: str, *, attempt_id: str | None = None) -> SmsResult:
+    """Journal before sending; repeat attempts only read their existing outcome.
+
+    A phone timeout or malformed response is unknown, including after a phone
+    accepted the SMS. The phone's durable receipt can later settle that same id.
+    Neither caller retries an uncertain send to repair its archive.
     """
     url = os.getenv("ASSIST_SMS_OUTBOUND_URL")
     secret = os.getenv("ASSIST_SMS_SECRET")
     if not url or not secret:
-        return "outbound SMS isn't configured (ASSIST_SMS_OUTBOUND_URL / ASSIST_SMS_SECRET)"
+        return SmsResult("not_sent", "outbound SMS isn't configured")
+    if urlsplit(url).path != "/outbound/sms/v1" or urlsplit(url).query or urlsplit(url).fragment:
+        return SmsResult("not_sent", "the configured phone endpoint lacks the journal protocol; no send attempted")
+    attempt_id = attempt_id or uuid.uuid4().hex
+    try:
+        archive = configured_archive()
+        row, created = archive.record(attempt_id, "outgoing", recipient, text, "unknown")
+    except (ValueError, OSError, sqlite3.Error):
+        return SmsResult("not_sent", "couldn't safely journal this attempt; no send attempted")
+    if not created:
+        return SmsResult(row["status"], "existing attempt; no SMS repeated")
+    status = "unknown"
+    detail = "the phone's outcome isn't confirmed; do not resend"
     try:
         response = requests.post(
-            url, json={"to": recipient, "text": text},
-            headers={"X-Assist-SMS-Secret": secret}, timeout=10,
+            url, json={"message_id": attempt_id, "to": recipient, "text": text, "occurred_at": row["occurred_at"]},
+            headers={"X-Assist-SMS-Secret": secret}, timeout=(5, 70),
             allow_redirects=False)
-    except requests.RequestException as error:
-        logger.warning("outbound SMS failed: %s", error)
-        return "couldn't reach the phone"
-    if response.status_code == 200:
-        return None
-    logger.warning("outbound SMS returned HTTP %s", response.status_code)
-    return f"the phone returned HTTP {response.status_code}"
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("message_id") == attempt_id and result.get("status") in {"sent", "not_sent", "unknown"}:
+                status = result["status"]
+                detail = "" if status != "unknown" else detail
+    except (requests.RequestException, ValueError, AttributeError):
+        # Do not log request exceptions: their string can contain endpoint secrets.
+        logger.warning("outbound SMS response unavailable or invalid")
+    try:
+        row, _ = archive.record(attempt_id, "outgoing", recipient, text, status)
+        return SmsResult(row["status"], detail)
+    except (ValueError, OSError, sqlite3.Error):
+        # The phone may already have sent it. Durable phone sync owns reconciliation.
+        return SmsResult(status, "receipt storage failed; do not repeat this send")
 
 
 def send_reply(text: str) -> str:
@@ -69,10 +103,18 @@ def send_reply(text: str) -> str:
     sender = _sender()
     if not sender:
         return "There is no inbound message to reply to in this turn."
-    failure = send_outbound_sms(sender, text)
-    if failure is None:
+    config = ((get_config() or {}).get("configurable") or {})
+    approval = config.get("approval_id")
+    if not approval:
+        return "Reply not sent: this send has no confirmed approval identity."
+    identity = f"{config.get('thread_id', '')}:{approval}"
+    attempt_id = "reply_" + hashlib.sha256(identity.encode()).hexdigest()
+    result = send_outbound_sms(sender, text, attempt_id=attempt_id)
+    if result.status == "sent":
         return f"Reply sent to {sender}."
-    return f"Reply not sent: {failure}."
+    if result.status == "unknown":
+        return "Reply outcome unknown; do not resend. " + result.detail
+    return f"Reply not sent: {result.detail or 'the phone confirmed no send'}."
 
 
 def reply_tools() -> list:
