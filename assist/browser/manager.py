@@ -173,22 +173,21 @@ def _sandbox_generations(threads_root: str,
         raise ValueError("invalid browser thread ID")
     work_dir = (os.path.join(root, thread_id, "domain")
                 if thread_id is not None else None)
-    output = _bounded_cli(
-        ["docker", "ps", "--all", "--no-trunc",
-         "--filter", "label=assist.sandbox=true", "--format", "{{.ID}}"],
-        limit=65536, timeout=5)
-    generations = output.decode("ascii").splitlines()
-    if not generations:
-        return set()
-    mounts = _bounded_cli(
-        ["docker", "inspect", "--format", "{{json .Mounts}}", *generations],
-        limit=262144, timeout=5).decode("utf-8").splitlines()
-    if len(mounts) != len(generations):
-        raise BrowserUnavailable("sandbox generation scan is incomplete")
+    # The Engine list already includes mount metadata. A second inspect can
+    # lose an auto-removed container between list and scope verification.
+    try:
+        snapshot = SandboxManager._get_docker_client().api.containers(
+            all=True, filters={"label": "assist.sandbox=true"})
+        if not isinstance(snapshot, list):
+            raise ValueError("invalid container list")
+        mounts = [(entry["Id"], entry["Mounts"]) for entry in snapshot]
+        if len(json.dumps(mounts).encode("utf-8")) > 262144:
+            raise ValueError("sandbox mount snapshot exceeds limit")
+    except Exception as error:
+        raise BrowserUnavailable("sandbox generation scan is unavailable") from error
     found = set()
-    for generation, raw in zip(generations, mounts, strict=True):
-        entries = json.loads(raw)
-        if not isinstance(entries, list):
+    for generation, entries in mounts:
+        if not isinstance(generation, str) or not isinstance(entries, list):
             raise BrowserUnavailable("sandbox generation scan is malformed")
         if any(entry.get("Destination") == "/workspace"
                and (os.path.realpath(entry.get("Source", "")) == work_dir
