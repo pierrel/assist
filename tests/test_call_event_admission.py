@@ -56,3 +56,12 @@ def test_call_admission_metadata_never_becomes_a_visible_thread(tmp_path):
     manager = ThreadManager(str(tmp_path))
     try: assert manager.list() == []
     finally: manager.conn.close()
+
+
+@pytest.mark.parametrize('caller',['(unknown caller)','Anonymous','12;drop','+1555\n123',''])
+def test_approved_reply_to_unsafe_or_unavailable_raw_caller_never_posts(monkeypatch,caller):
+    from assist.events import reply
+    monkeypatch.setattr(reply,'get_config',lambda:{'configurable':{'sms_sender':caller}})
+    monkeypatch.setattr(reply.requests,'post',lambda *args,**kwargs:pytest.fail('unsafe caller reached SMS transport'))
+    outcome = reply.send_reply('approved')
+    assert ('no SMS attempted' in outcome if caller else 'no inbound message' in outcome)

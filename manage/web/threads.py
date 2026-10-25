@@ -4837,11 +4837,8 @@ def _scheduled_dispatch(tid: str, prompt: str, tz: str | None) -> None:
 
 
 def _dispatch_admitted_event_run(run_id: str, tid: str) -> None:
-    """Keep a paused checkpoint behind its already queued serial resume."""
-    if _get_status(tid).get("stage") == "paused":
-        _RESUME_SCHEDULER.submit(run_id, tid)
-    else:
-        _execute_run(run_id, tid)
+    """Serialize replayable event wakeups with startup recovery of that Run."""
+    _RESUME_SCHEDULER.submit(run_id, tid)
 
 
 def _dispatch_event(sender: str, text: str) -> None:
@@ -4862,7 +4859,10 @@ def _dispatch_event(sender: str, text: str) -> None:
         return
     rendered = sub.render(sender, text)
     run = _create_run(sub.thread_id, rendered, sender=sender)
-    _dispatch_admitted_event_run(run.id, sub.thread_id)
+    if _get_status(sub.thread_id).get("stage") == "paused":
+        _RESUME_SCHEDULER.submit(run.id, sub.thread_id)
+    else:
+        _execute_run(run.id, sub.thread_id)
 
 
 def _sms_secret_state(provided: str | None):

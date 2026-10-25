@@ -1811,7 +1811,7 @@ async def receive_call_event(request: Request, background_tasks: BackgroundTasks
                                   state.SUBSCRIPTION_STORE, threads._create_run)
         except ValueError as error:
             raise HTTPException(status_code=409, detail='Conflicting or invalid call event') from error
-        except (OSError, sqlite3.Error) as error:
+        except (OSError, sqlite3.Error, RunStoreUnavailable) as error:
             raise HTTPException(status_code=503, detail='Call event storage unavailable') from error
     run = await anyio.to_thread.run_sync(admit)
     if run is not None:
