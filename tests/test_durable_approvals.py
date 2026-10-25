@@ -712,3 +712,55 @@ def test_actual_sms_review_continuation_sends_once_with_durable_identity(sqlite_
         assert configured_archive().read(requests[0]['message_id'])['status']=='sent'
         threads._execute_run(accepted.id,tid)
         assert len(requests)==1
+
+
+@pytest.mark.parametrize('outcome', ['sent', 'unknown', 'not_attempted'])
+def test_sms_recovery_successor_reuses_exact_accepted_attempt(sqlite_approval, monkeypatch, outcome):
+    from assist.events import reply
+    from assist.events.sms_archive import configured_archive
+    tid, root, service, queued = sqlite_approval
+    monkeypatch.setenv('ASSIST_SMS_ARCHIVE_DIR', str(root/'sms-archive'))
+    monkeypatch.setenv('ASSIST_THREADS_DIR', str(root/'threads'))
+    decision={'type':'approve','reply_review':{'sender':'+15555550100','text':'Approved exact text'}}
+    accepted=service.create(tid,'general-agent',None,sender='+15555550100',resume_decision=decision)
+    identity=threads._sms_reply_configurable(accepted)
+    monkeypatch.setattr(reply,'get_config',lambda:{'configurable':{'thread_id':tid,'sms_sender':accepted.sender,**identity}})
+    # The effect happened, but its model checkpoint did not finish before restart.
+    import hashlib
+    attempt='reply_'+hashlib.sha256(f'{tid}:{identity[reply.SMS_REPLY_REVIEW_ID_KEY]}'.encode()).hexdigest()
+    effects=[]
+    if outcome!='not_attempted':
+        configured_archive().record(attempt,'outgoing',accepted.sender,'Approved exact text',outcome)
+    else:
+        monkeypatch.setenv('ASSIST_SMS_OUTBOUND_URL','https://phone.invalid/outbound/sms/v1')
+        monkeypatch.setenv('ASSIST_SMS_SECRET','synthetic-secret')
+    def send(*args,**kwargs):
+        assert outcome=='not_attempted', 'recovery repeated an SMS effect'
+        effects.append(kwargs['json'])
+        return SimpleNamespace(status_code=200,json=lambda:{'message_id':attempt,'status':'sent'})
+    monkeypatch.setattr(reply.requests,'post',send)
+    service.claim(tid,accepted.id)
+    monkeypatch.setattr(threads,'_is_pi_thread',lambda value:False)
+    monkeypatch.setattr(threads,'_recovery_decision',lambda *a,**kw:'resume')
+    threads._recover_run(service.get(tid,accepted.id))
+    successor=service.get(tid,queued[-1][0])
+    assert successor.resume and successor.resume_decision is None
+    assert successor.work_id==accepted.work_id and successor.id!=accepted.id
+    restored=threads._sms_reply_configurable(successor)
+    assert restored==identity
+    monkeypatch.setattr(reply,'get_config',lambda:{'configurable':{'thread_id':tid,'sms_sender':successor.sender,**restored}})
+    result=reply.send_reply('Approved exact text')
+    assert ('outcome unknown' if outcome=='unknown' else 'Reply sent') in result
+    assert len(effects)==(1 if outcome=='not_attempted' else 0)
+    assert threads._sms_reply_configurable(successor)==restored
+    reply.send_reply('Approved exact text')
+    assert len(effects)==(1 if outcome=='not_attempted' else 0)
+    # A later rejection on the same work must supersede the old approval.
+    service.claim(tid,successor.id);service.transition(tid,successor.id,'awaiting_approval')
+    rejected=service.create(tid,'general-agent',None,sender=accepted.sender,work_id=accepted.work_id,
+                            resume_decision={'type':'reject','reply_review':{'text':'Later draft'}})
+    service.claim(tid,rejected.id);service.transition(tid,rejected.id,'interrupted')
+    threads._recover_run(service.get(tid,rejected.id))
+    assert threads._sms_reply_configurable(service.get(tid,queued[-1][0]))=={}
+    unrelated=service.create(tid,'general-agent','New SMS',sender=accepted.sender)
+    assert threads._sms_reply_configurable(unrelated)=={}

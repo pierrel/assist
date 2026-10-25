@@ -2595,8 +2595,20 @@ def _child_waits_for_egress(run: Run) -> bool:
 
 
 def _sms_reply_configurable(run: Run) -> dict:
-    """Bind a real accepted SMS review continuation to one immutable attempt."""
+    """Bind an accepted SMS review and its execution slices to one immutable attempt."""
     decision = run.resume_decision or {}
+    if run.sender and run.resume and not decision:
+        # Recovery/fair-scheduling slices continue the same accepted work. The
+        # latest reply decision wins, including a rejection at a later gate.
+        predecessors = []
+        for prior in _runs().list(run.thread_id):
+            if prior.id == run.id:
+                break
+            if (prior.work_id == run.work_id and prior.sender == run.sender
+                    and isinstance((prior.resume_decision or {}).get("reply_review"), dict)):
+                predecessors.append(prior)
+        if predecessors:
+            decision = predecessors[-1].resume_decision
     if (run.sender and decision.get("type") in {"approve", "edit"}
             and isinstance(decision.get("reply_review"), dict)):
         identity = json.dumps([run.thread_id, decision], sort_keys=True,
