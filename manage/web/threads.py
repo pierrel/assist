@@ -4885,7 +4885,7 @@ def _sms_secret_state(provided: str | None):
 class _InboundSms(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     message_id: str = Field(min_length=1, max_length=128)
-    sender: str = Field(min_length=1, max_length=20)
+    sender: str = Field(max_length=128)
     text: str = Field(max_length=16 * 1024)
     occurred_at: str | None = Field(default=None, max_length=64)
 
@@ -4922,7 +4922,7 @@ def _admit_inbound_sms(payload: _InboundSms):
             if row["thread_id"] is None or row["admitted"]:
                 return {"status": "accepted" if created else "duplicate"}, None
             _require_deep_thread(row["thread_id"])
-            run = _create_run(row["thread_id"], row["prompt"], sender=row["number"],
+            run = _create_run(row["thread_id"], row["prompt"], sender=row["number"] or "(unknown SMS sender)",
                               run_id=row["run_id"], dispatch_key="sms:" + payload.message_id)
             archive.mark_admitted(payload.message_id)
             return {"status": "accepted"}, run

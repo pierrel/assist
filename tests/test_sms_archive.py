@@ -115,3 +115,10 @@ def test_nonexistent_dotdot_prefix_cannot_hide_git_ancestor(tmp_path):
     with pytest.raises(ValueError):
         SmsArchive(tmp_path / "missing" / ".." / "repo" / "private", thread_root=tmp_path / "threads")
     assert not (repository / "private").exists()
+
+
+def test_incoming_sender_is_exact_untrusted_address_not_outbound_dial_validation(archive):
+    for index, number in enumerate(('T-Mobile', 'CITY BANK', '通知', '')):
+        row, _ = archive.record('sender' + str(index), 'incoming', number, '', 'received')
+        assert row['number'] == number and row['text'] == ''
+    with pytest.raises(ValueError): archive.record('bad_out', 'outgoing', 'T-Mobile', 'hello', 'unknown')

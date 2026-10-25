@@ -83,7 +83,8 @@ class SmsArchive:
             raise ValueError("invalid SMS direction or status")
         if (direction == "incoming") != (status == "received"):
             raise ValueError("SMS status does not match direction")
-        if not isinstance(number, str) or not re.fullmatch(r"[+0-9A-Za-z]{1,20}", number):
+        if (not isinstance(number, str) or "\0" in number or len(number.encode("utf-8")) > 128
+                or direction == "outgoing" and not re.fullmatch(r"[+0-9A-Za-z]{1,20}", number)):
             raise ValueError("invalid SMS correspondent")
         if not isinstance(text, str) or "\0" in text or len(text.encode("utf-8")) > MAX_TEXT_BYTES:
             raise ValueError("invalid SMS body")

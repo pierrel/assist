@@ -348,3 +348,17 @@ def test_browser_email_rejects_identity_changed_since_render(client, monkeypatch
     assert response.status_code == 409
     assert threads._get_status("t-sub") == before
     assert threads._runs().list("t-sub") == []
+
+
+@pytest.mark.parametrize('sender', ['T-Mobile', 'CITY BANK', ''])
+def test_incoming_nonnumeric_or_unknown_sender_keeps_archive_and_triage(client, monkeypatch, sender):
+    from assist.events.sms_archive import configured_archive
+    monkeypatch.setenv('ASSIST_SMS_SECRET', 's3cret')
+    observed = []
+    def execute(run_id, tid): observed.append(threads._runs().get(tid, run_id).sender)
+    monkeypatch.setattr(threads, '_execute_run', execute)
+    response = client.post('/inbound/sms', json=_body(sender=sender, text=''), headers={'X-Assist-SMS-Secret': 's3cret'})
+    assert response.status_code == 200
+    assert configured_archive().read('abc123')['number'] == sender
+    assert observed == [sender or '(unknown SMS sender)']
+    assert bool(observed[0])  # Never falls through to normal full-authority profile.
