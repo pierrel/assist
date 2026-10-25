@@ -42,8 +42,11 @@ class SmsOutbox(PerThreadJsonStore[SmsDraft]):
         self._lock = _LOCK
 
     @staticmethod
-    def current(record):
-        observed = configured_archive().read(record.id)
+    def current(record, archive=None):
+        """Settle unresolved drafts without regressing a known phone outcome."""
+        if record.state in {'sent', 'not_sent', 'rejected'}:
+            return record
+        observed = (archive or configured_archive()).read(record.id)
         if observed is not None:
             if (observed['direction'], observed['number'], observed['text']) != (
                     'outgoing', record.number, record.text):
@@ -85,13 +88,14 @@ class SmsOutbox(PerThreadJsonStore[SmsDraft]):
         if not isinstance(text, str) or not text or '\0' in text or len(text.encode()) > 4096:
             raise ValueError('Invalid exact SMS text')
         identity = 'outbox_' + hashlib.sha256(f'{tid}:{operation}'.encode()).hexdigest()
+        archive = configured_archive()
         with self._lock:
-            records = [self.current(record) for record in self._read(tid)]
+            records = [self.current(record, archive) for record in self._read(tid)]
             old = next((record for record in records if record.id == identity), None)
             if old:
                 if (old.number, old.text) != (number, text):
                     raise ValueError('SMS operation content changed')
-                return self.current(old)
+                return old
             if sum(record.state in {'pending', 'approved'} for record in records) >= 10:
                 raise ValueError('Finish pending phone SMS drafts first')
             record = SmsDraft(identity, tid, number, text, datetime.now(timezone.utc).isoformat())

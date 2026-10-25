@@ -1367,6 +1367,10 @@ until acknowledged; uncertain attempts must not be retried with a new identity.
 Drafts live beside thread status, outside its Git workspace. The approval list
 shows active drafts and ten recent results; durable identities remain available
 for replay and receipt reconciliation. Local phone SMS remains usable offline.
+Phone snapshots reconcile only the active drafts and ten recent saved results,
+sharing that projection for counts and result visibility. A known phone outcome
+cannot regress to an older unknown receipt. Draft creation validates the private
+archive before returning a pending result.
 
 All received texts are archived even when no subscription matches. Matching
 messages receive a durable Run before acknowledgment. Outgoing receipts retain

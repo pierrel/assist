@@ -113,3 +113,55 @@ def test_old_active_draft_rejection_returns_exact_ack_after_projection_rolls(box
     for _ in range(2):
         result = phone_api._sms_decision('thread', body)['proposal']
         assert (result['id'], result['state']) == (old.id, 'rejected')
+
+
+@pytest.mark.parametrize('terminal', ['sent', 'not_sent'])
+def test_phone_terminal_outcome_dominates_older_archive_unknown(box, terminal):
+    from assist.events.sms_archive import configured_archive
+    record = box.stage('thread', 'receipt-order', '+15555550100', 'exact')
+    box.decide('thread', record.id, 'approved')
+    configured_archive().record(record.id, 'outgoing', record.number, record.text, 'unknown')
+    box.decide('thread', record.id, terminal)
+    preview = phone_api._sms_previews('thread')[0]
+    assert preview['state'] == terminal
+    replay = phone_api._sms_decision('thread', phone_api._ApprovalDecision(
+        kind='send_sms', token=preview['token'], decision='approve'))
+    assert replay['proposal']['state'] == terminal
+    assert box.for_thread('thread')[0].state == terminal
+
+
+def test_first_draft_requires_usable_archive(box, monkeypatch, tmp_path):
+    from assist.events import sms_outbox
+    monkeypatch.setattr(sms_outbox, 'get_config', lambda: {'configurable': {'thread_id': 'thread'}})
+    tool = sms_sending_tools(box)[0]
+    monkeypatch.delenv('ASSIST_SMS_ARCHIVE_DIR')
+    assert tool('+15555550100', 'exact', SimpleNamespace(tool_call_id='no-config')).startswith('SMS not sent:')
+    assert box.for_thread('thread') == []
+    unavailable = tmp_path / 'bad-mode'
+    unavailable.mkdir(mode=0o755)
+    monkeypatch.setenv('ASSIST_SMS_ARCHIVE_DIR', str(unavailable))
+    assert tool('+15555550100', 'exact', SimpleNamespace(tool_call_id='bad-config')).startswith('SMS not sent:')
+    assert box.for_thread('thread') == []
+
+
+def test_snapshot_projection_reconciles_only_bounded_unsettled_selection(box, monkeypatch):
+    from unittest.mock import Mock
+    from assist.events import sms_archive
+    from assist.events.sms_outbox import SmsDraft
+    from manage.web import egress, geo
+    records = [SmsDraft(f'outbox_{i:064x}', 'thread', '+15555550100', 'exact',
+                        '2026-10-25T00:00:00+00:00', 'unknown') for i in range(1000)]
+    records.extend(SmsDraft(f'outbox_{i:064x}', 'thread', '+15555550100', 'exact',
+                           '2026-10-25T00:00:00+00:00') for i in range(1000, 1005))
+    box._write('thread', records)
+    archive = Mock()
+    archive.read.return_value = None
+    configured = Mock(return_value=archive)
+    monkeypatch.setattr(sms_archive, 'configured_archive', configured)
+    monkeypatch.setattr(egress, 'approval_previews', lambda tid: [])
+    monkeypatch.setattr(geo, 'approval_previews', lambda tid: [])
+    assert phone_api._approval_summary('thread', {'stage': 'ready'}) == (5, True)
+    configured.assert_called_once()
+    assert archive.read.call_count == 15
+    assert {call.args[0] for call in archive.read.call_args_list} == {
+        record.id for record in records[-15:]}

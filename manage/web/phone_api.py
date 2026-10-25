@@ -642,14 +642,15 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
             if checkpoint_backed and "_phone_checkpoint_position" in cursor_raw
             else _message_id(tid, cursor_raw, cursor_ordinal)
         )
+    approval_count, approval_results = _approval_summary(tid, status)
     return {
         "thread": {
             "id": tid,
             "description": _stored_thread_title(tid),
             "harness": read_thread_engine(_thread_dir(tid)).name,
             "status": status.get("stage", "ready"),
-            "approval_count": _approval_count(tid, status),
-            "approval_results": _approval_results(tid),
+            "approval_count": approval_count,
+            "approval_results": approval_results,
             "error": ("Thread failed; inspect Assist Web for details."
                       if status.get("error") else None),
             "publication_notice": status.get("git_notice"),
@@ -1490,12 +1491,20 @@ def _sms_previews(tid: str) -> list[dict]:
     from assist.events.sms_outbox import SmsOutbox
     store = SmsOutbox(state.MANAGER.root_dir)
     try:
-        records = [store.current(record) for record in store.for_thread(tid)]
+        records = store.for_thread(tid)
+        active = [record for record in records if record.state in {"pending", "approved"}]
+        terminal = [record for record in records if record.state not in {"pending", "approved"}]
+        selected = active + terminal[-10:]
+        from assist.events.sms_archive import configured_archive
+        archive = (configured_archive() if any(
+            record.state not in {"sent", "not_sent", "rejected"} for record in selected) else None)
+        resolved = [store.current(record, archive) for record in selected]
+        active = [record for record in resolved if record.state in {"pending", "approved"}]
+        terminal = sorted((record for record in resolved if record.state not in {"pending", "approved"}),
+                          key=lambda record: record.created_at)
+        return [_sms_preview(tid, record) for record in active + terminal[-10:]]
     except (OSError, ValueError, sqlite3.Error) as error:
         raise HTTPException(status_code=503, detail="SMS draft status unavailable") from error
-    active = [record for record in records if record.state in {"pending", "approved"}]
-    terminal = [record for record in records if record.state not in {"pending", "approved"}]
-    return [_sms_preview(tid, record) for record in active + terminal[-10:]]
 
 
 def _sms_decision(tid: str, body: _ApprovalDecision):
@@ -1546,20 +1555,13 @@ def _approval_collection(tid: str) -> dict[str, Any]:
     return value
 
 
-def _approval_count(tid: str, status: dict) -> int:
-    """Summarize independent pending cards without caching their sensitive previews."""
+def _approval_summary(tid: str, status: dict) -> tuple[int, bool]:
+    """Project independent cards once for pending counts and retained results."""
     from manage.web import egress, geo
-    return (int(status.get("stage") == "awaiting_approval")
-            + sum(value["state"] == "pending" for value in egress.approval_previews(tid))
-            + sum(value["state"] == "pending" for value in geo.approval_previews(tid))
-            + sum(value["state"] == "pending" for value in _sms_previews(tid)))
-
-
-def _approval_results(tid: str) -> bool:
-    """Keep existing independent service results discoverable after Run completion."""
-    from manage.web import egress, geo
-    return any(value["state"] != "pending" for value in
-               [*egress.approval_previews(tid), *geo.approval_previews(tid), *_sms_previews(tid)])
+    proposals = [*egress.approval_previews(tid), *geo.approval_previews(tid), *_sms_previews(tid)]
+    count = int(status.get("stage") == "awaiting_approval") + sum(
+        value["state"] == "pending" for value in proposals)
+    return count, any(value["state"] != "pending" for value in proposals)
 
 
 @router.get("/threads/{tid}/approvals")
