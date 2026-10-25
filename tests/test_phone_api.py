@@ -2556,3 +2556,44 @@ def test_phone_open_nonempty_json_requires_a_revision(tmp_path, monkeypatch, pay
     assert state._has_urgent("thread-a")
     assert (directory / "unseen_response").exists()
     assert (directory / "urgent_response").exists()
+
+
+def test_call_event_auth_durability_exact_retries_and_unknown_metadata(tmp_path, monkeypatch):
+    from assist.events.model import Subscription
+    from assist.events.store import SubscriptionStore
+    from manage.web import threads
+    client = _client(monkeypatch)
+    (tmp_path / 'call-thread').mkdir()
+    monkeypatch.setattr(state.MANAGER, 'root_dir', str(tmp_path))
+    store = SubscriptionStore(str(tmp_path))
+    store.add(Subscription('calls', 'call-thread', '.*', 'Observed {sender}: {text}', event_kind='call'))
+    monkeypatch.setattr(state, 'SUBSCRIPTION_STORE', store)
+    executed = []
+    monkeypatch.setattr(threads, '_execute_run', lambda *args: executed.append(args))
+    body = {'event_id': 'unknown1', 'number': None, 'reason': None, 'outcome': 'terminated_before_active'}
+    assert client.post('/api/v1/phone/events/call', json=body).status_code == 401
+    response = client.post('/api/v1/phone/events/call', json=body, headers=_auth())
+    assert response.status_code == 200
+    assert client.post('/api/v1/phone/events/call', json=body, headers=_auth()).status_code == 200
+    assert len(executed) == 1
+    run = threads._runs().get('call-thread', executed[0][0])
+    assert run.sender == '(unknown caller)' and 'No voicemail transcript' in run.text
+    assert client.post('/api/v1/phone/events/call', json={**body, 'reason': 4}, headers=_auth()).status_code == 409
+    assert client.post('/api/v1/phone/events/call', content=b'x'*4097, headers=_auth()).status_code == 413
+
+
+def test_paused_call_event_uses_serial_resume_scheduler(tmp_path, monkeypatch):
+    from assist.events.model import Subscription
+    from assist.events.store import SubscriptionStore
+    from manage.web import threads
+    client=_client(monkeypatch)
+    (tmp_path/'call-thread').mkdir()
+    monkeypatch.setattr(state.MANAGER,'root_dir',str(tmp_path))
+    store=SubscriptionStore(str(tmp_path));store.add(Subscription('c','call-thread','.*','{text}',event_kind='call'))
+    monkeypatch.setattr(state,'SUBSCRIPTION_STORE',store)
+    monkeypatch.setattr(threads,'_get_status',lambda tid:{'stage':'paused'})
+    queued=[];monkeypatch.setattr(threads._RESUME_SCHEDULER,'submit',lambda *args:queued.append(args))
+    monkeypatch.setattr(threads,'_execute_run',lambda *args:pytest.fail('paused call ran before resume'))
+    body={'event_id':'paused_call','number':None,'reason':None,'outcome':'terminated_before_active'}
+    assert client.post('/api/v1/phone/events/call',json=body,headers=_auth()).status_code==200
+    assert len(queued)==1 and queued[0][1]=='call-thread'

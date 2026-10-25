@@ -18,6 +18,7 @@ import json
 import os
 import re
 import stat
+import sqlite3
 import subprocess
 import tarfile
 import threading
@@ -1784,3 +1785,35 @@ async def get_asset(tid: str, path: str, request: Request) -> Response:
     """Serve only one authorized, bounded file; never inventory or synchronize."""
     return await anyio.to_thread.run_sync(
         _asset_response, tid, path, request.headers.get("if-none-match"))
+
+
+class _CallEvent(_StrictModel):
+    event_id: Annotated[str, Field(pattern=r'^[A-Za-z0-9_-]{1,128}$')]
+    number: Annotated[str, Field(max_length=128)] | None = None
+    outcome: Literal['terminated_before_active', 'terminated_after_active']
+    reason: Annotated[int, Field(ge=0, le=65535)] | None = None
+
+
+@router.post('/events/call')
+async def receive_call_event(request: Request, background_tasks: BackgroundTasks):
+    """Admit one phone-observed outcome, without implying voicemail or caller intent."""
+    _authenticate(request)
+    try:
+        with anyio.fail_after(5):
+            event = await _validated_body(request, _CallEvent, 4096)
+    except TimeoutError as error:
+        raise HTTPException(status_code=408, detail='Call event body timed out') from error
+    def admit():
+        from assist.events.calls import admit_call
+        try:
+            with threads._RUN_ADMISSION_LOCK:
+                return admit_call(state.MANAGER.root_dir, event.model_dump(),
+                                  state.SUBSCRIPTION_STORE, threads._create_run)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail='Conflicting or invalid call event') from error
+        except (OSError, sqlite3.Error) as error:
+            raise HTTPException(status_code=503, detail='Call event storage unavailable') from error
+    run = await anyio.to_thread.run_sync(admit)
+    if run is not None:
+        background_tasks.add_task(threads._dispatch_admitted_event_run, run.id, run.thread_id)
+    return {'status': 'accepted'}
