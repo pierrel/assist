@@ -205,3 +205,40 @@ def test_new_stage_does_not_reconcile_unrelated_unknown_history(box, monkeypatch
     assert box.stage('thread', 'new-operation', '+15555550100', 'new').state == 'pending'
     archive.read.assert_called_once_with('pending')
     assert len(box.for_thread('thread')) == 1002
+
+
+@pytest.mark.parametrize('mail_body,retained,fallback', [
+    ('x' * (32 * 1024), 10, False),
+    ('\x01' * (64 * 1024), 0, True),
+], ids=['trim-results', 'mail-fallback'])
+def test_combined_approval_budget_preserves_exact_active_sms(box, monkeypatch, mail_body, retained, fallback):
+    import json
+    from manage.web import egress, geo, threads
+    monkeypatch.setattr(threads, '_is_pi_thread', lambda tid: False)
+    monkeypatch.setattr(threads, 'email_identity', lambda: ('sender@example.test', ''))
+    mail = threads.email_approval_preview({
+        'pending_email_token': 'synthetic-email', 'pending_email_to': 'recipient@example.test',
+        'pending_email_subject': 'Synthetic', 'pending_email_body': mail_body})
+    monkeypatch.setattr(phone_api, '_approval_preview', lambda tid: {'proposal': mail})
+    monkeypatch.setattr(threads, 'reply_approval_preview', lambda tid: None)
+    monkeypatch.setattr(egress, 'approval_previews', lambda tid: [])
+    monkeypatch.setattr(geo, 'approval_previews', lambda tid: [])
+    for index in range(retained):
+        record = box.stage('thread', f'finished-{index}', '+15555550100', '\x01' * 4096)
+        box.decide('thread', record.id, 'rejected')
+    active = [box.stage('thread', f'active-{index}', '+15555550100', '\x01' * 4096)
+              for index in range(10)]
+    before = {'thread_id': 'thread', 'proposals': [{'state': 'pending', **mail}, *phone_api._sms_previews('thread')]}
+    assert len(json.dumps(before).encode()) > phone_api.MAX_APPROVAL_BYTES
+    result = phone_api._approval_collection('thread')
+    assert len(json.dumps(result).encode()) <= phone_api.MAX_APPROVAL_BYTES
+    drafts = [value for value in result['proposals'] if value['kind'] == 'send_sms' and value['state'] == 'pending']
+    assert {value['id'] for value in drafts} == {record.id for record in active}
+    assert all(value['text'] == '\x01' * 4096 and value['number'] == '+15555550100' for value in drafts)
+    email = next(value for value in result['proposals'] if value['kind'] == 'send_email')
+    if fallback:
+        assert email['state'] == 'unavailable' and email['decisions'] == []
+        assert 'Assist Web' in email['error'] and 'action' not in email
+    else:
+        assert email['action'] == mail['action'] and email['token'] == mail['token']
+    assert len(box.for_thread('thread')) == retained + 10

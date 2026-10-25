@@ -1531,17 +1531,22 @@ def _approval_collection(tid: str) -> dict[str, Any]:
     """Project existing approval services without treating Run state as discovery."""
     _thread_dir(tid)
     from manage.web import egress, geo
+
+    def unavailable_email():
+        from manage.web.approval_tokens import review_token
+        return {"kind": "send_email", "token": review_token("unavailable", tid),
+                "state": "unavailable", "error": "Complete Email preview exceeds this phone view's limit; review in Assist Web.",
+                "decisions": []}
+
     proposals = []
+    mail = None
     if not threads._is_pi_thread(tid):
         try:
             mail = _approval_preview(tid)["proposal"]
         except HTTPException as error:
             if error.status_code != 413:
                 raise
-            from manage.web.approval_tokens import review_token
-            mail = {"kind": "send_email", "token": review_token("unavailable", tid),
-                    "state": "unavailable", "error": "Complete Email preview exceeds the client limit; review in Assist Web.",
-                    "decisions": []}
+            mail = unavailable_email()
         if mail is not None:
             proposals.append({"state": "pending", **mail})
         elif (reply := threads.reply_approval_preview(tid)) is not None:
@@ -1550,6 +1555,15 @@ def _approval_collection(tid: str) -> dict[str, Any]:
         proposals.extend(geo.approval_previews(tid))
         proposals.extend(_sms_previews(tid))
     value = {"thread_id": tid, "proposals": proposals}
+    # Results are disposable projections; preserve complete active SMS drafts.
+    for result in [proposal for proposal in proposals if proposal.get("kind") == "send_sms"
+                   and proposal.get("state") not in {"pending", "approved"}]:
+        if len(json.dumps(value).encode()) <= MAX_APPROVAL_BYTES:
+            break
+        proposals.remove(result)
+    if len(json.dumps(value).encode()) > MAX_APPROVAL_BYTES and mail is not None:
+        if mail.get("state") != "unavailable":
+            proposals[0] = unavailable_email()
     if len(json.dumps(value).encode()) > MAX_APPROVAL_BYTES:
         raise HTTPException(status_code=413, detail="Complete approvals exceed client limit; review in Assist Web")
     return value

@@ -1365,7 +1365,8 @@ Open the thread on the phone and choose Review. The existing SMS screen requires
 two physical taps before the fixed root helper can send. Rejection is retained
 until acknowledged; uncertain attempts must not be retried with a new identity.
 Drafts live beside thread status, outside its Git workspace. The approval list
-shows active drafts and ten recent results; durable identities remain available
+shows active drafts and up to ten recent results within its shared byte budget;
+durable identities remain available
 for replay and receipt reconciliation. Local phone SMS remains usable offline.
 Phone snapshots reconcile only the active drafts and ten recent saved results,
 sharing that projection for counts and result visibility. A known phone outcome
@@ -1375,6 +1376,12 @@ Staging reconciles only pending/approved drafts for capacity; unrelated uncertai
 history does not trigger archive reads. Matching settled replays retain their
 saved result even if the archive is unavailable. Unresolved replay errors report
 unavailable status without claiming the earlier message was not sent.
+The shared phone approval response drops old SMS result cards first when its
+combined byte budget is exceeded, without deleting their durable records. Active
+SMS drafts keep complete recipient/text previews. If necessary, the existing
+unavailable Email card directs complete Email review to Assist Web; content is
+never silently truncated. Other combinations that still exceed the limit retain
+the existing explicit size error.
 
 All received texts are archived even when no subscription matches. Matching
 messages receive a durable Run before acknowledgment. Outgoing receipts retain
