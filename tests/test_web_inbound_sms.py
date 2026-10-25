@@ -26,6 +26,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(threads, "SUBSCRIPTION_STORE", store)
     monkeypatch.setenv("ASSIST_SMS_ARCHIVE_DIR", str(tmp_path / "sms-archive"))
     monkeypatch.setenv("ASSIST_THREADS_DIR", str(tmp_path / "thread-workspaces"))
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit", lambda rid, tid: threads._execute_run(rid, tid))
     return TestClient(web.app)
 
 
@@ -374,3 +375,23 @@ def test_paused_incoming_queues_behind_its_serial_resume(client, monkeypatch):
     response=client.post('/inbound/sms',json=_body(),headers={'X-Assist-SMS-Secret':'s3cret'})
     assert response.status_code == 200 and len(queued) == 1
     assert threads._runs().get('t-sub',queued[0][0]).sender == '+15551234567'
+
+
+def test_replayed_admission_cannot_recover_an_actively_running_run(client,monkeypatch):
+    from assist.events.sms_archive import SmsArchive
+    monkeypatch.setenv('ASSIST_SMS_SECRET','s3cret')
+    original=SmsArchive.mark_admitted
+    monkeypatch.setattr(SmsArchive,'mark_admitted',lambda *args: (_ for _ in ()).throw(OSError('crash after Run commit')))
+    headers={'X-Assist-SMS-Secret':'s3cret'}
+    assert client.post('/inbound/sms',json=_body(),headers=headers).status_code==503
+    run=threads._runs().list('t-sub')[0]
+    threads._runs().claim('t-sub',run.id)
+    monkeypatch.setattr(SmsArchive,'mark_admitted',original)
+    queued=[];monkeypatch.setattr(threads._RESUME_SCHEDULER,'submit',lambda *args:queued.append(args))
+    monkeypatch.setattr(threads,'_recover_run',lambda *args,**kwargs:pytest.fail('live recovery interrupted'))
+    assert client.post('/inbound/sms',json=_body(),headers=headers).status_code==200
+    assert threads._runs().get('t-sub',run.id).status=='running'
+    assert queued==[(run.id,'t-sub')]
+    threads._runs().transition('t-sub',run.id,'success')
+    threads._execute_run(*queued[0])
+    assert threads._runs().get('t-sub',run.id).status=='success'

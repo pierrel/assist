@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import hashlib
 import sqlite3
 import uuid
@@ -50,6 +51,11 @@ class SmsResult:
     detail: str = ""
 
 
+def valid_sms_recipient(value: str) -> bool:
+    """Accept bounded numeric modem recipients, never raw caller labels."""
+    return isinstance(value, str) and re.fullmatch(r"\+?[0-9]{1,20}", value) is not None
+
+
 def send_outbound_sms(recipient: str, text: str, *, attempt_id: str | None = None) -> SmsResult:
     """Journal before sending; repeat attempts only read their existing outcome.
 
@@ -77,7 +83,9 @@ def send_outbound_sms(recipient: str, text: str, *, attempt_id: str | None = Non
     secret = os.getenv("ASSIST_SMS_SECRET")
     status = "unknown"
     detail = "the phone's outcome isn't confirmed; do not resend"
-    if not url or not secret:
+    if not valid_sms_recipient(recipient):
+        status, detail = "not_sent", "recipient is unavailable or unsafe; no SMS attempted"
+    elif not url or not secret:
         status, detail = "not_sent", "outbound SMS isn't configured; no send attempted"
     elif urlsplit(url).path != "/outbound/sms/v1" or urlsplit(url).query or urlsplit(url).fragment:
         status, detail = "not_sent", "the configured phone endpoint lacks the journal protocol; no send attempted"

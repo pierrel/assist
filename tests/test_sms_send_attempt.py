@@ -99,3 +99,9 @@ def test_replay_outcome_survives_removed_transport_configuration(outgoing, monke
 def test_malformed_status_never_escapes_after_possible_effect(outgoing, monkeypatch, malformed):
     monkeypatch.setattr(reply.requests, 'post', lambda *a, **k: type('R', (), {'status_code':200, 'json':lambda self:{'message_id':'one','status':malformed}})())
     assert reply.send_outbound_sms('+15555550100', 'hi', attempt_id='one').status == 'unknown'
+
+
+@pytest.mark.parametrize('recipient',['(unknown caller)','Anonymous','12;drop','+1555\n123',''])
+def test_unsafe_raw_caller_never_reaches_transport(outgoing,monkeypatch,recipient):
+    monkeypatch.setattr(reply.requests,'post',lambda *a,**k:pytest.fail('unsafe recipient reached transport'))
+    assert reply.send_outbound_sms(recipient,'approved text',attempt_id='one').status=='not_sent'
