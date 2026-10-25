@@ -135,12 +135,12 @@ def test_first_draft_requires_usable_archive(box, monkeypatch, tmp_path):
     monkeypatch.setattr(sms_outbox, 'get_config', lambda: {'configurable': {'thread_id': 'thread'}})
     tool = sms_sending_tools(box)[0]
     monkeypatch.delenv('ASSIST_SMS_ARCHIVE_DIR')
-    assert tool('+15555550100', 'exact', SimpleNamespace(tool_call_id='no-config')).startswith('SMS not sent:')
+    assert tool('+15555550100', 'exact', SimpleNamespace(tool_call_id='no-config')).startswith('SMS draft status unavailable:')
     assert box.for_thread('thread') == []
     unavailable = tmp_path / 'bad-mode'
     unavailable.mkdir(mode=0o755)
     monkeypatch.setenv('ASSIST_SMS_ARCHIVE_DIR', str(unavailable))
-    assert tool('+15555550100', 'exact', SimpleNamespace(tool_call_id='bad-config')).startswith('SMS not sent:')
+    assert tool('+15555550100', 'exact', SimpleNamespace(tool_call_id='bad-config')).startswith('SMS draft status unavailable:')
     assert box.for_thread('thread') == []
 
 
@@ -165,3 +165,43 @@ def test_snapshot_projection_reconciles_only_bounded_unsettled_selection(box, mo
     assert archive.read.call_count == 15
     assert {call.args[0] for call in archive.read.call_args_list} == {
         record.id for record in records[-15:]}
+
+
+@pytest.mark.parametrize('saved', ['sent', 'approved', 'unknown'])
+def test_matching_replay_preserves_saved_outcome_when_archive_unavailable(box, monkeypatch, saved):
+    from assist.events import sms_outbox
+    monkeypatch.setattr(sms_outbox, 'get_config', lambda: {'configurable': {'thread_id': 'thread'}})
+    tool = sms_sending_tools(box)[0]
+    runtime = SimpleNamespace(tool_call_id='saved-attempt')
+    tool('+15555550100', 'exact', runtime)
+    draft = box.for_thread('thread')[0]
+    box.decide('thread', draft.id, 'approved')
+    if saved != 'approved':
+        box.decide('thread', draft.id, saved)
+    monkeypatch.delenv('ASSIST_SMS_ARCHIVE_DIR')
+    result = tool('+15555550100', 'exact', runtime)
+    if saved == 'sent':
+        assert ': sent.' in result
+    else:
+        assert 'status unavailable' in result
+        assert 'Do not retry' in result
+    assert 'SMS not sent' not in result
+    assert len(box.for_thread('thread')) == 1
+    assert box.for_thread('thread')[0].state == saved
+
+
+def test_new_stage_does_not_reconcile_unrelated_unknown_history(box, monkeypatch):
+    from unittest.mock import Mock
+    from assist.events import sms_outbox
+    from assist.events.sms_outbox import SmsDraft
+    records = [SmsDraft(f'outbox_{i:064x}', 'thread', '+15555550100', 'exact',
+                        '2026-10-25T00:00:00+00:00', 'unknown') for i in range(1000)]
+    records.append(SmsDraft('pending', 'thread', '+15555550100', 'exact',
+                            '2026-10-25T00:00:00+00:00'))
+    box._write('thread', records)
+    archive = Mock()
+    archive.read.return_value = None
+    monkeypatch.setattr(sms_outbox, 'configured_archive', lambda: archive)
+    assert box.stage('thread', 'new-operation', '+15555550100', 'new').state == 'pending'
+    archive.read.assert_called_once_with('pending')
+    assert len(box.for_thread('thread')) == 1002

@@ -88,14 +88,17 @@ class SmsOutbox(PerThreadJsonStore[SmsDraft]):
         if not isinstance(text, str) or not text or '\0' in text or len(text.encode()) > 4096:
             raise ValueError('Invalid exact SMS text')
         identity = 'outbox_' + hashlib.sha256(f'{tid}:{operation}'.encode()).hexdigest()
-        archive = configured_archive()
         with self._lock:
-            records = [self.current(record, archive) for record in self._read(tid)]
+            records = self._read(tid)
             old = next((record for record in records if record.id == identity), None)
             if old:
                 if (old.number, old.text) != (number, text):
                     raise ValueError('SMS operation content changed')
-                return old
+                return self.current(old)
+            archive = configured_archive()
+            records = [self.current(record, archive)
+                       if record.state in {'pending', 'approved'} else record
+                       for record in records]
             if sum(record.state in {'pending', 'approved'} for record in records) >= 10:
                 raise ValueError('Finish pending phone SMS drafts first')
             record = SmsDraft(identity, tid, number, text, datetime.now(timezone.utc).isoformat())
@@ -136,9 +139,11 @@ def sms_sending_tools(store: SmsOutbox):
         try:
             record = store.stage(tid, runtime.tool_call_id, number, text)
         except ValueError as error:
-            return f'SMS not sent: {error}'
+            return (f'SMS draft status unavailable: {error}. '
+                    'Do not retry an uncertain send under a new identity.')
         except (OSError, sqlite3.Error):
-            return 'SMS not sent: private draft storage is unavailable.'
+            return ('SMS draft status unavailable: private storage is unavailable. '
+                    'Do not retry an uncertain send under a new identity.')
         if record.state == 'pending':
             return (
                 'Proposed to the user; if approved on the phone it will be sent. '

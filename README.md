@@ -1371,6 +1371,10 @@ Phone snapshots reconcile only the active drafts and ten recent saved results,
 sharing that projection for counts and result visibility. A known phone outcome
 cannot regress to an older unknown receipt. Draft creation validates the private
 archive before returning a pending result.
+Staging reconciles only pending/approved drafts for capacity; unrelated uncertain
+history does not trigger archive reads. Matching settled replays retain their
+saved result even if the archive is unavailable. Unresolved replay errors report
+unavailable status without claiming the earlier message was not sent.
 
 All received texts are archived even when no subscription matches. Matching
 messages receive a durable Run before acknowledgment. Outgoing receipts retain
