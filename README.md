@@ -583,6 +583,7 @@ mail-only response and size errors. Decisions still POST to `/approval`.
 | `send_email` | Complete sender/Cc/recipient/subject/body; approve, edit, reject | Run-owned Email Approval |
 | `email_archive`, `email_delete` | Exact complete messages; approve or reject; incomplete preview is reject-only | Run-owned Email Approval |
 | `send_reply` | Exact SMS recipient and full text; approve, edit, reject | Existing reply execution Run and checkpoint |
+| `send_sms` | Exact saved recipient and text on the phone's existing SMS screen; physical two-tap send or acknowledged rejection | Private draft identity and the phone's write-before-effect journal |
 | `egress` | Exact host/port and unverified agent reasons; one hour, until revoked or thread deletion, or decline; active grants can be revoked | Existing EgressStore and main/child continuations |
 | `geo_download` | Recorded region, size or unknown size, and geocoder rebuild warning; approve or decline | Existing ProposalStore, RegionRegistry and Provisioner |
 
@@ -595,7 +596,7 @@ fresh review; the client never automatically repeats an approval POST. An
 oversized Email preview is explicitly unavailable in the collection and cannot
 hide independent network or download requests.
 
-SMS previews read the action and its binding from one checkpoint snapshot; a
+Reply SMS previews read the action and its binding from one checkpoint snapshot; a
 checkpoint read failure remains an error rather than an absent proposal. Region
 completion rechecks proposal generation and terminal state after the health probe,
 then admits a durable notification Run while publication and admission are excluded.
@@ -1355,6 +1356,17 @@ URLs are refused before any send; upgrade the phone journal transport before
 changing the host URL. Inbound ingestion and archive tools can be deployed first.
 The normal web profile exposes the `sms-history` skill and bounded search/read
 tools. Untrusted SMS-triage runs do not receive those tools.
+
+Ordinary web turns also expose `send_sms` and the `send-sms` skill. A request to
+send stages the exact number and text and returns immediately as awaiting phone
+approval. It does not send or suspend the turn. The number must come from the
+user, a trusted contact file, or the correspondent of an archived message.
+Open the thread on the phone and choose Review. The existing SMS screen requires
+two physical taps before the fixed root helper can send. Rejection is retained
+until acknowledged; uncertain attempts must not be retried with a new identity.
+Drafts live beside thread status, outside its Git workspace. The approval list
+shows active drafts and ten recent results; durable identities remain available
+for replay and receipt reconciliation. Local phone SMS remains usable offline.
 
 All received texts are archived even when no subscription matches. Matching
 messages receive a durable Run before acknowledgment. Outgoing receipts retain

@@ -18,6 +18,7 @@ import json
 import os
 import re
 import stat
+import sqlite3
 import subprocess
 import tarfile
 import threading
@@ -145,9 +146,9 @@ class _OpenThread(_StrictModel):
 
 
 class _ApprovalDecision(_StrictModel):
-    kind: Literal["send_email", "email_archive", "email_delete", "send_reply", "egress", "geo_download"]
+    kind: Literal["send_email", "email_archive", "email_delete", "send_reply", "egress", "geo_download", "send_sms"]
     token: Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")]
-    decision: Literal["approve", "reject", "edit", "hour", "always", "decline", "revoke"]
+    decision: Literal["approve", "reject", "edit", "hour", "always", "decline", "revoke", "sent", "not_sent", "unknown"]
     to: Annotated[str, Field(max_length=320)] = ""
     subject: Annotated[str, Field(max_length=998)] = ""
     body: Annotated[str, Field(max_length=64 * 1024)] = ""
@@ -1474,6 +1475,49 @@ def _approval_preview(tid: str) -> dict[str, Any]:
         return value
 
 
+def _sms_preview(tid: str, record) -> dict:
+    from manage.web.approval_tokens import review_token
+    return {
+        "kind": "send_sms", "id": record.id, "number": record.number,
+        "text": record.text, "state": record.state, "created_at": record.created_at,
+        "token": review_token("send_sms", [tid, record.id, record.number, record.text, record.created_at]),
+        "decisions": ["approve", "reject"] if record.state == "pending" else [],
+    }
+
+
+def _sms_previews(tid: str) -> list[dict]:
+    """Expose active drafts and ten recent results without discarding durable identities."""
+    from assist.events.sms_outbox import SmsOutbox
+    store = SmsOutbox(state.MANAGER.root_dir)
+    try:
+        records = [store.current(record) for record in store.for_thread(tid)]
+    except (OSError, ValueError, sqlite3.Error) as error:
+        raise HTTPException(status_code=503, detail="SMS draft status unavailable") from error
+    active = [record for record in records if record.state in {"pending", "approved"}]
+    terminal = [record for record in records if record.state not in {"pending", "approved"}]
+    return [_sms_preview(tid, record) for record in active + terminal[-10:]]
+
+
+def _sms_decision(tid: str, body: _ApprovalDecision):
+    """Acknowledge the trusted phone's exact draft decision without invoking transport."""
+    from assist.events.sms_outbox import SmsOutbox
+    _thread_dir(tid)
+    if (body.to or body.subject or body.body or body.text
+            or body.decision not in {"approve", "reject", "sent", "not_sent", "unknown"}):
+        raise HTTPException(status_code=422, detail="Invalid SMS decision")
+    store = SmsOutbox(state.MANAGER.root_dir)
+    record = next((record for record in store.for_thread(tid)
+                   if hmac.compare_digest(_sms_preview(tid, record)["token"], body.token)), None)
+    if record is None:
+        raise HTTPException(status_code=409, detail="SMS draft changed; refresh and review")
+    decision = {"approve": "approved", "reject": "rejected"}.get(body.decision, body.decision)
+    try:
+        updated = store.decide(tid, record.id, decision)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"thread_id": tid, "proposal": _sms_preview(tid, updated)}
+
+
 def _approval_collection(tid: str) -> dict[str, Any]:
     """Project existing approval services without treating Run state as discovery."""
     _thread_dir(tid)
@@ -1495,6 +1539,7 @@ def _approval_collection(tid: str) -> dict[str, Any]:
             proposals.append(reply)
         proposals.extend(egress.approval_previews(tid))
         proposals.extend(geo.approval_previews(tid))
+        proposals.extend(_sms_previews(tid))
     value = {"thread_id": tid, "proposals": proposals}
     if len(json.dumps(value).encode()) > MAX_APPROVAL_BYTES:
         raise HTTPException(status_code=413, detail="Complete approvals exceed client limit; review in Assist Web")
@@ -1506,14 +1551,15 @@ def _approval_count(tid: str, status: dict) -> int:
     from manage.web import egress, geo
     return (int(status.get("stage") == "awaiting_approval")
             + sum(value["state"] == "pending" for value in egress.approval_previews(tid))
-            + sum(value["state"] == "pending" for value in geo.approval_previews(tid)))
+            + sum(value["state"] == "pending" for value in geo.approval_previews(tid))
+            + sum(value["state"] == "pending" for value in _sms_previews(tid)))
 
 
 def _approval_results(tid: str) -> bool:
     """Keep existing independent service results discoverable after Run completion."""
     from manage.web import egress, geo
     return any(value["state"] != "pending" for value in
-               [*egress.approval_previews(tid), *geo.approval_previews(tid)])
+               [*egress.approval_previews(tid), *geo.approval_previews(tid), *_sms_previews(tid)])
 
 
 @router.get("/threads/{tid}/approvals")
@@ -1548,6 +1594,8 @@ async def get_approval(tid: str) -> dict[str, Any]:
 async def decide_approval(tid: str, request: Request, background_tasks: BackgroundTasks) -> dict[str, Any]:
     body = await _validated_body(request, _ApprovalDecision, MAX_APPROVAL_BYTES)
     assert isinstance(body, _ApprovalDecision)
+    if body.kind == "send_sms":
+        return await anyio.to_thread.run_sync(_sms_decision,tid,body)
     if body.kind in {"egress", "geo_download", "send_reply"}:
         await anyio.to_thread.run_sync(_thread_dir, tid)
         if body.to or body.subject or body.body or body.kind != "send_reply" and body.text:

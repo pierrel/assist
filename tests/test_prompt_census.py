@@ -1296,9 +1296,9 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(historical_p0_prompt) == 31_279
     # The composed current prompt includes V1 browser/egress wording plus the
     # landed Git, quiet and Email guidance. The Git skill catalog description
-    # now names ancestry-preserving merge, and SMS history adds its skill catalog
-    # entry. Historical P0-P2b3 rows stay unchanged.
-    assert len(current_prompt) == 27_486
+    # now names ancestry-preserving merge. SMS history and ordinary SMS sending
+    # add their skill catalog entries. Historical P0-P2b3 rows stay unchanged.
+    assert len(current_prompt) == 27_623
     assert len(schemas) == 18_735
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 37
