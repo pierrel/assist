@@ -1553,8 +1553,9 @@ def _expected_async_task_id() -> str:
 def _expected_async_launch() -> str:
     task_id = _expected_async_task_id()
     return (f"Started subagent. task_id: {task_id}. In the user reply, call it a "
-            "subagent or task, never background or async. Report this full ID and "
-            "return now; the result will trigger a follow-up.")
+            "subagent or task, never background or async. Report this full ID. "
+            "Do any independent work required by a loaded skill, then return "
+            "without waiting or polling; the result will trigger a follow-up.")
 
 
 def _source_manifest(trace: CensusTrace) -> list[dict[str, Any]]:
@@ -1716,6 +1717,7 @@ _TOOL_ORIGINS = {
 
 _DECLARED_TEMPLATE_RENDER_HASHES = {
     "assist/templates/deepagents/assist_core.md.j2": {
+        "57ef7e208aa13a838514651c329a3a2dcdcee0d1f8e92d85b61827c6e126b054",
         "b1c0d98c75c412efb574a32146abc3f06c78e60b1344bff5d589350423bf9285",
         "a225e7ff34ceea8981ffacfa40fc6424d94739bcb8bfcbd231245e7036a1975a",
         "c2bf45bb658da376155de7bcd91a6f36dea61a6dd73999721513cd4b62c91527",
@@ -2000,7 +2002,7 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
         "13a0df1decb69fe0f4839784c892bd4d5b68b341beef6c5985e799f8d86ab9a7",
         "24507d2f519918733b0db1404c15d4f956d29e75f70f03a1d7b2e383a3913cac",
     },
-    "start_async_task": {"eddaad4cd7c4daac2dcb056eda682895987de8d4c2ba869fc00f2a2aa8157793"},
+    "start_async_task": {"0a2c37a2bbf4b089b70718458de5658631d6d77bc966633f213ca8f64f5bd80c"},
     "travel": {"00329efd850f0564a51fc91cda1cef386988a8538eb4dbf9c58a3103f99f9384"},
     "update_async_task": {"f01d4f360963e9d7c9f00b36e0518dc09e6a26a4cab50f304e893c613655a5b4"},
     "write_file": {"9bfc37771fdc668c20dd0a508eef41a79a36743e3a368efb4d48024e6fcd9a38"},
@@ -2134,9 +2136,9 @@ _TOOL_RESULT_METADATA = {
 }
 
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "0d3f084d253d4728020d81a16c42b4da91b21463f7751d298c74ab218d443317"
+    "836bc12ca0a0283918c37e245a99f79699edeb06b176a06c3137866cf11f3039"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "429d4045ce9b641ff86a070c84268cfe8f4f08419ee4a0033b0a8b3d46d15bf0"
+    "1a4fd9675ab4521779ea6b4ecfdbf496a53d8f31cc948cc1c1ec1c7e8bbf56ab"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:

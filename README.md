@@ -30,7 +30,7 @@ where reliability is harder than with frontier APIs.
   skills are progressively-disclosed capability bundles. Assist-owned skills
   live under `assist/skills/<name>/SKILL.md`; supervisor-only workflows live
   under `assist/main_skills/`; ordinary-main grounding and occasional private-state
-  maintenance guidance, including the main agent's direct-results research
+  maintenance guidance, including research
   workflow, live under `assist/main_guidance_skills/`; the delegate's
   report-backed research workflow lives under `assist/caller_skills/`; domain skills use
   `.claude/skills/`. The ordinary web, CLI, and Assist voice-call paths receive
@@ -92,7 +92,10 @@ where reliability is harder than with frontier APIs.
   needs a blocked sandbox host pauses for the thread's normal exact-host
   approval card and resumes only after your decision. A delegate is the same
   Assist construction with synchronous specialists but no self-delegation or
-  web-supervisor tools.
+  web-supervisor tools. On an ordinary web research question, the main agent
+  starts the research task and makes a quick search for a provisional sourced
+  answer. When the task finishes with usable findings, it follows up with a
+  fuller answer and a report in `references/`.
 
 - **Resilient context handling.** Large tool results are evicted to
   disk before overflowing context, context-overflow errors are caught

@@ -133,7 +133,10 @@ _TaskId = Annotated[str, Field(
 def _start_async_task(
     description: Annotated[str, Field(
         min_length=1, max_length=64_000,
-        description="Complete, self-contained work for the subagent.")],
+        description=("Complete, self-contained work for the subagent. For "
+                     "research-agent, begin with the original visible user "
+                     "request copied word for word; append any checked context "
+                     "and source requirements separately."))],
     subagent_type: Annotated[
         str, Field(description="One listed subagent type.")],
     runtime: ToolRuntime,
@@ -168,8 +171,9 @@ def _start_async_task(
 
     _run(launch)
     return (f"Started subagent. task_id: {task_id}. In the user reply, call it a "
-            "subagent or task, never background or async. Report this full ID and "
-            "return now; the result will trigger a follow-up.")
+            "subagent or task, never background or async. Report this full ID. "
+            "Do any independent work required by a loaded skill, then return "
+            "without waiting or polling; the result will trigger a follow-up.")
 
 
 def _async_task_for_parent(
@@ -308,8 +312,13 @@ _AVAILABLE = "\n".join(
 START_ASYNC_TASK_DESCRIPTION = (
     "Start a subagent and return its task ID immediately. In the user reply, call "
     "it a subagent or task, never background or async. Never poll in the launch "
-    "turn. Give the subagent an explicit, self-contained description because it has "
-    "no parent conversation history. Available types:\n" + _AVAILABLE
+    "turn. After this tool returns its task ID, continue any independent work "
+    "a loaded skill requires. Give the "
+    "subagent an explicit, self-contained description because it has "
+    "no parent conversation history. For research-agent, copy the original "
+    "visible user request word for word into the description before adding "
+    "context; do not paraphrase it. "
+    "Available types:\n" + _AVAILABLE
 )
 
 CANCEL_ASYNC_TASK_DESCRIPTION = (

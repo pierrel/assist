@@ -312,6 +312,42 @@ def test_six_tools_round_trip_through_real_private_asgi(monkeypatch, tmp_path):
     assert submitted
 
 
+def test_research_task_acceptance_and_completion_create_durable_parent_wake(
+        monkeypatch, tmp_path):
+    """The research tool reaches a persisted child Run and ordinary parent wake."""
+    submitted = _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    prompt = "What does the HoloBeam 4K projector cost at Aster Electronics today?"
+    parent = threads._create_run("parent", prompt)
+    configure_async_subagent_app(web._agent_app)
+    runtime = SimpleNamespace(tool_call_id="research-start")
+
+    with async_task_context(AsyncTaskContext("parent", parent.id, parent.work_id)):
+        launched = TOOLS["start_async_task"].func(
+            prompt, "research-agent", runtime)
+    task_id = launched.split("task_id: ", 1)[1].split(".", 1)[0]
+    child = threads._runs().list(task_id)[0]
+    assert child.assistant_id == "research-agent"
+    assert child.text == prompt
+    assert child.status == "pending"
+
+    threads._runs().claim("parent", parent.id)
+    threads._runs().transition("parent", parent.id, "success", result="quick answer")
+    threads._runs().claim(task_id, child.id)
+    completed = threads._runs().transition(
+        task_id, child.id, "success", result="Sourced deep finding")
+    wake = threads._complete_child_handoff(completed)
+
+    assert wake is not None and wake.origin == "task-completion"
+    assert wake.status == "pending"
+    assert wake.thread_id == "parent"
+    assert task_id in wake.text
+    assert "Sourced deep finding" not in wake.text
+    assert (wake.id, "parent", {"user_priority": False}) in submitted
+    assert SERVICE.get_thread(task_id)["values"]["async_task"]["result"] == (
+        "Sourced deep finding")
+
+
 def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
         monkeypatch, tmp_path):
     submitted, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
