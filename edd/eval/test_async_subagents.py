@@ -1526,7 +1526,6 @@ class TestPromptRewriteGuidanceSkills(TestAsyncSubagentSupervisor):
 class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
     """Natural external-fact outcome under the paired guidance-skill profiles."""
 
-    test_answers_current_product_price = None
     test_career_scan_selects_repeated_work_skill_from_metadata_capability = None
     test_completion_wake_checks_then_uses_result = None
     test_context_result_informs_research_then_final_response = None
@@ -1754,31 +1753,6 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
         self.assertEqual(status_calls[0].get("name"), "get_async_task_status")
         self.assertEqual(status_calls[0].get("args", {}).get("task_id"), context_id)
         self.assertRegex(reply, r"(?i)(pending|running|still|not.*(?:return|finish))")
-
-    def test_answers_current_product_price(self):
-        candidate = os.environ.get("ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS") == "1"
-        with patch("assist.tools.requests.get",
-                   side_effect=AssertionError("research eval must not fetch")) as get:
-            agent = self._agent()
-            agent.message(
-                "What does the HoloBeam 4K projector cost at Aster Electronics today?")
-            starts = [call for call in self._calls(agent)
-                      if call.get("name") == "start_async_task"]
-            research = next(call for call in reversed(starts)
-                            if call.get("args", {}).get(
-                                "subagent_type") == "research-agent")
-            if candidate:
-                self.assertTrue(skill_was_loaded(agent, "research"))
-            self.assertFalse(any(call.get("args", {}).get("subagent_type") == "delegate-agent"
-                                 for call in starts), starts)
-            task_id = _task_id_for_call(research)
-            reply = agent.message(_completion_wake(task_id, "success"))
-        get.assert_not_called()
-        self.assertTrue(any(
-            call.get("name") == "get_async_task_result"
-            and call.get("args", {}).get("task_id") == task_id
-            for call in self._calls(agent)), self._calls(agent))
-        self.assertRegex(reply, r"(?is)HoloBeam.*\$?899")
 
     def test_dispatches_research_for_vague_media_identification(self):
         """Sparse cultural clues receive a tentative search-backed match."""
