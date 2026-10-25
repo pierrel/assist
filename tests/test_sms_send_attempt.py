@@ -105,3 +105,24 @@ def test_malformed_status_never_escapes_after_possible_effect(outgoing, monkeypa
 def test_unsafe_raw_caller_never_reaches_transport(outgoing,monkeypatch,recipient):
     monkeypatch.setattr(reply.requests,'post',lambda *a,**k:pytest.fail('unsafe recipient reached transport'))
     assert reply.send_outbound_sms(recipient,'approved text',attempt_id='one').status=='not_sent'
+
+
+@pytest.mark.parametrize('status',['sent','unknown'])
+@pytest.mark.parametrize('config',['changed','removed'])
+def test_notify_replay_uses_archived_effect_before_current_owner_config(outgoing,monkeypatch,status,config):
+    import hashlib
+    from assist.events import notify
+    from types import SimpleNamespace
+    monkeypatch.setattr(notify,'_thread_id',lambda:'thread1')
+    identity='notify_'+hashlib.sha256(b'thread1:existing-notify').hexdigest()
+    configured_archive().record(identity,'outgoing','+15555550100','urgent\nhttps://old.invalid/thread/thread1',status)
+    if config=='changed':
+        monkeypatch.setenv('URGENT_SMS_RECIPIENT','+15555550199')
+        monkeypatch.setenv('URGENT_SMS_THREAD_URL_BASE','https://new.invalid')
+    else:
+        monkeypatch.delenv('URGENT_SMS_RECIPIENT',raising=False)
+        monkeypatch.delenv('URGENT_SMS_THREAD_URL_BASE',raising=False)
+    monkeypatch.setattr(reply.requests,'post',lambda *args,**kwargs:pytest.fail('notify replay sent again'))
+    result=notify.notify_tools(lambda tid:None)[0]('urgent',SimpleNamespace(tool_call_id='existing-notify'))
+    assert ('SMS sent.' if status=='sent' else 'SMS outcome unknown') in result
+    assert configured_archive().read(identity)['number']=='+15555550100'

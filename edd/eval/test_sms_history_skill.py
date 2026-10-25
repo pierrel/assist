@@ -1,5 +1,6 @@
 """Natural SMS-history acceptance eval with synthetic private archive fixtures."""
 import shutil
+from dataclasses import replace
 import tempfile
 from pathlib import Path
 from unittest import TestCase, mock
@@ -37,7 +38,8 @@ class TestSmsHistorySkill(TestCase):
                 tools.append(tracked(function))
             with mock.patch.dict('os.environ', {'ASSIST_SMS_ARCHIVE_DIR': str(root / 'private'), 'ASSIST_THREADS_DIR': str(root / 'thread')}), stub_research_subagent():
                 harness = AgentHarness(create_agent(self.model, str(root / 'thread'),
-                    spec=prompt_rewrite_web_main_spec(tools=tools)))
+                    spec=replace(prompt_rewrite_web_main_spec(tools=tools),
+                                 web_main=True, main_guidance_skills=True)))
                 output = harness.message('What pickup time did the bicycle shop text me, and what collection code do I need? Their number is +15555550100.')
             self.assertTrue(skill_was_loaded(harness, 'sms-history'))
             self.assertTrue(any(name == 'search_sms_messages' for name, _ in observed))

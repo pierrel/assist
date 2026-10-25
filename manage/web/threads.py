@@ -3284,9 +3284,12 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
         return
     pending_text = run.pending_text or run.text or _get_status(tid).get("pending_message")
     if run.status == "interrupted":
-        successor = next((candidate for candidate in _runs().list(tid)
-                          if candidate.status in {"pending", "running"}
-                          and candidate.work_id == run.work_id
+        history = _runs().list(tid)
+        position = next(index for index, candidate in enumerate(history) if candidate.id == run.id)
+        # A completed recovery slice still owns this work; a late original
+        # receipt must not create another slice after its successor finished.
+        successor = next((candidate for candidate in reversed(history[position + 1:])
+                          if candidate.work_id == run.work_id
                           and (candidate.resume or candidate.resume_decision is not None)), None)
         if successor is None:
             successor = _create_run(
@@ -3295,8 +3298,9 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
                 origin=run.origin, work_id=run.work_id,
                 user_event_id=run.user_event_id,
                 location=_location_from_fields(run.location))
-        _RESUME_SCHEDULER.submit(
-            successor.id, tid, user_priority=user_priority)
+        if successor.status in {"pending", "running"}:
+            _RESUME_SCHEDULER.submit(
+                successor.id, tid, user_priority=user_priority)
         return
 
     decision = _recovery_decision(
