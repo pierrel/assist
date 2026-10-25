@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import http.client
 import hashlib
 import json
 import logging
@@ -15,7 +16,8 @@ import time
 import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from types import SimpleNamespace
+from urllib.parse import urlencode, urlsplit
 from uuid import uuid4
 
 from assist.browser import authority
@@ -173,19 +175,20 @@ def _sandbox_generations(threads_root: str,
         raise ValueError("invalid browser thread ID")
     work_dir = (os.path.join(root, thread_id, "domain")
                 if thread_id is not None else None)
-    # The Engine list already includes mount metadata. A second inspect can
-    # lose an auto-removed container between list and scope verification.
-    # Cap the entire streamed response before decoding, including other metadata.
+    # One Engine list contains both IDs and mounts. Keep acquisition inside the
+    # existing byte/deadline-bounded CLI transport; a second inspect can race
+    # container auto-removal. The wire cap includes HTTP headers and framing.
+    query = urlencode({"all": "1", "filters": json.dumps({"label": ["assist.sandbox=true"]})})
+    request = (f"GET /containers/json?{query} HTTP/1.1\r\n"
+               "Host: docker\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n").encode("ascii")
     try:
-        api = SandboxManager._get_docker_client().api
-        with api._get(api._url("/containers/json"), stream=True,
-                      params={"all": 1, "filters": json.dumps({"label": ["assist.sandbox=true"]})},
-                      headers={"Accept-Encoding": "identity"}) as response:
-            response.raise_for_status()
-            payload = response.raw.read(262145, decode_content=False)
-            if len(payload) > 262144:
-                raise ValueError("sandbox snapshot exceeds limit")
-        snapshot = json.loads(payload)
+        wire = _bounded_cli(["docker", "system", "dial-stdio"], payload=request,
+                            limit=262144, timeout=5)
+        with http.client.HTTPResponse(SimpleNamespace(makefile=lambda _mode: io.BytesIO(wire))) as response:
+            response.begin()
+            if response.status != 200:
+                raise ValueError("Docker snapshot request failed")
+            snapshot = json.loads(response.read())
         if not isinstance(snapshot, list):
             raise ValueError("invalid container list")
         mounts = [(entry["Id"], entry["Mounts"]) for entry in snapshot]
