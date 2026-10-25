@@ -122,3 +122,9 @@ def test_incoming_sender_is_exact_untrusted_address_not_outbound_dial_validation
         row, _ = archive.record('sender' + str(index), 'incoming', number, '', 'received')
         assert row['number'] == number and row['text'] == ''
     with pytest.raises(ValueError): archive.record('bad_out', 'outgoing', 'T-Mobile', 'hello', 'unknown')
+
+
+def test_long_multipart_text_is_not_lost_at_small_message_threshold(archive):
+    text='multipart ' * 4000
+    row,_=archive.record('multipart','incoming','CITY BANK',text,'received')
+    assert archive.read('multipart')['text']==text

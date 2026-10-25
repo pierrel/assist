@@ -13,7 +13,7 @@ from contextlib import contextmanager
 
 ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 STATUSES = frozenset({"received", "unknown", "sent", "not_sent"})
-MAX_TEXT_BYTES = 16 * 1024
+MAX_TEXT_BYTES = 256 * 1024
 
 
 def utc_now() -> str:

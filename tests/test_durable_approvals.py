@@ -665,3 +665,50 @@ def test_legacy_migration_read_failure_requires_checked_fresh_review(sqlite_appr
         run, _ = threads.email_decision_core(tid, "reject", fresh.id, phone_preview=True)
         threads._execute_run(run.id, tid)
         assert chosen == [{"decisions":[{"type":"reject", "message":"The user declined to send this email."}]}]
+
+
+@pytest.mark.parametrize('decision', ['approve', 'edit'])
+def test_actual_sms_review_continuation_sends_once_with_durable_identity(sqlite_approval, monkeypatch, decision):
+    from assist.events import reply
+    from assist.events.sms_archive import configured_archive
+    tid, root, service, queued = sqlite_approval
+    monkeypatch.setenv('ASSIST_SMS_ARCHIVE_DIR', str(root/'private-sms'))
+    monkeypatch.setenv('ASSIST_THREADS_DIR', str(root/'thread-workspaces'))
+    monkeypatch.setenv('ASSIST_SMS_OUTBOUND_URL', 'https://phone.invalid/outbound/sms/v1')
+    monkeypatch.setenv('ASSIST_SMS_SECRET', 'synthetic-secret')
+    requests = []
+    def send(url, **kwargs):
+        payload=kwargs['json']; requests.append(payload)
+        return SimpleNamespace(status_code=200, json=lambda:{'message_id':payload['message_id'],'status':'sent'})
+    monkeypatch.setattr(reply.requests, 'post', send)
+    original='Original exact "reply"'
+    def gate(value):
+        chosen=interrupt({'action_requests':[{'name':'send_reply','args':{'text':original}}]})['decisions'][0]
+        text=chosen['edited_action']['args']['text'] if chosen['type']=='edit' else original
+        return {'messages':[AIMessage(reply.send_reply(text))]}
+    with sqlite3.connect(root/'sms-checkpoint.db',check_same_thread=False) as connection:
+        builder=StateGraph(MessagesState);builder.add_node('gate',gate)
+        builder.add_edge(START,'gate');builder.add_edge('gate',END)
+        graph=builder.compile(checkpointer=SqliteSaver(connection))
+        owner=service.create(tid,'general-agent','Incoming SMS',sender='+15555550100')
+        service.claim(tid,owner.id)
+        graph.invoke({'messages':[HumanMessage('Incoming SMS')]},{'configurable':{'thread_id':tid,'work_id':owner.work_id}},durability='sync')
+        service.transition(tid,owner.id,'awaiting_approval')
+        def get(value, configurable=None, **kwargs):
+            chat=Thread.__new__(Thread);chat.thread_id,chat.agent=tid,graph
+            chat.runconfig={'configurable':{'thread_id':tid,**(configurable or {})}}
+            chat._run=lambda value:graph.invoke(value,chat.runconfig,durability='sync')['messages'][-1].content
+            return chat
+        monkeypatch.setattr(state.MANAGER,'get',get)
+        state._set_status(tid,'awaiting_approval',pending_reply=original,pending_sender='+15555550100')
+        token=threads.reply_approval_preview(tid)['token']
+        accepted,_=threads.reply_decision_core(tid,decision,token,'Edited exact "reply"' if decision=='edit' else '')
+        identity=threads._sms_reply_configurable(accepted)
+        assert identity and identity==threads._sms_reply_configurable(replace(accepted,id='recovered-copy'))
+        assert requests==[]
+        threads._execute_run(accepted.id,tid)
+        assert len(requests)==1
+        assert requests[0]['text']==('Edited exact "reply"' if decision=='edit' else original)
+        assert configured_archive().read(requests[0]['message_id'])['status']=='sent'
+        threads._execute_run(accepted.id,tid)
+        assert len(requests)==1

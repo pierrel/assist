@@ -44,7 +44,7 @@ def test_receipt_identity_and_conflict_do_not_send(outgoing, monkeypatch):
 
 
 def test_reply_confirmation_identity_survives_repeated_tool_execution(outgoing, monkeypatch):
-    monkeypatch.setattr(reply, 'get_config', lambda: {'configurable': {'thread_id': 't1', 'approval_id': 'approval1', 'sms_sender': '+15555550100'}})
+    monkeypatch.setattr(reply, 'get_config', lambda: {'configurable': {'thread_id': 't1', 'sms_reply_review_id': 'approval1', 'sms_sender': '+15555550100'}})
     sent = []
     def post(url, **kwargs):
         payload = kwargs['json']; sent.append(payload)
@@ -84,3 +84,18 @@ def test_legacy_endpoint_is_refused_before_any_sms_effect(outgoing, monkeypatch)
     monkeypatch.setattr(reply.requests, 'post', lambda *args, **kwargs: pytest.fail('legacy SMS effect attempted'))
     result = reply.send_outbound_sms('+15555550100', 'hi', attempt_id='one')
     assert result.status == 'not_sent' and 'no send attempted' in result.detail
+
+
+@pytest.mark.parametrize('status', ['sent', 'unknown'])
+def test_replay_outcome_survives_removed_transport_configuration(outgoing, monkeypatch, status):
+    configured_archive().record('existing', 'outgoing', '+15555550100', 'hi', status)
+    monkeypatch.delenv('ASSIST_SMS_SECRET')
+    monkeypatch.delenv('ASSIST_SMS_OUTBOUND_URL')
+    monkeypatch.setattr(reply.requests, 'post', lambda *a, **k: pytest.fail('existing attempt repeated'))
+    assert reply.send_outbound_sms('+15555550100', 'hi', attempt_id='existing').status == status
+
+
+@pytest.mark.parametrize('malformed', [[], {}, None, 1])
+def test_malformed_status_never_escapes_after_possible_effect(outgoing, monkeypatch, malformed):
+    monkeypatch.setattr(reply.requests, 'post', lambda *a, **k: type('R', (), {'status_code':200, 'json':lambda self:{'message_id':'one','status':malformed}})())
+    assert reply.send_outbound_sms('+15555550100', 'hi', attempt_id='one').status == 'unknown'

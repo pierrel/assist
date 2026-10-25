@@ -33,8 +33,10 @@ def test_install_service_renders_egress_host_paths(tmp_path):
             "ASSIST_THREADS_DIR": str(threads),
             "ASSIST_EGRESS_CLIENT_MAP_DIR": "/var/lib/assist/proxy-map",
             "ASSIST_EGRESS_RUNTIME_DIR": "/var/lib/assist/egress-runtime",
+            "ASSIST_SMS_ARCHIVE_DIR": "/var/lib/assist-sms-private",
         }, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     unit = capture.read_text()
     assert 'Environment="ASSIST_EGRESS_CLIENT_MAP_DIR=/var/lib/assist/proxy-map"' in unit
     assert 'Environment="ASSIST_EGRESS_RUNTIME_DIR=/var/lib/assist/egress-runtime"' in unit
+    assert 'Environment="ASSIST_SMS_ARCHIVE_DIR=/var/lib/assist-sms-private"' in unit

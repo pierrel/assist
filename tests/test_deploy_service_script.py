@@ -40,6 +40,7 @@ def test_deploy_service_transports_urgent_sms_configuration(tmp_path):
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "INSTALL_SERVICE_SCRIPT": str(installer),
         "URGENT_SMS_RECIPIENT": "+15555550100",
+        "ASSIST_SMS_ARCHIVE_DIR": "/var/lib/assist-sms-private",
         "URGENT_SMS_THREAD_URL_BASE": "https://web.example.test:5050",
     }
 
@@ -53,6 +54,9 @@ def test_deploy_service_transports_urgent_sms_configuration(tmp_path):
          'printf "%s|%s" "$URGENT_SMS_RECIPIENT" "$URGENT_SMS_THREAD_URL_BASE"'],
         check=True, capture_output=True, text=True)
     assert result.stdout == "+15555550100|https://web.example.test:5050"
+    archive = subprocess.run(["bash", "-c", configuration + 'printf %s "$ASSIST_SMS_ARCHIVE_DIR"'],
+                             check=True, capture_output=True, text=True)
+    assert archive.stdout == "/var/lib/assist-sms-private"
 
 
 def test_deploy_service_transports_egress_host_paths(tmp_path):
@@ -129,3 +133,16 @@ def test_make_deployment_preserves_gmail_token_path_in_service_unit(tmp_path):
                    env=os.environ | {"PATH": f"{tmp_path}:{os.environ['PATH']}",
                                      "GMAIL_TEST_UNIT": str(captured)})
     assert f'Environment="ASSIST_GMAIL_TOKEN_FILE={token_path}"' in captured.read_text()
+
+
+def test_make_service_export_reaches_archive_relay(tmp_path):
+    capture=tmp_path/'payload'
+    ssh=tmp_path/'ssh';ssh.write_text('#!/bin/sh\ncat > "$CAPTURE"\n');ssh.chmod(0o755)
+    installer=tmp_path/'installer';installer.write_text('# end configuration\n')
+    fixture=tmp_path/'archive.mk';fixture.write_text('ASSIST_SMS_ARCHIVE_DIR := /var/lib/synthetic-sms-private\n')
+    environment=os.environ|{'PATH':f"{tmp_path}:{os.environ['PATH']}",'CAPTURE':str(capture),'INSTALL_SERVICE_SCRIPT':str(installer)}
+    subprocess.run(['make','-s','-f','Makefile','-f',str(fixture),'deploy-service','DEPLOY_HOST=synthetic-host'],
+                   cwd=os.path.dirname(os.path.dirname(__file__)),env=environment,check=True,capture_output=True)
+    configuration=capture.read_text().partition('# end configuration')[0]
+    result=subprocess.run(['bash','-c',configuration+'printf %s "$ASSIST_SMS_ARCHIVE_DIR"'],check=True,capture_output=True,text=True)
+    assert result.stdout=='/var/lib/synthetic-sms-private'

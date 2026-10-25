@@ -74,7 +74,7 @@ from assist.events.thread_log import append_event
 from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
 from assist.location import LOCATION_CONTEXT_KEY, LocationSnapshot
 from assist.frequency import FREQUENCY_RUN_ID_KEY
-from assist.events.reply import SMS_SENDER_KEY
+from assist.events.reply import SMS_SENDER_KEY, SMS_REPLY_REVIEW_ID_KEY
 from assist.events.sms_archive import configured_archive, ID_RE as SMS_RECORD_ID_RE
 from assist.gmail import GMAIL_INTERRUPT_ON, GmailError, gmail_action_preview
 from assist.events.email import EMAIL_REVIEW_IDENTITY_KEY, email_identity, valid_email_content
@@ -2594,6 +2594,17 @@ def _child_waits_for_egress(run: Run) -> bool:
         run.parent_thread_id, EgressWaiter(run.thread_id, run.id))
 
 
+def _sms_reply_configurable(run: Run) -> dict:
+    """Bind a real accepted SMS review continuation to one immutable attempt."""
+    decision = run.resume_decision or {}
+    if (run.sender and decision.get("type") in {"approve", "edit"}
+            and isinstance(decision.get("reply_review"), dict)):
+        identity = json.dumps([run.thread_id, decision], sort_keys=True,
+                              separators=(",", ":"), ensure_ascii=False)
+        return {SMS_REPLY_REVIEW_ID_KEY: hashlib.sha256(identity.encode()).hexdigest()}
+    return {}
+
+
 def _frequency_configurable(run: Run | None, *, sender: str | None,
                             assistant_id: str) -> dict | None:
     """Return the maintenance identity only for an ordinary visible web Run."""
@@ -3681,6 +3692,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     elif _run is not None and _run.mode == "turn" and assistant_id == "general-agent":
                         _cfg["web_run_id"] = _run.id
                     if _run is not None:
+                        _cfg.update(_sms_reply_configurable(_run))
                         _cfg["work_id"] = _run.work_id
                         if _run.approval_id is not None:
                             record = _runs().approval(tid, _run.approval_id)
@@ -4837,6 +4849,15 @@ def _scheduled_dispatch(tid: str, prompt: str, tz: str | None) -> None:
     _execute_run(run.id, tid)
 
 
+def _dispatch_admitted_event_run(run_id: str, tid: str) -> None:
+    """Keep a paused checkpoint behind its already queued serial resume."""
+    if _get_status(tid).get("stage") == "paused":
+        _RESUME_SCHEDULER.submit(run_id, tid)
+    else:
+        _execute_run(run_id, tid)
+
+
+
 def _dispatch_event(sender: str, text: str) -> None:
     """Route an inbound message to its subscription's thread and run the triage turn there,
     with the sender in the run config so send_reply can target it. No matching subscription
@@ -4854,23 +4875,8 @@ def _dispatch_event(sender: str, text: str) -> None:
         logging.warning("inbound message matched Pi preview thread %s; not dispatched", sub.thread_id)
         return
     rendered = sub.render(sender, text)
-    stage = _get_status(sub.thread_id).get("stage")
     run = _create_run(sub.thread_id, rendered, sender=sender)
-    if stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == sub.thread_id:
-        # A follow-up to a busy thread (busy status, or holding the slot with no
-        # busy status written yet). The Run above is already durable; either the
-        # serial scheduler executes it after a paused head or the current triage
-        # consumes the pending Run as an interjection.
-        if stage == "paused":
-            # A paused thread has RELEASED the slot — dispatching directly would
-            # acquire immediately and run on the mid-flight checkpoint. Route
-            # through the serial worker, behind the queued resume/recovery
-            # (same as post_message).
-            _RESUME_SCHEDULER.submit(run.id, sub.thread_id)
-        else:
-            _execute_run(run.id, sub.thread_id)
-    else:
-        _execute_run(run.id, sub.thread_id)
+    _dispatch_admitted_event_run(run.id, sub.thread_id)
 
 
 def _sms_secret_state(provided: str | None):
@@ -4886,7 +4892,7 @@ class _InboundSms(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     message_id: str = Field(min_length=1, max_length=128)
     sender: str = Field(max_length=128)
-    text: str = Field(max_length=16 * 1024)
+    text: str = Field(max_length=256 * 1024)
     occurred_at: str | None = Field(default=None, max_length=64)
 
 
@@ -4894,7 +4900,7 @@ class _SmsReceipt(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     message_id: str = Field(min_length=1, max_length=128)
     number: str = Field(min_length=1, max_length=20)
-    text: str = Field(max_length=16 * 1024)
+    text: str = Field(max_length=256 * 1024)
     status: str = Field(min_length=1, max_length=16)
     occurred_at: str | None = Field(default=None, max_length=64)
 
@@ -4937,7 +4943,7 @@ async def _sms_request_body(request: Request, model):
     from manage.web.phone_api import _validated_body
     try:
         with anyio.fail_after(5):
-            return await _validated_body(request, model, 128 * 1024)
+            return await _validated_body(request, model, 2 * 1024 * 1024)
     except TimeoutError as error:
         raise HTTPException(status_code=408, detail="SMS body timed out") from error
 
@@ -4959,7 +4965,7 @@ async def inbound_sms(request: Request, background_tasks: BackgroundTasks,
     payload = await _sms_request_body(request, _InboundSms)
     response, run = await run_in_threadpool(_admit_inbound_sms, payload)
     if run is not None:
-        background_tasks.add_task(_execute_run, run.id, run.thread_id)
+        background_tasks.add_task(_dispatch_admitted_event_run, run.id, run.thread_id)
     return response
 
 

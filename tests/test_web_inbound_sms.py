@@ -127,7 +127,7 @@ def test_unmatched_archived_and_outgoing_receipts_never_dispatch(client, monkeyp
 
 def test_sms_payload_bounded_and_archive_not_in_triage(client, monkeypatch):
     monkeypatch.setenv("ASSIST_SMS_SECRET", "s3cret")
-    assert client.post("/inbound/sms", content=b"x" * (128 * 1024 + 1),
+    assert client.post("/inbound/sms", content=b"x" * (2 * 1024 * 1024 + 1),
                        headers={"X-Assist-SMS-Secret": "s3cret"}).status_code == 413
     from assist import thread_manager as tm
     assert {f.__name__ for f in tm._web_tools} >= {"search_sms_messages", "read_sms_message"}
@@ -362,3 +362,15 @@ def test_incoming_nonnumeric_or_unknown_sender_keeps_archive_and_triage(client, 
     assert configured_archive().read('abc123')['number'] == sender
     assert observed == [sender or '(unknown SMS sender)']
     assert bool(observed[0])  # Never falls through to normal full-authority profile.
+
+
+
+def test_paused_incoming_queues_behind_its_serial_resume(client, monkeypatch):
+    monkeypatch.setenv('ASSIST_SMS_SECRET', 's3cret')
+    monkeypatch.setattr(threads, '_get_status', lambda tid: {'stage':'paused'})
+    queued=[]
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, 'submit', lambda *args: queued.append(args))
+    monkeypatch.setattr(threads, '_execute_run', lambda *args: pytest.fail('paused checkpoint bypassed scheduler'))
+    response=client.post('/inbound/sms',json=_body(),headers={'X-Assist-SMS-Secret':'s3cret'})
+    assert response.status_code == 200 and len(queued) == 1
+    assert threads._runs().get('t-sub',queued[0][0]).sender == '+15551234567'
