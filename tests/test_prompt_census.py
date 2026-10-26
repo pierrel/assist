@@ -1295,10 +1295,11 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     )
     assert len(historical_p0_prompt) == 31_279
     # The composed current prompt includes the research launch exception;
-    # web main exposes quick search after loading the skill. Historical P0-P2b3
-    # rows stay unchanged.
+    # web main exposes quick search after loading the skill. The tool schema
+    # also clarifies that only subagent task IDs belong to update_async_task.
+    # Historical P0-P2b3 rows stay unchanged.
     assert len(current_prompt) == 27_308
-    assert len(schemas) == 19_116
+    assert len(schemas) == 19_258
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 37
     assert len(census["findings"]) == 20

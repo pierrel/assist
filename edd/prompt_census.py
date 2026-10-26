@@ -2004,7 +2004,7 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     },
     "start_async_task": {"0a2c37a2bbf4b089b70718458de5658631d6d77bc966633f213ca8f64f5bd80c"},
     "travel": {"00329efd850f0564a51fc91cda1cef386988a8538eb4dbf9c58a3103f99f9384"},
-    "update_async_task": {"f01d4f360963e9d7c9f00b36e0518dc09e6a26a4cab50f304e893c613655a5b4"},
+    "update_async_task": {"e8235e1f22357f4622ae03e87da2eb31252e4d8ba4ee5175b5ad64e871a0ebc4"},
     "write_file": {"9bfc37771fdc668c20dd0a508eef41a79a36743e3a368efb4d48024e6fcd9a38"},
     "write_todos": {"48687d0ff93c2b303781aaed33f8230ba2eeaf3d158ad19b27c968aad39c1601"},
 }
