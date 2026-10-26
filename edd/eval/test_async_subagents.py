@@ -1799,6 +1799,8 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
         research_index = wake_calls.index(research_tasks[0])
         after_research_launch = wake_calls[research_index + 1:]
         self.assertIn(prompt, research_tasks[0]["args"]["description"])
+        self.assertRegex(research_tasks[0]["args"]["description"],
+                         r"(?i)yuba\s+kombi\s+e5")
         self.assertTrue(any(call.get("name") == "search_internet"
                             for call in after_research_launch), wake_calls)
         self.assertFalse(any(call.get("name") == "get_async_task_result"
