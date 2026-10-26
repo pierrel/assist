@@ -1494,7 +1494,8 @@ class TestPromptRewriteGuidanceSkills(TestAsyncSubagentSupervisor):
                    side_effect=AssertionError("capability probe must not fetch")) as get, \
              patch("assist.tools._query_engine", return_value=([], False)) as query, \
              patch.dict(os.environ,
-                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1"},
+                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1",
+                         "ASSIST_SEARCH_URL": "http://searxng.test"},
                         clear=False):
             agent = self._candidate_agent()
             agent.message(
@@ -1667,7 +1668,8 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
             "notes for the exact model, then find the right one."
         )
         with patch.dict(os.environ,
-                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1"},
+                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1",
+                         "ASSIST_SEARCH_URL": "http://searxng.test"},
                         clear=False), \
              patch("assist.tools.requests.get",
                    side_effect=AssertionError("async lifecycle eval must not fetch")) as get, \
@@ -1763,7 +1765,8 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
                         "with striking hand-painted art and adult fans."),
         }
         with patch.dict(os.environ,
-                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1"},
+                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1",
+                         "ASSIST_SEARCH_URL": "http://searxng.test"},
                         clear=False), \
              patch("assist.tools.requests.get",
                    side_effect=AssertionError("research eval must not fetch")) as get, \
