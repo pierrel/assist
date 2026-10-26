@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel
 
@@ -1547,6 +1547,76 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
 
     def _agent(self, **kwargs) -> AgentHarness:
         return super()._agent(spec=prompt_rewrite_web_main_spec(), **kwargs)
+
+    def test_existing_thread_research_gives_quick_answer(self):
+        """A later natural movie question must use the research skill.
+
+        The synthetic history models an older kickoff-only turn in this thread;
+        the latest user prompt is just the desired information, with no routing
+        or tool instructions. Search is synthetic and no HTTP request escapes.
+        """
+        prompt = "What horror movies are coming to theaters this weekend?"
+        prior = "What fantasy films are coming to theaters next month?"
+
+        class SearchResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"results": [{
+                    "title": "The Lantern House - horror film theater release",
+                    "url": "https://cinema.example/releases/lantern-house",
+                    "content": "The Lantern House is a horror film opening in U.S. theaters Friday.",
+                }], "unresponsive_engines": []}
+
+        with patch.dict(os.environ, {
+                "ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1",
+                "ASSIST_SEARCH_URL": "http://searxng.test"}, clear=False), \
+             patch("assist.tools.requests.get", return_value=SearchResponse()) as get:
+            agent = self._agent()
+            agent.agent.update_state(
+                {"configurable": {"thread_id": agent.thread_id}},
+                {"messages": [
+                    HumanMessage(content=prior),
+                    AIMessage(content="", tool_calls=[{
+                        "name": "start_async_task",
+                        "args": {"description": "Research upcoming fantasy films",
+                                 "subagent_type": "research-agent"},
+                        "id": "prior-start", "type": "tool_call"}]),
+                    ToolMessage(content="Started subagent. task_id: task-eval-prior.",
+                                tool_call_id="prior-start", name="start_async_task"),
+                    AIMessage(content="I started a task and will update you."),
+                ]})
+            first = len(self._calls(agent))
+            quick_reply = agent.message(prompt)
+
+        calls = self._calls(agent)[first:]
+        batches = [message.tool_calls for message in agent.all_messages()
+                   if isinstance(message, AIMessage) and message.tool_calls][1:]
+        loads = [(i, call) for i, batch in enumerate(batches) for call in batch
+                 if call.get("name") == "load_skill"
+                 and call.get("args", {}).get("name") == "research"]
+        starts = [(i, call) for i, batch in enumerate(batches) for call in batch
+                  if call.get("name") == "start_async_task"
+                  and call.get("args", {}).get("subagent_type") == "research-agent"]
+        searches = [(i, call) for i, batch in enumerate(batches) for call in batch
+                    if call.get("name") == "search_internet"]
+        self.assertEqual(len(loads), 1, calls)
+        self.assertEqual(len(starts), 1, calls)
+        self.assertEqual(len(searches), 1, calls)
+        self.assertLess(loads[0][0], starts[0][0], batches)
+        self.assertLess(starts[0][0], searches[0][0], batches)
+        self.assertRegex(starts[0][1]["args"]["description"],
+                         r"^Original user request:\s*" + re.escape(prompt))
+        self.assertRegex(searches[0][1]["args"]["query"].lower(),
+                         r"horror|scary|slasher")
+        self.assertIn("Lantern House", quick_reply)
+        self.assertIn("https://cinema.example/releases/lantern-house", quick_reply)
+        self.assertFalse(any(call.get("name") == "get_async_task_result"
+                             for call in calls), calls)
+        get.assert_called()
 
     def _check_quick_answer_then_deeper_research_followup(
             self, deep_price, comparison):
