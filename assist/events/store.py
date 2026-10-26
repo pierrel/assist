@@ -5,6 +5,8 @@ type, cap, and the sender-routing query.
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 from assist.record_store import (
     PerThreadJsonStore,
     RecordCapExceeded,
@@ -36,12 +38,25 @@ class SubscriptionStore(PerThreadJsonStore[Subscription]):
     def _from_dict(d: dict) -> Subscription:
         return Subscription.from_dict(d)
 
-    def route(self, sender: str) -> Subscription | None:
+    def route(self, sender: str, *, occurred_at: str | None = None) -> Subscription | None:
         """The subscription that handles a message from ``sender``: the FIRST match by
-        creation order (earliest ``created_at``) across all threads. Returns None when
+        creation order (earliest ``created_at``) across all threads. When an arrival
+        time is supplied, only subscriptions created strictly before it qualify.
+        Missing/invalid subscription times cannot establish eligibility. Returns None when
         nothing matches — the caller records + logs the message but fires no turn (a
         catch-all is expressible as the regexp ``.*``)."""
-        matches = [s for s in self.all() if s.matches(sender)]
+        def precedes_arrival(subscription):
+            if occurred_at is None:
+                return True
+            if subscription.created_at is None:
+                return False
+            try:
+                arrival = datetime.fromisoformat(occurred_at)
+                created = datetime.fromisoformat(subscription.created_at)
+                return arrival.tzinfo is not None and created.tzinfo is not None and created < arrival
+            except (TypeError, ValueError):
+                return False
+        matches = [s for s in self.all() if s.matches(sender) and precedes_arrival(s)]
         if not matches:
             return None
         return min(matches, key=lambda s: (s.created_at or ""))
