@@ -1357,6 +1357,14 @@ changing the host URL. Inbound ingestion and archive tools can be deployed first
 The normal web profile exposes the `sms-history` skill and bounded search/read
 tools. Untrusted SMS-triage runs do not receive those tools.
 
+Incoming subscription routing uses the original durable phone observation time:
+only subscriptions created strictly before it can match. Missing arrival times
+and explicit `archive_only` bootstrap receipts are archived without creating a
+Run. Among eligible matches the earliest-created subscription still wins. Stable
+receipt IDs keep archive/Run admission idempotent. Deploy this host support before
+the matching phone retained-inventory transport; never replace observation time
+with a history rediscovery time. Existing archived handling decisions are kept.
+
 Ordinary web turns also expose `send_sms` and the `send-sms` skill. A request to
 send stages the exact number and text and returns immediately as awaiting phone
 approval. It does not send or suspend the turn. The number must come from the

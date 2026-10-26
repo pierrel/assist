@@ -22,7 +22,7 @@ def client(tmp_path, monkeypatch):
     from assist.events.model import Subscription
     from assist.events.store import SubscriptionStore
     store = SubscriptionStore(str(tmp_path))
-    store.add(Subscription("subscription", "t-sub", ".*", "from {sender}: {text}"))
+    store.add(Subscription("subscription", "t-sub", ".*", "from {sender}: {text}", "2026-10-20T00:00:00+00:00"))
     monkeypatch.setattr(threads, "SUBSCRIPTION_STORE", store)
     monkeypatch.setenv("ASSIST_SMS_ARCHIVE_DIR", str(tmp_path / "sms-archive"))
     monkeypatch.setenv("ASSIST_THREADS_DIR", str(tmp_path / "thread-workspaces"))
@@ -31,7 +31,7 @@ def client(tmp_path, monkeypatch):
 
 
 def _body(mid="abc123", sender="+15551234567", text="hi"):
-    return {"message_id": mid, "sender": sender, "text": text}
+    return {"message_id": mid, "sender": sender, "text": text, "occurred_at": "2026-10-21T00:00:00+00:00"}
 
 
 def _reply_chat(text):
@@ -113,7 +113,7 @@ def test_interruption_after_run_creation_does_not_create_second_run(client, monk
 def test_unmatched_archived_and_outgoing_receipts_never_dispatch(client, monkeypatch):
     from assist.events.sms_archive import configured_archive
     monkeypatch.setenv("ASSIST_SMS_SECRET", "s3cret")
-    monkeypatch.setattr(threads.SUBSCRIPTION_STORE, "route", lambda _: None)
+    monkeypatch.setattr(threads.SUBSCRIPTION_STORE, "route", lambda _, **kwargs: None)
     monkeypatch.setattr(threads, "_execute_run", lambda *a: pytest.fail("unmatched receipt dispatched"))
     h = {"X-Assist-SMS-Secret": "s3cret"}
     assert client.post("/inbound/sms", json=_body(), headers=h).status_code == 200

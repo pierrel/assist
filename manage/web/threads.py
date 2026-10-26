@@ -4909,6 +4909,7 @@ class _InboundSms(BaseModel):
     sender: str = Field(max_length=128)
     text: str = Field(max_length=256 * 1024)
     occurred_at: str | None = Field(default=None, max_length=64)
+    archive_only: bool = False
 
 
 class _SmsReceipt(BaseModel):
@@ -4935,7 +4936,7 @@ def _admit_inbound_sms(payload: _InboundSms):
         raise HTTPException(status_code=400, detail="invalid message_id")
     try:
         with _RUN_ADMISSION_LOCK:
-            sub = SUBSCRIPTION_STORE.route(payload.sender)
+            sub = SUBSCRIPTION_STORE.route(payload.sender, occurred_at=payload.occurred_at) if payload.occurred_at and not payload.archive_only else None
             handling = (sub.thread_id, sub.render(payload.sender, payload.text)) if sub else None
             row, created = archive.record(payload.message_id, "incoming", payload.sender,
                                            payload.text, "received", occurred_at=payload.occurred_at,
