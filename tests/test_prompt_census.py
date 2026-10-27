@@ -1297,12 +1297,12 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
         separators=(",", ":"),
     )
     assert len(historical_p0_prompt) == 31_279
-    # The composed current prompt includes V1 browser/egress wording plus the
-    # landed Git, quiet, Email, and thread-description tool listing. The Git
-    # skill catalog description now names ancestry-preserving merge; historical
-    # P0-P2b3 rows stay unchanged.
-    assert len(current_prompt) == 27_299
-    assert len(schemas) == 19_062
+    # The current prompt requires research before dispatch and lists the
+    # thread-description tool; the schema clarifies that update_async_task
+    # accepts subagent task IDs.
+    # Historical P0-P2b3 rows stay unchanged.
+    assert len(current_prompt) == 27_367
+    assert len(schemas) == 19_585
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 37
     assert len(census["findings"]) == 20

@@ -97,9 +97,9 @@ class AgentSpec:
     web_main: bool = False
 
     # Closed opt-in for the ordinary main assistant's progressive grounding and
-    # research guidance. It selects only prompt-source material: the compact
-    # Assist core and three read-only main-guidance skills, including the
-    # direct-results research workflow. It stays separate from ``web_main`` so
+    # research guidance. It selects the compact Assist core and three
+    # main-guidance skills, including two-stage research. With ``web_main`` it
+    # also adds quick search and its existing guards. It stays separate so
     # evals can compare the pre-migration and candidate prompts with the same
     # production-shaped agent.
     main_guidance_skills: bool = False
