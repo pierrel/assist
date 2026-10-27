@@ -66,6 +66,7 @@ from assist.middleware.context_rider_middleware import ContextRiderMiddleware
 from assist.middleware.interjection import InterjectionMiddleware
 from assist.middleware.image_input_guard import ImageInputGuardMiddleware
 from assist.middleware.prompt_composition import PromptCompositionMiddleware
+from assist.middleware.execution_limit import ExecutionLimitMiddleware
 from assist.env import env_int
 
 
@@ -673,7 +674,8 @@ def create_agent(model: BaseChatModel,
             *([HumanInTheLoopMiddleware(interrupt_on=spec.interrupt_on)]
               if spec.interrupt_on else []),
             skills_mw, memory_mw, ContextRiderMiddleware(),
-            *([] if delegate else [InterjectionMiddleware()]), logging_mw],
+            *([] if delegate else [InterjectionMiddleware()]),
+            ExecutionLimitMiddleware(), logging_mw],
         backend=backend,
         # A non-legacy embedder gets no deepagents subagents: web main supplies
         # five lifecycle tools; web triage deliberately supplies none.
