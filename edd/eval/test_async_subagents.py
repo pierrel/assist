@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel
 
@@ -1548,6 +1548,101 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
     def _agent(self, **kwargs) -> AgentHarness:
         return super()._agent(spec=prompt_rewrite_web_main_spec(), **kwargs)
 
+    def test_existing_thread_research_gives_quick_answer(self):
+        """A later natural movie question loads research in an existing thread.
+
+        An ordinary greeting establishes real prior conversation history without
+        a loaded research skill. The next prompt gives only the desired outcome;
+        search is synthetic and no web-search HTTP request escapes.
+        """
+        prompt = "What horror movies are coming to theaters this weekend?"
+        prior = "Hi."
+
+        class SearchResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"results": [{
+                    "title": "The Lantern House - horror film theater release",
+                    "url": "https://cinema.example/releases/lantern-house",
+                    "content": "The Lantern House is a horror film opening in U.S. theaters Friday.",
+                }], "unresponsive_engines": []}
+
+        with patch.dict(os.environ, {
+                "ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1",
+                "ASSIST_SEARCH_URL": "http://searxng.test"}, clear=False), \
+             patch("assist.tools.requests.get", return_value=SearchResponse()) as get:
+            agent = self._agent()
+            prior_reply = agent.message(prior)
+            self.assertTrue(prior_reply.strip())
+            seeded = agent.all_messages()
+            state = agent.agent.get_state(
+                {"configurable": {"thread_id": agent.thread_id}}).values
+            self.assertNotIn("research", state.get("active_skills") or {})
+            self.assertNotIn("search_internet",
+                             state.get("loaded_skill_tools") or ())
+            self.assertFalse(any(call.get("name") == "load_skill"
+                                 and call.get("args", {}).get("name") == "research"
+                                 for message in seeded
+                                 if isinstance(message, AIMessage)
+                                 for call in (message.tool_calls or [])), seeded)
+            prior_call_ids = {call["id"] for message in seeded
+                              if isinstance(message, AIMessage)
+                              for call in (message.tool_calls or [])}
+            provider_saw_prior = []
+            generate = self.model._generate
+
+            def observe_provider_messages(messages, *args, **kwargs):
+                provider_saw_prior.append(
+                    any(isinstance(message, HumanMessage)
+                        and message.content == prior for message in messages)
+                    and any(isinstance(message, AIMessage)
+                            and message.content == prior_reply
+                            for message in messages)
+                    and any(isinstance(message, HumanMessage)
+                            and message.content == prompt
+                            for message in messages))
+                return generate(messages, *args, **kwargs)
+
+            with patch.object(self.model, "_generate",
+                              side_effect=observe_provider_messages):
+                quick_reply = agent.message(prompt)
+
+        self.assertTrue(any(provider_saw_prior),
+                        "The actual model request omitted the prior turn")
+        batches = [[call for call in message.tool_calls
+                    if call["id"] not in prior_call_ids]
+                   for message in agent.all_messages()
+                   if isinstance(message, AIMessage) and message.tool_calls]
+        batches = [batch for batch in batches if batch]
+        calls = [call for batch in batches for call in batch]
+        loads = [(i, call) for i, batch in enumerate(batches) for call in batch
+                 if call.get("name") == "load_skill"
+                 and call.get("args", {}).get("name") == "research"]
+        starts = [(i, call) for i, batch in enumerate(batches) for call in batch
+                  if call.get("name") == "start_async_task"
+                  and call.get("args", {}).get("subagent_type") == "research-agent"]
+        searches = [(i, call) for i, batch in enumerate(batches) for call in batch
+                    if call.get("name") == "search_internet"]
+        self.assertEqual(len(loads), 1, calls)
+        self.assertEqual(len(starts), 1, calls)
+        self.assertTrue(searches, calls)
+        self.assertLess(loads[0][0], starts[0][0], batches)
+        self.assertTrue(all(starts[0][0] < index for index, _ in searches), batches)
+        original_line = starts[0][1]["args"]["description"].splitlines()[0]
+        self.assertEqual(original_line.removeprefix("Original user request:")
+                         .strip().strip('"“”'), prompt)
+        self.assertRegex(searches[0][1]["args"]["query"].lower(),
+                         r"horror|scary|slasher")
+        self.assertIn("Lantern House", quick_reply)
+        self.assertIn("cinema.example/releases/lantern-house", quick_reply)
+        self.assertFalse(any(call.get("name") == "get_async_task_result"
+                             for call in calls), calls)
+        get.assert_called()
+
     def _check_quick_answer_then_deeper_research_followup(
             self, deep_price, comparison):
         """A natural external question receives two honest, sourced replies.
@@ -1704,6 +1799,8 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
         research_index = wake_calls.index(research_tasks[0])
         after_research_launch = wake_calls[research_index + 1:]
         self.assertIn(prompt, research_tasks[0]["args"]["description"])
+        self.assertRegex(research_tasks[0]["args"]["description"],
+                         r"(?i)yuba\s+kombi\s+e5")
         self.assertTrue(any(call.get("name") == "search_internet"
                             for call in after_research_launch), wake_calls)
         self.assertFalse(any(call.get("name") == "get_async_task_result"
