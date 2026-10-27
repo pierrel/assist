@@ -143,6 +143,9 @@ Snapshot reads and background probes do not clear notifications.
   a later replacement can preserve it; Assist asks rather than guessing when
   no timezone is known.
 
+- **Thread descriptions.** The ordinary web assistant can update the current
+  thread's description when asked, and the change is saved with the thread.
+
 - **Pi web preview.** A new web thread can explicitly select a bounded Pi
   preview; Deep Agents remains the default. Pi threads are visibly labelled,
   run only ordinary manual web turns, and can start a new Deep Agents thread
