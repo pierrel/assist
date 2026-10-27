@@ -14,13 +14,17 @@ the web deployment only; emacsos/CLI have no Manager). Never raises into the age
 from __future__ import annotations
 
 import html
+import hashlib
 import logging
 import os
+import sqlite3
 from urllib.parse import quote
 
 from langgraph.config import get_config
+from langchain.tools import ToolRuntime
 
 from assist.events.reply import send_outbound_sms
+from assist.events.sms_archive import configured_archive
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +47,7 @@ def notify_tools(mark_urgent) -> list:
     """Return the notify tool, closing over the injected ``mark_urgent(tid)`` callback (so
     this module never imports web state — no import cycle)."""
 
-    def notify(message: str) -> str:
+    def notify(message: str, runtime: ToolRuntime) -> str:
         """Flag THIS thread as URGENT / time-sensitive so the user is alerted it needs a
         fast look: the web thread list shows an "urgent" badge on this thread, and the
         home-screen app icon shows a badge dot until they open it. It also immediately texts
@@ -64,17 +68,32 @@ def notify_tools(mark_urgent) -> list:
         # Escape message: the tool result renders through markdown (raw HTML passes),
         # and message could carry agent-echoed untrusted content — don't let it inject.
         confirmation = f"Flagged this thread as urgent: {html.escape(message)}"
-        recipient = os.getenv(_RECIPIENT_ENV)
-        if not recipient:
-            logger.warning("urgent SMS disabled: %s is not configured", _RECIPIENT_ENV)
-            return f"{confirmation} SMS not sent: recipient isn't configured."
-        thread_url = _thread_url(tid)
-        if not thread_url:
-            logger.warning("urgent SMS disabled: %s is not configured", _THREAD_URL_BASE_ENV)
-            return f"{confirmation} SMS not sent: thread link isn't configured."
-        failure = send_outbound_sms(recipient, f"{message}\n{thread_url}")
-        if failure:
-            return f"{confirmation} SMS not sent: {html.escape(failure)}."
-        return f"{confirmation} SMS sent."
+        if not runtime.tool_call_id:
+            return f"{confirmation} SMS not sent: no durable operation identity."
+        attempt_id = "notify_" + hashlib.sha256(
+            f"{tid}:{runtime.tool_call_id}".encode()).hexdigest()
+        try:
+            previous = configured_archive().read(attempt_id)
+        except (ValueError, OSError, sqlite3.Error):
+            return f"{confirmation} SMS outcome unknown; archive unavailable, no new send attempted."
+        if previous is not None:
+            # Replay the immutable recipient/body before consulting current config.
+            recipient, text = previous["number"], previous["text"]
+        else:
+            recipient = os.getenv(_RECIPIENT_ENV)
+            if not recipient:
+                logger.warning("urgent SMS disabled: %s is not configured", _RECIPIENT_ENV)
+                return f"{confirmation} SMS not sent: recipient isn't configured."
+            thread_url = _thread_url(tid)
+            if not thread_url:
+                logger.warning("urgent SMS disabled: %s is not configured", _THREAD_URL_BASE_ENV)
+                return f"{confirmation} SMS not sent: thread link isn't configured."
+            text = f"{message}\n{thread_url}"
+        result = send_outbound_sms(recipient, text, attempt_id=attempt_id)
+        if result.status == "sent":
+            return f"{confirmation} SMS sent."
+        if result.status == "unknown":
+            return f"{confirmation} SMS outcome unknown; do not resend. {html.escape(result.detail)}"
+        return f"{confirmation} SMS not sent: {html.escape(result.detail or 'the phone confirmed no send')}."
 
     return [notify]

@@ -1,8 +1,7 @@
-"""Route tests for inbound-SMS + reply-approval: auth, dedup, dispatch queued, gating.
+"""SMS route authentication, durable archive/Run admission and reply approval.
 
-The route + dispatch are exercised for real (auth, the durable claim, BackgroundTask
-scheduling); the triage turn itself (_dispatch_event → _process_message) is stubbed to a
-spy so the LLM/sandbox isn't needed.
+Storage and admission run for real; _execute_run is stubbed so these tests
+need neither a model, sandbox container nor a real SMS transport.
 """
 import pytest
 from types import SimpleNamespace
@@ -20,14 +19,19 @@ def client(tmp_path, monkeypatch):
     tdir.mkdir()
     monkeypatch.setattr(web.MANAGER, "root_dir", str(tmp_path))
     monkeypatch.setattr(web.MANAGER, "thread_dir", lambda tid: str(tmp_path / tid))
-    # Repoint the durable inbound log at the tmp root so dedup is isolated per test.
-    from assist.events.inbound import InboundLog
-    monkeypatch.setattr(threads, "INBOUND_LOG", InboundLog(str(tmp_path)))
+    from assist.events.model import Subscription
+    from assist.events.store import SubscriptionStore
+    store = SubscriptionStore(str(tmp_path))
+    store.add(Subscription("subscription", "t-sub", ".*", "from {sender}: {text}", "2026-10-20T00:00:00+00:00"))
+    monkeypatch.setattr(threads, "SUBSCRIPTION_STORE", store)
+    monkeypatch.setenv("ASSIST_SMS_ARCHIVE_DIR", str(tmp_path / "sms-archive"))
+    monkeypatch.setenv("ASSIST_THREADS_DIR", str(tmp_path / "thread-workspaces"))
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit", lambda rid, tid: threads._execute_run(rid, tid))
     return TestClient(web.app)
 
 
 def _body(mid="abc123", sender="+15551234567", text="hi"):
-    return {"message_id": mid, "sender": sender, "text": text}
+    return {"message_id": mid, "sender": sender, "text": text, "occurred_at": "2026-10-21T00:00:00+00:00"}
 
 
 def _reply_chat(text):
@@ -53,22 +57,82 @@ def test_inbound_401_bad_secret(client, monkeypatch):
 def test_inbound_accepts_and_dispatches(client, monkeypatch):
     monkeypatch.setenv("ASSIST_SMS_SECRET", "s3cret")
     calls = []
-    monkeypatch.setattr(threads, "_dispatch_event", lambda sender, text: calls.append((sender, text)))
+    def execute(run_id, tid):
+        run = threads._runs().get(tid, run_id)
+        calls.append((run.sender, run.text))
+    monkeypatch.setattr(threads, "_execute_run", execute)
     r = client.post("/inbound/sms", json=_body(), headers={"X-Assist-SMS-Secret": "s3cret"})
     assert r.status_code == 200 and r.json()["status"] == "accepted"
-    assert calls == [("+15551234567", "hi")]   # dispatched once, off the response path
+    assert calls == [("+15551234567", "from +15551234567: hi")]
 
 
 def test_inbound_dedup_same_message_id(client, monkeypatch):
     monkeypatch.setenv("ASSIST_SMS_SECRET", "s3cret")
     calls = []
-    monkeypatch.setattr(threads, "_dispatch_event", lambda sender, text: calls.append(1))
+    monkeypatch.setattr(threads, "_execute_run", lambda *_: calls.append(1))
     h = {"X-Assist-SMS-Secret": "s3cret"}
     first = client.post("/inbound/sms", json=_body(mid="dup1"), headers=h)
     second = client.post("/inbound/sms", json=_body(mid="dup1"), headers=h)
     assert first.json()["status"] == "accepted"
     assert second.json()["status"] == "duplicate"
     assert len(calls) == 1                       # the duplicate did NOT re-dispatch
+
+
+def test_archive_acceptance_interruption_recovers_same_run_once(client, monkeypatch):
+    from assist.events.sms_archive import configured_archive
+    monkeypatch.setenv("ASSIST_SMS_SECRET", "s3cret")
+    original = threads._create_run
+    monkeypatch.setattr(threads, "_create_run", lambda *a, **k: (_ for _ in ()).throw(OSError("interrupted")))
+    h = {"X-Assist-SMS-Secret": "s3cret"}
+    assert client.post("/inbound/sms", json=_body(), headers=h).status_code == 503
+    pending = configured_archive().read("abc123")
+    assert pending["handling"] == "pending"
+    monkeypatch.setattr(threads, "_create_run", original)
+    queued = []
+    monkeypatch.setattr(threads, "_execute_run", lambda *a: queued.append(a))
+    assert client.post("/inbound/sms", json=_body(), headers=h).status_code == 200
+    assert client.post("/inbound/sms", json=_body(), headers=h).json()["status"] == "duplicate"
+    assert len(queued) == 1 and len(threads._runs().list("t-sub")) == 1
+    assert configured_archive().read("abc123")["handling"] == "admitted"
+
+
+def test_interruption_after_run_creation_does_not_create_second_run(client, monkeypatch):
+    from assist.events.sms_archive import SmsArchive
+    monkeypatch.setenv("ASSIST_SMS_SECRET", "s3cret")
+    original = SmsArchive.mark_admitted
+    monkeypatch.setattr(SmsArchive, "mark_admitted", lambda *a: (_ for _ in ()).throw(OSError("interrupted")))
+    h = {"X-Assist-SMS-Secret": "s3cret"}
+    assert client.post("/inbound/sms", json=_body(), headers=h).status_code == 503
+    first = threads._runs().list("t-sub")[0]
+    monkeypatch.setattr(SmsArchive, "mark_admitted", original)
+    monkeypatch.setattr(threads, "_execute_run", lambda *a: None)
+    assert client.post("/inbound/sms", json=_body(), headers=h).status_code == 200
+    assert [run.id for run in threads._runs().list("t-sub")] == [first.id]
+
+
+def test_unmatched_archived_and_outgoing_receipts_never_dispatch(client, monkeypatch):
+    from assist.events.sms_archive import configured_archive
+    monkeypatch.setenv("ASSIST_SMS_SECRET", "s3cret")
+    monkeypatch.setattr(threads.SUBSCRIPTION_STORE, "route", lambda _, **kwargs: None)
+    monkeypatch.setattr(threads, "_execute_run", lambda *a: pytest.fail("unmatched receipt dispatched"))
+    h = {"X-Assist-SMS-Secret": "s3cret"}
+    assert client.post("/inbound/sms", json=_body(), headers=h).status_code == 200
+    assert configured_archive().read("abc123")["handling"] == "archive_only"
+    body = {"message_id": "outgoing1", "number": "+15551234567", "text": 'exact "quote"', "status": "sent"}
+    assert client.post("/sms/receipts", json=body, headers=h).json()["status"] == "sent"
+    assert client.post("/sms/receipts", json={**body, "status": "unknown"}, headers=h).json()["status"] == "sent"
+    assert client.post("/sms/receipts", json={**body, "text": "changed"}, headers=h).status_code == 409
+    assert client.post("/sms/receipts", json=body).status_code == 401
+    assert configured_archive().read("outgoing1")["text"] == 'exact "quote"'
+
+
+def test_sms_payload_bounded_and_archive_not_in_triage(client, monkeypatch):
+    monkeypatch.setenv("ASSIST_SMS_SECRET", "s3cret")
+    assert client.post("/inbound/sms", content=b"x" * (2 * 1024 * 1024 + 1),
+                       headers={"X-Assist-SMS-Secret": "s3cret"}).status_code == 413
+    from assist import thread_manager as tm
+    assert {f.__name__ for f in tm._web_tools} >= {"search_sms_messages", "read_sms_message"}
+    assert not {"search_sms_messages", "read_sms_message"} & {f.__name__ for f in tm._web_triage_tools}
 
 
 def test_inbound_400_bad_message_id(client, monkeypatch):
@@ -285,3 +349,49 @@ def test_browser_email_rejects_identity_changed_since_render(client, monkeypatch
     assert response.status_code == 409
     assert threads._get_status("t-sub") == before
     assert threads._runs().list("t-sub") == []
+
+
+@pytest.mark.parametrize('sender', ['T-Mobile', 'CITY BANK', ''])
+def test_incoming_nonnumeric_or_unknown_sender_keeps_archive_and_triage(client, monkeypatch, sender):
+    from assist.events.sms_archive import configured_archive
+    monkeypatch.setenv('ASSIST_SMS_SECRET', 's3cret')
+    observed = []
+    def execute(run_id, tid): observed.append(threads._runs().get(tid, run_id).sender)
+    monkeypatch.setattr(threads, '_execute_run', execute)
+    response = client.post('/inbound/sms', json=_body(sender=sender, text=''), headers={'X-Assist-SMS-Secret': 's3cret'})
+    assert response.status_code == 200
+    assert configured_archive().read('abc123')['number'] == sender
+    assert observed == [sender or '(unknown SMS sender)']
+    assert bool(observed[0])  # Never falls through to normal full-authority profile.
+
+
+
+def test_paused_incoming_queues_behind_its_serial_resume(client, monkeypatch):
+    monkeypatch.setenv('ASSIST_SMS_SECRET', 's3cret')
+    monkeypatch.setattr(threads, '_get_status', lambda tid: {'stage':'paused'})
+    queued=[]
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, 'submit', lambda *args: queued.append(args))
+    monkeypatch.setattr(threads, '_execute_run', lambda *args: pytest.fail('paused checkpoint bypassed scheduler'))
+    response=client.post('/inbound/sms',json=_body(),headers={'X-Assist-SMS-Secret':'s3cret'})
+    assert response.status_code == 200 and len(queued) == 1
+    assert threads._runs().get('t-sub',queued[0][0]).sender == '+15551234567'
+
+
+def test_replayed_admission_cannot_recover_an_actively_running_run(client,monkeypatch):
+    from assist.events.sms_archive import SmsArchive
+    monkeypatch.setenv('ASSIST_SMS_SECRET','s3cret')
+    original=SmsArchive.mark_admitted
+    monkeypatch.setattr(SmsArchive,'mark_admitted',lambda *args: (_ for _ in ()).throw(OSError('crash after Run commit')))
+    headers={'X-Assist-SMS-Secret':'s3cret'}
+    assert client.post('/inbound/sms',json=_body(),headers=headers).status_code==503
+    run=threads._runs().list('t-sub')[0]
+    threads._runs().claim('t-sub',run.id)
+    monkeypatch.setattr(SmsArchive,'mark_admitted',original)
+    queued=[];monkeypatch.setattr(threads._RESUME_SCHEDULER,'submit',lambda *args:queued.append(args))
+    monkeypatch.setattr(threads,'_recover_run',lambda *args,**kwargs:pytest.fail('live recovery interrupted'))
+    assert client.post('/inbound/sms',json=_body(),headers=headers).status_code==200
+    assert threads._runs().get('t-sub',run.id).status=='running'
+    assert queued==[(run.id,'t-sub')]
+    threads._runs().transition('t-sub',run.id,'success')
+    threads._execute_run(*queued[0])
+    assert threads._runs().get('t-sub',run.id).status=='success'
