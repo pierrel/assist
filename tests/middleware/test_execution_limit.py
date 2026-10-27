@@ -99,3 +99,48 @@ def test_warning_preserves_approval_and_resume(decision):
     assert effects == (["executed"] if decision == "approve" else [])
     assert all(str(p[0].content).count(LIMIT_WARNING) == 1 for p in model.prompts)
     assert graph.get_state(cfg).values["messages"][-1].content == "Done."
+
+
+def test_preserves_structured_system_context_and_message_metadata():
+    from langchain.agents.middleware.types import ModelRequest
+    from langchain_core.messages import SystemMessage
+
+    blocks = [
+        {"type": "text", "text": "First instruction.\nSecond instruction.",
+         "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "Tool policy."},
+    ]
+    system = SystemMessage(content=blocks, id="trusted-context",
+                           additional_kwargs={"owner": "host"})
+    request = ModelRequest(model=RecordingModel(responses=[]), messages=[],
+                           system_message=system,
+                           state={"execution_limit_warned": True})
+    seen = []
+    ExecutionLimitMiddleware().wrap_model_call(request, lambda changed: seen.append(changed))
+    changed = seen[0].system_message
+    assert changed.content_blocks[:-1] == blocks
+    assert changed.content_blocks[-1] == {"type": "text", "text": f"\n\n{LIMIT_WARNING}"}
+    assert changed.id == system.id
+    assert changed.additional_kwargs == system.additional_kwargs
+    assert system.content == blocks
+
+
+@pytest.mark.parametrize("role", ["web-main", "delegate"])
+def test_actual_assist_profiles_preserve_prompt_when_warning_starts(role, tmp_path):
+    from assist.agent import create_agent as create_assist_agent
+    from assist.spec import AgentSpec
+
+    spec = (AgentSpec(web_main=True, main_guidance_skills=True,
+                      async_subagent_tools=(inspect_item,))
+            if role == "web-main" else AgentSpec(role="delegate"))
+    contexts = []
+    for budget in (550, 50):
+        model = RecordingModel(responses=[], stop_after=1)
+        graph = create_assist_agent(model, str(tmp_path), spec=spec)
+        graph.invoke({"messages": [("user", "Hello.")]}, {
+            "configurable": {"thread_id": f"{role}-{budget}"}, "recursion_limit": budget,
+        })
+        contexts.append(model.prompts[0][0].content_blocks)
+    baseline, warned = contexts
+    assert warned[:-1] == baseline
+    assert warned[-1] == {"type": "text", "text": f"\n\n{LIMIT_WARNING}"}

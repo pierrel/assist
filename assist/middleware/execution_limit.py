@@ -46,5 +46,7 @@ class ExecutionLimitMiddleware(AgentMiddleware):
         if not request.state.get("execution_limit_warned", False):
             return handler(request)
         base = request.system_message
-        content = f"{base.content}\n\n{LIMIT_WARNING}" if base else LIMIT_WARNING
-        return handler(request.override(system_message=SystemMessage(content=content)))
+        system = (base.model_copy(update={"content": [
+            *base.content_blocks, {"type": "text", "text": f"\n\n{LIMIT_WARNING}"},
+        ]}) if base else SystemMessage(content=LIMIT_WARNING))
+        return handler(request.override(system_message=system))
