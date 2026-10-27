@@ -667,7 +667,7 @@ def test_legacy_migration_read_failure_requires_checked_fresh_review(sqlite_appr
         assert chosen == [{"decisions":[{"type":"reject", "message":"The user declined to send this email."}]}]
 
 
-@pytest.mark.parametrize('decision', ['approve', 'edit'])
+@pytest.mark.parametrize('decision', ['approve', 'edit', 'reject'])
 def test_actual_sms_review_continuation_sends_once_with_durable_identity(sqlite_approval, monkeypatch, decision):
     from assist.events import reply
     from assist.events.sms_archive import configured_archive
@@ -683,7 +683,10 @@ def test_actual_sms_review_continuation_sends_once_with_durable_identity(sqlite_
     monkeypatch.setattr(reply.requests, 'post', send)
     original='Original exact "reply"'
     def gate(value):
-        chosen=interrupt({'action_requests':[{'name':'send_reply','args':{'text':original}}]})['decisions'][0]
+        chosen=interrupt({'action_requests':[{'name':'send_reply','args':{'text':original},
+            'description':'Send the exact reviewed reply'}]})['decisions'][0]
+        if chosen['type']=='reject':
+            return {'messages':[AIMessage('Reply rejected')]}
         text=chosen['edited_action']['args']['text'] if chosen['type']=='edit' else original
         return {'messages':[AIMessage(reply.send_reply(text))]}
     with sqlite3.connect(root/'sms-checkpoint.db',check_same_thread=False) as connection:
@@ -701,17 +704,23 @@ def test_actual_sms_review_continuation_sends_once_with_durable_identity(sqlite_
             return chat
         monkeypatch.setattr(state.MANAGER,'get',get)
         state._set_status(tid,'awaiting_approval',pending_reply=original,pending_sender='+15555550100')
-        token=threads.reply_approval_preview(tid)['token']
+        preview=phone_api._approval_collection(tid)['proposals']
+        assert len(preview)==1 and preview[0]['kind']=='send_reply'
+        assert preview[0]['action']['args']['text']==original
+        assert requests==[]
+        token=preview[0]['token']
         accepted,_=threads.reply_decision_core(tid,decision,token,'Edited exact "reply"' if decision=='edit' else '')
         identity=threads._sms_reply_configurable(accepted)
-        assert identity and identity==threads._sms_reply_configurable(replace(accepted,id='recovered-copy'))
+        assert bool(identity)==(decision!='reject')
+        assert identity==threads._sms_reply_configurable(replace(accepted,id='recovered-copy'))
         assert requests==[]
         threads._execute_run(accepted.id,tid)
-        assert len(requests)==1
-        assert requests[0]['text']==('Edited exact "reply"' if decision=='edit' else original)
-        assert configured_archive().read(requests[0]['message_id'])['status']=='sent'
+        assert len(requests)==(0 if decision=='reject' else 1)
+        if requests:
+            assert requests[0]['text']==('Edited exact "reply"' if decision=='edit' else original)
+            assert configured_archive().read(requests[0]['message_id'])['status']=='sent'
         threads._execute_run(accepted.id,tid)
-        assert len(requests)==1
+        assert len(requests)==(0 if decision=='reject' else 1)
 
 
 @pytest.mark.parametrize('outcome', ['sent', 'unknown', 'not_attempted'])

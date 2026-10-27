@@ -3780,7 +3780,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         decision = {key: value for key, value in resume_decision.items()
                                     if key != "reply_review"}
                         if (review := resume_decision.get("reply_review")) is not None:
-                            action = {"name": "send_reply", "args": {"text": review["text"]}}
+                            action = next(request for request in review["requests"]
+                                          if request.get("name") == "send_reply"
+                                          and request.get("args") == {"text": review["text"]})
                             resp = chat.resume_actions(_decision_vector(action, review["requests"], decision))
                         else:
                             resp = chat.resume_reply(decision)
@@ -5018,14 +5020,13 @@ def _reply_review(chat, status: dict) -> dict | None:
     if not status.get("pending_sender"):
         return None
     snapshot = chat.agent.get_state(chat.runconfig)
-    args = next((dict(action["args"]) for intr in snapshot.interrupts
-                 for action in (intr.value or {}).get("action_requests", [])
-                 if action.get("name") == "send_reply" and isinstance(action.get("args"), dict)), None)
-    if not args:
+    action = next((action for intr in snapshot.interrupts
+                   for action in (intr.value or {}).get("action_requests", [])
+                   if action.get("name") == "send_reply" and isinstance(action.get("args"), dict)), None)
+    if action is None or not action["args"]:
         return None
-    interrupt, checkpoint, namespace, requests = _checkpoint_review(
-        chat, {"name": "send_reply", "args": args}, snapshot=snapshot)
-    return {"sender": status["pending_sender"], "text": args.get("text", ""),
+    interrupt, checkpoint, namespace, requests = _checkpoint_review(chat, action, snapshot=snapshot)
+    return {"sender": status["pending_sender"], "text": action["args"].get("text", ""),
             "interrupt_id": interrupt, "checkpoint_id": checkpoint, "checkpoint_ns": namespace,
             "requests": requests, "work_id": (snapshot.metadata or {}).get("work_id")}
 

@@ -41,6 +41,7 @@ from assist.events.email import email_tools, EMAIL_INTERRUPT_ON
 from assist.gmail import gmail_tools, GMAIL_INTERRUPT_ON
 from assist.events.notify import notify_tools
 from assist.events.sms_tools import sms_archive_tools
+from assist.events.sms_outbox import SmsOutbox, sms_sending_tools
 from assist.backlog import MessageBacklog
 from assist.run_service import RunService
 from assist.egress.store import EgressStore, approvals_dir_is_safe
@@ -208,8 +209,10 @@ def _request_quiet(tid: str, run_id: str) -> bool:
     return _runs().request_quiet(tid, run_id)
 
 
+SMS_OUTBOX = SmsOutbox(MANAGER.root_dir)
+
 set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE)
-              + sms_archive_tools()
+              + sms_archive_tools() + sms_sending_tools(SMS_OUTBOX)
               + notify_tools(lambda tid: _mark_urgent(tid))
               + quiet_tools(_request_quiet)
               + _geo_tools + email_tools() + gmail_tools() + [get_location]
