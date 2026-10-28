@@ -1497,8 +1497,13 @@ def _sms_previews(tid: str) -> list[dict]:
         selected = active + terminal[-10:]
         from assist.events.sms_archive import configured_archive
         archive = (configured_archive() if any(
-            record.state not in {"sent", "not_sent", "rejected"} for record in selected) else None)
-        resolved = [store.current(record, archive) for record in selected]
+            record.state in {"pending", "approved"} for record in selected) else None)
+        resolved = []
+        for record in selected:
+            projected = store.current(record, archive)
+            if projected != record:
+                projected = store.update(tid, record.id, lambda saved: store.current(saved, archive))
+            resolved.append(projected)
         active = [record for record in resolved if record.state in {"pending", "approved"}]
         terminal = sorted((record for record in resolved if record.state not in {"pending", "approved"}),
                           key=lambda record: record.created_at)

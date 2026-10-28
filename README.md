@@ -1370,12 +1370,12 @@ changing the host URL. Inbound ingestion and archive tools can be deployed first
 The normal web profile exposes the `sms-history` skill and bounded search/read
 tools. Untrusted SMS-triage runs do not receive those tools.
 
-Incoming subscription routing uses the original durable phone observation time:
+Incoming subscription routing uses the original timezone-aware modem SMS source timestamp:
 only subscriptions created strictly before it can match. Missing arrival times
 and explicit `archive_only` bootstrap receipts are archived without creating a
 Run. Among eligible matches the earliest-created subscription still wins. Stable
 receipt IDs keep archive/Run admission idempotent. Deploy this host support before
-the matching phone retained-inventory transport; never replace observation time
+the matching phone source-identity transport; never replace source time
 with a history rediscovery time. Existing archived handling decisions are kept.
 
 Ordinary web turns also expose `send_sms` and the `send-sms` skill. A request to
@@ -1384,14 +1384,16 @@ approval. It does not send or suspend the turn. The number must come from the
 user, a trusted contact file, or the correspondent of an archived message.
 Open the thread on the phone and choose Review. The existing SMS screen requires
 two physical taps before the fixed root helper can send. Rejection is retained
-until acknowledged; uncertain attempts must not be retried with a new identity.
+until acknowledged. Unknown is terminal; do not automatically retry. An explicit
+new user request can prepare a new attempt requiring fresh phone confirmation.
 Drafts live beside thread status, outside its Git workspace. The approval list
 shows active drafts and up to ten recent results within its shared byte budget;
 durable identities remain available
-for replay and receipt reconciliation. Local phone SMS remains usable offline.
-Phone snapshots reconcile only the active drafts and ten recent saved results,
+for duplicate-confirmation protection and history. Local phone SMS remains usable offline.
+Phone snapshots project active drafts and ten recent saved results,
 sharing that projection for counts and result visibility. A known phone outcome
-cannot regress to an older unknown receipt. Draft creation validates the private
+cannot regress to an older unknown receipt. A saved unknown remains terminal
+without further archive settlement. Draft creation validates the private
 archive before returning a pending result.
 Staging reconciles only pending/approved drafts for capacity; unrelated uncertain
 history does not trigger archive reads. Matching settled replays retain their
@@ -1405,10 +1407,14 @@ never silently truncated. Other combinations that still exceed the limit retain
 the existing explicit size error.
 
 All received texts are archived even when no subscription matches. Matching
-messages receive a durable Run before acknowledgment. Outgoing receipts retain
+messages receive a durable Run before acknowledgment. Frozen thread/prompt routing
+bridges archive and Run stores; normal dispatch-key deduplication and Run lifecycle
+own execution, without archive run-id/admitted mirrors. See
+[the ingestion/Run boundary design](docs/2026-10-28-sms-ingestion-run-boundary.org). Outgoing receipts retain
 `sent` (ModemManager accepted), `not_sent` or `unknown`; `sent` does not prove
-carrier delivery. A timeout is unknown and must not be retried as another send.
-The phone retries only its journal handoff and keeps independent identical texts.
+carrier delivery. A timeout is unknown and is not automatically retried.
+The phone retries only its journal handoff; equal sender/source-time/content
+observations deliberately collapse under the accepted identity policy.
 Archive files are never automatically copied into source/thread Git workspaces.
 Explicit requests to quote or export SMS follow the existing privacy rules.
 

@@ -16,4 +16,7 @@ phone confirmation, not sent. They can open this thread on the phone and choose
 Review to inspect the existing SMS confirmation screen.
 
 Rejection means no send. A sent result means modem acceptance, not recipient
-delivery. An unknown outcome must not trigger another send attempt.
+delivery. Failed or unknown outcomes never trigger an automatic retry. Report the
+outcome and leave the decision to the user. A new explicit request to try again
+can prepare a new attempt with fresh phone approval; mention that an unknown
+previous outcome could mean the recipient receives a duplicate.

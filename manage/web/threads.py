@@ -4932,7 +4932,7 @@ def _sms_archive():
 
 
 def _admit_inbound_sms(payload: _InboundSms):
-    """Persist message and its stable Run admission before acknowledging the phone."""
+    """Persist ingestion/routing, then hand off to the ordinary Run store before ACK."""
     archive = _sms_archive()
     if not SMS_RECORD_ID_RE.fullmatch(payload.message_id):
         raise HTTPException(status_code=400, detail="invalid message_id")
@@ -4943,12 +4943,18 @@ def _admit_inbound_sms(payload: _InboundSms):
             row, created = archive.record(payload.message_id, "incoming", payload.sender,
                                            payload.text, "received", occurred_at=payload.occurred_at,
                                            handling=handling)
-            if row["thread_id"] is None or row["admitted"]:
+            if row["thread_id"] is None:
                 return {"status": "accepted" if created else "duplicate"}, None
             _require_deep_thread(row["thread_id"])
+            dispatch_key = "sms:" + payload.message_id
+            previous = next((run for run in _runs().list(row["thread_id"])
+                             if run.dispatch_key == dispatch_key), None)
+            if previous is not None:
+                # Admission is complete. Ordinary Run scheduling/recovery owns
+                # this Run, including pending, interrupted and terminal states.
+                return {"status": "duplicate"}, None
             run = _create_run(row["thread_id"], row["prompt"], sender=row["number"] or "(unknown SMS sender)",
-                              run_id=row["run_id"], dispatch_key="sms:" + payload.message_id)
-            archive.mark_admitted(payload.message_id)
+                              dispatch_key=dispatch_key)
             return {"status": "accepted"}, run
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -4973,7 +4979,8 @@ async def inbound_sms(request: Request, background_tasks: BackgroundTasks,
 
     The bounded request body is read asynchronously; blocking storage/admission
     runs in the threadpool. A failed admission retains a pending archive record
-    and returns an error, so a phone handoff retry uses the same persisted Run id.
+    and returns an error. Once a Run exists, its normal lifecycle owns execution;
+    receipt retries never reopen or recover it.
     """
     auth = _sms_secret_state(x_assist_sms_secret)
     if auth is None:

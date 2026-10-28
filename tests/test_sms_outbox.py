@@ -162,9 +162,9 @@ def test_snapshot_projection_reconciles_only_bounded_unsettled_selection(box, mo
     monkeypatch.setattr(geo, 'approval_previews', lambda tid: [])
     assert phone_api._approval_summary('thread', {'stage': 'ready'}) == (5, True)
     configured.assert_called_once()
-    assert archive.read.call_count == 15
+    assert archive.read.call_count == 5
     assert {call.args[0] for call in archive.read.call_args_list} == {
-        record.id for record in records[-15:]}
+        record.id for record in records[-5:]}
 
 
 @pytest.mark.parametrize('saved', ['sent', 'approved', 'unknown'])
@@ -180,11 +180,11 @@ def test_matching_replay_preserves_saved_outcome_when_archive_unavailable(box, m
         box.decide('thread', draft.id, saved)
     monkeypatch.delenv('ASSIST_SMS_ARCHIVE_DIR')
     result = tool('+15555550100', 'exact', runtime)
-    if saved == 'sent':
-        assert ': sent.' in result
+    if saved in {'sent', 'unknown'}:
+        assert f': {saved}.' in result
     else:
         assert 'status unavailable' in result
-        assert 'Do not retry' in result
+        assert 'Do not automatically retry' in result
     assert 'SMS not sent' not in result
     assert len(box.for_thread('thread')) == 1
     assert box.for_thread('thread')[0].state == saved
@@ -242,3 +242,39 @@ def test_combined_approval_budget_preserves_exact_active_sms(box, monkeypatch, m
     else:
         assert email['action'] == mail['action'] and email['token'] == mail['token']
     assert len(box.for_thread('thread')) == retained + 10
+
+
+def test_unknown_is_terminal_without_archive_reconciliation_or_automatic_send(box, monkeypatch):
+    from assist.events import sms_outbox
+    record=box.stage('thread','uncertain-attempt','+15555550100','exact')
+    box.decide('thread',record.id,'approved')
+    box.decide('thread',record.id,'unknown')
+    monkeypatch.setattr(sms_outbox,'configured_archive',lambda: pytest.fail('terminal unknown queried archive'))
+    assert box.current(box.for_thread('thread')[0]).state=='unknown'
+    preview=phone_api._sms_previews('thread')[0]
+    assert preview['state']=='unknown' and preview['decisions']==[]
+    with pytest.raises(ValueError,match='no longer applicable'):
+        box.decide('thread',record.id,'sent')
+    assert box.for_thread('thread')[0].state=='unknown'
+
+
+def test_first_unknown_projection_is_durable_and_not_later_reconciled(box):
+    from assist.events.sms_archive import configured_archive
+    record=box.stage('thread','lost-response','+15555550100','exact')
+    box.decide('thread',record.id,'approved')
+    archive=configured_archive()
+    archive.record(record.id,'outgoing',record.number,record.text,'unknown')
+    assert phone_api._sms_previews('thread')[0]['state']=='unknown'
+    assert box.for_thread('thread')[0].state=='unknown'
+    archive.record(record.id,'outgoing',record.number,record.text,'sent')
+    assert phone_api._sms_previews('thread')[0]['state']=='unknown'
+
+
+def test_matching_replay_freezes_first_unknown_projection(box):
+    from assist.events.sms_archive import configured_archive
+    record=box.stage('thread','lost-response','+15555550100','exact')
+    box.decide('thread',record.id,'approved')
+    archive=configured_archive()
+    archive.record(record.id,'outgoing',record.number,record.text,'unknown')
+    assert box.stage('thread','lost-response','+15555550100','exact').state=='unknown'
+    assert box.for_thread('thread')[0].state=='unknown'

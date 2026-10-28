@@ -1,0 +1,77 @@
+#+title: SMS ingestion ends at normal Run admission
+#+date: 2026-10-28
+
+* Scope
+
+SMS needs durable ingestion, deduplication and subscription routing. After
+admission the ordinary Run store owns scheduling, checkpoints, failure and
+recovery. This does not turn an untrusted SMS sender into the owner: the Run
+still carries sender, selects the restricted triage tool profile, and cannot
+approve its own outbound effects. Notify behavior remains unchanged.
+
+* What is removed
+
+Remove the archive's newly allocated run_id and admitted progress mirror, its
+mark_admitted write, and SMS-specific recovery on repeated receipts. New archive
+databases do not contain those columns. Existing databases retain their unused
+columns and values without destructive rebuilding. RunService.create already
+serializes and deduplicates dispatch_key under its own lock. Use the established
+sms:<receipt-id> key; no second execution state machine is necessary.
+
+The archive retains only a frozen destination thread and rendered prompt beside
+the immutable receipt. These are routing, not execution progress. A crash after
+archive commit but before Run commit must retry the SAME destination and prompt,
+even if subscriptions changed. ACK only after the matching Run is durable (or an
+unmatched/history receipt is durable). A duplicate cannot reopen running,
+interrupted or terminal work. Once the Run exists, ordinary scheduling/startup
+recovery applies, including the normal crash window between Run commit and queue
+notification. There is no SMS-specific promise to repair that window on retry.
+Archive read/search describes incoming handling as routed or archive_only; it
+does not project execution progress from a second lifecycle field.
+
+* Source timestamp and identity
+
+The phone's original timezone-aware SMS Timestamp supplies occurred_at, and a
+subscription must be strictly older than it. Missing time or explicit archive_only
+never admits a Run. Retained histories must not become new events on rediscovery.
+The paired phone simplification uses a unique hash of sender, original timestamp
+and exact content, deliberately collapsing equal messages within time resolution.
+Existing archive IDs and message rows remain immutable. The phone retries only
+the stored receipt; the host's primary-key uniqueness deduplicates ingestion.
+
+* Outgoing outcomes
+
+A confirmed send attempt remains durably keyed before effects so repeated
+confirmation cannot accidentally send twice. Sent means modem acceptance, not
+recipient delivery. Not-sent and unknown are acceptable terminal outcomes. The
+agent must not automatically resend either. A new explicit user request may
+prepare another attempt, with the same physical approval boundary.
+
+Remove unknown draft settlement and unknown-to-known draft transitions. The
+first terminal observation of an approved draft is persisted using the existing
+store, including an unknown shown after a lost phone response. A saved
+unknown result stays visible without consulting archive availability. Reads of
+pending/approved drafts may still detect an already recorded attempt to prevent
+a stale approval/rejection from treating it as unsent. The actual phone result
+can finish its currently approved draft. Ordinary phone receipt handoff remains:
+it archives ALL local outgoing messages and does not retry modem effects or run
+an extra investigation to settle uncertainty.
+
+* Verification and rollout
+
+Synthetic tests exercise real SQLite and normal RunService, including failures
+before and after Run commit, changing subscriptions between retries, active and
+terminal Run replay, unmatched history and timestamp cutoffs. operator
+composes both reviewed candidates while preserving unrelated live features.
+Wire request/response shapes are unchanged. Host-first rollout is compatible;
+archive columns remain for rollback. Do not restore an old archive snapshot or
+mint replacement receipts to fill history. Phone key migration has its own
+original-metadata alias-preservation checks. No real messages or phone effects
+are required for deterministic checks.
+
+* Historical supersessions
+
+This replaces the application-stamped arrival time in /Model (v1, post-review)/
+of [[file:2026-07-01-inbound-sms-interception.org][2026-07-01-inbound-sms-interception.org]] with original modem SMS source time.
+Its sender-restricted triage and approval boundaries remain. Other dated designs
+remain historical records; this document does not rewrite them.
