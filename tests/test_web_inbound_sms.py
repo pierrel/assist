@@ -411,6 +411,7 @@ def test_lost_ack_retry_after_destination_deletion_is_archived_only(client, monk
     headers={'X-Assist-SMS-Secret':'s3cret'}
     assert client.post('/inbound/sms',json=_body(),headers=headers).status_code==200
     before=configured_archive().read('abc123')
+    assert len(threads._runs().list('t-sub'))==1
     destination=Path(threads.MANAGER.thread_dir('t-sub'))
     shutil.rmtree(destination)  # Same storage removal as permanent thread deletion.
     original=threads._create_run
