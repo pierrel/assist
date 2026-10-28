@@ -1841,4 +1841,3 @@ async def get_asset(tid: str, path: str, request: Request) -> Response:
     """Serve only one authorized, bounded file; never inventory or synchronize."""
     return await anyio.to_thread.run_sync(
         _asset_response, tid, path, request.headers.get("if-none-match"))
-
