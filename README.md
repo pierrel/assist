@@ -30,7 +30,7 @@ where reliability is harder than with frontier APIs.
   skills are progressively-disclosed capability bundles. Assist-owned skills
   live under `assist/skills/<name>/SKILL.md`; supervisor-only workflows live
   under `assist/main_skills/`; ordinary-main grounding and occasional private-state
-  maintenance guidance, including the main agent's direct-results research
+  maintenance guidance, including research
   workflow, live under `assist/main_guidance_skills/`; the delegate's
   report-backed research workflow lives under `assist/caller_skills/`; domain skills use
   `.claude/skills/`. The ordinary web, CLI, and Assist voice-call paths receive
@@ -92,7 +92,10 @@ where reliability is harder than with frontier APIs.
   needs a blocked sandbox host pauses for the thread's normal exact-host
   approval card and resumes only after your decision. A delegate is the same
   Assist construction with synchronous specialists but no self-delegation or
-  web-supervisor tools.
+  web-supervisor tools. On an ordinary web research question, the main agent
+  starts the research task and makes a quick search for a provisional sourced
+  answer. When the task finishes with usable findings, it follows up with a
+  fuller answer and a report in `references/`.
 
 - **Resilient context handling.** Large tool results are evicted to
   disk before overflowing context, context-overflow errors are caught
@@ -104,7 +107,14 @@ where reliability is harder than with frontier APIs.
 
 - **Loop and stall guards.** Repeating tool calls and empty model
   responses are detected and recovered automatically — keeps small
-  models from getting stuck in degenerate states.
+  models from getting stuck in degenerate states. Near the main/delegate
+  execution limit, the agent receives one trusted warning to finish a clear
+  path or report completed work, unfinished work, and blockers honestly. A
+  50-superstep finalization window extends the original 500-superstep budget;
+  these are graph steps, not model calls. The hard stop remains terminal if
+  the agent does not finish. Checkpoint continuations retain the warning;
+  a new turn resets it. Each invocation retains LangGraph's existing budget
+  semantics, including a fresh budget when resuming a checkpoint.
 
 - **Git domain integration.** Each thread works in its own git branch
   of a configured "domain" repo (your life repo, your work repo, etc.)
@@ -139,6 +149,9 @@ Snapshot reads and background probes do not clear notifications.
   timezone takes precedence. Schedule listings include the stored timezone so
   a later replacement can preserve it; Assist asks rather than guessing when
   no timezone is known.
+
+- **Thread descriptions.** The ordinary web assistant can update the current
+  thread's description when asked, and the change is saved with the thread.
 
 - **Pi web preview.** A new web thread can explicitly select a bounded Pi
   preview; Deep Agents remains the default. Pi threads are visibly labelled,
@@ -583,6 +596,7 @@ mail-only response and size errors. Decisions still POST to `/approval`.
 | `send_email` | Complete sender/Cc/recipient/subject/body; approve, edit, reject | Run-owned Email Approval |
 | `email_archive`, `email_delete` | Exact complete messages; approve or reject; incomplete preview is reject-only | Run-owned Email Approval |
 | `send_reply` | Exact SMS recipient and full text; approve, edit, reject | Existing reply execution Run and checkpoint |
+| `send_sms` | Exact saved recipient and text on the phone's existing SMS screen; physical two-tap send or acknowledged rejection | Private draft identity and the phone's write-before-effect journal |
 | `egress` | Exact host/port and unverified agent reasons; one hour, until revoked or thread deletion, or decline; active grants can be revoked | Existing EgressStore and main/child continuations |
 | `geo_download` | Recorded region, size or unknown size, and geocoder rebuild warning; approve or decline | Existing ProposalStore, RegionRegistry and Provisioner |
 
@@ -595,7 +609,7 @@ fresh review; the client never automatically repeats an approval POST. An
 oversized Email preview is explicitly unavailable in the collection and cannot
 hide independent network or download requests.
 
-SMS previews read the action and its binding from one checkpoint snapshot; a
+Reply SMS previews read the action and its binding from one checkpoint snapshot; a
 checkpoint read failure remains an error rather than an absent proposal. Region
 completion rechecks proposal generation and terminal state after the health probe,
 then admits a durable notification Run while publication and admission are excluded.
@@ -1356,11 +1370,53 @@ changing the host URL. Inbound ingestion and archive tools can be deployed first
 The normal web profile exposes the `sms-history` skill and bounded search/read
 tools. Untrusted SMS-triage runs do not receive those tools.
 
+Incoming subscription routing uses the original timezone-aware modem SMS source timestamp:
+only subscriptions created strictly before it can match. Missing arrival times
+and explicit `archive_only` bootstrap receipts are archived without creating a
+Run. Among eligible matches the earliest-created subscription still wins. Stable
+receipt IDs keep archive/Run admission idempotent. Deploy this host support before
+the matching phone source-identity transport; never replace source time
+with a history rediscovery time. Existing archived handling decisions are kept.
+
+Ordinary web turns also expose `send_sms` and the `send-sms` skill. A request to
+send stages the exact number and text and returns immediately as awaiting phone
+approval. It does not send or suspend the turn. The number must come from the
+user, a trusted contact file, or the correspondent of an archived message.
+Open the thread on the phone and choose Review. The existing SMS screen requires
+two physical taps before the fixed root helper can send. Rejection is retained
+until acknowledged. Unknown is terminal; do not automatically retry. An explicit
+new user request can prepare a new attempt requiring fresh phone confirmation.
+Drafts live beside thread status, outside its Git workspace. The approval list
+shows active drafts and up to ten recent results within its shared byte budget;
+durable identities remain available
+for duplicate-confirmation protection and history. Local phone SMS remains usable offline.
+Phone snapshots project only saved draft states. Only an explicit authenticated
+phone result finishes an approved draft; the archive's write-before-effect
+unknown is not a completion signal. Unknown stays terminal without background
+settlement. A lost callback can leave an approved draft until the existing
+on-phone Review reads its exact journal identity and reports the outcome.
+Draft creation validates private archive configuration before returning a new
+pending result; replaying a saved draft does not require archive availability.
+No archive polling or staging-time reconciliation is used for draft status.
+The shared phone approval response drops old SMS result cards first when its
+combined byte budget is exceeded, without deleting their durable records. Active
+SMS drafts keep complete recipient/text previews. If necessary, the existing
+unavailable Email card directs complete Email review to Assist Web; content is
+never silently truncated. Other combinations that still exceed the limit retain
+the existing explicit size error.
+
 All received texts are archived even when no subscription matches. Matching
-messages receive a durable Run before acknowledgment. Outgoing receipts retain
+messages receive a durable Run before acknowledgment. If a frozen destination
+has since been deleted, the archived receipt is acknowledged without rerouting
+or recreating work. Storage errors and invalid destination entries remain
+unavailable. Frozen thread/prompt routing
+bridges archive and Run stores; normal dispatch-key deduplication and Run lifecycle
+own execution, without archive run-id/admitted mirrors. See
+[the ingestion/Run boundary design](docs/2026-10-28-sms-ingestion-run-boundary.org). Outgoing receipts retain
 `sent` (ModemManager accepted), `not_sent` or `unknown`; `sent` does not prove
-carrier delivery. A timeout is unknown and must not be retried as another send.
-The phone retries only its journal handoff and keeps independent identical texts.
+carrier delivery. A timeout is unknown and is not automatically retried.
+The phone retries only its journal handoff; equal sender/source-time/content
+observations deliberately collapse under the accepted identity policy.
 Archive files are never automatically copied into source/thread Git workspaces.
 Explicit requests to quote or export SMS follow the existing privacy rules.
 

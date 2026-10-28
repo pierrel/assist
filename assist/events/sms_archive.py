@@ -7,7 +7,6 @@ import re
 import sqlite3
 import stat
 from datetime import datetime, timezone
-import uuid
 from contextlib import contextmanager
 
 
@@ -58,7 +57,7 @@ class SmsArchive:
                     id TEXT PRIMARY KEY, direction TEXT NOT NULL, number TEXT NOT NULL,
                     text TEXT NOT NULL, status TEXT NOT NULL, occurred_at TEXT NOT NULL,
                     recorded_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                    thread_id TEXT, prompt TEXT, run_id TEXT, admitted INTEGER NOT NULL DEFAULT 0
+                    thread_id TEXT, prompt TEXT
                 );
                 CREATE INDEX IF NOT EXISTS sms_correspondent ON messages(number, occurred_at);
                 CREATE INDEX IF NOT EXISTS sms_time ON messages(occurred_at);
@@ -96,7 +95,7 @@ class SmsArchive:
 
         A new outgoing ``unknown`` record is the write-before-effect claim.
         Only its creator may attempt the send. Incoming handling is fixed on
-        first receipt and carries a persisted Run id before acknowledgement.
+        first receipt; the ordinary Run store owns deduplication and execution.
         """
         self._validate(record_id, direction, number, text, status)
         if occurred_at is not None:
@@ -121,24 +120,19 @@ class SmsArchive:
                 created = False
             else:
                 thread_id, prompt = handling if handling else (None, None)
-                run_id = uuid.uuid4().hex if handling else None
-                connection.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,0)",
+                connection.execute("INSERT INTO messages (id,direction,number,text,status,occurred_at,recorded_at,updated_at,thread_id,prompt) VALUES (?,?,?,?,?,?,?,?,?,?)",
                                    (record_id, direction, number, text, status, occurred_at or now,
-                                    now, now, thread_id, prompt, run_id))
+                                    now, now, thread_id, prompt))
                 created = True
             row = dict(connection.execute("SELECT * FROM messages WHERE id=?", (record_id,)).fetchone())
         return row, created
-
-    def mark_admitted(self, record_id: str) -> None:
-        with self._connect() as connection:
-            connection.execute("UPDATE messages SET admitted=1 WHERE id=?", (record_id,))
 
     @staticmethod
     def _public(row) -> dict:
         value = {key: row[key] for key in ("id", "direction", "number", "text", "status", "occurred_at", "recorded_at", "updated_at")}
         if row["direction"] == "incoming":
             value["handling"] = ("archive_only" if row["thread_id"] is None
-                                 else "admitted" if row["admitted"] else "pending")
+                                 else "routed")
         return value
 
     def read(self, record_id: str) -> dict | None:

@@ -66,6 +66,7 @@ from assist.middleware.context_rider_middleware import ContextRiderMiddleware
 from assist.middleware.interjection import InterjectionMiddleware
 from assist.middleware.image_input_guard import ImageInputGuardMiddleware
 from assist.middleware.prompt_composition import PromptCompositionMiddleware
+from assist.middleware.execution_limit import ExecutionLimitMiddleware
 from assist.env import env_int
 
 
@@ -390,6 +391,7 @@ def create_agent(model: BaseChatModel,
             "not both")
     delegate = spec.role == "delegate"
     async_main = not delegate and bool(spec.async_subagent_tools)
+    web_quick_research = spec.web_main and spec.main_guidance_skills
     caller_research_skill = delegate
     thread_memory_enabled = bool(
         getattr(sandbox_backend, "native_agent_dir", False) is True
@@ -437,7 +439,7 @@ def create_agent(model: BaseChatModel,
 
     # Put caller guidance and the async main's orchestration skills before broad
     # shared/domain skills. Source order is prompt salience, not an access guard;
-    # main guidance owns the async direct-results workflow, while delegates load
+    # main guidance owns the async two-stage workflow, while delegates load
     # their report-backed caller workflow under the same ``research`` name.
     skill_sources = (
         ([MAIN_GUIDANCE_SKILLS_ROUTE] if spec.main_guidance_skills else [])
@@ -480,6 +482,7 @@ def create_agent(model: BaseChatModel,
         *list(spec.tools),
         *execution_egress_tools,
         travel, directions, map_data, read_url,
+        *([search_internet] if web_quick_research else []),
     ):
         # Deep Agents binds tools by name.  Specs may use provider-schema dicts
         # while the built-ins are BaseTool instances, so object identity is not
@@ -632,12 +635,10 @@ def create_agent(model: BaseChatModel,
             ToolResultToFileMiddleware(backend, tools={"execute"}, floor_chars=8000,
                                        preview_style="head_tail", untrusted=True,
                                        offload_root="/tmp"),
-            # read_url on the main/delegate agent is a NAVIGATION tool: follow a known
-            # URL + the links it surfaces to find a page or downloadable file
-            # (the download itself is curl in the sandbox, egress-gated). It
-            # can't do general research — no search_internet here — so the
-            # delegation split holds: a research question still routes to the
-            # research-agent (which has search). The guards are load-bearing:
+            # read_url on the main/delegate agent follows a known URL and its
+            # surfaced links to find a page or downloadable file. The guided
+            # ordinary web main also has search_internet for a quick sourced
+            # answer while its research task runs. The guards are load-bearing:
             # UrlProvenanceMiddleware keeps read_url on URLs from the user or a
             # link a page actually surfaced (same-host), never invented ones —
             # so it can't flood on fabricated URLs the way raw curl did (thread
@@ -661,6 +662,9 @@ def create_agent(model: BaseChatModel,
                 trust_human_messages=not delegate,
                 trust_task_results=not delegate,
             ),
+            *([SearchUnavailableBreakerMiddleware(
+                threshold=env_int("ASSIST_SEARCH_UNAVAILABLE_THRESHOLD", 4)),
+               SearchRunawayBreakerMiddleware()] if web_quick_research else []),
             # Mid-turn interjection delivery is installed on the user-facing main
             # agent only. A delegate is an atomic task worker and omits it.
             # Keep HITL immediately before skills. after-model hooks run in
@@ -670,7 +674,8 @@ def create_agent(model: BaseChatModel,
             *([HumanInTheLoopMiddleware(interrupt_on=spec.interrupt_on)]
               if spec.interrupt_on else []),
             skills_mw, memory_mw, ContextRiderMiddleware(),
-            *([] if delegate else [InterjectionMiddleware()]), logging_mw],
+            *([] if delegate else [InterjectionMiddleware()]),
+            ExecutionLimitMiddleware(), logging_mw],
         backend=backend,
         # A non-legacy embedder gets no deepagents subagents: web main supplies
         # five lifecycle tools; web triage deliberately supplies none.

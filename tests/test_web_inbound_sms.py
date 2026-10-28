@@ -22,7 +22,7 @@ def client(tmp_path, monkeypatch):
     from assist.events.model import Subscription
     from assist.events.store import SubscriptionStore
     store = SubscriptionStore(str(tmp_path))
-    store.add(Subscription("subscription", "t-sub", ".*", "from {sender}: {text}"))
+    store.add(Subscription("subscription", "t-sub", ".*", "from {sender}: {text}", "2026-10-20T00:00:00+00:00"))
     monkeypatch.setattr(threads, "SUBSCRIPTION_STORE", store)
     monkeypatch.setenv("ASSIST_SMS_ARCHIVE_DIR", str(tmp_path / "sms-archive"))
     monkeypatch.setenv("ASSIST_THREADS_DIR", str(tmp_path / "thread-workspaces"))
@@ -31,7 +31,7 @@ def client(tmp_path, monkeypatch):
 
 
 def _body(mid="abc123", sender="+15551234567", text="hi"):
-    return {"message_id": mid, "sender": sender, "text": text}
+    return {"message_id": mid, "sender": sender, "text": text, "occurred_at": "2026-10-21T00:00:00+00:00"}
 
 
 def _reply_chat(text):
@@ -86,25 +86,27 @@ def test_archive_acceptance_interruption_recovers_same_run_once(client, monkeypa
     h = {"X-Assist-SMS-Secret": "s3cret"}
     assert client.post("/inbound/sms", json=_body(), headers=h).status_code == 503
     pending = configured_archive().read("abc123")
-    assert pending["handling"] == "pending"
+    assert pending["handling"] == "routed"
     monkeypatch.setattr(threads, "_create_run", original)
     queued = []
     monkeypatch.setattr(threads, "_execute_run", lambda *a: queued.append(a))
     assert client.post("/inbound/sms", json=_body(), headers=h).status_code == 200
     assert client.post("/inbound/sms", json=_body(), headers=h).json()["status"] == "duplicate"
     assert len(queued) == 1 and len(threads._runs().list("t-sub")) == 1
-    assert configured_archive().read("abc123")["handling"] == "admitted"
+    assert configured_archive().read("abc123")["handling"] == "routed"
 
 
 def test_interruption_after_run_creation_does_not_create_second_run(client, monkeypatch):
-    from assist.events.sms_archive import SmsArchive
     monkeypatch.setenv("ASSIST_SMS_SECRET", "s3cret")
-    original = SmsArchive.mark_admitted
-    monkeypatch.setattr(SmsArchive, "mark_admitted", lambda *a: (_ for _ in ()).throw(OSError("interrupted")))
+    original = threads._create_run
+    def crash(*args, **kwargs):
+        original(*args, **kwargs)
+        raise OSError("interrupted after ordinary Run commit")
+    monkeypatch.setattr(threads, "_create_run", crash)
     h = {"X-Assist-SMS-Secret": "s3cret"}
     assert client.post("/inbound/sms", json=_body(), headers=h).status_code == 503
     first = threads._runs().list("t-sub")[0]
-    monkeypatch.setattr(SmsArchive, "mark_admitted", original)
+    monkeypatch.setattr(threads, "_create_run", original)
     monkeypatch.setattr(threads, "_execute_run", lambda *a: None)
     assert client.post("/inbound/sms", json=_body(), headers=h).status_code == 200
     assert [run.id for run in threads._runs().list("t-sub")] == [first.id]
@@ -113,7 +115,7 @@ def test_interruption_after_run_creation_does_not_create_second_run(client, monk
 def test_unmatched_archived_and_outgoing_receipts_never_dispatch(client, monkeypatch):
     from assist.events.sms_archive import configured_archive
     monkeypatch.setenv("ASSIST_SMS_SECRET", "s3cret")
-    monkeypatch.setattr(threads.SUBSCRIPTION_STORE, "route", lambda _: None)
+    monkeypatch.setattr(threads.SUBSCRIPTION_STORE, "route", lambda _, **kwargs: None)
     monkeypatch.setattr(threads, "_execute_run", lambda *a: pytest.fail("unmatched receipt dispatched"))
     h = {"X-Assist-SMS-Secret": "s3cret"}
     assert client.post("/inbound/sms", json=_body(), headers=h).status_code == 200
@@ -380,18 +382,77 @@ def test_paused_incoming_queues_behind_its_serial_resume(client, monkeypatch):
 def test_replayed_admission_cannot_recover_an_actively_running_run(client,monkeypatch):
     from assist.events.sms_archive import SmsArchive
     monkeypatch.setenv('ASSIST_SMS_SECRET','s3cret')
-    original=SmsArchive.mark_admitted
-    monkeypatch.setattr(SmsArchive,'mark_admitted',lambda *args: (_ for _ in ()).throw(OSError('crash after Run commit')))
+    original=threads._create_run
+    def crash(*args, **kwargs):
+        original(*args, **kwargs)
+        raise OSError('crash after Run commit')
+    monkeypatch.setattr(threads,'_create_run',crash)
     headers={'X-Assist-SMS-Secret':'s3cret'}
     assert client.post('/inbound/sms',json=_body(),headers=headers).status_code==503
     run=threads._runs().list('t-sub')[0]
     threads._runs().claim('t-sub',run.id)
-    monkeypatch.setattr(SmsArchive,'mark_admitted',original)
+    monkeypatch.setattr(threads,'_create_run',original)
     queued=[];monkeypatch.setattr(threads._RESUME_SCHEDULER,'submit',lambda *args:queued.append(args))
     monkeypatch.setattr(threads,'_recover_run',lambda *args,**kwargs:pytest.fail('live recovery interrupted'))
     assert client.post('/inbound/sms',json=_body(),headers=headers).status_code==200
     assert threads._runs().get('t-sub',run.id).status=='running'
-    assert queued==[(run.id,'t-sub')]
+    assert queued==[]
     threads._runs().transition('t-sub',run.id,'success')
-    threads._execute_run(*queued[0])
+    threads._execute_run(run.id, 't-sub')
     assert threads._runs().get('t-sub',run.id).status=='success'
+
+
+def test_lost_ack_retry_after_destination_deletion_is_archived_only(client, monkeypatch):
+    import shutil
+    from pathlib import Path
+    from assist.events.sms_archive import configured_archive
+    monkeypatch.setenv('ASSIST_SMS_SECRET','s3cret')
+    monkeypatch.setattr(threads,'_execute_run',lambda *args: None)
+    headers={'X-Assist-SMS-Secret':'s3cret'}
+    assert client.post('/inbound/sms',json=_body(),headers=headers).status_code==200
+    before=configured_archive().read('abc123')
+    assert len(threads._runs().list('t-sub'))==1
+    destination=Path(threads.MANAGER.thread_dir('t-sub'))
+    shutil.rmtree(destination)  # Same storage removal as permanent thread deletion.
+    original=threads._create_run
+    created=[]
+    def create(*args,**kwargs):
+        created.append(True)
+        return original(*args,**kwargs)
+    monkeypatch.setattr(threads,'_create_run',create)
+    response=client.post('/inbound/sms',json=_body(),headers=headers)
+    assert response.status_code==200 and response.json()['status']=='duplicate'
+    assert configured_archive().read('abc123')==before
+    assert not destination.exists() and created==[]
+
+
+@pytest.mark.parametrize('failure',['root-missing','permission','io','dangling-link','file'])
+def test_missing_or_invalid_destination_storage_is_not_silently_acknowledged(client,monkeypatch,failure):
+    import os
+    import errno
+    import shutil
+    from pathlib import Path
+    monkeypatch.setenv('ASSIST_SMS_SECRET','s3cret')
+    monkeypatch.setattr(threads,'_execute_run',lambda *args: None)
+    headers={'X-Assist-SMS-Secret':'s3cret'}
+    assert client.post('/inbound/sms',json=_body(),headers=headers).status_code==200
+    destination=Path(threads.MANAGER.thread_dir('t-sub'))
+    if failure in {'root-missing','dangling-link','file'}:
+        shutil.rmtree(destination)
+    if failure=='dangling-link':destination.symlink_to(destination.parent/'absent-target')
+    elif failure=='file':destination.write_text('not a directory')
+    elif failure=='root-missing':
+        original=os.stat
+        def unavailable(path,*args,**kwargs):
+            if os.fspath(path)==threads.MANAGER.root_dir:raise FileNotFoundError(errno.ENOENT,'synthetic root missing')
+            return original(path,*args,**kwargs)
+        monkeypatch.setattr(os,'stat',unavailable)
+    else:
+        original=os.lstat
+        def unavailable(path,*args,**kwargs):
+            if os.fspath(path)==str(destination):
+                raise OSError(errno.EACCES if failure=='permission' else errno.EIO,'synthetic storage failure')
+            return original(path,*args,**kwargs)
+        monkeypatch.setattr(os,'lstat',unavailable)
+    response=client.post('/inbound/sms',json=_body(),headers=headers)
+    assert response.status_code==503

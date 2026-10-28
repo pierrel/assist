@@ -17,6 +17,7 @@ import os
 import queue
 import re
 import secrets
+import stat
 import uuid
 import shutil
 import subprocess
@@ -3780,7 +3781,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         decision = {key: value for key, value in resume_decision.items()
                                     if key != "reply_review"}
                         if (review := resume_decision.get("reply_review")) is not None:
-                            action = {"name": "send_reply", "args": {"text": review["text"]}}
+                            action = next(request for request in review["requests"]
+                                          if request.get("name") == "send_reply"
+                                          and request.get("args") == {"text": review["text"]})
                             resp = chat.resume_actions(_decision_vector(action, review["requests"], decision))
                         else:
                             resp = chat.resume_reply(decision)
@@ -4909,6 +4912,7 @@ class _InboundSms(BaseModel):
     sender: str = Field(max_length=128)
     text: str = Field(max_length=256 * 1024)
     occurred_at: str | None = Field(default=None, max_length=64)
+    archive_only: bool = False
 
 
 class _SmsReceipt(BaseModel):
@@ -4929,23 +4933,40 @@ def _sms_archive():
 
 
 def _admit_inbound_sms(payload: _InboundSms):
-    """Persist message and its stable Run admission before acknowledging the phone."""
+    """Persist routing, then admit a normal Run or honor a deleted destination."""
     archive = _sms_archive()
     if not SMS_RECORD_ID_RE.fullmatch(payload.message_id):
         raise HTTPException(status_code=400, detail="invalid message_id")
     try:
         with _RUN_ADMISSION_LOCK:
-            sub = SUBSCRIPTION_STORE.route(payload.sender)
+            sub = SUBSCRIPTION_STORE.route(payload.sender, occurred_at=payload.occurred_at) if payload.occurred_at and not payload.archive_only else None
             handling = (sub.thread_id, sub.render(payload.sender, payload.text)) if sub else None
             row, created = archive.record(payload.message_id, "incoming", payload.sender,
                                            payload.text, "received", occurred_at=payload.occurred_at,
                                            handling=handling)
-            if row["thread_id"] is None or row["admitted"]:
+            if row["thread_id"] is None:
                 return {"status": "accepted" if created else "duplicate"}, None
+            try:
+                destination = os.lstat(MANAGER.thread_dir(row["thread_id"]))
+            except FileNotFoundError:
+                # Ordinary deletion wins over frozen routing. Only a missing
+                # entry with its parent store available is archive-only, not
+                # an unreadable journal, broken symlink or missing store root.
+                if not stat.S_ISDIR(os.stat(MANAGER.root_dir).st_mode):
+                    raise RunStoreUnavailable("Thread store is unavailable")
+                return {"status": "accepted" if created else "duplicate"}, None
+            if not stat.S_ISDIR(destination.st_mode):
+                raise RunStoreUnavailable("Thread destination is unavailable")
             _require_deep_thread(row["thread_id"])
+            dispatch_key = "sms:" + payload.message_id
+            previous = next((run for run in _runs().list(row["thread_id"])
+                             if run.dispatch_key == dispatch_key), None)
+            if previous is not None:
+                # Admission is complete. Ordinary Run scheduling/recovery owns
+                # this Run, including pending, interrupted and terminal states.
+                return {"status": "duplicate"}, None
             run = _create_run(row["thread_id"], row["prompt"], sender=row["number"] or "(unknown SMS sender)",
-                              run_id=row["run_id"], dispatch_key="sms:" + payload.message_id)
-            archive.mark_admitted(payload.message_id)
+                              dispatch_key=dispatch_key)
             return {"status": "accepted"}, run
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -4966,11 +4987,12 @@ async def _sms_request_body(request: Request, model):
 @app.post("/inbound/sms")
 async def inbound_sms(request: Request, background_tasks: BackgroundTasks,
                 x_assist_sms_secret: str | None = Header(default=None)):
-    """Acknowledge only after non-Git archive and any matching Run are durable.
+    """Acknowledge durable archive and matching Run, or a deleted frozen destination.
 
     The bounded request body is read asynchronously; blocking storage/admission
     runs in the threadpool. A failed admission retains a pending archive record
-    and returns an error, so a phone handoff retry uses the same persisted Run id.
+    and returns an error. Once a Run exists, its normal lifecycle owns execution;
+    receipt retries never reopen or recover it.
     """
     auth = _sms_secret_state(x_assist_sms_secret)
     if auth is None:
@@ -5018,14 +5040,13 @@ def _reply_review(chat, status: dict) -> dict | None:
     if not status.get("pending_sender"):
         return None
     snapshot = chat.agent.get_state(chat.runconfig)
-    args = next((dict(action["args"]) for intr in snapshot.interrupts
-                 for action in (intr.value or {}).get("action_requests", [])
-                 if action.get("name") == "send_reply" and isinstance(action.get("args"), dict)), None)
-    if not args:
+    action = next((action for intr in snapshot.interrupts
+                   for action in (intr.value or {}).get("action_requests", [])
+                   if action.get("name") == "send_reply" and isinstance(action.get("args"), dict)), None)
+    if action is None or not action["args"]:
         return None
-    interrupt, checkpoint, namespace, requests = _checkpoint_review(
-        chat, {"name": "send_reply", "args": args}, snapshot=snapshot)
-    return {"sender": status["pending_sender"], "text": args.get("text", ""),
+    interrupt, checkpoint, namespace, requests = _checkpoint_review(chat, action, snapshot=snapshot)
+    return {"sender": status["pending_sender"], "text": action["args"].get("text", ""),
             "interrupt_id": interrupt, "checkpoint_id": checkpoint, "checkpoint_ns": namespace,
             "requests": requests, "work_id": (snapshot.metadata or {}).get("work_id")}
 

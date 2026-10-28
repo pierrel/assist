@@ -60,7 +60,7 @@ def send_outbound_sms(recipient: str, text: str, *, attempt_id: str | None = Non
     """Journal before sending; repeat attempts only read their existing outcome.
 
     A phone timeout or malformed response is unknown, including after a phone
-    accepted the SMS. The phone's durable receipt can later settle that same id.
+    accepted the SMS. Unknown is an acceptable result, not a retry instruction.
     Neither caller retries an uncertain send to repair its archive.
     """
     supplied_identity = attempt_id is not None
@@ -69,20 +69,20 @@ def send_outbound_sms(recipient: str, text: str, *, attempt_id: str | None = Non
         archive = configured_archive()
     except (ValueError, OSError, sqlite3.Error):
         return SmsResult("unknown" if supplied_identity else "not_sent",
-                         "archive unavailable; no new send attempted; do not repeat an uncertain send")
+                         "archive unavailable; no new send attempted; no automatic retry")
     try:
         row, created = archive.record(attempt_id, "outgoing", recipient, text, "unknown")
     except ValueError:
         return SmsResult("not_sent", "invalid or conflicting attempt; no new send attempted")
     except (OSError, sqlite3.Error):
         return SmsResult("unknown" if supplied_identity else "not_sent",
-                         "archive unavailable; no new send attempted; do not repeat an uncertain send")
+                         "archive unavailable; no new send attempted; no automatic retry")
     if not created:
         return SmsResult(row["status"], "existing attempt; no SMS repeated")
     url = os.getenv("ASSIST_SMS_OUTBOUND_URL")
     secret = os.getenv("ASSIST_SMS_SECRET")
     status = "unknown"
-    detail = "the phone's outcome isn't confirmed; do not resend"
+    detail = "the phone's outcome isn't confirmed; no automatic retry"
     if not valid_sms_recipient(recipient):
         status, detail = "not_sent", "recipient is unavailable or unsafe; no SMS attempted"
     elif not url or not secret:
@@ -109,8 +109,8 @@ def send_outbound_sms(recipient: str, text: str, *, attempt_id: str | None = Non
         row, _ = archive.record(attempt_id, "outgoing", recipient, text, status)
         return SmsResult(row["status"], detail)
     except (ValueError, OSError, sqlite3.Error):
-        # The phone may already have sent it. Durable phone sync owns reconciliation.
-        return SmsResult(status, "receipt storage failed; do not repeat this send")
+        # The phone may already have sent it. Report the observation without retry.
+        return SmsResult(status, "receipt storage failed; no automatic retry")
 
 
 def send_reply(text: str) -> str:
@@ -133,7 +133,7 @@ def send_reply(text: str) -> str:
     if result.status == "sent":
         return f"Reply sent to {sender}."
     if result.status == "unknown":
-        return "Reply outcome unknown; do not resend. " + result.detail
+        return "Reply outcome unknown; no automatic retry. A new explicit user request can start a new approved attempt. " + result.detail
     return f"Reply not sent: {result.detail or 'the phone confirmed no send'}."
 
 

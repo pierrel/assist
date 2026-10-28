@@ -82,12 +82,10 @@ def test_incoming_handling_identity_durable_and_immutable(archive, tmp_path):
     reopened = SmsArchive(archive.directory, thread_root=tmp_path / "threads")
     duplicate, _ = reopened.record("receipt", "incoming", "+15550001001", "hi", "received",
                                     handling=("different-thread", "different prompt"))
-    assert (duplicate["thread_id"], duplicate["prompt"], duplicate["run_id"]) == (
-        "thread1", "handle hi", row["run_id"])
-    assert not duplicate["admitted"]
-    reopened.mark_admitted("receipt")
+    assert (duplicate["thread_id"], duplicate["prompt"]) == (
+        "thread1", "handle hi")
     admitted, _ = reopened.record("receipt", "incoming", "+15550001001", "hi", "received")
-    assert admitted["admitted"]
+    assert admitted["thread_id"] == "thread1"
 
 
 def test_bounded_literal_search_and_read_tools(archive, monkeypatch):
@@ -128,3 +126,22 @@ def test_long_multipart_text_is_not_lost_at_small_message_threshold(archive):
     text='multipart ' * 4000
     row,_=archive.record('multipart','incoming','CITY BANK',text,'received')
     assert archive.read('multipart')['text']==text
+
+
+def test_old_admission_columns_are_preserved_but_not_execution_state(archive, tmp_path):
+    import sqlite3
+    with sqlite3.connect(archive.path) as connection:
+        connection.execute('ALTER TABLE messages ADD COLUMN run_id TEXT')
+        connection.execute('ALTER TABLE messages ADD COLUMN admitted INTEGER NOT NULL DEFAULT 0')
+    archive.record('legacy','incoming','+15555550100','original','received',
+                   occurred_at='2026-10-20T00:00:00+00:00',handling=('thread1','frozen prompt'))
+    with sqlite3.connect(archive.path) as connection:
+        connection.execute("UPDATE messages SET run_id='legacy-run',admitted=1 WHERE id='legacy'")
+    reopened=SmsArchive(archive.directory,thread_root=tmp_path/'threads')
+    row,created=reopened.record('legacy','incoming','+15555550100','original','received',
+                                handling=('different','changed prompt'))
+    assert not created and (row['thread_id'],row['prompt'])==('thread1','frozen prompt')
+    assert (row['run_id'],row['admitted'])==('legacy-run',1)
+    assert reopened.read('legacy')['handling']=='routed'
+    newer,created=reopened.record('new','incoming','+15555550100','new','received')
+    assert created and newer['run_id'] is None and newer['admitted']==0
