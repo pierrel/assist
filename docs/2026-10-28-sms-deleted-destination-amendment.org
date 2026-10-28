@@ -1,0 +1,34 @@
+#+title: SMS receipt ACK after destination deletion
+#+date: 2026-10-28
+
+* Correction
+
+The archive outlives a thread and its Run journal. If a phone loses its ACK and
+retries after the destination is permanently deleted, the frozen route must not
+recreate work or retry forever. Keep the archived receipt and routing decision;
+acknowledge it with no Run when the thread entry is positively absent while its
+parent store is accessible. This is the normal deletion boundary, not SMS
+execution recovery. No tombstone or admission-progress mirror is added.
+
+Use the entry itself as the signal, not a missing runs.json file. A broken
+symlink, a non-directory entry, permission/EIO errors, or unavailable parent
+storage is not evidence of deletion and remains unavailable. An extant directory
+with no Run journal keeps normal RunService first-admission semantics. Frozen
+routing is never replaced with a newly matching subscription.
+
+* Verification
+
+Synthetic real archive/Run state reproduces lost ACK, deletion of the complete
+destination directory, and retry. The receipt remains unchanged, no Run or
+scheduler action is recreated, and the phone receives its duplicate ACK.
+Controls exercise unavailable parent storage, child permissions/EIO, a broken
+symlink and a non-directory entry. Existing before-Run crash/retry and timestamp
+cutoff tests still exercise ordinary first admission with an extant destination.
+No model, SMS, phone or shared-state effects are needed.
+
+* Historical supersessions
+
+This narrows the ACK rule in /What is removed/ and /Verification and rollout/ of
+[[file:2026-10-28-sms-ingestion-run-boundary.org][2026-10-28-sms-ingestion-run-boundary.org]]: after an explicit destination
+deletion, a durable archived receipt does not require a new or surviving Run
+before ACK. All other routing, trust and outcome boundaries remain unchanged.

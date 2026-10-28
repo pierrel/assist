@@ -34,6 +34,8 @@ def subscription_tools(store) -> list:
     def create_subscription(sender_regexp: str, template: str) -> str:
         """Subscribe THIS thread to inbound messages whose SENDER matches SENDER_REGEXP.
 
+        Earliest matching subscription wins. When splitting a catchall,
+        create the specific subscription first, then exclude its sender from the catchall.
         On each matching message a turn runs here with TEMPLATE rendered — put your whole
         instruction to yourself in TEMPLATE (how to decide what to do, your rules), using
         the literal slots {sender} and {text} where the message's sender and body go. You

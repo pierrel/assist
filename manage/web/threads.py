@@ -17,6 +17,7 @@ import os
 import queue
 import re
 import secrets
+import stat
 import uuid
 import shutil
 import subprocess
@@ -30,8 +31,9 @@ from datetime import datetime, timedelta, timezone
 
 import markdown
 import requests
-from pydantic import BaseModel
-from fastapi import BackgroundTasks, Form, Header, HTTPException
+import sqlite3
+from pydantic import BaseModel, ConfigDict, Field
+from fastapi import BackgroundTasks, Form, Header, HTTPException, Request
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -73,7 +75,8 @@ from assist.events.thread_log import append_event
 from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
 from assist.location import LOCATION_CONTEXT_KEY, LocationSnapshot
 from assist.frequency import FREQUENCY_RUN_ID_KEY
-from assist.events.reply import SMS_SENDER_KEY
+from assist.events.reply import SMS_SENDER_KEY, SMS_REPLY_REVIEW_ID_KEY
+from assist.events.sms_archive import configured_archive, ID_RE as SMS_RECORD_ID_RE
 from assist.gmail import GMAIL_INTERRUPT_ON, GmailError, gmail_action_preview
 from assist.events.email import EMAIL_REVIEW_IDENTITY_KEY, email_identity, valid_email_content
 from assist.schedule.scheduler import Scheduler
@@ -136,7 +139,6 @@ from manage.web.state import (
     GEO_DIR,
     GEO_PROPOSALS,
     GEO_REGISTRY,
-    INBOUND_LOG,
     INIT_STAGES,
     LOCATION_STORE,
     MANAGER,
@@ -2593,6 +2595,29 @@ def _child_waits_for_egress(run: Run) -> bool:
         run.parent_thread_id, EgressWaiter(run.thread_id, run.id))
 
 
+def _sms_reply_configurable(run: Run) -> dict:
+    """Bind an accepted SMS review and its execution slices to one immutable attempt."""
+    decision = run.resume_decision or {}
+    if run.sender and run.resume and not decision:
+        # Recovery/fair-scheduling slices continue the same accepted work. The
+        # latest reply decision wins, including a rejection at a later gate.
+        predecessors = []
+        for prior in _runs().list(run.thread_id):
+            if prior.id == run.id:
+                break
+            if (prior.work_id == run.work_id and prior.sender == run.sender
+                    and isinstance((prior.resume_decision or {}).get("reply_review"), dict)):
+                predecessors.append(prior)
+        if predecessors:
+            decision = predecessors[-1].resume_decision
+    if (run.sender and decision.get("type") in {"approve", "edit"}
+            and isinstance(decision.get("reply_review"), dict)):
+        identity = json.dumps([run.thread_id, decision], sort_keys=True,
+                              separators=(",", ":"), ensure_ascii=False)
+        return {SMS_REPLY_REVIEW_ID_KEY: hashlib.sha256(identity.encode()).hexdigest()}
+    return {}
+
+
 def _frequency_configurable(run: Run | None, *, sender: str | None,
                             assistant_id: str) -> dict | None:
     """Return the maintenance identity only for an ordinary visible web Run."""
@@ -3260,9 +3285,12 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
         return
     pending_text = run.pending_text or run.text or _get_status(tid).get("pending_message")
     if run.status == "interrupted":
-        successor = next((candidate for candidate in _runs().list(tid)
-                          if candidate.status in {"pending", "running"}
-                          and candidate.work_id == run.work_id
+        history = _runs().list(tid)
+        position = next(index for index, candidate in enumerate(history) if candidate.id == run.id)
+        # A completed recovery slice still owns this work; a late original
+        # receipt must not create another slice after its successor finished.
+        successor = next((candidate for candidate in reversed(history[position + 1:])
+                          if candidate.work_id == run.work_id
                           and (candidate.resume or candidate.resume_decision is not None)), None)
         if successor is None:
             successor = _create_run(
@@ -3271,8 +3299,9 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
                 origin=run.origin, work_id=run.work_id,
                 user_event_id=run.user_event_id,
                 location=_location_from_fields(run.location))
-        _RESUME_SCHEDULER.submit(
-            successor.id, tid, user_priority=user_priority)
+        if successor.status in {"pending", "running"}:
+            _RESUME_SCHEDULER.submit(
+                successor.id, tid, user_priority=user_priority)
         return
 
     decision = _recovery_decision(
@@ -3680,6 +3709,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     elif _run is not None and _run.mode == "turn" and assistant_id == "general-agent":
                         _cfg["web_run_id"] = _run.id
                     if _run is not None:
+                        _cfg.update(_sms_reply_configurable(_run))
                         _cfg["work_id"] = _run.work_id
                         if _run.approval_id is not None:
                             record = _runs().approval(tid, _run.approval_id)
@@ -3751,7 +3781,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         decision = {key: value for key, value in resume_decision.items()
                                     if key != "reply_review"}
                         if (review := resume_decision.get("reply_review")) is not None:
-                            action = {"name": "send_reply", "args": {"text": review["text"]}}
+                            action = next(request for request in review["requests"]
+                                          if request.get("name") == "send_reply"
+                                          and request.get("args") == {"text": review["text"]})
                             resp = chat.resume_actions(_decision_vector(action, review["requests"], decision))
                         else:
                             resp = chat.resume_reply(decision)
@@ -4836,6 +4868,11 @@ def _scheduled_dispatch(tid: str, prompt: str, tz: str | None) -> None:
     _execute_run(run.id, tid)
 
 
+def _dispatch_admitted_event_run(run_id: str, tid: str) -> None:
+    """Serialize replayable event wakeups with startup recovery of that Run."""
+    _RESUME_SCHEDULER.submit(run_id, tid)
+
+
 def _dispatch_event(sender: str, text: str) -> None:
     """Route an inbound message to its subscription's thread and run the triage turn there,
     with the sender in the run config so send_reply can target it. No matching subscription
@@ -4853,21 +4890,9 @@ def _dispatch_event(sender: str, text: str) -> None:
         logging.warning("inbound message matched Pi preview thread %s; not dispatched", sub.thread_id)
         return
     rendered = sub.render(sender, text)
-    stage = _get_status(sub.thread_id).get("stage")
     run = _create_run(sub.thread_id, rendered, sender=sender)
-    if stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == sub.thread_id:
-        # A follow-up to a busy thread (busy status, or holding the slot with no
-        # busy status written yet). The Run above is already durable; either the
-        # serial scheduler executes it after a paused head or the current triage
-        # consumes the pending Run as an interjection.
-        if stage == "paused":
-            # A paused thread has RELEASED the slot — dispatching directly would
-            # acquire immediately and run on the mid-flight checkpoint. Route
-            # through the serial worker, behind the queued resume/recovery
-            # (same as post_message).
-            _RESUME_SCHEDULER.submit(run.id, sub.thread_id)
-        else:
-            _execute_run(run.id, sub.thread_id)
+    if _get_status(sub.thread_id).get("stage") == "paused":
+        _RESUME_SCHEDULER.submit(run.id, sub.thread_id)
     else:
         _execute_run(run.id, sub.thread_id)
 
@@ -4882,40 +4907,131 @@ def _sms_secret_state(provided: str | None):
 
 
 class _InboundSms(BaseModel):
-    message_id: str
-    sender: str
-    text: str
+    model_config = ConfigDict(extra="forbid", strict=True)
+    message_id: str = Field(min_length=1, max_length=128)
+    sender: str = Field(max_length=128)
+    text: str = Field(max_length=256 * 1024)
+    occurred_at: str | None = Field(default=None, max_length=64)
+    archive_only: bool = False
+
+
+class _SmsReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    message_id: str = Field(min_length=1, max_length=128)
+    number: str = Field(min_length=1, max_length=20)
+    text: str = Field(max_length=256 * 1024)
+    status: str = Field(min_length=1, max_length=16)
+    occurred_at: str | None = Field(default=None, max_length=64)
+
+
+def _sms_archive():
+    try:
+        return configured_archive()
+    except (ValueError, OSError, sqlite3.Error) as error:
+        logging.error("SMS archive unavailable: %s", type(error).__name__)
+        raise HTTPException(status_code=503, detail="SMS archive is unavailable") from error
+
+
+def _admit_inbound_sms(payload: _InboundSms):
+    """Persist routing, then admit a normal Run or honor a deleted destination."""
+    archive = _sms_archive()
+    if not SMS_RECORD_ID_RE.fullmatch(payload.message_id):
+        raise HTTPException(status_code=400, detail="invalid message_id")
+    occurred_at = payload.occurred_at
+    if occurred_at is not None:
+        try:
+            if datetime.fromisoformat(occurred_at).utcoffset() is None:
+                occurred_at = None
+        except ValueError:
+            occurred_at = None
+    try:
+        with _RUN_ADMISSION_LOCK:
+            sub = SUBSCRIPTION_STORE.route(payload.sender, occurred_at=occurred_at) if occurred_at and not payload.archive_only else None
+            handling = (sub.thread_id, sub.render(payload.sender, payload.text)) if sub else None
+            row, created = archive.record(payload.message_id, "incoming", payload.sender,
+                                           payload.text, "received", occurred_at=occurred_at,
+                                           handling=handling)
+            if row["thread_id"] is None:
+                return {"status": "accepted" if created else "duplicate"}, None
+            try:
+                destination = os.lstat(MANAGER.thread_dir(row["thread_id"]))
+            except FileNotFoundError:
+                # Ordinary deletion wins over frozen routing. Only a missing
+                # entry with its parent store available is archive-only, not
+                # an unreadable journal, broken symlink or missing store root.
+                if not stat.S_ISDIR(os.stat(MANAGER.root_dir).st_mode):
+                    raise RunStoreUnavailable("Thread store is unavailable")
+                return {"status": "accepted" if created else "duplicate"}, None
+            if not stat.S_ISDIR(destination.st_mode):
+                raise RunStoreUnavailable("Thread destination is unavailable")
+            _require_deep_thread(row["thread_id"])
+            dispatch_key = "sms:" + payload.message_id
+            previous = next((run for run in _runs().list(row["thread_id"])
+                             if run.dispatch_key == dispatch_key), None)
+            if previous is not None:
+                # Admission is complete. Ordinary Run scheduling/recovery owns
+                # this Run, including pending, interrupted and terminal states.
+                return {"status": "duplicate"}, None
+            run = _create_run(row["thread_id"], row["prompt"], sender=row["number"] or "(unknown SMS sender)",
+                              dispatch_key=dispatch_key)
+            return {"status": "accepted"}, run
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except (OSError, sqlite3.Error, RunStoreUnavailable) as error:
+        raise HTTPException(status_code=503, detail="SMS storage is unavailable") from error
+
+
+async def _sms_request_body(request: Request, model):
+    # Reuse the machine API's bounded reader; archive/Run work runs off the loop.
+    from manage.web.phone_api import _validated_body
+    try:
+        with anyio.fail_after(5):
+            return await _validated_body(request, model, 2 * 1024 * 1024)
+    except TimeoutError as error:
+        raise HTTPException(status_code=408, detail="SMS body timed out") from error
 
 
 @app.post("/inbound/sms")
-def inbound_sms(payload: _InboundSms, background_tasks: BackgroundTasks,
+async def inbound_sms(request: Request, background_tasks: BackgroundTasks,
                 x_assist_sms_secret: str | None = Header(default=None)):
-    """Receive an inbound message forwarded from the phone: authenticate, record it durably
-    (so the 200 means "assist owns this text"), then dispatch a triage turn off the loop.
+    """Acknowledge durable archive and matching Run, or a deleted frozen destination.
 
-    SYNC ``def`` (like ``/merge``) so auth + the durable record run in the threadpool, never
-    on the single-worker event loop. 200 accepted|duplicate → the phone deletes the SMS;
-    400 malformed (delete); 401 bad secret (retain); 503 disabled (retain)."""
+    The bounded request body is read asynchronously; blocking storage/admission
+    runs in the threadpool. A failed admission retains a pending archive record
+    and returns an error. Once a Run exists, its normal lifecycle owns execution;
+    receipt retries never reopen or recover it.
+    """
     auth = _sms_secret_state(x_assist_sms_secret)
     if auth is None:
         raise HTTPException(status_code=503, detail="Inbound SMS is not configured")
     if not auth:
         raise HTTPException(status_code=401, detail="Bad or missing X-Assist-SMS-Secret")
-    if not (payload.message_id and payload.sender and payload.text):
-        raise HTTPException(status_code=400, detail="message_id, sender and text are required")
-    # The sender becomes the reply recipient, folded into the phone's mmcli `number='…'`
-    # arg. Bound it to a phone-number/shortcode/sender-id shape so a crafted originating
-    # address (which can carry arbitrary chars) can't break out of that arg.
-    if not re.fullmatch(r"[+0-9A-Za-z]{1,20}", payload.sender):
-        raise HTTPException(status_code=400, detail="sender is not a valid number/shortcode")
-    try:
-        fresh = INBOUND_LOG.claim(payload.message_id, payload.sender, payload.text)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="invalid message_id")
-    if not fresh:
-        return {"status": "duplicate"}
-    background_tasks.add_task(_dispatch_event, payload.sender, payload.text)
-    return {"status": "accepted"}
+    payload = await _sms_request_body(request, _InboundSms)
+    response, run = await run_in_threadpool(_admit_inbound_sms, payload)
+    if run is not None:
+        background_tasks.add_task(_dispatch_admitted_event_run, run.id, run.thread_id)
+    return response
+
+
+@app.post("/sms/receipts")
+async def sms_receipt(request: Request, x_assist_sms_secret: str | None = Header(default=None)):
+    """Accept exact outgoing phone receipts without executing another SMS."""
+    auth = _sms_secret_state(x_assist_sms_secret)
+    if auth is None:
+        raise HTTPException(status_code=503, detail="SMS is not configured")
+    if not auth:
+        raise HTTPException(status_code=401, detail="Bad or missing X-Assist-SMS-Secret")
+    payload = await _sms_request_body(request, _SmsReceipt)
+    def store():
+        try:
+            row, _ = _sms_archive().record(payload.message_id, "outgoing", payload.number,
+                                            payload.text, payload.status, occurred_at=payload.occurred_at)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except (OSError, sqlite3.Error) as error:
+            raise HTTPException(status_code=503, detail="SMS storage is unavailable") from error
+        return {"message_id": row["id"], "status": row["status"]}
+    return await run_in_threadpool(store)
 
 
 _REPLY_DECISIONS = {
@@ -4931,14 +5047,13 @@ def _reply_review(chat, status: dict) -> dict | None:
     if not status.get("pending_sender"):
         return None
     snapshot = chat.agent.get_state(chat.runconfig)
-    args = next((dict(action["args"]) for intr in snapshot.interrupts
-                 for action in (intr.value or {}).get("action_requests", [])
-                 if action.get("name") == "send_reply" and isinstance(action.get("args"), dict)), None)
-    if not args:
+    action = next((action for intr in snapshot.interrupts
+                   for action in (intr.value or {}).get("action_requests", [])
+                   if action.get("name") == "send_reply" and isinstance(action.get("args"), dict)), None)
+    if action is None or not action["args"]:
         return None
-    interrupt, checkpoint, namespace, requests = _checkpoint_review(
-        chat, {"name": "send_reply", "args": args}, snapshot=snapshot)
-    return {"sender": status["pending_sender"], "text": args.get("text", ""),
+    interrupt, checkpoint, namespace, requests = _checkpoint_review(chat, action, snapshot=snapshot)
+    return {"sender": status["pending_sender"], "text": action["args"].get("text", ""),
             "interrupt_id": interrupt, "checkpoint_id": checkpoint, "checkpoint_ns": namespace,
             "requests": requests, "work_id": (snapshot.metadata or {}).get("work_id")}
 

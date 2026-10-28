@@ -596,6 +596,7 @@ mail-only response and size errors. Decisions still POST to `/approval`.
 | `send_email` | Complete sender/Cc/recipient/subject/body; approve, edit, reject | Run-owned Email Approval |
 | `email_archive`, `email_delete` | Exact complete messages; approve or reject; incomplete preview is reject-only | Run-owned Email Approval |
 | `send_reply` | Exact SMS recipient and full text; approve, edit, reject | Existing reply execution Run and checkpoint |
+| `send_sms` | Exact saved recipient and text on the phone's existing SMS screen; physical two-tap send or acknowledged rejection | Private draft identity and the phone's write-before-effect journal |
 | `egress` | Exact host/port and unverified agent reasons; one hour, until revoked or thread deletion, or decline; active grants can be revoked | Existing EgressStore and main/child continuations |
 | `geo_download` | Recorded region, size or unknown size, and geocoder rebuild warning; approve or decline | Existing ProposalStore, RegionRegistry and Provisioner |
 
@@ -608,7 +609,7 @@ fresh review; the client never automatically repeats an approval POST. An
 oversized Email preview is explicitly unavailable in the collection and cannot
 hide independent network or download requests.
 
-SMS previews read the action and its binding from one checkpoint snapshot; a
+Reply SMS previews read the action and its binding from one checkpoint snapshot; a
 checkpoint read failure remains an error rather than an absent proposal. Region
 completion rechecks proposal generation and terminal state after the health probe,
 then admits a durable notification Run while publication and admission are excluded.
@@ -1355,3 +1356,72 @@ make status
 # View service logs
 make logs
 ```
+
+
+### Private SMS history
+
+Set `ASSIST_SMS_ARCHIVE_DIR` to a dedicated absolute directory outside every Git
+repository and outside `ASSIST_THREADS_DIR`. It must be owned by the service,
+mode 0700; its SQLite database is mode 0600. Inbound SMS and outgoing attempts
+fail closed if this archive is unavailable. Configure `ASSIST_SMS_SECRET` on both
+sides and `ASSIST_SMS_OUTBOUND_URL` for the phone's authenticated `/outbound/sms/v1` endpoint. Legacy endpoint
+URLs are refused before any send; upgrade the phone journal transport before
+changing the host URL. Inbound ingestion and archive tools can be deployed first.
+The normal web profile exposes the `sms-history` skill and bounded search/read
+tools. Untrusted SMS-triage runs do not receive those tools.
+
+Incoming subscription routing uses the original timezone-aware modem SMS source timestamp:
+only subscriptions created strictly before it can match. The inbound endpoint
+normalizes malformed or timezone-naive incoming metadata to missing source time
+before both routing and storage; recording time never authorizes a Run. Missing arrival times
+and explicit `archive_only` bootstrap receipts are archived without creating a
+Run. Among eligible matches the earliest-created subscription still wins. Stable
+receipt IDs keep archive/Run admission idempotent. Deploy this host support before
+the matching phone source-identity transport; never replace source time
+with a history rediscovery time. Existing archived handling decisions are kept.
+
+Ordinary web turns also expose `send_sms` and the `send-sms` skill. A request to
+send stages the exact number and text and returns immediately as awaiting phone
+approval. It does not send or suspend the turn. The number must come from the
+user, a trusted contact file, or the correspondent of an archived message.
+Open the thread on the phone and choose Review. The existing SMS screen requires
+two physical taps before the fixed root helper can send. Rejection is retained
+until acknowledged. Unknown is terminal; do not automatically retry. An explicit
+new user request can prepare a new attempt requiring fresh phone confirmation.
+Drafts live beside thread status, outside its Git workspace. The approval list
+shows active drafts and up to ten recent results within its shared byte budget;
+durable identities remain available
+for duplicate-confirmation protection and history. Local phone SMS remains usable offline.
+Phone snapshots project only saved draft states. Only an explicit authenticated
+phone result finishes an approved draft; the archive's write-before-effect
+unknown is not a completion signal. Unknown stays terminal without background
+settlement. A lost callback can leave an approved draft until the existing
+on-phone Review reads its exact journal identity and reports the outcome.
+Draft creation validates private archive configuration before returning a new
+pending result; replaying a saved draft does not require archive availability.
+No archive polling or staging-time reconciliation is used for draft status.
+The shared phone approval response drops old SMS result cards first when its
+combined byte budget is exceeded, without deleting their durable records. Active
+SMS drafts keep complete recipient/text previews. If necessary, the existing
+unavailable Email card directs complete Email review to Assist Web; content is
+never silently truncated. Other combinations that still exceed the limit retain
+the existing explicit size error.
+
+All received texts are archived even when no subscription matches. Matching
+messages receive a durable Run before acknowledgment. If a frozen destination
+has since been deleted, the archived receipt is acknowledged without rerouting
+or recreating work. Storage errors and invalid destination entries remain
+unavailable. Frozen thread/prompt routing
+bridges archive and Run stores; normal dispatch-key deduplication and Run lifecycle
+own execution, without archive run-id/admitted mirrors. See
+[the ingestion/Run boundary design](docs/2026-10-28-sms-ingestion-run-boundary.org). Outgoing receipts retain
+`sent` (ModemManager accepted), `not_sent` or `unknown`; `sent` does not prove
+carrier delivery. A timeout is unknown and is not automatically retried.
+The phone retries only its journal handoff; equal sender/source-time/content
+observations deliberately collapse under the accepted identity policy.
+Archive files are never automatically copied into source/thread Git workspaces.
+Explicit requests to quote or export SMS follow the existing privacy rules.
+
+Existing legacy inbound JSON files remain untouched. Migrate them only through
+an explicitly reviewed operator procedure, preserving their original identities;
+never replay messages to fill history.
