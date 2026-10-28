@@ -4937,12 +4937,19 @@ def _admit_inbound_sms(payload: _InboundSms):
     archive = _sms_archive()
     if not SMS_RECORD_ID_RE.fullmatch(payload.message_id):
         raise HTTPException(status_code=400, detail="invalid message_id")
+    occurred_at = payload.occurred_at
+    if occurred_at is not None:
+        try:
+            if datetime.fromisoformat(occurred_at).utcoffset() is None:
+                occurred_at = None
+        except ValueError:
+            occurred_at = None
     try:
         with _RUN_ADMISSION_LOCK:
-            sub = SUBSCRIPTION_STORE.route(payload.sender, occurred_at=payload.occurred_at) if payload.occurred_at and not payload.archive_only else None
+            sub = SUBSCRIPTION_STORE.route(payload.sender, occurred_at=occurred_at) if occurred_at and not payload.archive_only else None
             handling = (sub.thread_id, sub.render(payload.sender, payload.text)) if sub else None
             row, created = archive.record(payload.message_id, "incoming", payload.sender,
-                                           payload.text, "received", occurred_at=payload.occurred_at,
+                                           payload.text, "received", occurred_at=occurred_at,
                                            handling=handling)
             if row["thread_id"] is None:
                 return {"status": "accepted" if created else "duplicate"}, None

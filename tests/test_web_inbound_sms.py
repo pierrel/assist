@@ -456,3 +456,21 @@ def test_missing_or_invalid_destination_storage_is_not_silently_acknowledged(cli
         monkeypatch.setattr(os,'lstat',unavailable)
     response=client.post('/inbound/sms',json=_body(),headers=headers)
     assert response.status_code==503
+
+
+@pytest.mark.parametrize('source_time',['malformed-time','2026-10-28T00:00:00',''])
+def test_unusable_incoming_time_archives_only_and_retries_same_identity(client,monkeypatch,source_time):
+    from assist.events.sms_archive import configured_archive
+    monkeypatch.setenv('ASSIST_SMS_SECRET','s3cret')
+    monkeypatch.setattr(threads,'_execute_run',lambda *args: pytest.fail('invalid time dispatched'))
+    body={**_body(mid='unusable-time',text='exact synthetic history'), 'occurred_at':source_time}
+    headers={'X-Assist-SMS-Secret':'s3cret'}
+    response=client.post('/inbound/sms',json=body,headers=headers)
+    assert response.status_code==200 and response.json()['status']=='accepted'
+    saved=configured_archive().read('unusable-time')
+    assert saved['text']=='exact synthetic history' and saved['handling']=='archive_only'
+    assert threads._runs().list('t-sub')==[]
+    response=client.post('/inbound/sms',json=body,headers=headers)
+    assert response.status_code==200 and response.json()['status']=='duplicate'
+    assert configured_archive().read('unusable-time')==saved
+    assert threads._runs().list('t-sub')==[]

@@ -145,3 +145,11 @@ def test_old_admission_columns_are_preserved_but_not_execution_state(archive, tm
     assert reopened.read('legacy')['handling']=='routed'
     newer,created=reopened.record('new','incoming','+15555550100','new','received')
     assert created and newer['run_id'] is None and newer['admitted']==0
+
+
+@pytest.mark.parametrize('source_time',['malformed-time','2026-10-28T00:00:00',''])
+@pytest.mark.parametrize('direction,status',[('incoming','received'),('outgoing','unknown')])
+def test_generic_archive_keeps_strict_timestamp_validation(archive,source_time,direction,status):
+    with pytest.raises(ValueError):
+        archive.record('strict-time',direction,'+15555550100','exact',status,occurred_at=source_time)
+    assert archive.read('strict-time') is None

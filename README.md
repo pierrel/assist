@@ -1371,7 +1371,9 @@ The normal web profile exposes the `sms-history` skill and bounded search/read
 tools. Untrusted SMS-triage runs do not receive those tools.
 
 Incoming subscription routing uses the original timezone-aware modem SMS source timestamp:
-only subscriptions created strictly before it can match. Missing arrival times
+only subscriptions created strictly before it can match. The inbound endpoint
+normalizes malformed or timezone-naive incoming metadata to missing source time
+before both routing and storage; recording time never authorizes a Run. Missing arrival times
 and explicit `archive_only` bootstrap receipts are archived without creating a
 Run. Among eligible matches the earliest-created subscription still wins. Stable
 receipt IDs keep archive/Run admission idempotent. Deploy this host support before
