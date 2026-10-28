@@ -276,16 +276,17 @@ def test_missing_thread_directory_still_stops_exact_turn_sandbox(
 
 def test_sandbox_generation_scan_matches_exact_thread_mount(
         monkeypatch, tmp_path):
-    snapshot = [
-        {"Id": "target", "Mounts": [{"Destination": "/workspace",
-            "Source": str(tmp_path / "target-thread" / "domain")}]},
-        {"Id": "other", "Mounts": [{"Destination": "/workspace",
-            "Source": str(tmp_path / "other" / "domain")}]},
-    ]
-    body = json.dumps(snapshot).encode()
-    monkeypatch.setattr(browser, "_bounded_cli", lambda *args, **kwargs:
-                        b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode()
-                        + b"\r\n\r\n" + body)
+    def docker(argv, **_kwargs):
+        if argv[1] == "ps":
+            return b"target\nother\n"
+        assert argv[1] == "inspect"
+        return (json.dumps([{"Destination": "/workspace",
+                             "Source": str(tmp_path / "target-thread" / "domain")}])
+                + "\n" + json.dumps([{"Destination": "/workspace",
+                                         "Source": str(tmp_path / "other" / "domain")}])
+                + "\n").encode()
+
+    monkeypatch.setattr(browser, "_bounded_cli", docker)
     assert browser._sandbox_generations(
         str(tmp_path), "target-thread") == {"target"}
 

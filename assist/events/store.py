@@ -38,8 +38,8 @@ class SubscriptionStore(PerThreadJsonStore[Subscription]):
     def _from_dict(d: dict) -> Subscription:
         return Subscription.from_dict(d)
 
-    def route(self, sender: str, event_kind: str = "sms", *, occurred_at: str | None = None) -> Subscription | None:
-        """The subscription handling ``event_kind`` from ``sender``: the FIRST match by
+    def route(self, sender: str, *, occurred_at: str | None = None) -> Subscription | None:
+        """The subscription handling a message from ``sender``: the FIRST match by
         creation order (earliest ``created_at``) across all threads. When an arrival
         time is supplied, only subscriptions created strictly before it qualify.
         Missing/invalid subscription times cannot establish eligibility. Returns None when
@@ -56,7 +56,7 @@ class SubscriptionStore(PerThreadJsonStore[Subscription]):
                 return arrival.tzinfo is not None and created.tzinfo is not None and created < arrival
             except (TypeError, ValueError):
                 return False
-        matches = [s for s in self.all() if s.event_kind == event_kind and s.matches(sender) and precedes_arrival(s)]
+        matches = [s for s in self.all() if s.matches(sender) and precedes_arrival(s)]
         if not matches:
             return None
         return min(matches, key=lambda s: (s.created_at or ""))
