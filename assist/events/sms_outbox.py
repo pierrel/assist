@@ -42,19 +42,6 @@ class SmsOutbox(PerThreadJsonStore[SmsDraft]):
         self._lock = _LOCK
 
     @staticmethod
-    def current(record, archive=None):
-        """Project a previously attempted pending draft; terminal outcomes stay final."""
-        if record.state in {'sent', 'not_sent', 'unknown', 'rejected'}:
-            return record
-        observed = (archive or configured_archive()).read(record.id)
-        if observed is not None:
-            if (observed['direction'], observed['number'], observed['text']) != (
-                    'outgoing', record.number, record.text):
-                raise ValueError('SMS receipt does not match the draft')
-            return replace(record, state=observed['status'])
-        return record
-
-    @staticmethod
     def _from_dict(value):
         record = SmsDraft(**value)
         if record.state not in _STATES:
@@ -94,14 +81,8 @@ class SmsOutbox(PerThreadJsonStore[SmsDraft]):
             if old:
                 if (old.number, old.text) != (number, text):
                     raise ValueError('SMS operation content changed')
-                observed = self.current(old)
-                if observed != old:
-                    self._write(tid, [observed if record.id == old.id else record for record in records])
-                return observed
-            archive = configured_archive()
-            records = [self.current(record, archive)
-                       if record.state in {'pending', 'approved'} else record
-                       for record in records]
+                return old
+            configured_archive()
             if sum(record.state in {'pending', 'approved'} for record in records) >= 10:
                 raise ValueError('Finish pending phone SMS drafts first')
             record = SmsDraft(identity, tid, number, text, datetime.now(timezone.utc).isoformat())
@@ -113,8 +94,6 @@ class SmsOutbox(PerThreadJsonStore[SmsDraft]):
             raise ValueError('Invalid SMS decision')
 
         def apply(record):
-            if state in {'approved', 'rejected'}:
-                record = self.current(record)
             if state == 'approved' and record.state in {'sent', 'not_sent', 'unknown'}:
                 return record
             allowed = {

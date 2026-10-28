@@ -47,21 +47,24 @@ recipient delivery. Not-sent and unknown are acceptable terminal outcomes. The
 agent must not automatically resend either. A new explicit user request may
 prepare another attempt, with the same physical approval boundary.
 
-Remove unknown draft settlement and unknown-to-known draft transitions. The
-first terminal observation of an approved draft is persisted using the existing
-store, including an unknown shown after a lost phone response. A saved
-unknown result stays visible without consulting archive availability. Reads of
-pending/approved drafts may still detect an already recorded attempt to prevent
-a stale approval/rejection from treating it as unsent. The actual phone result
-can finish its currently approved draft. Ordinary phone receipt handoff remains:
-it archives ALL local outgoing messages and does not retry modem effects or run
-an extra investigation to settle uncertainty.
+Remove all archive-to-draft settlement and unknown-to-known draft transitions.
+The archive's unknown can be the helper's write-before-effect claim while the
+modem operation is still running; polling cannot turn that into a terminal
+result. Only an explicit authenticated phone result finishes an approved draft.
+A saved unknown remains final even if a later ordinary receipt is more certain.
+
+Existing exact-ID phone journal lookup, immutable helper attempts, and phone
+send/cancel guards prevent accidental duplicates. A lost callback can leave the
+draft approved until the user opens existing Review, which reads and reports its
+journal outcome without resending. There is no background agreement guarantee.
+Ordinary receipt handoff still archives ALL local outgoing messages and never
+retries modem effects or investigates uncertainty solely to settle the draft.
 
 * Verification and rollout
 
 Synthetic tests exercise real SQLite and normal RunService, including failures
 before and after Run commit, changing subscriptions between retries, active and
-terminal Run replay, unmatched history and timestamp cutoffs. operator
+terminal Run replay, unmatched history and timestamp cutoffs. The operator
 composes both reviewed candidates while preserving unrelated live features.
 Wire request/response shapes are unchanged. Host-first rollout is compatible;
 archive columns remain for rollback. Do not restore an old archive snapshot or

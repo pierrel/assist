@@ -1495,19 +1495,7 @@ def _sms_previews(tid: str) -> list[dict]:
         active = [record for record in records if record.state in {"pending", "approved"}]
         terminal = [record for record in records if record.state not in {"pending", "approved"}]
         selected = active + terminal[-10:]
-        from assist.events.sms_archive import configured_archive
-        archive = (configured_archive() if any(
-            record.state in {"pending", "approved"} for record in selected) else None)
-        resolved = []
-        for record in selected:
-            projected = store.current(record, archive)
-            if projected != record:
-                projected = store.update(tid, record.id, lambda saved: store.current(saved, archive))
-            resolved.append(projected)
-        active = [record for record in resolved if record.state in {"pending", "approved"}]
-        terminal = sorted((record for record in resolved if record.state not in {"pending", "approved"}),
-                          key=lambda record: record.created_at)
-        return [_sms_preview(tid, record) for record in active + terminal[-10:]]
+        return [_sms_preview(tid, record) for record in selected]
     except (OSError, ValueError, sqlite3.Error) as error:
         raise HTTPException(status_code=503, detail="SMS draft status unavailable") from error
 

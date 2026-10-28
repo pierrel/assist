@@ -1390,15 +1390,14 @@ Drafts live beside thread status, outside its Git workspace. The approval list
 shows active drafts and up to ten recent results within its shared byte budget;
 durable identities remain available
 for duplicate-confirmation protection and history. Local phone SMS remains usable offline.
-Phone snapshots project active drafts and ten recent saved results,
-sharing that projection for counts and result visibility. A known phone outcome
-cannot regress to an older unknown receipt. A saved unknown remains terminal
-without further archive settlement. Draft creation validates the private
-archive before returning a pending result.
-Staging reconciles only pending/approved drafts for capacity; unrelated uncertain
-history does not trigger archive reads. Matching settled replays retain their
-saved result even if the archive is unavailable. Unresolved replay errors report
-unavailable status without claiming the earlier message was not sent.
+Phone snapshots project only saved draft states. Only an explicit authenticated
+phone result finishes an approved draft; the archive's write-before-effect
+unknown is not a completion signal. Unknown stays terminal without background
+settlement. A lost callback can leave an approved draft until the existing
+on-phone Review reads its exact journal identity and reports the outcome.
+Draft creation validates private archive configuration before returning a new
+pending result; replaying a saved draft does not require archive availability.
+No archive polling or staging-time reconciliation is used for draft status.
 The shared phone approval response drops old SMS result cards first when its
 combined byte budget is exceeded, without deleting their durable records. Active
 SMS drafts keep complete recipient/text previews. If necessary, the existing
