@@ -1406,7 +1406,10 @@ never silently truncated. Other combinations that still exceed the limit retain
 the existing explicit size error.
 
 All received texts are archived even when no subscription matches. Matching
-messages receive a durable Run before acknowledgment. Frozen thread/prompt routing
+messages receive a durable Run before acknowledgment. If a frozen destination
+has since been deleted, the archived receipt is acknowledged without rerouting
+or recreating work. Storage errors and invalid destination entries remain
+unavailable. Frozen thread/prompt routing
 bridges archive and Run stores; normal dispatch-key deduplication and Run lifecycle
 own execution, without archive run-id/admitted mirrors. See
 [the ingestion/Run boundary design](docs/2026-10-28-sms-ingestion-run-boundary.org). Outgoing receipts retain

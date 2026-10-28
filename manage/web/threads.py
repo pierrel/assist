@@ -17,6 +17,7 @@ import os
 import queue
 import re
 import secrets
+import stat
 import uuid
 import shutil
 import subprocess
@@ -4932,7 +4933,7 @@ def _sms_archive():
 
 
 def _admit_inbound_sms(payload: _InboundSms):
-    """Persist ingestion/routing, then hand off to the ordinary Run store before ACK."""
+    """Persist routing, then admit a normal Run or honor a deleted destination."""
     archive = _sms_archive()
     if not SMS_RECORD_ID_RE.fullmatch(payload.message_id):
         raise HTTPException(status_code=400, detail="invalid message_id")
@@ -4945,6 +4946,17 @@ def _admit_inbound_sms(payload: _InboundSms):
                                            handling=handling)
             if row["thread_id"] is None:
                 return {"status": "accepted" if created else "duplicate"}, None
+            try:
+                destination = os.lstat(MANAGER.thread_dir(row["thread_id"]))
+            except FileNotFoundError:
+                # Ordinary deletion wins over frozen routing. Only a missing
+                # entry with its parent store available is archive-only, not
+                # an unreadable journal, broken symlink or missing store root.
+                if not stat.S_ISDIR(os.stat(MANAGER.root_dir).st_mode):
+                    raise RunStoreUnavailable("Thread store is unavailable")
+                return {"status": "accepted" if created else "duplicate"}, None
+            if not stat.S_ISDIR(destination.st_mode):
+                raise RunStoreUnavailable("Thread destination is unavailable")
             _require_deep_thread(row["thread_id"])
             dispatch_key = "sms:" + payload.message_id
             previous = next((run for run in _runs().list(row["thread_id"])
@@ -4975,7 +4987,7 @@ async def _sms_request_body(request: Request, model):
 @app.post("/inbound/sms")
 async def inbound_sms(request: Request, background_tasks: BackgroundTasks,
                 x_assist_sms_secret: str | None = Header(default=None)):
-    """Acknowledge only after non-Git archive and any matching Run are durable.
+    """Acknowledge durable archive and matching Run, or a deleted frozen destination.
 
     The bounded request body is read asynchronously; blocking storage/admission
     runs in the threadpool. A failed admission retains a pending archive record

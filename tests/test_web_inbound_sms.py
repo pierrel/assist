@@ -400,3 +400,58 @@ def test_replayed_admission_cannot_recover_an_actively_running_run(client,monkey
     threads._runs().transition('t-sub',run.id,'success')
     threads._execute_run(run.id, 't-sub')
     assert threads._runs().get('t-sub',run.id).status=='success'
+
+
+def test_lost_ack_retry_after_destination_deletion_is_archived_only(client, monkeypatch):
+    import shutil
+    from pathlib import Path
+    from assist.events.sms_archive import configured_archive
+    monkeypatch.setenv('ASSIST_SMS_SECRET','s3cret')
+    monkeypatch.setattr(threads,'_execute_run',lambda *args: None)
+    headers={'X-Assist-SMS-Secret':'s3cret'}
+    assert client.post('/inbound/sms',json=_body(),headers=headers).status_code==200
+    before=configured_archive().read('abc123')
+    destination=Path(threads.MANAGER.thread_dir('t-sub'))
+    shutil.rmtree(destination)  # Same storage removal as permanent thread deletion.
+    original=threads._create_run
+    created=[]
+    def create(*args,**kwargs):
+        created.append(True)
+        return original(*args,**kwargs)
+    monkeypatch.setattr(threads,'_create_run',create)
+    response=client.post('/inbound/sms',json=_body(),headers=headers)
+    assert response.status_code==200 and response.json()['status']=='duplicate'
+    assert configured_archive().read('abc123')==before
+    assert not destination.exists() and created==[]
+
+
+@pytest.mark.parametrize('failure',['root-missing','permission','io','dangling-link','file'])
+def test_missing_or_invalid_destination_storage_is_not_silently_acknowledged(client,monkeypatch,failure):
+    import os
+    import errno
+    import shutil
+    from pathlib import Path
+    monkeypatch.setenv('ASSIST_SMS_SECRET','s3cret')
+    monkeypatch.setattr(threads,'_execute_run',lambda *args: None)
+    headers={'X-Assist-SMS-Secret':'s3cret'}
+    assert client.post('/inbound/sms',json=_body(),headers=headers).status_code==200
+    destination=Path(threads.MANAGER.thread_dir('t-sub'))
+    if failure in {'root-missing','dangling-link','file'}:
+        shutil.rmtree(destination)
+    if failure=='dangling-link':destination.symlink_to(destination.parent/'absent-target')
+    elif failure=='file':destination.write_text('not a directory')
+    elif failure=='root-missing':
+        original=os.stat
+        def unavailable(path,*args,**kwargs):
+            if os.fspath(path)==threads.MANAGER.root_dir:raise FileNotFoundError(errno.ENOENT,'synthetic root missing')
+            return original(path,*args,**kwargs)
+        monkeypatch.setattr(os,'stat',unavailable)
+    else:
+        original=os.lstat
+        def unavailable(path,*args,**kwargs):
+            if os.fspath(path)==str(destination):
+                raise OSError(errno.EACCES if failure=='permission' else errno.EIO,'synthetic storage failure')
+            return original(path,*args,**kwargs)
+        monkeypatch.setattr(os,'lstat',unavailable)
+    response=client.post('/inbound/sms',json=_body(),headers=headers)
+    assert response.status_code==503

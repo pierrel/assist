@@ -15,6 +15,7 @@ def system(tmp_path, monkeypatch):
     subscriptions.add(Subscription('synthetic-sub', 'synthetic-sms-thread', '.*',
                                    'Handle message from {sender}: {text}',
                                    '2026-10-26T10:00:00+00:00'))
+    monkeypatch.setattr(threads.MANAGER, 'root_dir', str(root))
     monkeypatch.setattr(threads, 'SUBSCRIPTION_STORE', subscriptions)
     monkeypatch.setattr(threads, '_sms_archive', lambda: archive)
     monkeypatch.setattr(threads, '_runs', lambda: runs)
