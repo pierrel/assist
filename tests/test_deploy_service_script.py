@@ -29,7 +29,7 @@ def test_deploy_service_transports_display_name_with_apostrophe(tmp_path):
     assert result.stdout == "Pierre's assistant"
 
 
-def test_deploy_service_transports_urgent_sms_configuration(tmp_path):
+def test_deploy_service_preserves_approved_sms_configuration(tmp_path):
     captured = tmp_path / "payload"
     fake_ssh = tmp_path / "ssh"
     fake_ssh.write_text(f"#!/bin/sh\ncat > {captured}\n")
@@ -39,8 +39,8 @@ def test_deploy_service_transports_urgent_sms_configuration(tmp_path):
     environment = os.environ | {
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "INSTALL_SERVICE_SCRIPT": str(installer),
-        "URGENT_SMS_RECIPIENT": "+15555550100",
-        "URGENT_SMS_THREAD_URL_BASE": "https://web.example.test:5050",
+        "ASSIST_SMS_SECRET": "synthetic-shared-secret",
+        "ASSIST_SMS_OUTBOUND_URL": "https://phone.example.test/outbound/sms",
     }
 
     subprocess.run(["bash", "scripts/deploy-service.sh", "test-host"],
@@ -50,9 +50,9 @@ def test_deploy_service_transports_urgent_sms_configuration(tmp_path):
     configuration = captured.read_text().partition("# end configuration")[0]
     result = subprocess.run(
         ["bash", "-c", configuration +
-         'printf "%s|%s" "$URGENT_SMS_RECIPIENT" "$URGENT_SMS_THREAD_URL_BASE"'],
+         'printf "%s|%s" "$ASSIST_SMS_SECRET" "$ASSIST_SMS_OUTBOUND_URL"'],
         check=True, capture_output=True, text=True)
-    assert result.stdout == "+15555550100|https://web.example.test:5050"
+    assert result.stdout == "synthetic-shared-secret|https://phone.example.test/outbound/sms"
 
 
 def test_deploy_service_transports_egress_host_paths(tmp_path):

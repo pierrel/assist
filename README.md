@@ -653,14 +653,27 @@ set together: `ASSIST_VOICE_SECRET`, `ASSIST_VOICE_PIN`,
 canonical E.164 values (for example, `+15555550100`). The PIN is at least six
 digits; it and the transport secret belong only in the ignored `.deploy.env`.
 
-### Urgent SMS notifications
+### Phone attention notifications
 
-The web-only `notify(message)` tool always marks the current thread urgent. When the
-host also configures `URGENT_SMS_RECIPIENT` and `URGENT_SMS_THREAD_URL_BASE` in its
-ignored environment file, it immediately texts that fixed recipient with the message
-and a link to the thread. These values intentionally do not use an `ASSIST_` prefix, so
-they are not passed into sandboxes. If the recipient is absent, Assist logs the missing
-configuration and keeps the in-app urgent behavior without sending SMS.
+`notify(message)` queues a phone-only alert with a meaningful single-line reason,
+at most 200 characters. Both owner turns and restricted incoming-SMS turns can
+request it; no other owner tools are exposed to an SMS sender. This tool never
+sends an SMS or uses an SMS fallback. Ordinary SMS send/reply approvals remain
+separate.
+
+One alert is coalesced per urgent thread until it is opened. Repeated calls update
+the reason without another buzz. The authenticated phone API exposes pending
+reasons and exact-cycle acknowledgments; acknowledgment does not clear the urgent
+badge. Opening the thread on phone or browser clears it through the existing
+read-receipt path. Empty legacy urgent markers remain badges without inventing a
+phone-alert reason.
+
+The phone consumes alerts through its existing UI service, saves a per-thread
+receipt and records the reason before requesting finite feedback. Lost ACKs and
+client restarts do not intentionally repeat the same attempt. Tool results say
+queued, pending or handled; none establishes physical vibration. The notification
+viewer records request/failure outcomes privately. A phone offline or asleep may
+not poll until connectivity resumes; this adds no modem or hardware wake channel.
 
 ### Email mailbox
 

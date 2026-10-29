@@ -1389,6 +1389,22 @@ def _workspace_archive(tid: str) -> bytes:
 router = APIRouter(prefix=PHONE_API_PREFIX, dependencies=[Depends(_authenticate)])
 
 
+@router.get('/notifications')
+async def phone_notifications() -> dict[str, Any]:
+    return await anyio.to_thread.run_sync(state._phone_notifications)
+
+
+@router.post('/notifications/{tid}/{notification_id}/ack')
+async def acknowledge_phone_notification(tid: str, notification_id: str) -> dict[str, Any]:
+    def acknowledge():
+        _thread_dir(tid)
+        try:
+            return state._ack_phone_notification(tid, notification_id)
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=503, detail='Phone notification storage unavailable') from error
+    return await anyio.to_thread.run_sync(acknowledge)
+
+
 @router.get("/threads")
 async def list_threads() -> dict[str, Any]:
     return await anyio.to_thread.run_sync(_list_threads)
