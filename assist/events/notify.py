@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import unicodedata
 from langgraph.config import get_config
 
 MAX_REASON_CHARS = 200
@@ -11,7 +12,7 @@ def valid_reason(message) -> bool:
     """Whether MESSAGE is a nonempty, bounded, display-safe notification reason."""
     return (isinstance(message, str) and bool(message.strip())
             and len(message) <= MAX_REASON_CHARS
-            and all(ord(char) >= 32 and ord(char) != 127 for char in message))
+            and all(unicodedata.category(char) not in {"Cc", "Zl", "Zp"} for char in message))
 
 
 def _thread_id() -> str | None:

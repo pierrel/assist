@@ -717,15 +717,17 @@ def _ack_phone_notification(tid: str, notification_id: str) -> dict:
         return {'acknowledged': True}
 
 
-def _clear_urgent(tid: str) -> None:
-    """Clear ``tid``'s urgent flag (its page was opened): drop the set entry + the
-    marker. Missing-ok and never-raise, paired under the marker lock."""
+def _clear_urgent(tid: str) -> bool:
+    """Clear the durable urgent cycle before memory; return false on storage failure."""
     with _NOTIFICATION_LOCK:
-        _URGENT.discard(tid)
         try:
             os.remove(_urgent_path(tid))
-        except OSError:
+        except FileNotFoundError:
             pass
+        except OSError:
+            return False
+        _URGENT.discard(tid)
+        return True
 
 
 def _has_urgent(tid: str) -> bool:

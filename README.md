@@ -1368,3 +1368,5 @@ make status
 # View service logs
 make logs
 ```
+
+Notification reasons are single-line Unicode text; control characters and line or paragraph separators are rejected. If clearing an urgent marker fails in storage, its active cycle remains visible and the phone open acknowledgment reports `cleared: false`; a later successful open clears it.

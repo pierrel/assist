@@ -116,3 +116,24 @@ def test_legacy_badge_only_write_failure_remains_best_effort(phone_attention, mo
     state._mark_urgent('thread-a')
     assert state._has_urgent('thread-a')
     assert not (phone_attention / 'thread-a' / 'urgent_response').exists()
+
+@pytest.mark.parametrize('unsafe', ['\x85', '\x9f', '\u2028', '\u2029'])
+def test_phone_reason_rejects_c1_and_unicode_line_separators(phone_attention, unsafe):
+    assert not notify_mod.valid_reason('Deadline' + unsafe + 'Act today')
+
+
+def test_failed_urgent_unlink_preserves_active_cycle_and_reports_not_cleared(phone_attention, monkeypatch):
+    state._mark_urgent('thread-a', 'First bounded reason')
+    first = state._phone_alert('thread-a')
+    state._ack_phone_notification('thread-a', first['id'])
+    def unavailable(*args, **kwargs):
+        raise PermissionError('synthetic transient unlink failure')
+    with monkeypatch.context() as patch:
+        patch.setattr(state.os, 'remove', unavailable)
+        result = phone_api._open_thread('thread-a', None)
+    assert result['cleared'] is False
+    assert state._has_urgent('thread-a')
+    assert state._phone_alert('thread-a')['id'] == first['id']
+    assert state._clear_urgent('thread-a') is True
+    assert state._mark_urgent('thread-a', 'Another bounded reason') == 'queued'
+    assert state._phone_alert('thread-a')['id'] != first['id']

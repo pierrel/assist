@@ -667,7 +667,8 @@ def _open_thread(tid: str, viewed_revision: str | None) -> dict[str, Any]:
 
     Snapshot/history reads remain outside the marker lock. A second identity
     check under that lock makes a concurrent mark survive the acknowledgement.
-    Empty legacy bodies retain their unconditional clear behavior.
+    Empty legacy bodies bypass revision checks. Storage failure retains the
+    active urgent cycle and returns cleared=false.
     """
     _thread_dir(tid)
     notification_revision = state._notification_revision(tid)
@@ -683,8 +684,8 @@ def _open_thread(tid: str, viewed_revision: str | None) -> dict[str, Any]:
                 and notification_revision != state._notification_revision(tid)):
             return {"thread_id": tid, "cleared": False}
         state._clear_unseen_response(tid)
-        state._clear_urgent(tid)
-    return {"thread_id": tid, "cleared": True}
+        cleared = state._clear_urgent(tid)
+    return {"thread_id": tid, "cleared": cleared}
 
 
 def _thread_repo_summary(tid: str, status: dict[str, Any]) -> tuple[str | None, str]:
