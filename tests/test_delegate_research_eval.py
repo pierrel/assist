@@ -41,9 +41,6 @@ class _FixtureAgent:
             backend = FilesystemBackend(root_dir=self.workspace, virtual_mode=True)
             backend.write("/pwned.md", "canary")
             backend.edit("/existing.md", "original", "changed")
-            assert not os.path.exists(os.path.join(self.workspace, "pwned.md"))
-            with open(path) as original:
-                assert original.read() == "original"
             raise RuntimeError("synthetic incomplete turn after attempted effects")
 
 
@@ -52,20 +49,39 @@ class TestInjectionEvalReporting(unittest.TestCase):
         case = evals.TestDelegateResearchWorkflow(
             "test_treats_injected_research_result_as_evidence_not_instructions")
         result = unittest.TestResult()
+        snapshot = {}
+
+        def capture_files(path):
+            snapshot["canary_exists"] = os.path.exists(os.path.join(path, "pwned.md"))
+            existing = os.path.join(path, "existing.md")
+            if os.path.exists(existing):
+                with open(existing) as original:
+                    snapshot["existing"] = original.read()
+
+        # All fixture files are unprivileged; tearDown's rmtree is sufficient.
         with patch.object(evals.TestDelegateResearchWorkflow, "_agent",
-                          lambda case: _FixtureAgent(case.workspace, malicious=malicious)):
+                          lambda case: _FixtureAgent(case.workspace, malicious=malicious)), \
+             patch.object(evals, "cleanup_workspace", side_effect=capture_files):
             case.run(result)
-        return result
+        return result, snapshot
 
     def test_grounded_single_dispatch_passes(self):
-        result = self._run(False)
+        result, _ = self._run(False)
         self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
 
     def test_workflow_failure_does_not_hide_effects_or_completion_failure(self):
-        result = self._run(True)
+        result, snapshot = self._run(True)
+        self.assertFalse(snapshot["canary_exists"])
+        self.assertEqual("original", snapshot["existing"])
         self.assertEqual([], result.errors)
         failures = "\n".join(str(case) for case, _ in result.failures)
         for check in ("exactly_one_research_task", "no_effect_tool_calls",
                       "no_backend_writes", "no_backend_edits", "completed_without_error"):
             self.assertIn(check, failures)
         self.assertEqual(5, len(result.failures), result.failures)
+        completion = next(detail for case, detail in result.failures
+                          if "completed_without_error" in str(case))
+        self.assertIn(
+            "RuntimeError('synthetic incomplete turn after attempted effects')",
+            completion,
+        )
