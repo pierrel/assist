@@ -17,11 +17,11 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.config import get_config
 
 
-_LINK = re.compile(r"\[([^\[\]\n]{1,500})\]\(ref:([^\[\)\n]*)\)", re.I)
-_BAD_LINK = re.compile(r"\[([^\[\]\n]{1,500})\]\(ref:[^\[\)\n]*", re.I)
 _BARE_REF = re.compile(r"(?<!\S)ref:([A-Za-z0-9_-]*)", re.I)
-_REFERENCE = re.compile(f"{_LINK.pattern}|{_BAD_LINK.pattern}|{_BARE_REF.pattern}", re.I)
 _STREAM_START = re.compile(r"\[|(?<!\S)ref:", re.I)
+_LINK_TARGET = re.compile(r"\]\(ref:", re.I)
+_LABEL_ATOM = r"(?:\\[^\n]|\[(?:\\[^\n]|[^\[\]\\\n])*\]|[^\[\]\\\n])"
+_LABEL_OPEN = re.compile(r"\[(?:" + _LABEL_ATOM + r"){1,500}\]")
 _STREAM_PREFIXES = {"r", "re", "ref"}
 _RECORD_ID = re.compile(r"r[0-9a-f]{32}\Z")
 _UNBOUND = "[source link unavailable: ask me to verify it again]"
@@ -162,38 +162,63 @@ def resolve_host_report(path: str, store: ThreadDataStore) -> bool:
         os.close(root)
 
 
+def _label_close(text: str, start: int = 0) -> int | None:
+    """Find an explicit citation label in a bounded slice using the regex engine."""
+    match = _LABEL_OPEN.match(text, start, min(len(text), start + 502))
+    return match.end() - 1 if match else None
+
+
+def _link_at(text: str, start: int, store: ThreadDataStore) -> tuple[int, str] | None:
+    if _LINK_TARGET.search(text, start + 1, min(len(text), start + 507)) is None:
+        return None
+    close = _label_close(text, start)
+    if close is None or text[close + 1:close + 6].lower() != "(ref:":
+        return None
+    label = text[start + 1:close]
+    target_start = close + 6
+    end = target_start
+    while end < len(text) and text[end] not in "[)\n":
+        end += 1
+    if end < len(text) and text[end] == ")":
+        url = source_url(store, text[target_start:end].lower())
+        return end + 1, f"[{label}](<{url}>)" if url else f"{label} {_UNBOUND}"
+    return end, f"{label} {_UNBOUND}"
+
+
 def resolve_references(text: str, store: ThreadDataStore,
                        max_output_bytes: int | None = None) -> str:
     """Resolve explicit source refs; preserve ordinary text and URLs.
 
     ``max_output_bytes`` bounds UTF-8 output and raises on overflow.
     """
-
-    def replace(match: re.Match[str]) -> str:
-        label, link_id, bad_label, bare_id = match.groups()
-        if link_id is not None:
-            url = source_url(store, link_id.lower())
-            return f"[{label}](<{url}>)" if url else f"{label} {_UNBOUND}"
-        if bad_label is not None:
-            return f"{bad_label} {_UNBOUND}"
-        return source_url(store, bare_id.lower()) or _UNBOUND
-
-    if max_output_bytes is None:
-        return _REFERENCE.sub(replace, text)
     parts = []
     used = 0
-    position = 0
-    for match in _REFERENCE.finditer(text):
-        for piece in (text[position:match.start()], replace(match)):
+
+    def append(piece: str) -> None:
+        nonlocal used
+        if max_output_bytes is not None:
             used += len(piece.encode("utf-8"))
             if used > max_output_bytes:
                 raise ValueError("resolved research report exceeds 8 MiB source-binding limit")
-            parts.append(piece)
-        position = match.end()
-    tail = text[position:]
-    if used + len(tail.encode("utf-8")) > max_output_bytes:
-        raise ValueError("resolved research report exceeds 8 MiB source-binding limit")
-    parts.append(tail)
+        parts.append(piece)
+
+    position = 0
+    while marker := _STREAM_START.search(text, position):
+        append(text[position:marker.start()])
+        if text[marker.start()] == "[":
+            link = _link_at(text, marker.start(), store)
+            if link is None:
+                append("[")
+                position = marker.start() + 1
+            else:
+                position, replacement = link
+                append(replacement)
+        else:
+            bare = _BARE_REF.match(text, marker.start())
+            assert bare is not None
+            append(source_url(store, bare.group(1).lower()) or _UNBOUND)
+            position = bare.end()
+    append(text[position:])
     return "".join(parts)
 
 
@@ -205,8 +230,15 @@ class ReferenceStream:
         self.pending = ""
         self.last_emitted_char = ""
         self.discard_invalid_target = False
+        self.discard_bare_id = False
 
     def push(self, text: str, *, final: bool = False) -> str:
+        if self.discard_bare_id:
+            boundary = re.search(r"[^A-Za-z0-9_-]", text)
+            if boundary is None:
+                return ""
+            text = text[boundary.start():]
+            self.discard_bare_id = False
         if self.discard_invalid_target:
             boundary = re.search(r"[\[\)\n]", text)
             if boundary is None:
@@ -227,21 +259,21 @@ class ReferenceStream:
             output.append(self.pending[:marker.start()])
             self.pending = self.pending[marker.start():]
             if self.pending.startswith("["):
-                close_label = self.pending.find("]")
-                if close_label < 0 or close_label + 1 == len(self.pending):
+                close_label = _label_close(self.pending)
+                if close_label is None or close_label + 1 == len(self.pending):
                     if not final and len(self.pending) <= 502:
                         break
                     output.append(self.pending[0])
                     self.pending = self.pending[1:]
                     continue
                 if self.pending[close_label + 1] != "(":
-                    output.append(resolve_references(self.pending[:close_label + 1], self.store))
-                    self.pending = self.pending[close_label + 1:]
+                    output.append("[")
+                    self.pending = self.pending[1:]
                     continue
                 target = self.pending[close_label + 2:]
                 if not "ref:".startswith(target.lower()) and not target.lower().startswith("ref:"):
-                    output.append(resolve_references(self.pending[:close_label + 2], self.store))
-                    self.pending = target
+                    output.append("[")
+                    self.pending = self.pending[1:]
                     continue
                 end = self.pending.find(")", close_label + 2)
                 if end < 0:
@@ -274,6 +306,7 @@ class ReferenceStream:
                     if not final:
                         output.append(_UNBOUND)
                         self.pending = ""
+                        self.discard_bare_id = True
                         break
                     piece, self.pending = self.pending, ""
                 else:
@@ -289,6 +322,7 @@ class ReferenceStream:
         self.pending = ""
         self.last_emitted_char = ""
         self.discard_invalid_target = False
+        self.discard_bare_id = False
 
 
 def _current_store() -> ThreadDataStore | None:

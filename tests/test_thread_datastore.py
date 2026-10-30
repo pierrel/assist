@@ -158,6 +158,39 @@ def test_stream_retains_valid_reference_after_bounded_invalid_target(tmp_path, s
     assert actual == expected
 
 
+@pytest.mark.parametrize("label", [r"Guide \[PDF\]", "Guide [PDF]"])
+def test_citation_label_with_brackets_resolves_in_history_and_stream(tmp_path, label):
+    store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+    record_id = register_source(store, URL)
+    raw = f"[{label}](ref:{record_id})"
+    expected = f"[{label}](<{URL}>)"
+    assert resolve_references(raw, store) == expected
+    for split in range(len(raw) + 1):
+        stream = ReferenceStream(store)
+        actual = stream.push(raw[:split]) + stream.push(raw[split:]) + stream.push("", final=True)
+        assert actual == expected, split
+
+
+def test_stream_discards_rest_of_overlong_bare_reference(tmp_path):
+    store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+    raw = "ref:" + "a" * 300 + " Next paragraph."
+    expected = resolve_references(raw, store)
+    for split in range(260, 310):
+        stream = ReferenceStream(store)
+        actual = stream.push(raw[:split]) + stream.push(raw[split:]) + stream.push("", final=True)
+        assert actual == expected, split
+
+
+def test_nested_malformed_brackets_match_canonical_stream(tmp_path):
+    store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+    raw = "[[Y](ref:]]"
+    expected = resolve_references(raw, store)
+    for split in range(len(raw) + 1):
+        stream = ReferenceStream(store)
+        actual = stream.push(raw[:split]) + stream.push(raw[split:]) + stream.push("", final=True)
+        assert actual == expected, split
+
+
 def test_fact_check_report_read_resolves_host_source_without_registering_text(tmp_path, monkeypatch):
     store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
     record_id = register_source(store, URL)
