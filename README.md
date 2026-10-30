@@ -1218,6 +1218,10 @@ source from mutable `origin` or clear user edits. See the historical procedures
 in `docs/2026-09-27-thread-git-compatibility.org` and
 `docs/2026-09-27-web-git-operator-recovery.org`.
 
+Host Git verification leaves interrupted `tmp_pack_` files with six alphanumeric
+suffix characters in place and admits them only as bounded, independent regular
+files. Commit integrity and publication verification remain unchanged.
+
 The phone uses its own Git credential and persistent checkout, not an Assist
 Git-object proxy. Sending a message neither commits nor pulls phone work.
 After a successful Run, it fetches and fast-forwards only a clean local
