@@ -416,16 +416,19 @@ class ReferenceBindingMiddleware(AgentMiddleware):
                 if not isinstance(row, dict):
                     return result
                 record_id = register_source(store, row.get("url"), str(row.get("title") or ""))
-                item = dict(row)
+                item = {key: value for key, value in row.items()
+                        if key not in {"source_id", "source_link"}}
                 if record_id:
-                    item = {"source_id": f"ref:{record_id}", **item}
+                    item.update(source_id=f"ref:{record_id}",
+                                source_link=f"[Source](ref:{record_id})")
                 bound.append(item)
             return result.model_copy(update={"content": str(bound)})
         if name == "read_url" and isinstance(result.content, str) and not result.content.startswith("Error fetching URL:"):
             url = (request.tool_call.get("args") or {}).get("url")
             record_id = register_source(store, url)
             if record_id:
-                return result.model_copy(update={"content": f"Source ID: ref:{record_id}\n{result.content}"})
+                return result.model_copy(update={"content":
+                                                 f"Source link: [Source](ref:{record_id})\n{result.content}"})
         if self.bind_file_refs and name == "read_file" and isinstance(result.content, str):
             bound_sources: list[str] = []
             resolved = resolve_references(result.content, store,
