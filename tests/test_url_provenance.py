@@ -4,6 +4,9 @@ Deterministic (no LLM): drive wrap_tool_call directly with a constructed
 ToolCallRequest and assert allow (handler invoked) vs reject (corrective
 ToolMessage, handler NOT invoked).
 """
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -123,6 +126,49 @@ class TestUrlProvenanceMiddleware(TestCase):
         result, handler = self._call(url, msgs)
         self.assertIsNotNone(handler.called_with)
         self.assertEqual(result.content, "FETCHED")
+
+    def test_fact_check_report_ref_provenances_exact_host_url_not_display_target(self):
+        from assist.thread_datastore import (
+            BOUND_FILE_URLS_ARTIFACT, ReferenceBindingMiddleware, ThreadDataStore, register_source,
+            resolve_references)
+
+        for url, wrong_url in (
+                ("https://source.example/a|b", "https://source.example/a&#124;b"),
+                ('https://source.example/a"b', "https://source.example/a"),
+                ("https://source.example/a'b", "https://source.example/a")):
+            with self.subTest(url=url), TemporaryDirectory() as directory:
+                store = ThreadDataStore(str(Path(directory) / "thread-data.sqlite"))
+                record_id = register_source(store, url)
+                request = SimpleNamespace(tool_call={
+                    "name": "read_file", "args": {"file_path": "final_report.md"}, "id": "file-1"})
+                ordinary = "https://owner.example/ordinary"
+                raw = ToolMessage(content=f"[Source](ref:{record_id})\n{ordinary}",
+                                  name="read_file", tool_call_id="file-1")
+                with patch("assist.thread_datastore._current_store", return_value=store):
+                    bound = ReferenceBindingMiddleware(bind_file_refs=True)._bind_result(request, raw)
+                self.assertTrue(bound.content.startswith(resolve_references(raw.content, store)))
+                self.assertIn(f"Exact source URLs for fact-checking:\n{url}", bound.content)
+                self.assertEqual(bound.artifact[BOUND_FILE_URLS_ARTIFACT], (ordinary, url))
+                msgs = [AIMessage(content="", tool_calls=[request.tool_call]), bound]
+                result, handler = self._call(url, msgs)
+                self.assertEqual(result.content, "FETCHED")
+                self.assertIsNotNone(handler.called_with)
+                original, handler = self._call(ordinary, msgs)
+                self.assertEqual(original.content, "FETCHED")
+                self.assertIsNotNone(handler.called_with)
+                wrong, handler = self._call(wrong_url, msgs)
+                self.assertEqual(wrong.status, "error")
+                self.assertIsNone(handler.called_with)
+                failed, handler = self._call(
+                    url, [msgs[0], bound.model_copy(update={"status": "error"})])
+                self.assertEqual(failed.status, "error")
+                self.assertIsNone(handler.called_with)
+                offload_call = {**request.tool_call,
+                                "args": {"file_path": "/large_tool_results/result"}}
+                offloaded, handler = self._call(
+                    url, [AIMessage(content="", tool_calls=[offload_call]), bound])
+                self.assertEqual(offloaded.status, "error")
+                self.assertIsNone(handler.called_with)
 
     def test_allows_user_provided_url(self):
         # A URL in the question itself is provenanced (copyable, not invented).

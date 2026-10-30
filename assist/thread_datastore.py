@@ -25,6 +25,7 @@ _LABEL_OPEN = re.compile(r"\[(?:" + _LABEL_ATOM + r"){1,500}\]")
 _STREAM_PREFIXES = {"r", "re", "ref"}
 _RECORD_ID = re.compile(r"r[0-9a-f]{32}\Z")
 _UNBOUND = "[source link unavailable: ask me to verify it again]"
+BOUND_FILE_URLS_ARTIFACT = "assist_bound_file_urls"
 
 
 def _source_url(value: object) -> str | None:
@@ -168,7 +169,7 @@ def _label_close(text: str, start: int = 0) -> int | None:
     return match.end() - 1 if match else None
 
 
-def _link_at(text: str, start: int, store: ThreadDataStore) -> tuple[int, str] | None:
+def _link_at(text: str, start: int, store: ThreadDataStore) -> tuple[int, str, str | None] | None:
     if _LINK_TARGET.search(text, start + 1, min(len(text), start + 507)) is None:
         return None
     close = _label_close(text, start)
@@ -184,20 +185,23 @@ def _link_at(text: str, start: int, store: ThreadDataStore) -> tuple[int, str] |
         if url:
             # Markdown decodes entities and escapes, parses code spans, and
             # splits table cells at pipes inside link targets.
-            # Encode only bound destinations so the rendered href matches the record.
+            # Encode outward bound destinations so the rendered href matches the record.
             target = (re.sub(r"&(?=(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]+);)",
                              "&amp;", url).replace("\\", "&#92;")
                      .replace("`", "&#96;").replace("|", "&#124;"))
-            return end + 1, f"[{label}](<{target}>)"
-        return end + 1, f"{label} {_UNBOUND}"
-    return end, f"{label} {_UNBOUND}"
+            return end + 1, f"[{label}](<{target}>)", url
+        return end + 1, f"{label} {_UNBOUND}", None
+    return end, f"{label} {_UNBOUND}", None
 
 
 def resolve_references(text: str, store: ThreadDataStore,
-                       max_output_bytes: int | None = None) -> str:
+                       max_output_bytes: int | None = None,
+                       *, bound_sources: list[str] | None = None) -> str:
     """Resolve explicit source refs; preserve ordinary text and URLs.
 
     ``max_output_bytes`` bounds UTF-8 output and raises on overflow.
+    ``bound_sources`` collects exact host URLs for an internal fact-check read;
+    outward Markdown keeps escaped targets for exact rendered destinations.
     """
     parts = []
     used = 0
@@ -219,12 +223,17 @@ def resolve_references(text: str, store: ThreadDataStore,
                 append("[")
                 position = marker.start() + 1
             else:
-                position, replacement = link
+                position, replacement, bound_url = link
                 append(replacement)
+                if bound_sources is not None and bound_url is not None:
+                    bound_sources.append(bound_url)
         else:
             bare = _BARE_REF.match(text, marker.start())
             assert bare is not None
-            append(source_url(store, bare.group(1).lower()) or _UNBOUND)
+            bound_url = source_url(store, bare.group(1).lower())
+            append(bound_url or _UNBOUND)
+            if bound_sources is not None and bound_url is not None:
+                bound_sources.append(bound_url)
             position = bare.end()
     append(text[position:])
     return "".join(parts)
@@ -418,9 +427,20 @@ class ReferenceBindingMiddleware(AgentMiddleware):
             if record_id:
                 return result.model_copy(update={"content": f"Source ID: ref:{record_id}\n{result.content}"})
         if self.bind_file_refs and name == "read_file" and isinstance(result.content, str):
-            resolved = resolve_references(result.content, store)
+            bound_sources: list[str] = []
+            resolved = resolve_references(result.content, store,
+                                          bound_sources=bound_sources)
             if resolved != result.content:
-                return result.model_copy(update={"content": resolved})
+                from assist.middleware.url_provenance import urls_in_text
+                original_urls = urls_in_text(result.content)
+                artifact = result.artifact if isinstance(result.artifact, dict) else {}
+                artifact = {**artifact, BOUND_FILE_URLS_ARTIFACT: tuple(dict.fromkeys(
+                    (*original_urls, *bound_sources)))}
+                if bound_sources:
+                    resolved += "\n\nExact source URLs for fact-checking:\n" + "\n".join(
+                        dict.fromkeys(bound_sources))
+                return result.model_copy(update={"content": resolved,
+                                                 "artifact": artifact})
         return result
 
     def after_model(self, state, runtime):
