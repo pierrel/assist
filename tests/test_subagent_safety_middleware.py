@@ -159,7 +159,8 @@ class TestSubagentSafetyMiddleware(TestCase):
 
         names = {getattr(tool, "name", getattr(tool, "__name__", None))
                  for tool in create.call_args.kwargs["tools"]}
-        self.assertEqual(names, {"search_internet", "read_url", "request_egress"})
+        self.assertEqual(names, {"search_internet", "read_url", "request_egress",
+                                 "get_thread_data", "list_thread_data", "search_thread_data"})
         egress_skill = next(
             middleware for middleware in create.call_args.kwargs["middleware"]
             if isinstance(middleware, SmallModelSkillsMiddleware))

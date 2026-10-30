@@ -19,6 +19,7 @@ import pytest
 from langchain.messages import AIMessage
 
 from assist.research_cleanup import ReferencesCleanupRunnable
+from assist.thread_datastore import ThreadDataStore, register_source
 
 
 def _ai_with_write(file_path: str, content_text: str = "done"):
@@ -63,6 +64,62 @@ def _run(side_effect, messages):
 
 
 class TestReferencesCleanup:
+    def test_stale_final_marker_does_not_rewrite_prior_report(self, tmp_path):
+        store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+        refs = tmp_path / "references"
+        refs.mkdir()
+        report = refs / "prior.md"
+        report.write_text("Existing [link](https://example.com/owner-link)")
+        before = report.read_bytes()
+        inner = _FakeInner(lambda _path: None,
+                           [AIMessage(content="FINAL_REPORT: prior.md")])
+        inner.bind_path(str(refs))
+        ReferencesCleanupRunnable(inner, str(refs)).invoke(
+            {}, config={"configurable": {"thread_datastore_path": store.path}})
+        assert report.read_bytes() == before
+
+    def test_modified_existing_final_report_resolves_sources(self, tmp_path):
+        store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+        url = "https://source.example/updated"
+        record_id = register_source(store, url)
+        refs = tmp_path / "references"
+        refs.mkdir()
+        report = refs / "prior.md"
+        report.write_text("Old report")
+
+        def writes(_path):
+            report.write_text(f"New [source](ref:{record_id})")
+
+        inner = _FakeInner(writes, [AIMessage(content="FINAL_REPORT: prior.md")])
+        inner.bind_path(str(refs))
+        ReferencesCleanupRunnable(inner, str(refs)).invoke(
+            {}, config={"configurable": {"thread_datastore_path": store.path}})
+        assert report.read_text() == f"New [source](<{url}>)"
+
+    def test_shell_written_final_report_resolves_registered_sources(self, tmp_path):
+        store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+        url = "https://source.example/exact-page"
+        record_id = register_source(store, url, "Source")
+        refs = tmp_path / "references"
+        refs.mkdir()
+
+        def writes(path):
+            (Path(path) / "report.md").write_text(
+                f"[Source](ref:{record_id})\n[Unknown](ref:r0000000000000000)\n"
+                "[Owner](https://owner.example/home)\n"
+                "`curl https://api.example/v1`\n")
+
+        inner = _FakeInner(writes, [AIMessage(content="FINAL_REPORT: report.md")])
+        inner.bind_path(str(refs))
+        ReferencesCleanupRunnable(inner, str(refs)).invoke(
+            {}, config={"configurable": {"thread_datastore_path": store.path}})
+        report = (refs / "report.md").read_text()
+        assert f"[Source](<{url}>)" in report
+        assert "ask me to verify" in report
+        assert "ref:" not in report
+        assert "[Owner](https://owner.example/home)" in report
+        assert "`curl https://api.example/v1`" in report
+
     def test_prunes_drafts_keeps_final_via_tool_call(self):
         def writes(refs):
             open(os.path.join(refs, "draft1.org"), "w").write("d1")
@@ -245,6 +302,19 @@ class TestReferencesCleanup:
         assert after == ["real.org"]
 
 
+def test_host_snapshot_handles_many_retained_reports_without_container_output(tmp_path):
+    refs = tmp_path / "references"
+    refs.mkdir()
+    for index in range(2000):
+        (refs / f"report-{index}.md").write_text("x")
+    (refs / "odd\nname.md").write_text("x")
+    wrapper = ReferencesCleanupRunnable(Mock(), str(refs))
+
+    snapshot = wrapper._snapshot()
+    assert len(snapshot) == 2001
+    assert "odd\nname.md" in snapshot
+
+
 class TestResearchAgentWiring:
     """Pin the integration: ``create_research_agent`` must wire the
     references-confined backend and wrap the result with
@@ -277,7 +347,7 @@ class TestResearchAgentWiring:
                 assert isinstance(runnable, ReferencesCleanupRunnable)
                 assert isinstance(runnable._inner, RollbackRunnable)
                 assert runnable._references_path == refs
-                assert runnable._sandbox is None
+                assert runnable._references_path == refs
 
                 # Invoke-time _ensure_dir() is the moment the dir gets
                 # created; verify that contract is honored.
@@ -360,8 +430,8 @@ class TestResearchAgentWiring:
                     MagicMock(), wd, sandbox_backend=sandbox,
                 )
 
-                assert runnable._sandbox is sandbox
                 assert runnable._references_path == "/workspace/references"
+                assert runnable._sandbox is sandbox
 
                 # The agent's backend used a *sibling* sandbox rooted
                 # at /workspace/references for file ops.

@@ -172,12 +172,13 @@ def test_classified_kernel_matches_each_final_skills_enabled_request(census):
     async_lifecycle = [
         "start_async_task", "get_async_task_status", "get_async_task_result", "update_async_task",
         "cancel_async_task", "list_async_tasks"]
+    thread_data = ["get_thread_data", "list_thread_data", "search_thread_data"]
     expected = {
         "web-main-core": [*executable, "load_skill", *async_lifecycle,
-                          "quiet", "update_thread_description"],
+                          "quiet", "update_thread_description", *thread_data],
         "web-main-full": [*executable, "load_skill", *async_lifecycle,
-                          "quiet", "update_thread_description"],
-        "web-delegate": [*executable, "task", "load_skill"],
+                          "quiet", "update_thread_description", *thread_data],
+        "web-delegate": [*executable, "task", "load_skill", *thread_data],
         "legacy-main": [*filesystem, "task", "load_skill"],
         "skill-precedence-built-in": [
             *filesystem, "load_skill", *async_lifecycle],
@@ -521,7 +522,7 @@ def test_research_worker_prompt_uses_markdown_reports():
 
     assert "bare Markdown filename" in prompt
     assert "`<topic>.md`" in prompt
-    assert "Markdown links (`[Title](URL)`)" in prompt
+    assert "exact `source_id` returned by retrieval" in prompt
     assert ".org" not in prompt
     assert "org format" not in prompt.lower()
 
