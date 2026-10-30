@@ -909,7 +909,7 @@ def create_research_agent(model: BaseChatModel,
     # left the fact-check-agent unbounded — it ran 200+ `read_url`
     # calls in a diag because nothing would short-circuit a model that
     # kept "thinking of more references to verify".
-    def _subagent_safety_mw():
+    def _subagent_safety_mw(*, bind_file_refs: bool = False):
         return [BoundedSummarizationMiddleware(model, backend),
                 _make_retry_middleware(),
                 BadRequestRetryMiddleware(max_retries=3),
@@ -943,7 +943,7 @@ def create_research_agent(model: BaseChatModel,
                 # constant respectively). Inert on the non-search subagents (critique,
                 # fact-check) — same uniform-stack posture as the unavailable breaker.
                 SearchRunawayBreakerMiddleware(),
-                ReferenceBindingMiddleware(),
+                ReferenceBindingMiddleware(bind_file_refs=bind_file_refs),
                 ThreadQueueMiddleware(),
                 EmptyResponseRecoveryMiddleware()]
 
@@ -974,9 +974,10 @@ def create_research_agent(model: BaseChatModel,
         "description": "Used to check all references for alignment with claims and statements. You MUST provide the file it should fact-check.",
         "system_prompt": base_prompt_for("deepagents/fact_checker.md.j2"),
         "tools": [read_url, *execution_egress_tools],
-        # Fact-checker re-fetches URLs cited in the report it's handed — those appear in
-        # its context (the report ToolMessage), so they pass; an invented URL is refused.
-        "middleware": _subagent_safety_mw() + _read_url_guards(
+        # The fact-checker's report read resolves host-registered source IDs to
+        # exact URLs. Existing read_file provenance then applies to that result;
+        # merely listing a datastore record does not authorize navigation.
+        "middleware": _subagent_safety_mw(bind_file_refs=True) + _read_url_guards(
             trust_human_messages=trust_human_messages)
         + ([_egress_skills_middleware(backend, execution_egress_tools)]
            if execution_egress_tools else []),

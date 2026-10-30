@@ -309,6 +309,26 @@ class DockerSandboxBackend(BaseSandbox):
         with self._execute_lock:
             return self._execute_locked(command)
 
+    def execute_host_command(self, argv: list[str]) -> ExecuteResponse:
+        """Run a host-authored sandbox operation without PATH or shell lookup."""
+        command = ["/usr/bin/timeout", "--kill-after=5s", "30s", *argv]
+        with self._execute_lock:
+            try:
+                exit_code, output_bytes = self.container.exec_run(
+                    command, demux=False, workdir=self.work_dir)
+            except DockerNotFound as error:
+                raise SandboxContainerLostError(
+                    f"Sandbox container {self.container.id[:12]} disappeared "
+                    "mid-thread — please retry.") from error
+            except Exception as error:
+                logger.error("Trusted sandbox command failed: %s", error)
+                return ExecuteResponse(output=f"Error executing command: {error}",
+                                       exit_code=1)
+        output = output_bytes.decode("utf-8", errors="replace") if output_bytes else ""
+        if len(output) > MAX_OUTPUT_CHARS:
+            output = output[:MAX_OUTPUT_CHARS] + "\n... [output truncated]"
+        return ExecuteResponse(output=output, exit_code=exit_code)
+
     def _execute_locked(self, command: str) -> ExecuteResponse:
         """Run one command while its proxy-log attribution is exclusive."""
         bounded = (

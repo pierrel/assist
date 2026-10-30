@@ -128,7 +128,7 @@ def resolve_host_report(path: str, store: ThreadDataStore) -> bool:
     basename = os.path.basename(path)
     root = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        fd = os.open(basename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
+        fd = os.open(basename, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=root)
         with os.fdopen(fd, "rb") as source:
             old = os.fstat(source.fileno())
             if not stat.S_ISREG(old.st_mode):
@@ -203,6 +203,7 @@ class ReferenceStream:
     def __init__(self, store: ThreadDataStore):
         self.store = store
         self.pending = ""
+        self.last_emitted_char = ""
 
     def push(self, text: str, *, final: bool = False) -> str:
         self.pending += text
@@ -246,6 +247,12 @@ class ReferenceStream:
                 piece = self.pending[:end + 1]
                 self.pending = self.pending[end + 1:]
             else:
+                previous = next((part[-1] for part in reversed(output) if part),
+                                self.last_emitted_char)
+                if previous and not previous.isspace():
+                    output.append(self.pending[0])
+                    self.pending = self.pending[1:]
+                    continue
                 boundary = re.search(r"[^A-Za-z0-9_-]", self.pending[4:])
                 boundary_at = boundary.start() + 4 if boundary is not None else None
                 if boundary is None:
@@ -260,10 +267,14 @@ class ReferenceStream:
                     piece = self.pending[:boundary_at]
                     self.pending = self.pending[boundary_at:]
             output.append(resolve_references(piece, self.store))
-        return "".join(output)
+        emitted = "".join(output)
+        if emitted:
+            self.last_emitted_char = emitted[-1]
+        return emitted
 
     def reset(self) -> None:
         self.pending = ""
+        self.last_emitted_char = ""
 
 
 def _current_store() -> ThreadDataStore | None:
@@ -314,6 +325,9 @@ def get_thread_data(record_id: str) -> str:
 class ReferenceBindingMiddleware(AgentMiddleware):
     """Capture trusted retrieval URLs and resolve explicit model references."""
 
+    def __init__(self, *, bind_file_refs: bool = False):
+        self.bind_file_refs = bind_file_refs
+
     def wrap_tool_call(self, request: ToolCallRequest, handler):
         return self._bind_result(request, handler(request))
 
@@ -347,6 +361,10 @@ class ReferenceBindingMiddleware(AgentMiddleware):
             record_id = register_source(store, url)
             if record_id:
                 return result.model_copy(update={"content": f"Source ID: ref:{record_id}\n{result.content}"})
+        if self.bind_file_refs and name == "read_file" and isinstance(result.content, str):
+            resolved = resolve_references(result.content, store)
+            if resolved != result.content:
+                return result.model_copy(update={"content": resolved})
         return result
 
     def after_model(self, state, runtime):

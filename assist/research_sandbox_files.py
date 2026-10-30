@@ -29,7 +29,7 @@ try:
     def regular(name):
         if not name or name in (".", "..") or "/" in name or "\x00" in name:
             raise ValueError("invalid report filename")
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
+        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=root)
         s = os.fstat(fd)
         if not stat.S_ISREG(s.st_mode):
             os.close(fd)
@@ -87,7 +87,7 @@ try:
         os.close(fd)
         if stamp(name) != prior:
             raise ValueError("research report changed during source binding")
-        source_fd = os.open(transfer, os.O_RDONLY | os.O_NOFOLLOW)
+        source_fd = os.open(transfer, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
         temporary = None
         try:
             source_stat = os.fstat(source_fd)
@@ -120,10 +120,11 @@ try:
                 os.close(source_fd)
         print("OK")
     elif op == "prune":
-        names_fd = os.open(transfer, os.O_RDONLY | os.O_NOFOLLOW)
+        names_fd = os.open(transfer, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
         with os.fdopen(names_fd, "rb") as names_file:
-            if os.fstat(names_file.fileno()).st_size > 4 * 1024 * 1024:
-                raise ValueError("research cleanup list is too large")
+            names_stat = os.fstat(names_file.fileno())
+            if not stat.S_ISREG(names_stat.st_mode) or names_stat.st_size > 4 * 1024 * 1024:
+                raise ValueError("invalid research cleanup transfer")
             names_data = names_file.read(4 * 1024 * 1024 + 1)
         if hashlib.sha256(names_data).hexdigest() != payload:
             raise ValueError("research cleanup list changed")

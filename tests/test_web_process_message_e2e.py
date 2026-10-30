@@ -511,6 +511,39 @@ def test_completion_worker_binds_report_written_during_parent_turn(
     assert report.read_text() == f"[Child](<{url}>)"
 
 
+def test_resumed_completion_binds_report_written_after_pause(client, monkeypatch, tmp_path):
+    from assist.thread_datastore import ThreadDataStore, register_source
+
+    tid = "thread-e2e"
+    task_id = "sub-" + "d" * 24
+    refs = tmp_path / tid / "references"
+    refs.mkdir()
+    store = ThreadDataStore(web.MANAGER.thread_datastore_path(tid))
+    url = "https://source.example/resumed-exact"
+    record_id = register_source(store, url)
+    report = refs / f"{task_id}.md"
+
+    class Chat:
+        def resume(self):
+            report.write_text(f"[Child](ref:{record_id})")
+            return "Report ready"
+
+        def pending_reply(self):
+            return None
+
+        def get_messages(self):
+            return []
+
+    _stub_happy_path(monkeypatch, Chat())
+    run = threads._create_run(
+        tid, None, origin="task-completion", resume=True,
+        pending_text=f"Task ID: {task_id}\nAgent: research-agent",
+        work_id="resumed-completion-work")
+    threads._execute_run(run.id, tid)
+    assert threads._runs().get(tid, run.id).status == "success"
+    assert report.read_text() == f"[Child](<{url}>)"
+
+
 def test_process_message_kills_container_even_when_turn_errors(client, monkeypatch):
     """The teardown is in a `finally`, so a crash mid-turn still reaps the
     container — otherwise an erroring turn would leak its sandbox."""
