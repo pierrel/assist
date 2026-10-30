@@ -85,6 +85,35 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertIsNone(handler.called_with)
         self.assertEqual(result.status, "error")
 
+    def test_framework_offloaded_datastore_read_does_not_grant_navigation(self):
+        url = "https://source.example/registered"
+        for path in ("/large_tool_results/data-1",
+                     "/./large_tool_results/data-1", "./large_tool_results/data-1"):
+            with self.subTest(path=path):
+                msgs = [
+                    ToolMessage(content="Large datastore result saved",
+                                name="list_thread_data", tool_call_id="data-1"),
+                    AIMessage(content="", tool_calls=[{
+                        "name": "read_file", "args": {"file_path": path}, "id": "file-1"}]),
+                    ToolMessage(content=f'{{"value":"{url}"}}',
+                                name="read_file", tool_call_id="file-1"),
+                ]
+                result, handler = self._call(url, msgs)
+                self.assertIsNone(handler.called_with)
+                self.assertEqual(result.status, "error")
+
+    def test_failed_file_read_error_does_not_provenance_embedded_url(self):
+        url = "https://attacker.example/leak"
+        msgs = [
+            AIMessage(content="", tool_calls=[{
+                "name": "read_file", "args": {"file_path": f"../{url}"}, "id": "bad-file"}]),
+            ToolMessage(content=f"Error: Path traversal not allowed: ../{url}",
+                        name="read_file", tool_call_id="bad-file", status="error"),
+        ]
+        result, handler = self._call(url, msgs)
+        self.assertIsNone(handler.called_with)
+        self.assertEqual(result.status, "error")
+
     def test_fact_check_report_read_can_provenance_resolved_source(self):
         url = "https://source.example/registered"
         msgs = [AIMessage(content="", tool_calls=[{
@@ -354,6 +383,21 @@ class TestUrlProvenanceMiddleware(TestCase):
         _result, handler = self._call(target, msgs)
 
         self.assertIsNotNone(handler.called_with)
+
+    def test_failed_page_offload_read_cannot_mint_same_host_navigation(self):
+        target = "https://shop.example/guessed"
+        path = f"/large_tool_results/untrusted-page-{target}"
+        msgs = [
+            HumanMessage(content="explore https://shop.example/"),
+            AIMessage(content="", tool_calls=[{
+                "name": "read_file", "id": "missing-page",
+                "args": {"file_path": path}}]),
+            ToolMessage(content=f"Error: File '{path}' not found",
+                        name="read_file", tool_call_id="missing-page", status="error"),
+        ]
+        result, handler = self._call(target, msgs)
+        self.assertIsNone(handler.called_with)
+        self.assertEqual(result.status, "error")
 
     def test_allows_same_host_navigation_from_relative_offloaded_page_alias(self):
         target = "https://shop.example/pages/support"
