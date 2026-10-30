@@ -15,8 +15,8 @@ result outside delegate mode, or the USER's message. A delegate is the exception
 the main model's brief, so the web host supplies only brief-form URLs canonically
 matched to owner-authored Runs already accepted when the child Run is admitted;
 the brief may remove owner userinfo but cannot add or change it.
-Five channels are deliberately NOT provenance sources, because
-their content is attacker-derivable: the model's OWN prior text (else it launders a
+Six channels are deliberately NOT provenance sources, because their content is
+attacker-derivable or a lookup alone grants no navigation: the model's OWN prior text (else it launders a
 fabricated URL by writing it into its reasoning, then fetching it — see
 ``_seen_urls``); ``read_url`` PAGE CONTENT (the untrusted channel — an injected page
 can't name an exfil URL and have a follow-up read of it pass, a read-becomes-write);
@@ -26,10 +26,11 @@ of OFFLOADED untrusted content, written under
 the ``…/large_tool_results/untrusted-{data,page}-`` family (in state, or
 ``/tmp/large_tool_results/…`` for a real-fs offload) — the SAME content laundered
 through a file; and async task-management results, whose descriptions and child
-results are model-authored data. Read-url offloads use the narrower
+results are model-authored data; and thread datastore lookup results, which
+expose records without granting navigation authority. Read-url offloads use the narrower
 ``untrusted-page-`` marker: they remain excluded as authority but can supply only
 same-host link evidence. Shell and child results use the generic marker and cannot.
-Delegate graphs exclude a sixth channel: their synchronous ``task`` specialist
+Delegate graphs exclude another channel: their synchronous ``task`` specialist
 results, because the delegate authored those briefs and could ask a specialist to
 echo an invented URL. The legacy main retains trusted synchronous ``task`` results so
 research-specialist citations can reach its navigation tool; the V2 research
@@ -103,6 +104,7 @@ _ASYNC_TASK_TOOLS = {
     "cancel_async_task",
     "list_async_tasks",
 }
+_THREAD_DATA_TOOLS = {"get_thread_data", "list_thread_data", "search_thread_data"}
 # Per-run trusted URL seeds for a delegate. The web composition root freezes the
 # intersection of its brief and already-accepted owner Runs; the model cannot write
 # the durable Run field or RunnableConfig.
@@ -270,14 +272,14 @@ def _is_untrusted_result(
 ) -> bool:
     """A ToolMessage whose content must NOT provenance URLs — the untrusted channels:
     read_url page content directly, ``execute`` (shell) output, async task-management
-    output, or a delegate's synchronous specialist and file-read output when
+    output, thread datastore lookup, or a delegate's synchronous specialist and file-read output when
     task-result trust is disabled. Other roles also exclude a ``read_file``/``grep``
     of OFFLOADED untrusted content (read_url page or execute/child output). Fails
     CLOSED: a file read whose originating ``tool_call`` is missing from
     the message list (e.g. summarization dropped it) is treated as untrusted — we can't
     verify its target wasn't the offload dir, so we don't provenance its URLs."""
     name = getattr(m, "name", None)
-    if name in {_READ_TOOL, _SHELL_TOOL, *_ASYNC_TASK_TOOLS}:
+    if name in {_READ_TOOL, _SHELL_TOOL, *_ASYNC_TASK_TOOLS, *_THREAD_DATA_TOOLS}:
         return True
     if name == _SYNC_SUBAGENT_TOOL and not trust_task_results:
         return True
@@ -329,8 +331,9 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True,
     (e.g. a stripped trailing paren on a Wikipedia URL).
 
     Normally scans ``HumanMessage`` content (a URL the user pasted) and TRUSTED ``ToolMessage``
-    content (search results, non-offloaded ``read_file``/``grep`` results). Five channels
-    are always EXCLUDED because their content is attacker-derivable: (1) the model's own
+    content (search results, non-offloaded ``read_file``/``grep`` results). Six channels
+    are always EXCLUDED because their content is attacker-derivable or lookup
+    alone grants no navigation: (1) the model's own
     ``AIMessage`` — else it launders a fabricated URL by writing it into its reasoning
     first, then fetching it (observed on Qwen3.6, 14 of 24 fetches slipped through this
     way); (2) ``read_url`` results — arbitrary, possibly attacker-controlled page
@@ -340,7 +343,9 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True,
     ``read_file``/``grep`` of OFFLOADED untrusted content (read_url page,
     execute output, or child result)
     under an ``…/large_tool_results/untrusted-{data,page}-`` namespace — the SAME content laundered through
-    a file (ToolResultToFileMiddleware writes it there and the model greps it). So a
+    a file (ToolResultToFileMiddleware writes it there and the model greps it); and
+    (6) thread datastore get/list/search results, which expose records without
+    creating read_url authority. So a
     URL appearing only inside fetched-page content — direct or offloaded — never
     becomes trusted authority. A real same-host page link is separately navigable;
     a new host requires another trusted source such as search. Delegate mode also excludes its synchronous specialist results,

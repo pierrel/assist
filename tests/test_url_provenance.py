@@ -77,6 +77,24 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertIn("not fetched", result.content)
         self.assertIn("https://shop.example/f91w", result.content)  # lists a real one
 
+    def test_datastore_lookup_does_not_grant_navigation(self):
+        url = "https://source.example/registered"
+        msgs = [ToolMessage(content=f'{{"value":"{url}"}}',
+                            name="get_thread_data", tool_call_id="data-1")]
+        result, handler = self._call(url, msgs)
+        self.assertIsNone(handler.called_with)
+        self.assertEqual(result.status, "error")
+
+    def test_fact_check_report_read_can_provenance_resolved_source(self):
+        url = "https://source.example/registered"
+        msgs = [AIMessage(content="", tool_calls=[{
+                    "name": "read_file", "args": {"file_path": "final_report.md"}, "id": "file-1"}]),
+                ToolMessage(content=f"[Source](<{url}>)",
+                            name="read_file", tool_call_id="file-1")]
+        result, handler = self._call(url, msgs)
+        self.assertIsNotNone(handler.called_with)
+        self.assertEqual(result.content, "FETCHED")
+
     def test_allows_user_provided_url(self):
         # A URL in the question itself is provenanced (copyable, not invented).
         msgs = [HumanMessage(content="summarize https://blog.example/post-1 for me")]

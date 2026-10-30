@@ -1,6 +1,7 @@
 """Exact source binding from retrieval through streamed and stored replies."""
 
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,7 @@ from assist import tools
 from assist.thread_datastore import (
     ReferenceBindingMiddleware, ReferenceStream, ThreadDataStore,
     get_thread_data, register_source, resolve_references, source_url,
+    resolve_host_report,
 )
 
 
@@ -101,6 +103,27 @@ def test_bound_url_containing_ref_text_stays_byte_exact(tmp_path):
     assert resolve_references(f"[Source](ref:{record_id})", store) == f"[Source](<{url}>)"
     assert resolve_references(f"[Source]({url})", store) == f"[Source]({url})"
     assert resolve_references(f"Visit {url}", store) == f"Visit {url}"
+    text = f"Visit https://owner.example/?q=ref:{record_id} now."
+    for split in range(len(text) + 1):
+        stream = ReferenceStream(store)
+        actual = (stream.push(text[:split]) + stream.push(text[split:])
+                  + stream.push("", final=True))
+        assert actual == text, split
+
+
+def test_fact_check_report_read_resolves_host_source_without_registering_text(tmp_path, monkeypatch):
+    store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+    record_id = register_source(store, URL)
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
+    request = SimpleNamespace(tool_call={"name": "read_file", "id": "read-1",
+                                         "args": {"file_path": "final_report.md"}})
+    result = ToolMessage(content=f"[Source](ref:{record_id})",
+                         tool_call_id="read-1", name="read_file")
+
+    assert ReferenceBindingMiddleware()._bind_result(request, result).content == result.content
+    bound = ReferenceBindingMiddleware(bind_file_refs=True)._bind_result(request, result)
+    assert bound.content == f"[Source](<{URL}>)"
+    assert len(store.list(kind="source")) == 1
 
 
 def test_report_binding_is_linear_on_incomplete_refs_and_bounds_expansion(tmp_path):
@@ -113,6 +136,16 @@ def test_report_binding_is_linear_on_incomplete_refs_and_bounds_expansion(tmp_pa
     with pytest.raises(ValueError, match="exceeds 8 MiB"):
         resolve_references(f"[S](ref:{record_id})" * 1100, store,
                            max_output_bytes=8 * 1024 * 1024)
+
+
+def test_local_report_binding_rejects_fifo_without_blocking(tmp_path):
+    store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+    refs = tmp_path / "references"
+    refs.mkdir()
+    fifo = refs / "report.md"
+    os.mkfifo(fifo)
+    with pytest.raises(ValueError, match="regular file"):
+        resolve_host_report(str(fifo), store)
 
 
 def test_plain_brackets_do_not_stall_reply_stream(tmp_path):

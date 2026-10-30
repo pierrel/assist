@@ -3841,9 +3841,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                             lambda _attempt: RUN_STREAMS.reset_attempt(tid, _run.work_id))
                     else:
                         resp = chat.message(text)
-                    if origin == "task-completion":
-                        _bind_task_report(tid, _run.text if _run is not None else text,
-                                          MANAGER.thread_default_working_dir(tid), sandbox)
+                if origin == "task-completion":
+                    task_message = ((_run.pending_text or _run.text) if _run else None)
+                    _bind_task_report(tid, task_message or pending_text or text,
+                                      MANAGER.thread_default_working_dir(tid), sandbox)
             finally:
                 # Capture browser state before sandbox teardown. Failed teardown
                 # retains tracked generations for shutdown proof and leaves

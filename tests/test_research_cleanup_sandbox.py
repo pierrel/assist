@@ -15,8 +15,14 @@ from assist.thread_datastore import ThreadDataStore, register_source
 class LocalSandboxTransport:
     """Run the exact sandbox program and transfer bytes over its public API."""
 
-    def execute(self, command):
-        result = subprocess.run(command, shell=True, text=True, capture_output=True)
+    def __init__(self, cwd=None, env=None):
+        self.cwd = cwd
+        self.env = env
+
+    def execute_host_command(self, argv):
+        result = subprocess.run(
+            ["/usr/bin/timeout", "--kill-after=5s", "30s", *argv],
+            text=True, capture_output=True, timeout=5, cwd=self.cwd, env=self.env)
         return SimpleNamespace(exit_code=result.returncode,
                                output=result.stdout + result.stderr)
 
@@ -82,6 +88,44 @@ def test_sandbox_directory_symlink_cannot_redirect_cleanup(tmp_path):
     assert (victim / "draft.md").read_text() == "outside"
 
 
+def test_sandbox_rejects_fifo_without_blocking(tmp_path):
+    refs = tmp_path / "references"
+    refs.mkdir()
+    os.mkfifo(refs / "final.md")
+    runner = ReferencesCleanupRunnable(WritesReport(lambda: None), str(refs),
+                                       LocalSandboxTransport())
+    runner._ensure_dir()
+    assert not runner._exists("final.md")
+
+
+def test_sandbox_program_ignores_workspace_python_modules(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "json.py").write_text("raise RuntimeError('workspace code ran')")
+    runner = ReferencesCleanupRunnable(
+        WritesReport(lambda: None), str(workspace / "references"),
+        LocalSandboxTransport(cwd=workspace))
+    runner._ensure_dir()
+    assert runner._snapshot() == {}
+
+
+def test_sandbox_program_uses_absolute_launcher_and_interpreter(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    marker = tmp_path / "hijacked"
+    for name in ("python3", "bash", "timeout"):
+        fake = fake_bin / name
+        fake.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+        fake.chmod(0o755)
+    env = dict(os.environ, PATH=str(fake_bin) + ":" + os.environ["PATH"])
+    runner = ReferencesCleanupRunnable(
+        WritesReport(lambda: None), str(tmp_path / "references"),
+        LocalSandboxTransport(env=env))
+    runner._ensure_dir()
+    assert runner._snapshot() == {}
+    assert not marker.exists()
+
+
 def test_sandbox_failed_replace_removes_staged_file(tmp_path):
     refs = tmp_path / "references"
     refs.mkdir()
@@ -89,10 +133,10 @@ def test_sandbox_failed_replace_removes_staged_file(tmp_path):
     record_id = register_source(store, "https://example.test/exact")
 
     class FailingTransport(LocalSandboxTransport):
-        def execute(self, command):
-            if ' replace ' in command:
+        def execute_host_command(self, argv):
+            if len(argv) > 4 and argv[4] == "replace":
                 return SimpleNamespace(exit_code=1, output="replacement failed")
-            return super().execute(command)
+            return super().execute_host_command(argv)
 
     def write():
         (refs / "final.md").write_text(f"[Source](ref:{record_id})")
@@ -160,3 +204,30 @@ def test_sandbox_rejects_tampered_cleanup_transfer(tmp_path):
     with pytest.raises(RuntimeError, match="research cleanup list changed"):
         runner.invoke({})
     assert victim.read_text() == "outside"
+
+
+@pytest.mark.parametrize("target", ["prune", "replace"])
+def test_sandbox_rejects_fifo_transfer_without_blocking(tmp_path, target):
+    refs = tmp_path / "references"
+    refs.mkdir()
+    store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+    record_id = register_source(store, "https://source.example/exact")
+
+    class FifoTransport(LocalSandboxTransport):
+        def upload_files(self, files):
+            result = super().upload_files(files)
+            path, data = files[0]
+            if (target == "replace" and b"https://source.example/exact" in data
+                    or target == "prune" and b"draft.md" in data):
+                Path(path).unlink()
+                os.mkfifo(path)
+            return result
+
+    def write():
+        (refs / "draft.md").write_text("draft")
+        (refs / "final.md").write_text(f"[Source](ref:{record_id})")
+
+    runner = ReferencesCleanupRunnable(WritesReport(write), str(refs),
+                                       FifoTransport())
+    with pytest.raises(RuntimeError, match="research sandbox (replace|prune) failed"):
+        runner.invoke({}, config={"configurable": {"thread_datastore_path": store.path}})

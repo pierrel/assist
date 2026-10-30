@@ -50,7 +50,6 @@ import re
 import json
 import hashlib
 import secrets
-import shlex
 from typing import Any
 
 from assist.research_sandbox_files import SANDBOX_FILES
@@ -187,7 +186,8 @@ class ReferencesCleanupRunnable:
                     if result != "OK":
                         logger.warning("ReferencesCleanup: %s", result)
                 finally:
-                    self._sandbox.execute("rm -f -- " + shlex.quote(transfer))
+                    self._sandbox.execute_host_command(
+                        ["/usr/bin/rm", "-f", "--", transfer])
             return
         new_files = after.keys() - before.keys()
         for name in new_files:
@@ -212,9 +212,8 @@ class ReferencesCleanupRunnable:
     def _sandbox_op(self, op: str, payload=None, transfer: str = "") -> str:
         args = (op, self._references_path, json.dumps(self._dir_identity or []),
                 json.dumps(payload), transfer)
-        command = "python3 -c " + shlex.quote(SANDBOX_FILES)
-        command += " " + " ".join(shlex.quote(arg) for arg in args)
-        result = self._sandbox.execute(command)
+        result = self._sandbox.execute_host_command(
+            ["/usr/bin/python3", "-I", "-c", SANDBOX_FILES, *args])
         if result.exit_code != 0:
             raise RuntimeError(f"research sandbox {op} failed: {result.output}")
         return result.output.strip()
@@ -232,7 +231,7 @@ class ReferencesCleanupRunnable:
                 raise RuntimeError(f"research sandbox {op} transfer exceeded byte limit")
             return response.content, stamp
         finally:
-            self._sandbox.execute("rm -f -- " + shlex.quote(transfer))
+            self._sandbox.execute_host_command(["/usr/bin/rm", "-f", "--", transfer])
 
     def _sandbox_read(self, basename: str) -> tuple[bytes, list[int]]:
         data, stamp = self._sandbox_transfer("read", basename)
@@ -247,7 +246,7 @@ class ReferencesCleanupRunnable:
             self._sandbox_op("replace", [basename, stamp,
                                          hashlib.sha256(data).hexdigest()], transfer)
         finally:
-            self._sandbox.execute("rm -f -- " + shlex.quote(transfer))
+            self._sandbox.execute_host_command(["/usr/bin/rm", "-f", "--", transfer])
 
     # --- final-filename extraction ------------------------------------
 
