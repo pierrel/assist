@@ -253,6 +253,7 @@ class Thread:
             self.model, working_dir=working_dir, checkpointer=checkpointer,
             sandbox_backend=sandbox_backend, agent_dir=agent_dir,
             scratch_dir=scratch_dir,
+            thread_data_available=thread_datastore_path is not None,
             spec=spec)
 
     def _run(self, graph_input) -> str:

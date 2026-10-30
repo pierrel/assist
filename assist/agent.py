@@ -344,6 +344,7 @@ def create_agent(model: BaseChatModel,
                  *,
                  agent_dir: str | None = None,
                  scratch_dir: str | None = None,
+                 thread_data_available: bool = False,
                  spec: AgentSpec | None = None,
                  ) -> CompiledStateGraph:
     """Build an Assist main or delegate agent.
@@ -353,7 +354,9 @@ def create_agent(model: BaseChatModel,
     carrying the embedder-supplied tools, skill sources, and default
     backend — canonical field semantics live on the spec.  ``spec=None``
     means ``AgentSpec()`` — the defaults.  ``spec.default_backend`` is
-    mutually exclusive with ``sandbox_backend``.
+    mutually exclusive with ``sandbox_backend``. ``thread_data_available``
+    gates Assist's built-in record lookup tools; Thread sets it from its
+    datastore path.
 
     Passing ``agent_dir`` enables local-mode private state at ``/agent`` and
     auto-loads ``/agent/memory.md``. ``scratch_dir`` maps persistent local-mode
@@ -485,7 +488,8 @@ def create_agent(model: BaseChatModel,
         *execution_egress_tools,
         travel, directions, map_data, read_url,
         *([get_thread_data, list_thread_data, search_thread_data]
-          if spec.web_main or spec.role == "delegate" else []),
+          if thread_data_available and (spec.web_main or spec.role == "delegate")
+          else []),
         *([search_internet] if web_quick_research else []),
     ):
         # Deep Agents binds tools by name.  Specs may use provider-schema dicts
@@ -571,6 +575,7 @@ def create_agent(model: BaseChatModel,
                                            [retry_middle, json_validation_mw,
                                             tool_name_mw],
                                            sandbox_backend=sandbox_backend,
+                                           thread_data_available=thread_data_available,
                                            trust_human_messages=not delegate)
         )
 
@@ -798,12 +803,14 @@ def create_research_agent(model: BaseChatModel,
                           middleware=[],
                           sandbox_backend=None,
                           *, leaf: bool = False, egress_tools=(),
+                          thread_data_available: bool = False,
                           trust_human_messages: bool = True) -> RollbackRunnable:
     """Create a DeepAgents-based agent suitable for general-purpose research replies.
 
     The default research lead delegates searching, critique, and fact-checking.
     ``leaf=True`` instead builds the direct search/read worker used by subagent runs;
     it cannot recursively delegate on the single model slot.
+    ``thread_data_available`` gates record lookup tools in both profiles.
     ``trust_human_messages=False`` carries a delegate's URL trust boundary into
     its synchronous search and fact-check specialists.
 
@@ -951,7 +958,9 @@ def create_research_agent(model: BaseChatModel,
         "name": "research-agent",
         "description": "Used to research more in depth questions. Only give this researcher one topic at a time. It will return research results.",
         "system_prompt": base_prompt_for("deepagents/sub_research.txt.j2"),
-        "tools": [search_internet, read_url, get_thread_data, list_thread_data, search_thread_data,
+        "tools": [search_internet, read_url,
+                  *([get_thread_data, list_thread_data, search_thread_data]
+                    if thread_data_available else []),
                   *execution_egress_tools],
         "middleware": _subagent_safety_mw() + _read_url_guards(
             trust_human_messages=trust_human_messages)
@@ -994,9 +1003,10 @@ def create_research_agent(model: BaseChatModel,
     # and enforces clean delegation instead of the orchestrator doing worker work.
     # Execution and egress are one capability: no execution-capable research
     # profile can hit the proxy without also getting its approval workflow.
-    leaf_tools = ([search_internet, read_url, get_thread_data, list_thread_data, search_thread_data,
-                   *execution_egress_tools] if leaf else
-                  [get_thread_data, list_thread_data, search_thread_data])
+    data_tools = ([get_thread_data, list_thread_data, search_thread_data]
+                  if thread_data_available else [])
+    leaf_tools = ([search_internet, read_url, *data_tools, *execution_egress_tools]
+                  if leaf else data_tools)
     egress_skills = _egress_skills_middleware(backend, execution_egress_tools)
     agent = create_deep_agent(
         model=model,

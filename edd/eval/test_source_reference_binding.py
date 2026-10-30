@@ -39,7 +39,8 @@ def test_natural_horror_research_uses_exact_source_reference(tmp_path, follow_up
               "recursion_limit": 30}
     with (patch("assist.agent.search_internet", search_internet),
           patch("assist.agent.read_url", read_url)):
-        agent = create_research_agent(select_assistant_model(0.1), str(tmp_path), leaf=True)
+        agent = create_research_agent(select_assistant_model(0.1), str(tmp_path),
+                                      leaf=True, thread_data_available=True)
         result = agent.invoke(
             {"messages": [{"role": "user", "content":
                            "What horror movies can I stream on Shudder this weekend? Please include a source."}]},
