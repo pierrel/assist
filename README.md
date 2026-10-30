@@ -117,7 +117,14 @@ where reliability is harder than with frontier APIs.
 
 - **Loop and stall guards.** Repeating tool calls and empty model
   responses are detected and recovered automatically — keeps small
-  models from getting stuck in degenerate states.
+  models from getting stuck in degenerate states. Near the main/delegate
+  execution limit, the agent receives one trusted warning to finish a clear
+  path or report completed work, unfinished work, and blockers honestly. A
+  50-superstep finalization window extends the original 500-superstep budget;
+  these are graph steps, not model calls. The hard stop remains terminal if
+  the agent does not finish. Checkpoint continuations retain the warning;
+  a new turn resets it. Each invocation retains LangGraph's existing budget
+  semantics, including a fresh budget when resuming a checkpoint.
 
 - **Git domain integration.** Each thread works in its own git branch
   of a configured "domain" repo (your life repo, your work repo, etc.)
@@ -152,6 +159,9 @@ Snapshot reads and background probes do not clear notifications.
   timezone takes precedence. Schedule listings include the stored timezone so
   a later replacement can preserve it; Assist asks rather than guessing when
   no timezone is known.
+
+- **Thread descriptions.** The ordinary web assistant can update the current
+  thread's description when asked, and the change is saved with the thread.
 
 - **Pi web preview.** A new web thread can explicitly select a bounded Pi
   preview; Deep Agents remains the default. Pi threads are visibly labelled,

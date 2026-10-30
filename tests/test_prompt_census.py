@@ -92,6 +92,9 @@ def test_final_provider_tools_are_the_visible_tools(census):
     assert "quiet" in main["visible_tools"]
     assert "quiet" in _call(census, "web-main-full")["visible_tools"]
     assert "quiet" not in _call(census, "web-delegate")["visible_tools"]
+    assert "update_thread_description" in main["visible_tools"]
+    assert "update_thread_description" not in _call(
+        census, "web-delegate")["visible_tools"]
     assert "general-purpose" not in _system_prompt(main).split(
         "Available subagent types:")[-1]
     assert "task" not in main["visible_tools"]
@@ -172,9 +175,9 @@ def test_classified_kernel_matches_each_final_skills_enabled_request(census):
     thread_data = ["get_thread_data", "list_thread_data", "search_thread_data"]
     expected = {
         "web-main-core": [*executable, "load_skill", *async_lifecycle,
-                              "quiet", *thread_data],
+                              "quiet", "update_thread_description", *thread_data],
         "web-main-full": [*executable, "load_skill", *async_lifecycle,
-                              "quiet", *thread_data],
+                              "quiet", "update_thread_description", *thread_data],
         "web-delegate": [*executable, "task", "load_skill", *thread_data],
         "legacy-main": [*filesystem, "task", "load_skill"],
         "skill-precedence-built-in": [
@@ -1295,11 +1298,10 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
         separators=(",", ":"),
     )
     assert len(historical_p0_prompt) == 31_279
-    # The composed current prompt requires loading research before dispatch;
-    # web main exposes quick search after loading the skill. Historical P0-P2b3
-    # rows stay unchanged.
-    assert len(current_prompt) == 27_395
-    assert len(schemas) == 20_006
+    # The current bootstrap includes source guidance in the prompt and the
+    # thread-description tool schema. Historical P0-P2b3 rows stay unchanged.
+    assert len(current_prompt) == 27_422
+    assert len(schemas) == 20_475
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 37
     assert len(census["findings"]) == 20

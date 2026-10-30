@@ -36,6 +36,7 @@ from assist.schedule.tools import schedule_tools
 from assist.events.store import SubscriptionStore
 from assist.events.tools import subscription_tools
 from assist.events.quiet import quiet_tools
+from assist.events.thread_description import thread_description_tools
 from assist.events.reply import reply_tools, REPLY_INTERRUPT_ON
 from assist.events.email import email_tools, EMAIL_INTERRUPT_ON
 from assist.gmail import gmail_tools, GMAIL_INTERRUPT_ON
@@ -212,6 +213,8 @@ def _request_quiet(tid: str, run_id: str) -> bool:
 set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE)
               + notify_tools(lambda tid: _mark_urgent(tid))
               + quiet_tools(_request_quiet)
+              + thread_description_tools(
+                  lambda tid, description: set_description(tid, description))
               + _geo_tools + email_tools() + gmail_tools() + [get_location]
               + frequency_tools(FREQUENCY_STORE))
 set_execution_egress_tools(_egress_tools)

@@ -15,6 +15,7 @@ from assist.checkpoint_rollback import invoke_with_rollback, stream_with_rollbac
 from assist.stream_chunks import extract_content_text
 from assist.thread_queue import THREAD_QUEUE
 from assist.thread_datastore import ReferenceStream, ThreadDataStore
+from assist.middleware.execution_limit import EXECUTION_STEP_LIMIT
 from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
@@ -218,15 +219,10 @@ class Thread:
         self.runconfig = {
             "configurable": {"thread_id": self.thread_id},
             "max_concurrency": self.max_concurrency,
-            # Bound the TOP-LEVEL orchestrator too. Without this it runs at
-            # langgraph's default (~10007 steps); the sub-agents have their own
-            # recursion_limits (research 300, context 500) but the trunk was
-            # effectively unbounded. Now that a recursion hit is terminal (not
-            # rolled-back-and-retried), this makes the orchestrator's own runaway
-            # (e.g. re-dispatch / read_file thrash) fail fast in a few minutes.
-            # Its own steps are mostly task-dispatch + synthesis, so 500 is
-            # generous for legit work while still bounding a runaway; eval-gated.
-            "recursion_limit": 500,
+            # Keep the original 500 graph supersteps plus a bounded 50-step
+            # finalization window. Middleware warns at the next model call in
+            # that window; a recursion hit remains terminal, without rollback.
+            "recursion_limit": EXECUTION_STEP_LIMIT,
         }
         if configurable is not None:
             if not isinstance(configurable, Mapping):
