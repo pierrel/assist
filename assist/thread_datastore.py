@@ -204,8 +204,15 @@ class ReferenceStream:
         self.store = store
         self.pending = ""
         self.last_emitted_char = ""
+        self.discard_invalid_target = False
 
     def push(self, text: str, *, final: bool = False) -> str:
+        if self.discard_invalid_target:
+            boundary = re.search(r"[\[\)\n]", text)
+            if boundary is None:
+                return ""
+            text = text[boundary.end():] if boundary.group() == ")" else text[boundary.start():]
+            self.discard_invalid_target = False
         self.pending += text
         output = []
         while self.pending:
@@ -228,21 +235,27 @@ class ReferenceStream:
                     self.pending = self.pending[1:]
                     continue
                 if self.pending[close_label + 1] != "(":
-                    output.append(self.pending[:close_label + 1])
+                    output.append(resolve_references(self.pending[:close_label + 1], self.store))
                     self.pending = self.pending[close_label + 1:]
                     continue
                 target = self.pending[close_label + 2:]
                 if not "ref:".startswith(target.lower()) and not target.lower().startswith("ref:"):
-                    output.append(self.pending[:close_label + 2])
+                    output.append(resolve_references(self.pending[:close_label + 2], self.store))
                     self.pending = target
                     continue
                 end = self.pending.find(")", close_label + 2)
                 if end < 0:
                     if not final and len(self.pending) <= 2550:
                         break
-                    output.append(f"{self.pending[1:close_label]} {_UNBOUND}"
-                                  if target.lower().startswith("ref:") else self.pending)
-                    self.pending = ""
+                    boundary = re.search(r"[\[\n]", target)
+                    if boundary is None:
+                        self.discard_invalid_target = not final
+                        output.append(resolve_references(self.pending, self.store))
+                        self.pending = ""
+                    else:
+                        offset = close_label + 2 + boundary.start()
+                        output.append(resolve_references(self.pending[:offset], self.store))
+                        self.pending = self.pending[offset:]
                     continue
                 piece = self.pending[:end + 1]
                 self.pending = self.pending[end + 1:]
@@ -275,6 +288,7 @@ class ReferenceStream:
     def reset(self) -> None:
         self.pending = ""
         self.last_emitted_char = ""
+        self.discard_invalid_target = False
 
 
 def _current_store() -> ThreadDataStore | None:
