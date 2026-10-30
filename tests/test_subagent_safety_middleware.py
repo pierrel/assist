@@ -130,16 +130,21 @@ class TestSubagentSafetyMiddleware(TestCase):
     def test_leaf_research_agent_offloads_pages_with_navigation_marker(self):
         from assist.agent import create_research_agent
         from assist.middleware.tool_result_to_file import ToolResultToFileMiddleware
+        from assist.thread_datastore import ReferenceBindingMiddleware
 
         with patch("assist.agent.create_deep_agent") as create:
             create.return_value = MagicMock()
             create_research_agent(MagicMock(), working_dir="/tmp/x", leaf=True)
 
+        middleware = create.call_args.kwargs["middleware"]
         offload = next(
-            middleware for middleware in create.call_args.kwargs["middleware"]
+            middleware for middleware in middleware
             if isinstance(middleware, ToolResultToFileMiddleware)
             and "read_url" in middleware._tools)
         self.assertTrue(offload._page_navigation)
+        self.assertLess(middleware.index(offload), next(
+            i for i, item in enumerate(middleware)
+            if isinstance(item, ReferenceBindingMiddleware)))
 
     def test_leaf_research_agent_pairs_execution_with_egress_skill_and_tools(self):
         """An execution-capable child receives the egress skill and tools."""
