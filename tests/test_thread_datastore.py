@@ -111,6 +111,53 @@ def test_bound_url_containing_ref_text_stays_byte_exact(tmp_path):
         assert actual == text, split
 
 
+@pytest.mark.parametrize("template", [
+    "See [source ref:{record_id}].",
+    "See [source ref:{record_id}](https://owner.example/page).",
+])
+def test_stream_resolves_references_inside_bracket_labels_across_splits(tmp_path, template):
+    store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+    record_id = register_source(store, URL)
+    raw = template.format(record_id=record_id)
+    expected = resolve_references(raw, store)
+    for split in range(len(raw) + 1):
+        stream = ReferenceStream(store)
+        actual = stream.push(raw[:split]) + stream.push(raw[split:]) + stream.push("", final=True)
+        assert actual == expected, split
+
+
+def test_stream_preserves_paragraph_after_unclosed_reference_target(tmp_path):
+    store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+    record_id = register_source(store, URL)
+    raw = f"[Source](ref:{record_id}\n\nThe next paragraph is still here."
+    expected = resolve_references(raw, store)
+    for split in range(len(raw) + 1):
+        stream = ReferenceStream(store)
+        actual = stream.push(raw[:split]) + stream.push(raw[split:]) + stream.push("", final=True)
+        assert actual == expected, split
+
+
+def test_stream_discards_late_close_after_bounded_invalid_target(tmp_path):
+    store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+    raw = "[S](ref:" + "a" * 2550 + ") Next paragraph."
+    expected = resolve_references(raw, store)
+    split = raw.index(")")
+    stream = ReferenceStream(store)
+    actual = stream.push(raw[:split]) + stream.push(raw[split:]) + stream.push("", final=True)
+    assert actual == expected
+
+
+@pytest.mark.parametrize("separator", ["", "\n"])
+def test_stream_retains_valid_reference_after_bounded_invalid_target(tmp_path, separator):
+    store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+    record_id = register_source(store, URL)
+    raw = "[S](ref:" + "a" * 2520 + separator + f"[B](ref:{record_id})"
+    expected = resolve_references(raw, store)
+    stream = ReferenceStream(store)
+    actual = stream.push(raw[:-1]) + stream.push(raw[-1:]) + stream.push("", final=True)
+    assert actual == expected
+
+
 def test_fact_check_report_read_resolves_host_source_without_registering_text(tmp_path, monkeypatch):
     store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
     record_id = register_source(store, URL)
