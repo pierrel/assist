@@ -274,7 +274,8 @@ def test_fact_check_report_read_resolves_host_source_without_registering_text(tm
 
     assert ReferenceBindingMiddleware()._bind_result(request, result).content == result.content
     bound = ReferenceBindingMiddleware(bind_file_refs=True)._bind_result(request, result)
-    assert bound.content == f"[Source](<{URL}>)"
+    assert bound.content == (f"[Source](<{URL}>)\n\n"
+                             f"Exact source URLs for fact-checking:\n{URL}")
     assert len(store.list(kind="source")) == 1
 
 

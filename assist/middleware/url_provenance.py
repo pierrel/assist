@@ -92,6 +92,7 @@ from assist.middleware.tool_result_to_file import (
     _OFFLOAD_DIR,
     UNTRUSTED_PAGE_OFFLOAD_MARK,
 )
+from assist.thread_datastore import BOUND_FILE_URLS_ARTIFACT
 
 logger = logging.getLogger(__name__)
 
@@ -367,6 +368,16 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True,
             continue
         if isinstance(m, ToolMessage) and _is_untrusted_result(
                 m, calls_by_id, trust_task_results=trust_task_results):
+            continue
+        artifact = getattr(m, "artifact", None)
+        if (isinstance(m, ToolMessage) and m.name == "read_file"
+                and isinstance(artifact, dict)
+                and BOUND_FILE_URLS_ARTIFACT in artifact):
+            # The host binder supplies exact registered destinations plus URLs
+            # from the original file. Its Markdown display can contain encoded
+            # targets or truncated URL prefixes, which cannot grant authority.
+            for url in artifact[BOUND_FILE_URLS_ARTIFACT]:
+                _record_url(seen, url)
             continue
         for url in urls_in_text(_message_text(m)):
             _record_url(seen, url)
