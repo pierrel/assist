@@ -29,7 +29,7 @@ _UNBOUND = "[source link unavailable: ask me to verify it again]"
 
 def _source_url(value: object) -> str | None:
     if (not isinstance(value, str) or len(value) > 8192
-            or any(c in "<> " or ord(c) < 32 or ord(c) == 127 for c in value)):
+            or any(c in "<>" or c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value)):
         return None
     try:
         parsed = urlsplit(value)
@@ -181,7 +181,15 @@ def _link_at(text: str, start: int, store: ThreadDataStore) -> tuple[int, str] |
         end += 1
     if end < len(text) and text[end] == ")":
         url = source_url(store, text[target_start:end].lower())
-        return end + 1, f"[{label}](<{url}>)" if url else f"{label} {_UNBOUND}"
+        if url:
+            # Markdown decodes entities and escapes, parses code spans, and
+            # splits table cells at pipes inside link targets.
+            # Encode only bound destinations so the rendered href matches the record.
+            target = (re.sub(r"&(?=(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]+);)",
+                             "&amp;", url).replace("\\", "&#92;")
+                     .replace("`", "&#96;").replace("|", "&#124;"))
+            return end + 1, f"[{label}](<{target}>)"
+        return end + 1, f"{label} {_UNBOUND}"
     return end, f"{label} {_UNBOUND}"
 
 

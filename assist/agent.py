@@ -1011,14 +1011,16 @@ def create_research_agent(model: BaseChatModel,
         # The searcher + fact-check sub-agents carry those guards themselves.
         # logging_mw stays innermost/last.
         middleware=([BoundedSummarizationMiddleware(model, backend)] + base_mw + middleware
-                    + [ReferenceBindingMiddleware()]
+                    # Offload wraps binding here so a failed fetch's raw error
+                    # cannot become a source when the offloader makes a preview.
                     + ([ToolResultToFileMiddleware(
                         backend, tools={"read_url"}, floor_chars=4000,
                         preview_style="head", untrusted=True,
                         page_navigation=True,
                         name="ToolResultToFileMiddleware_read_url")]
-                       + _read_url_guards(
-                           trust_human_messages=trust_human_messages)
+                       if leaf else [])
+                    + [ReferenceBindingMiddleware()]
+                    + (_read_url_guards(trust_human_messages=trust_human_messages)
                        if leaf else [])
                     + ([egress_skills] if egress_skills is not None else [])
                     + [logging_mw]),

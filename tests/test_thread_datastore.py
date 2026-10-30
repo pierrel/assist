@@ -2,6 +2,7 @@
 
 import json
 import os
+from html.parser import HTMLParser
 from types import SimpleNamespace
 
 import pytest
@@ -109,6 +110,77 @@ def test_bound_url_containing_ref_text_stays_byte_exact(tmp_path):
         actual = (stream.push(text[:split]) + stream.push(text[split:])
                   + stream.push("", final=True))
         assert actual == text, split
+
+
+@pytest.mark.parametrize("url", [
+    "https://source.example/a&copy;",
+    "https://source.example/a&#42;",
+    r"https://source.example/a\)b",
+    "https://source.example/a`q`",
+    "https://source.example/a|b",
+])
+def test_bound_markdown_renders_exact_href_without_changing_ordinary_urls(tmp_path, url):
+    from assist.safe_markdown import render_markdown
+
+    class Links(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.hrefs = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "a":
+                self.hrefs.append(dict(attrs)["href"])
+
+    store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+    record_id = register_source(store, url)
+    assert source_url(store, record_id) == url
+    raw = f"[Source](ref:{record_id})"
+    resolved = resolve_references(raw, store)
+    for split in range(len(raw) + 1):
+        stream = ReferenceStream(store)
+        assert (stream.push(raw[:split]) + stream.push(raw[split:])
+                + stream.push("", final=True)) == resolved
+    links = Links()
+    links.feed(render_markdown(resolved))
+    assert links.hrefs == [url]
+    table_links = Links()
+    table_links.feed(render_markdown(f"| Source |\n| --- |\n| {resolved} |",
+                                     extensions=["fenced_code", "tables"]))
+    assert table_links.hrefs == [url]
+    assert resolve_references(f"[Owner](<{url}>)", store) == f"[Owner](<{url}>)"
+
+
+def test_source_with_unicode_whitespace_is_not_registered(tmp_path):
+    store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+    assert register_source(store, "https://source.example/a\u00a0b") is None
+    assert store.list(kind="source") == []
+
+
+def test_failed_long_read_url_offload_does_not_register_source(tmp_path, monkeypatch):
+    from assist.middleware.tool_result_to_file import ToolResultToFileMiddleware
+
+    store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
+    backend = SimpleNamespace(write=lambda path, content: SimpleNamespace(error=None))
+    offload = ToolResultToFileMiddleware(
+        backend, tools={"read_url"}, floor_chars=4000,
+        untrusted=True, page_navigation=True)
+    binding = ReferenceBindingMiddleware()
+    request = SimpleNamespace(tool_call={"name": "read_url", "id": "failed-fetch",
+                                         "args": {"url": "https://failed.example/page"}})
+    failed = ToolMessage(content="Error fetching URL: " + "X" * 5000,
+                         name="read_url", tool_call_id="failed-fetch")
+    result = offload.wrap_tool_call(
+        request, lambda req: binding.wrap_tool_call(req, lambda _req: failed))
+    assert "Source ID:" not in result.content
+    assert store.list(kind="source") == []
+
+    succeeded = ToolMessage(content="Page body " + "X" * 5000,
+                            name="read_url", tool_call_id="successful-fetch")
+    preview = offload.wrap_tool_call(
+        request, lambda req: binding.wrap_tool_call(req, lambda _req: succeeded))
+    assert "Source ID: ref:" in preview.content
+    assert len(store.list(kind="source")) == 1
 
 
 @pytest.mark.parametrize("template", [
