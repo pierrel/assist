@@ -264,11 +264,9 @@ def read_url(url: str) -> str:
     Per-host throttled (~1s between calls to the same host) so a burst of
     fetches to different sites isn't artificially serialised, but a tight
     loop against one bot-protected site is rate-limited locally."""
-    # `urlparse` never raises on str input; for empty/malformed URLs
-    # `.hostname` is None and `_host_throttle` no-ops on the empty string.
-    host = urlparse(url).hostname or ""
-    _host_throttle(host)
     try:
+        host = urlparse(url).hostname or ""
+        _host_throttle(host)
         resp = requests.get(
             url,
             headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"},

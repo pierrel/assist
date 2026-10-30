@@ -749,7 +749,20 @@ def browser_tools(session: BrowserSession):
     """The web main sees typed operations, never Docker or general code execution."""
     def invoke(operation, **args):
         try:
-            return json.dumps(session.command(operation, **args), ensure_ascii=False)
+            response = session.command(operation, **args)
+            observation = response.get("result") if isinstance(response, dict) else None
+            if isinstance(observation, dict):
+                source_url = observation.pop("_source_url", None)
+                if (operation in {"open", "observe", "act", "wait"}
+                        and isinstance(source_url, str)
+                        and "navigation_failed" not in observation.get("observation_errors", [])):
+                    from assist.thread_datastore import ThreadDataStore, register_source
+                    store = ThreadDataStore(os.path.join(
+                        session.threads_root, session.thread_id, "thread-data.sqlite"))
+                    source_id = register_source(store, source_url)
+                    if source_id:
+                        observation["source_id"] = f"ref:{source_id}"
+            return json.dumps(response, ensure_ascii=False)
         except BrowserUnavailable as error:
             return f"Browser unavailable: {error}"
         except Exception as error:

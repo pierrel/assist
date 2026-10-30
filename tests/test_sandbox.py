@@ -537,6 +537,15 @@ class TestDockerSandboxBackendPathPrefixing(TestCase):
         self.assertEqual(len(responses), 1)
         self.assertEqual(responses[0].error, "file_not_found")
 
+    def test_download_files_rejects_archive_growth_before_buffering(self):
+        self.container.get_archive.return_value = (
+            iter([b"x" * 512, b"y" * 1024]), {"size": 1536})
+
+        responses = self.sandbox.download_files(
+            ["/tmp/assist-research-transfer"], max_bytes=1024)
+
+        self.assertEqual(responses[0].error, "file_not_found")
+
     @staticmethod
     def _uploaded_tarinfo(put_archive_mock):
         """Pull the single TarInfo out of a captured put_archive(stream) call."""

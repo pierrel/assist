@@ -19,6 +19,8 @@ from assist.promptable import base_prompt_for
 from assist.web_main_prompt import render_deep_web_main_prompt
 from assist.spec import AgentSpec
 from assist.tools import directions, map_data, read_url, search_internet, travel
+from assist.thread_datastore import (
+    ReferenceBindingMiddleware, get_thread_data, list_thread_data, search_thread_data)
 from assist.backends import (
     DOMAIN_SKILLS_PATH,
     LegacySkillsBackend,
@@ -481,6 +483,8 @@ def create_agent(model: BaseChatModel,
         *list(spec.tools),
         *execution_egress_tools,
         travel, directions, map_data, read_url,
+        *([get_thread_data, list_thread_data, search_thread_data]
+          if spec.web_main or spec.role == "delegate" else []),
         *([search_internet] if web_quick_research else []),
     ):
         # Deep Agents binds tools by name.  Specs may use provider-schema dicts
@@ -673,6 +677,7 @@ def create_agent(model: BaseChatModel,
             *([HumanInTheLoopMiddleware(interrupt_on=spec.interrupt_on)]
               if spec.interrupt_on else []),
             skills_mw, memory_mw, ContextRiderMiddleware(),
+            ReferenceBindingMiddleware(),
             *([] if delegate else [InterjectionMiddleware()]), logging_mw],
         backend=backend,
         # A non-legacy embedder gets no deepagents subagents: web main supplies
@@ -936,6 +941,7 @@ def create_research_agent(model: BaseChatModel,
                 # constant respectively). Inert on the non-search subagents (critique,
                 # fact-check) — same uniform-stack posture as the unavailable breaker.
                 SearchRunawayBreakerMiddleware(),
+                ReferenceBindingMiddleware(),
                 ThreadQueueMiddleware(),
                 EmptyResponseRecoveryMiddleware()]
 
@@ -943,7 +949,8 @@ def create_research_agent(model: BaseChatModel,
         "name": "research-agent",
         "description": "Used to research more in depth questions. Only give this researcher one topic at a time. It will return research results.",
         "system_prompt": base_prompt_for("deepagents/sub_research.txt.j2"),
-        "tools": [search_internet, read_url, *execution_egress_tools],
+        "tools": [search_internet, read_url, get_thread_data, list_thread_data, search_thread_data,
+                  *execution_egress_tools],
         "middleware": _subagent_safety_mw() + _read_url_guards(
             trust_human_messages=trust_human_messages)
         + ([_egress_skills_middleware(backend, execution_egress_tools)]
@@ -984,7 +991,9 @@ def create_research_agent(model: BaseChatModel,
     # and enforces clean delegation instead of the orchestrator doing worker work.
     # Execution and egress are one capability: no execution-capable research
     # profile can hit the proxy without also getting its approval workflow.
-    leaf_tools = [search_internet, read_url, *execution_egress_tools] if leaf else []
+    leaf_tools = ([search_internet, read_url, get_thread_data, list_thread_data, search_thread_data,
+                   *execution_egress_tools] if leaf else
+                  [get_thread_data, list_thread_data, search_thread_data])
     egress_skills = _egress_skills_middleware(backend, execution_egress_tools)
     agent = create_deep_agent(
         model=model,
@@ -999,6 +1008,7 @@ def create_research_agent(model: BaseChatModel,
         # The searcher + fact-check sub-agents carry those guards themselves.
         # logging_mw stays innermost/last.
         middleware=([BoundedSummarizationMiddleware(model, backend)] + base_mw + middleware
+                    + [ReferenceBindingMiddleware()]
                     + ([ToolResultToFileMiddleware(
                         backend, tools={"read_url"}, floor_chars=4000,
                         preview_style="head", untrusted=True,
@@ -1027,21 +1037,10 @@ def create_research_agent(model: BaseChatModel,
     # runaway to ~5 min (vs the 70-min incident) with room for thorough research.
     rollback_runnable = RollbackRunnable(agent, recursion_limit=300)
 
-    # Wrap with the references-cleanup runnable so intermediate drafts
-    # and sub-sub-agent scratch files get pruned after the research call
-    # returns — only the final report stays in references/.  The wrapper
-    # uses the *parent* sandbox (work_dir=/workspace) for its lazy
-    # _ensure_dir fallback.  In sandbox mode the eager mkdir above is the
-    # load-bearing creator; _ensure_dir is the load-bearing creator in
-    # local mode (no container to exec_run against).
-    if sandbox_backend:
-        references_path = sandbox_backend.work_dir + "/references"
-        cleanup_sandbox = sandbox_backend
-    else:
-        references_path = os.path.join(working_dir, "references")
-        cleanup_sandbox = None
+    references_path = (sandbox_backend.work_dir + "/references" if sandbox_backend
+                       else os.path.join(working_dir, "references"))
     return ReferencesCleanupRunnable(
         rollback_runnable,
         references_path=references_path,
-        sandbox_backend=cleanup_sandbox,
+        sandbox_backend=sandbox_backend,
     )

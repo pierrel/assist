@@ -675,12 +675,9 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertIsNotNone(handler.called_with, "trailing-slash variant should match")
 
     def test_allows_url_from_a_subagent_task_result(self):
-        # THE orchestrator healthy-path mechanism: a deepagents sub-agent returns only its
-        # FINAL message text to the parent, as the `task` tool's ToolMessage. So the
-        # orchestrator can only read URLs the searcher wrote into that final message (why
-        # sub_research.txt.j2 now requires a verbatim `Sources:` list). Given such a task
-        # result, provenance must ALLOW the orchestrator to read a listed URL — otherwise
-        # provenance-guarding the orchestrator would break healthy research.
+        # Navigation provenance accepts a URL in a synchronous task's final
+        # ToolMessage. Source-reference binding is separate: task prose cannot
+        # register a trusted citation, while this URL may still be read.
         task_result = ToolMessage(
             content=("Rikki Vale is buried at Green Hills Memorial Park, Los Angeles.\n\n"
                      "Sources:\n"

@@ -68,6 +68,16 @@ where reliability is harder than with frontier APIs.
   On restart, a new managed generation waits for confirmed cleanup. Browser
   and shell share the sandbox's network and mounts.
 
+- **Thread data and source links.** Managed threads keep host-owned text records
+  in a SQLite datastore beside their description, outside the workspace. Host code
+  writes non-source text records; the agent can get, list, and search records in
+  its own thread. Search results, successful URL reads, and observed browser
+  pages capture exact source URLs as one kind of record and return opaque IDs.
+  Explicit Markdown links using those IDs resolve in replies, streams, and
+  saved research reports. Ordinary URLs pass through unchanged. Source binding
+  preserves URL identity, not page availability or support for a claim. Unknown
+  source IDs produce a recoverable unavailable-link message.
+
 - **Specialized agents and skills out of the box.**
   - **Research agent** rigorous fact-checking and critiquing with
     internet search (`search_internet`) and URL fetch (`read_url`).

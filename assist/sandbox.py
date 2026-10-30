@@ -491,8 +491,9 @@ class DockerSandboxBackend(BaseSandbox):
                 responses.append(FileUploadResponse(path=path, error="permission_denied"))
         return responses
 
-    def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
-        """Download files from the container via tar archive."""
+    def download_files(self, paths: list[str], *,
+                       max_bytes: int | None = None) -> list[FileDownloadResponse]:
+        """Download files via tar; optionally cap buffered archive bytes."""
         import io
         import tarfile
 
@@ -503,10 +504,15 @@ class DockerSandboxBackend(BaseSandbox):
                 bits, _ = self.container.get_archive(resolved)
                 tar_stream = io.BytesIO()
                 for chunk in bits:
+                    if max_bytes is not None and tar_stream.tell() + len(chunk) > max_bytes:
+                        raise ValueError("sandbox download exceeds archive byte limit")
                     tar_stream.write(chunk)
                 tar_stream.seek(0)
                 with tarfile.open(fileobj=tar_stream, mode="r") as tar:
                     member = tar.getmembers()[0]
+                    if max_bytes is not None and (not member.isfile()
+                                                  or member.size > max_bytes):
+                        raise ValueError("sandbox download is not a bounded regular file")
                     f = tar.extractfile(member)
                     if f is None:
                         responses.append(FileDownloadResponse(

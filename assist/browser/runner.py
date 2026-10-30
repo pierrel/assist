@@ -298,6 +298,8 @@ class BrowserWorker:
                           for ident, value in self.downloads.items()],
             "network_errors": self.errors[-12:],
         }
+        if len(page.url) <= 8192:
+            result["_source_url"] = page.url
         if observation_errors:
             result["observation_errors"] = observation_errors
         while snapshot and self._result_size({**result, "snapshot": snapshot}) > 32768:

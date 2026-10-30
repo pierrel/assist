@@ -381,6 +381,7 @@ class ThreadManager:
                       model=self.model,
                       sandbox_backend=sandbox_backend,
                       on_queue_state=on_queue_state,
+                      thread_datastore_path=self.thread_datastore_path(thread_id),
                       configurable=configurable)
         if specialized is not None:
             return Thread(working_dir, agent=specialized, **thread_kwargs)
@@ -534,6 +535,10 @@ class ThreadManager:
         if tid in ("", ".", "..") or "/" in tid or "\\" in tid or "\0" in tid:
             raise InvalidThreadId(f"invalid thread id: {tid!r}")
         return os.path.join(self.root_dir, tid)
+
+    def thread_datastore_path(self, tid: str) -> str:
+        """Host-only durable records, alongside thread metadata outside agent mounts."""
+        return os.path.join(self.thread_dir(tid), "thread-data.sqlite")
 
     def thread_default_working_dir(self, tid: str) -> str:
         return os.path.join(self.thread_dir(tid),
