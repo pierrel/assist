@@ -571,6 +571,22 @@ def _thread_history(tid: str, before: str | None) -> tuple[list[dict], bool, boo
     return messages, has_more, True
 
 
+def _active_thread_run(tid: str) -> dict[str, str] | None:
+    """Select public observation identity, never a message or local Send receipt."""
+    try:
+        with threads._RUN_ADMISSION_LOCK:
+            _thread_dir(tid)
+            latest = {run.work_id: run for run in threads._runs().list(tid)
+                      if run.mode == "turn"}
+            selected = next((run for run in latest.values() if run.status == "running"), None)
+            if selected is not None:
+                return {"id": selected.id, "work_id": selected.work_id,
+                        "status": selected.status}
+    except RunStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail="run-store-unavailable") from error
+    return None
+
+
 def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
     _thread_dir(tid)
     notification_revision = state._notification_revision(tid)
@@ -647,6 +663,7 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
             "description": _stored_thread_title(tid),
             "harness": read_thread_engine(_thread_dir(tid)).name,
             "status": status.get("stage", "ready"),
+            "active_run": _active_thread_run(tid),
             "approval_count": _approval_count(tid, status),
             "approval_results": _approval_results(tid),
             "error": ("Thread failed; inspect Assist Web for details."

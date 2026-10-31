@@ -2048,6 +2048,103 @@ def test_snapshot_exposes_visible_messages_and_safe_file_references(tmp_path, mo
     assert response.headers["cache-control"] == "no-store"
 
 
+
+def test_snapshot_discovers_running_root_before_a_newer_pending_followup(tmp_path, monkeypatch):
+    """A reopened view finds current work, not a queued message or private context."""
+    _thread_environment(tmp_path, monkeypatch, [])
+    service = phone_api.threads._runs()
+    active = service.create("thread-a", "general-agent", "private input",
+                            rider={"private": "context"})
+    service.transition("thread-a", active.id, "running")
+    pending = service.create("thread-a", "general-agent", "later input")
+
+    payload = _client(monkeypatch).get(
+        "/api/v1/phone/threads/thread-a", headers=_auth()).json()
+
+    assert payload["thread"]["active_run"] == {
+        "id": active.id, "work_id": active.work_id, "status": "running"}
+    assert pending.id not in str(payload)
+    assert "private input" not in str(payload) and "context" not in str(payload)
+
+
+def test_snapshot_discovers_the_next_work_and_stops_at_approval(tmp_path, monkeypatch):
+    """One discovery field follows separate work, without an observer queue."""
+    _thread_environment(tmp_path, monkeypatch, [])
+    service = phone_api.threads._runs()
+    first = service.create("thread-a", "general-agent", "first")
+    service.transition("thread-a", first.id, "running")
+    later = service.create("thread-a", "general-agent", "later")
+    service.transition("thread-a", first.id, "success")
+    client = _client(monkeypatch)
+    read = lambda: client.get("/api/v1/phone/threads/thread-a", headers=_auth()).json()["thread"]["active_run"]
+
+    assert read() is None
+    service.transition("thread-a", later.id, "running")
+    assert read()["id"] == later.id
+    service.transition("thread-a", later.id, "awaiting_approval")
+    assert read() is None
+
+
+def test_snapshot_discovery_uses_latest_slice_and_excludes_child_runs(tmp_path, monkeypatch):
+    _thread_environment(tmp_path, monkeypatch, [])
+    service = phone_api.threads._runs()
+    first = service.create("thread-a", "general-agent", "first")
+    service.transition("thread-a", first.id, "running")
+    service.transition("thread-a", first.id, "interrupted")
+    successor = service.create("thread-a", "general-agent", None, work_id=first.work_id)
+    service.transition("thread-a", successor.id, "running")
+    runs = service.list("thread-a")
+    from dataclasses import replace
+    child = replace(successor, id="child-a", work_id="child-work", mode="child")
+    monkeypatch.setattr(service, "list", lambda tid: [*runs, child])
+
+    value = _client(monkeypatch).get(
+        "/api/v1/phone/threads/thread-a", headers=_auth()).json()["thread"]["active_run"]
+
+    assert value == {"id": successor.id, "work_id": first.work_id, "status": "running"}
+
+
+def test_snapshot_reports_failed_run_discovery_without_claiming_idle(tmp_path, monkeypatch):
+    directory = _thread_environment(tmp_path, monkeypatch, [])
+    (directory / "runs.json").write_text("corrupt")
+
+    response = _client(monkeypatch).get(
+        "/api/v1/phone/threads/thread-a", headers=_auth())
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "run-store-unavailable"
+
+
+def test_snapshot_discovery_admission_wait_does_not_block_the_event_loop(tmp_path, monkeypatch):
+    """Exercise the actual admission lock and two requests on one event loop."""
+    import httpx
+    _thread_environment(tmp_path, monkeypatch, [])
+    service = phone_api.threads._runs()
+    active = service.create("thread-a", "general-agent", "running")
+    service.transition("thread-a", active.id, "running")
+    selected = threading.Event()
+    original = phone_api._active_thread_run
+    def discover(tid):
+        selected.set()
+        return original(tid)
+    monkeypatch.setattr(phone_api, "_active_thread_run", discover)
+    monkeypatch.setenv(phone_api.PHONE_API_TOKEN_ENV, "phone-test-token")
+    lock = phone_api.threads._RUN_ADMISSION_LOCK
+    async def probe():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                    base_url="http://test") as client:
+            with lock:
+                pending = asyncio.create_task(client.get(
+                    "/api/v1/phone/threads/thread-a", headers=_auth()))
+                assert await asyncio.to_thread(selected.wait, 2)
+                unrelated = await asyncio.wait_for(client.get("/openapi.json"), 2)
+                assert unrelated.status_code == 200
+                assert not pending.done()
+            response = await asyncio.wait_for(pending, 2)
+            assert response.json()["thread"]["active_run"]["id"] == active.id
+    asyncio.run(probe())
+
+
 def test_snapshot_never_exposes_a_backend_error(tmp_path, monkeypatch):
     _thread_environment(tmp_path, monkeypatch, [])
     monkeypatch.setattr(state, "_get_status", lambda tid: {
