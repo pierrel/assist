@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Any, Callable, List, Iterator, Mapping
 
-from langchain.messages import HumanMessage, AIMessage, AnyMessage
+from langchain.messages import HumanMessage, AIMessage, AIMessageChunk, AnyMessage
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from assist.promptable import base_prompt_for
@@ -14,6 +14,7 @@ from assist.spec import AgentSpec
 from assist.checkpoint_rollback import invoke_with_rollback, stream_with_rollback
 from assist.stream_chunks import extract_content_text
 from assist.thread_queue import THREAD_QUEUE
+from assist.thread_datastore import ReferenceStream, ThreadDataStore
 from assist.middleware.execution_limit import EXECUTION_STEP_LIMIT
 from langgraph.types import Command
 
@@ -165,6 +166,7 @@ class Thread:
                  agent_dir: str | None = None,
                  scratch_dir: str | None = None,
                  on_queue_state: Callable[[str], None] | None = None,
+                 thread_datastore_path: str | None = None,
                  agent=None):
         """The embedder surface (docs/2026-06-11-embedder-contract.org):
 
@@ -192,6 +194,10 @@ class Thread:
         part of the reusable ``AgentSpec`` declaration; the web composition
         passes them only to visible main agents.
 
+        ``thread_datastore_path`` supplies the host-owned record store used to
+        resolve source references before replies are streamed or checkpointed.
+        It is optional for embedders outside the managed web thread path.
+
         The remaining params are per-instance/run wiring: identity
         (``thread_id``), persistence (``checkpointer``), model,
         concurrency, sandbox, and the queue-state callback.  The split
@@ -209,6 +215,7 @@ class Thread:
         # acquired.  Callers (e.g. manage.web) wire this to the
         # status.json so the UI can show "queued".
         self.on_queue_state = on_queue_state
+        self.thread_datastore_path = thread_datastore_path
         self.runconfig = {
             "configurable": {"thread_id": self.thread_id},
             "max_concurrency": self.max_concurrency,
@@ -239,11 +246,14 @@ class Thread:
             # an embedder mutating its mapping later can't change this
             # Thread's runconfig (nested values stay shared, as ever).
             self.runconfig["configurable"].update(configurable)
+        if thread_datastore_path is not None:
+            self.runconfig["configurable"]["thread_datastore_path"] = thread_datastore_path
 
         self.agent = agent or create_agent(
             self.model, working_dir=working_dir, checkpointer=checkpointer,
             sandbox_backend=sandbox_backend, agent_dir=agent_dir,
             scratch_dir=scratch_dir,
+            thread_data_available=thread_datastore_path is not None,
             spec=spec)
 
     def _run(self, graph_input) -> str:
@@ -330,22 +340,54 @@ class Thread:
         ``stream_with_rollback`` requests LangGraph's top-level stream only;
         model checkpoint namespaces also occur on ordinary top-level chunks.
         """
+        datastore_path = getattr(self, "thread_datastore_path", None)
+        reference_stream = (ReferenceStream(ThreadDataStore(datastore_path))
+                            if datastore_path else None)
+        current_message_id = None
+
         def receive(chunk) -> None:
+            nonlocal current_message_id
             payload = chunk
             if isinstance(chunk, tuple) and len(chunk) == 2 and chunk[0] == "messages":
                 payload = chunk[1]
             try:
-                _message, _metadata = payload
+                message, _metadata = payload
             except (TypeError, ValueError):
                 return
+            if reference_stream:
+                message_id = getattr(message, "id", None)
+                if (getattr(message, "type", None) == "tool"
+                        or (message_id and current_message_id
+                            and message_id != current_message_id)):
+                    tail = reference_stream.push("", final=True)
+                    if tail:
+                        on_delta(tail)
+                    reference_stream.reset()
+                    current_message_id = None
+                if isinstance(message, (AIMessage, AIMessageChunk)) and message_id:
+                    current_message_id = message_id
             text = extract_content_text(payload)
             if text:
-                on_delta(text)
+                resolved = reference_stream.push(text) if reference_stream else text
+                if resolved:
+                    on_delta(resolved)
+
+        def reset(attempt):
+            nonlocal current_message_id
+            if reference_stream:
+                reference_stream.reset()
+                current_message_id = None
+            if on_reset:
+                on_reset(attempt)
 
         with THREAD_QUEUE.acquire(self.thread_id, on_state_change=self.on_queue_state):
             kwargs = {"rollback_on": ()} if self.runconfig["configurable"].get("approval_id") else {}
             result = stream_with_rollback(
-                self.agent, graph_input, self.runconfig, receive, on_reset=on_reset, **kwargs)
+                self.agent, graph_input, self.runconfig, receive, on_reset=reset, **kwargs)
+        if reference_stream:
+            tail = reference_stream.push("", final=True)
+            if tail:
+                on_delta(tail)
         messages = result.get("messages", [])
         if messages and isinstance(messages[-1], AIMessage):
             return messages[-1].content
@@ -381,8 +423,12 @@ class Thread:
         # impossible: every step runs in the construction context.
         ctx = contextvars.copy_context()
         def _gen():
+            datastore_path = getattr(self, "thread_datastore_path", None)
+            reference_stream = (ReferenceStream(ThreadDataStore(datastore_path))
+                                if datastore_path else None)
+            current_message_id = None
             with THREAD_QUEUE.acquire(self.thread_id, on_state_change=self.on_queue_state):
-                yield from self.agent.stream(
+                for chunk in self.agent.stream(
                     {"messages": [{"role": "user", "content": text}]},
                     self.runconfig,
                     stream_mode=["messages", "updates"],
@@ -401,7 +447,34 @@ class Thread:
                     # them).  langgraph propagates this to the task-tool
                     # sub-agents via the config, so the whole tree is covered.
                     durability="sync",
-                )
+                ):
+                    if (reference_stream and isinstance(chunk, tuple) and len(chunk) == 2
+                            and chunk[0] == "messages" and isinstance(chunk[1], tuple)
+                            and len(chunk[1]) == 2):
+                        message, metadata = chunk[1]
+                        message_id = getattr(message, "id", None)
+                        if (getattr(message, "type", None) == "tool"
+                                or (message_id and current_message_id
+                                    and message_id != current_message_id)):
+                            tail = reference_stream.push("", final=True)
+                            if tail:
+                                yield ("messages", (AIMessageChunk(content=tail), {}))
+                            reference_stream.reset()
+                            current_message_id = None
+                        if isinstance(message, (AIMessage, AIMessageChunk)):
+                            if message_id:
+                                current_message_id = message_id
+                            raw = extract_content_text(chunk[1])
+                            if raw:
+                                resolved = reference_stream.push(raw)
+                                if resolved != raw:
+                                    message = message.model_copy(update={"content": resolved})
+                                    chunk = ("messages", (message, metadata))
+                    yield chunk
+                if reference_stream:
+                    tail = reference_stream.push("", final=True)
+                    if tail:
+                        yield ("messages", (AIMessageChunk(content=tail), {}))
         return _ContextBoundIterator(ctx, _gen())
 
     def get_messages(self) -> list[dict]:

@@ -110,7 +110,8 @@ def _task_value(thread: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
-def _format_task(task: dict[str, Any], *, include_result: bool = True) -> str:
+def _format_task(task: dict[str, Any], *, include_result: bool = True,
+                 sources: list[dict[str, str]] | None = None) -> str:
     description = str(task.get("description") or "")
     fields = {
         "task_id": task.get("task_id"),
@@ -124,6 +125,11 @@ def _format_task(task: dict[str, Any], *, include_result: bool = True) -> str:
             "success", "error", "timeout", "cancelled"}:
         fields["result"] = task.get("result")
         fields["error"] = task.get("error")
+        if sources:
+            fields["sources"] = [
+                {**source, "source_link": f"[Source](ref:{source['id']})"}
+                for source in sources
+            ]
     return json.dumps(fields, ensure_ascii=False)
 
 
@@ -218,7 +224,11 @@ def _get_async_task_result(
         return (f"Task `{task_id}` is not terminal; its current status is "
                 f"{task.get('status')}. Wait for its completion wake before "
                 "retrieving a result.")
-    return _format_task(task)
+    from assist.thread_datastore import _current_store
+    store = _current_store()
+    return _format_task(
+        task, sources=store.list_imported(task_id, kind="source", limit=20)
+        if store else None)
 
 
 def _list_async_tasks(runtime: ToolRuntime) -> str:

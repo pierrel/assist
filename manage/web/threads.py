@@ -2566,6 +2566,34 @@ def _publish_phone_text(tid: str, work_id: str, text: str) -> None:
         RUN_STREAMS.publish_delta(tid, work_id, text[start:])
 
 
+def _bind_task_report(tid: str, task_message: str | None, working_dir: str,
+                      sandbox=None) -> None:
+    """Resolve only the host-named research report for a completion wake."""
+    if not task_message:
+        return
+    if task_message.startswith(_TASK_COMPLETION_RIDER):
+        task_message = task_message[len(_TASK_COMPLETION_RIDER):]
+    match = re.match(r"Task ID: (sub-[0-9a-f]{24})\n", task_message)
+    if match is None:
+        return
+    basename = match.group(1) + ".md"
+    from assist.thread_datastore import ThreadDataStore, resolve_host_report
+    store = ThreadDataStore(MANAGER.thread_datastore_path(tid))
+    if sandbox is not None:
+        from assist.research_cleanup import ReferencesCleanupRunnable
+        binder = ReferencesCleanupRunnable(
+            None, sandbox.work_dir + "/references", sandbox)
+        binder._ensure_dir()
+        if binder._exists(basename):
+            binder._resolve_report_references(basename, store)
+        return
+    references = os.path.join(working_dir, "references")
+    report = os.path.join(references, basename)
+    if os.path.islink(references) or os.path.islink(report) or not os.path.isfile(report):
+        return
+    resolve_host_report(report, store)
+
+
 def _delegate_configurable(run: Run) -> dict | None:
     """Expose immutable brief-form URLs admitted by canonical owner match."""
     if run.assistant_id != "delegate-agent":
@@ -2859,6 +2887,13 @@ def _complete_child_handoff(run: Run) -> Run | None:
         logging.info("parent of child run %s was deleted", run.id)
         MANAGER.hard_delete(run.thread_id)
         return None
+    # Import host-authored records before the idempotent existing-wake return:
+    # recovery can revisit this handoff after creating the wake but before the
+    # parent has read the child's results. Child prose never registers sources.
+    from assist.thread_datastore import ThreadDataStore
+    parent_data = ThreadDataStore(MANAGER.thread_datastore_path(run.parent_thread_id))
+    child_data = ThreadDataStore(MANAGER.thread_datastore_path(run.thread_id))
+    parent_data.import_from(child_data, owner=run.thread_id, kind="source")
     dispatch_key = f"task-completion:{run.id}"
     existing = next(
         (candidate for candidate in _runs().list(run.parent_thread_id)
@@ -3806,6 +3841,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                             lambda _attempt: RUN_STREAMS.reset_attempt(tid, _run.work_id))
                     else:
                         resp = chat.message(text)
+                if origin == "task-completion":
+                    task_message = ((_run.pending_text or _run.text) if _run else None)
+                    _bind_task_report(tid, task_message or pending_text or text,
+                                      MANAGER.thread_default_working_dir(tid), sandbox)
             finally:
                 # Capture browser state before sandbox teardown. Failed teardown
                 # retains tracked generations for shutdown proof and leaves

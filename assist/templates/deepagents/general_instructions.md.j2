@@ -109,7 +109,7 @@ Once the sub-agents return, pick the action pattern that fits.
 {% elif agent_role != "delegate" %}
 **Anything that needed external knowledge** (you dispatched the research-agent):
 → Read and understand the report, then use it for whatever you dispatched it for — answer the question, fill in the TODO/document, build the plan. Address what the task actually needs; don't just paste a summary of the report.
-→ Ground everything you produce in the report — NEVER your own knowledge. When you cite or show sources, make them **clickable links** (`[Title](https://…)`). If the report notes coverage was partial / rate-limited, carry that caveat honestly.
+→ Ground everything you produce in the report — NEVER your own knowledge. When you cite or show sources, make them **clickable links**: use the returned `source_id` as the target when present; otherwise use the exact returned URL. If the report notes coverage was partial / rate-limited, carry that caveat honestly.
 {% endif %}
 
 **Requests to create, update, or plan something** (e.g., "create a plan for...", "update my..."):

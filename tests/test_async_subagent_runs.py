@@ -413,6 +413,7 @@ def test_research_task_acceptance_and_completion_create_durable_parent_wake(
 
 def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
         monkeypatch, tmp_path):
+    from assist.thread_datastore import ThreadDataStore, register_source, source_url
     submitted, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
     threads._runs().claim("parent", parent.id)
     threads._runs().transition("parent", parent.id, "success", result="started task")
@@ -422,8 +423,22 @@ def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
     child = threads._runs().transition(
         child.thread_id, child.id, "success", result="child result")
 
+    child_data = ThreadDataStore(threads.MANAGER.thread_datastore_path(child.thread_id))
+    parent_data = ThreadDataStore(threads.MANAGER.thread_datastore_path("parent"))
+    parent_ref = register_source(parent_data, "https://source.example/parent-search")
+    first_ref = register_source(child_data, "https://source.example/first")
+    note_id = child_data.put_text("child research notes", "note", "Context")
+
     first = threads._complete_child_handoff(child)
+    assert source_url(parent_data, first_ref) == "https://source.example/first"
+    assert parent_data.get(note_id) is None
+    second_ref = register_source(child_data, "https://source.example/second")
     second = threads._complete_child_handoff(child)
+
+    assert source_url(parent_data, second_ref) == "https://source.example/second"
+    unrelated_child = ThreadDataStore(str(tmp_path / "unrelated.sqlite"))
+    other_ref = register_source(unrelated_child, "https://source.example/other-child")
+    parent_data.import_from(unrelated_child, owner="sub-other", kind="source")
 
     assert second.id == first.id
     wakes = [run for run in threads._runs().list("parent")
@@ -437,6 +452,14 @@ def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
     assert task["status"] == "success"
     assert task["result"] == "child result"
     assert (wakes[0].id, "parent", {"user_priority": False}) in submitted
+    configure_async_subagent_app(web._agent_app)
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: parent_data)
+    with async_task_context(AsyncTaskContext("parent", parent.id, parent.work_id)):
+        retrieved = TOOLS["get_async_task_result"].func(
+            child.thread_id, SimpleNamespace(tool_call_id="result"))
+    assert first_ref in retrieved and second_ref in retrieved
+    assert note_id not in retrieved
+    assert parent_ref not in retrieved and other_ref not in retrieved
 
 
 def test_terminal_task_recovery_reuses_a_legacy_completion_wake(

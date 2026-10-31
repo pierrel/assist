@@ -367,6 +367,183 @@ def test_durable_worker_publishes_reserved_phone_deltas_then_finishes_journal(cl
     assert threads._runs().get("thread-e2e", run.id).status == "success"
 
 
+def test_search_reference_reaches_phone_stream_and_durable_run(client, monkeypatch):
+    """A bound source survives the actual web worker's stream and result writes."""
+    from langchain_core.messages import AIMessage
+    from assist import thread as thread_module
+    from assist.thread_datastore import ThreadDataStore, ReferenceBindingMiddleware, register_source
+    from manage.web.run_stream import RunStreamJournal
+
+    url = "https://source.example/articles/exact-result"
+    store = ThreadDataStore(web.MANAGER.thread_datastore_path("thread-e2e"))
+    record_id = register_source(store, url, "Source")
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
+    ordinary = (" [Owner](https://owner.example/home)"
+                " [Mail](https://mail.google.com/mail/u/0/#inbox/abc)"
+                " `curl https://api.example/v1`")
+    raw = f"See [Source](ref:{record_id})." + ordinary
+    saved = ReferenceBindingMiddleware().after_model(
+        {"messages": [AIMessage(content=raw, id="reply-1")]}, None)["messages"][0]
+
+    thread = object.__new__(thread_module.Thread)
+    thread.thread_id = "thread-e2e"
+    thread.on_queue_state = None
+    thread.runconfig = {"configurable": {"thread_id": "thread-e2e"}}
+    thread.thread_datastore_path = store.path
+    thread.agent = object()
+
+    def stream(_agent, _input, _config, receive, *, on_reset, **_kwargs):
+        for part in ("See [Source](ref:", record_id[:7], record_id[7:], ").",
+                     ordinary[:25], ordinary[25:65], ordinary[65:]):
+            receive((AIMessage(content=part), {}))
+        return {"messages": [saved]}
+
+    monkeypatch.setattr(thread_module, "stream_with_rollback", stream)
+
+    class _ObservedChat:
+        def observe_message(self, text, publish, reset):
+            assert text == "Which source?"
+            return thread.observe_message(text, publish, reset)
+
+        def pending_reply(self):
+            return None
+
+        def get_messages(self):
+            return [{"role": "user", "content": "Which source?"},
+                    {"role": "assistant", "content": saved.content}]
+
+        def get_raw_messages(self):
+            return [saved]
+
+    journal = RunStreamJournal()
+    run = threads._create_run("thread-e2e", "Which source?", work_id="source-work")
+    assert journal.reserve("thread-e2e", "source-work")
+    assert journal.activate("thread-e2e", "source-work")
+    _stub_happy_path(monkeypatch, _ObservedChat())
+    monkeypatch.setattr(threads, "RUN_STREAMS", journal)
+
+    threads._execute_run(run.id, "thread-e2e")
+
+    streamed = "".join(item["text"] for item in journal.read("thread-e2e", "source-work")["deltas"])
+    assert streamed == saved.content == f"See [Source](<{url}>)." + ordinary
+    assert threads._runs().get("thread-e2e", run.id).status == "success"
+    assert _get_status("thread-e2e")["stage"] == "ready"
+
+
+def test_completion_resolves_only_its_named_report(client, tmp_path):
+    from assist.thread_datastore import ThreadDataStore, register_source
+
+    tid = "thread-e2e"
+    task_id = "sub-" + "a" * 24
+    references = tmp_path / tid / "references"
+    references.mkdir()
+    url = "https://source.example/exact"
+    store = ThreadDataStore(web.MANAGER.thread_datastore_path(tid))
+    record_id = register_source(store, url)
+    report = references / f"{task_id}.md"
+    report.write_text(f"[Source](ref:{record_id})")
+    unrelated = references / "user-notes.md"
+    unrelated.write_text("[User link](https://unrelated.example/keep)")
+
+    threads._bind_task_report(
+        tid, threads._TASK_COMPLETION_RIDER + f"Task ID: {task_id}\nAgent: research-agent",
+        str(tmp_path / tid))
+
+    assert report.read_text() == f"[Source](<{url}>)"
+    assert unrelated.read_text() == "[User link](https://unrelated.example/keep)"
+
+
+def test_completion_binds_named_report_through_sandbox_transfer(client, tmp_path):
+    from assist.thread_datastore import ThreadDataStore, register_source
+    from tests.test_research_cleanup_sandbox import LocalSandboxTransport
+
+    tid = "thread-e2e"
+    task_id = "sub-" + "c" * 24
+    refs = tmp_path / tid / "references"
+    refs.mkdir()
+    store = ThreadDataStore(web.MANAGER.thread_datastore_path(tid))
+    url = "https://source.example/child-exact?a=1&b=2"
+    record_id = register_source(store, url)
+    report = refs / f"{task_id}.md"
+    report.write_text(f"[Source](ref:{record_id})")
+    sandbox = LocalSandboxTransport()
+    sandbox.work_dir = str(tmp_path / tid)
+
+    threads._bind_task_report(
+        tid, f"Task ID: {task_id}\nAgent: research-agent",
+        str(tmp_path / tid), sandbox)
+
+    assert report.read_text() == f"[Source](<{url}>)"
+
+
+def test_completion_worker_binds_report_written_during_parent_turn(
+    client, monkeypatch, tmp_path,
+):
+    from assist.thread_datastore import ThreadDataStore, register_source
+
+    tid = "thread-e2e"
+    task_id = "sub-" + "b" * 24
+    references = tmp_path / tid / "references"
+    references.mkdir()
+    url = "https://source.example/child-exact"
+    store = ThreadDataStore(web.MANAGER.thread_datastore_path(tid))
+    record_id = register_source(store, url)
+    report = references / f"{task_id}.md"
+
+    class Chat:
+        def message(self, _text):
+            assert not report.exists()
+            report.write_text(f"[Child](ref:{record_id})")
+            return "I used the report"
+
+        def pending_reply(self):
+            return None
+
+        def get_messages(self):
+            return []
+
+    _stub_happy_path(monkeypatch, Chat())
+    run = threads._create_run(
+        tid, f"Task ID: {task_id}\nAgent: research-agent", origin="task-completion",
+        work_id="completion-work")
+    threads._execute_run(run.id, tid)
+    assert threads._runs().get(tid, run.id).status == "success"
+    assert report.read_text() == f"[Child](<{url}>)"
+
+
+def test_resumed_completion_binds_report_written_after_pause(client, monkeypatch, tmp_path):
+    from assist.thread_datastore import ThreadDataStore, register_source
+
+    tid = "thread-e2e"
+    task_id = "sub-" + "d" * 24
+    refs = tmp_path / tid / "references"
+    refs.mkdir()
+    store = ThreadDataStore(web.MANAGER.thread_datastore_path(tid))
+    url = "https://source.example/resumed-exact"
+    record_id = register_source(store, url)
+    report = refs / f"{task_id}.md"
+
+    class Chat:
+        def resume(self):
+            report.write_text(f"[Child](ref:{record_id})")
+            return "Report ready"
+
+        def pending_reply(self):
+            return None
+
+        def get_messages(self):
+            return []
+
+    _stub_happy_path(monkeypatch, Chat())
+    run = threads._create_run(
+        tid, None, origin="task-completion", resume=True,
+        pending_text=f"Task ID: {task_id}\nAgent: research-agent",
+        work_id="resumed-completion-work")
+    threads._execute_run(run.id, tid)
+    assert threads._runs().get(tid, run.id).status == "success"
+    assert report.read_text() == f"[Child](<{url}>)"
+
+
 def test_process_message_kills_container_even_when_turn_errors(client, monkeypatch):
     """The teardown is in a `finally`, so a crash mid-turn still reaps the
     container — otherwise an erroring turn would leak its sandbox."""

@@ -19,6 +19,8 @@ from assist.promptable import base_prompt_for
 from assist.web_main_prompt import render_deep_web_main_prompt
 from assist.spec import AgentSpec
 from assist.tools import directions, map_data, read_url, search_internet, travel
+from assist.thread_datastore import (
+    ReferenceBindingMiddleware, get_thread_data, list_thread_data, search_thread_data)
 from assist.backends import (
     DOMAIN_SKILLS_PATH,
     LegacySkillsBackend,
@@ -342,6 +344,7 @@ def create_agent(model: BaseChatModel,
                  *,
                  agent_dir: str | None = None,
                  scratch_dir: str | None = None,
+                 thread_data_available: bool = False,
                  spec: AgentSpec | None = None,
                  ) -> CompiledStateGraph:
     """Build an Assist main or delegate agent.
@@ -351,7 +354,9 @@ def create_agent(model: BaseChatModel,
     carrying the embedder-supplied tools, skill sources, and default
     backend — canonical field semantics live on the spec.  ``spec=None``
     means ``AgentSpec()`` — the defaults.  ``spec.default_backend`` is
-    mutually exclusive with ``sandbox_backend``.
+    mutually exclusive with ``sandbox_backend``. ``thread_data_available``
+    gates Assist's built-in record lookup tools; Thread sets it from its
+    datastore path.
 
     Passing ``agent_dir`` enables local-mode private state at ``/agent`` and
     auto-loads ``/agent/memory.md``. ``scratch_dir`` maps persistent local-mode
@@ -482,6 +487,9 @@ def create_agent(model: BaseChatModel,
         *list(spec.tools),
         *execution_egress_tools,
         travel, directions, map_data, read_url,
+        *([get_thread_data, list_thread_data, search_thread_data]
+          if thread_data_available and (spec.web_main or spec.role == "delegate")
+          else []),
         *([search_internet] if web_quick_research else []),
     ):
         # Deep Agents binds tools by name.  Specs may use provider-schema dicts
@@ -567,6 +575,7 @@ def create_agent(model: BaseChatModel,
                                            [retry_middle, json_validation_mw,
                                             tool_name_mw],
                                            sandbox_backend=sandbox_backend,
+                                           thread_data_available=thread_data_available,
                                            trust_human_messages=not delegate)
         )
 
@@ -674,6 +683,7 @@ def create_agent(model: BaseChatModel,
             *([HumanInTheLoopMiddleware(interrupt_on=spec.interrupt_on)]
               if spec.interrupt_on else []),
             skills_mw, memory_mw, ContextRiderMiddleware(),
+            ReferenceBindingMiddleware(),
             *([] if delegate else [InterjectionMiddleware()]),
             ExecutionLimitMiddleware(), logging_mw],
         backend=backend,
@@ -793,12 +803,14 @@ def create_research_agent(model: BaseChatModel,
                           middleware=[],
                           sandbox_backend=None,
                           *, leaf: bool = False, egress_tools=(),
+                          thread_data_available: bool = False,
                           trust_human_messages: bool = True) -> RollbackRunnable:
     """Create a DeepAgents-based agent suitable for general-purpose research replies.
 
     The default research lead delegates searching, critique, and fact-checking.
     ``leaf=True`` instead builds the direct search/read worker used by subagent runs;
     it cannot recursively delegate on the single model slot.
+    ``thread_data_available`` gates record lookup tools in both profiles.
     ``trust_human_messages=False`` carries a delegate's URL trust boundary into
     its synchronous search and fact-check specialists.
 
@@ -904,7 +916,7 @@ def create_research_agent(model: BaseChatModel,
     # left the fact-check-agent unbounded — it ran 200+ `read_url`
     # calls in a diag because nothing would short-circuit a model that
     # kept "thinking of more references to verify".
-    def _subagent_safety_mw():
+    def _subagent_safety_mw(*, bind_file_refs: bool = False):
         return [BoundedSummarizationMiddleware(model, backend),
                 _make_retry_middleware(),
                 BadRequestRetryMiddleware(max_retries=3),
@@ -938,6 +950,7 @@ def create_research_agent(model: BaseChatModel,
                 # constant respectively). Inert on the non-search subagents (critique,
                 # fact-check) — same uniform-stack posture as the unavailable breaker.
                 SearchRunawayBreakerMiddleware(),
+                ReferenceBindingMiddleware(bind_file_refs=bind_file_refs),
                 ThreadQueueMiddleware(),
                 EmptyResponseRecoveryMiddleware()]
 
@@ -945,7 +958,10 @@ def create_research_agent(model: BaseChatModel,
         "name": "research-agent",
         "description": "Used to research more in depth questions. Only give this researcher one topic at a time. It will return research results.",
         "system_prompt": base_prompt_for("deepagents/sub_research.txt.j2"),
-        "tools": [search_internet, read_url, *execution_egress_tools],
+        "tools": [search_internet, read_url,
+                  *([get_thread_data, list_thread_data, search_thread_data]
+                    if thread_data_available else []),
+                  *execution_egress_tools],
         "middleware": _subagent_safety_mw() + _read_url_guards(
             trust_human_messages=trust_human_messages)
         + ([_egress_skills_middleware(backend, execution_egress_tools)]
@@ -967,9 +983,10 @@ def create_research_agent(model: BaseChatModel,
         "description": "Used to check all references for alignment with claims and statements. You MUST provide the file it should fact-check.",
         "system_prompt": base_prompt_for("deepagents/fact_checker.md.j2"),
         "tools": [read_url, *execution_egress_tools],
-        # Fact-checker re-fetches URLs cited in the report it's handed — those appear in
-        # its context (the report ToolMessage), so they pass; an invented URL is refused.
-        "middleware": _subagent_safety_mw() + _read_url_guards(
+        # The fact-checker's report read resolves host-registered source IDs to
+        # exact URLs. Existing read_file provenance then applies to that result;
+        # merely listing a datastore record does not authorize navigation.
+        "middleware": _subagent_safety_mw(bind_file_refs=True) + _read_url_guards(
             trust_human_messages=trust_human_messages)
         + ([_egress_skills_middleware(backend, execution_egress_tools)]
            if execution_egress_tools else []),
@@ -986,7 +1003,10 @@ def create_research_agent(model: BaseChatModel,
     # and enforces clean delegation instead of the orchestrator doing worker work.
     # Execution and egress are one capability: no execution-capable research
     # profile can hit the proxy without also getting its approval workflow.
-    leaf_tools = [search_internet, read_url, *execution_egress_tools] if leaf else []
+    data_tools = ([get_thread_data, list_thread_data, search_thread_data]
+                  if thread_data_available else [])
+    leaf_tools = ([search_internet, read_url, *data_tools, *execution_egress_tools]
+                  if leaf else data_tools)
     egress_skills = _egress_skills_middleware(backend, execution_egress_tools)
     agent = create_deep_agent(
         model=model,
@@ -1001,13 +1021,16 @@ def create_research_agent(model: BaseChatModel,
         # The searcher + fact-check sub-agents carry those guards themselves.
         # logging_mw stays innermost/last.
         middleware=([BoundedSummarizationMiddleware(model, backend)] + base_mw + middleware
+                    # Offload wraps binding here so a failed fetch's raw error
+                    # cannot become a source when the offloader makes a preview.
                     + ([ToolResultToFileMiddleware(
                         backend, tools={"read_url"}, floor_chars=4000,
                         preview_style="head", untrusted=True,
                         page_navigation=True,
                         name="ToolResultToFileMiddleware_read_url")]
-                       + _read_url_guards(
-                           trust_human_messages=trust_human_messages)
+                       if leaf else [])
+                    + [ReferenceBindingMiddleware()]
+                    + (_read_url_guards(trust_human_messages=trust_human_messages)
                        if leaf else [])
                     + ([egress_skills] if egress_skills is not None else [])
                     + [logging_mw]),
@@ -1029,21 +1052,10 @@ def create_research_agent(model: BaseChatModel,
     # runaway to ~5 min (vs the 70-min incident) with room for thorough research.
     rollback_runnable = RollbackRunnable(agent, recursion_limit=300)
 
-    # Wrap with the references-cleanup runnable so intermediate drafts
-    # and sub-sub-agent scratch files get pruned after the research call
-    # returns — only the final report stays in references/.  The wrapper
-    # uses the *parent* sandbox (work_dir=/workspace) for its lazy
-    # _ensure_dir fallback.  In sandbox mode the eager mkdir above is the
-    # load-bearing creator; _ensure_dir is the load-bearing creator in
-    # local mode (no container to exec_run against).
-    if sandbox_backend:
-        references_path = sandbox_backend.work_dir + "/references"
-        cleanup_sandbox = sandbox_backend
-    else:
-        references_path = os.path.join(working_dir, "references")
-        cleanup_sandbox = None
+    references_path = (sandbox_backend.work_dir + "/references" if sandbox_backend
+                       else os.path.join(working_dir, "references"))
     return ReferencesCleanupRunnable(
         rollback_runnable,
         references_path=references_path,
-        sandbox_backend=cleanup_sandbox,
+        sandbox_backend=sandbox_backend,
     )

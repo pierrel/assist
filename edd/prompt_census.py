@@ -1678,10 +1678,12 @@ _TOOL_ORIGINS = {
     "find_regions": "assist.geo.tools",
     "should_run_maintenance": "assist.frequency",
     "get_location": "assist.location",
+    "get_thread_data": "assist.thread_datastore",
     "glob": "deepagents.middleware.filesystem",
     "grep": "deepagents.middleware.filesystem",
     "list_allowed_hosts": "assist.egress.tools",
     "list_async_tasks": "assist.async_subagents",
+    "list_thread_data": "assist.thread_datastore",
     "list_regions": "assist.geo.tools",
     "list_schedules": "assist.schedule.tools",
     "list_subscriptions": "assist.events.tools",
@@ -1704,6 +1706,7 @@ _TOOL_ORIGINS = {
     "request_egress_batch": "assist.egress.tools",
     "resume_schedule": "assist.schedule.tools",
     "search_internet": "assist.tools",
+    "search_thread_data": "assist.thread_datastore",
     "send_email": "assist.events.email",
     "email_search": "assist.gmail",
     "email_read": "assist.gmail",
@@ -1762,6 +1765,7 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
     "assist/templates/deepagents/fact_checker.md.j2": {
         "c8853dc566ad691ea9406fc2c42dcb01298ba24193fd0f81a3b8677205d0afef",
         "785c3a84e6a66ed8a13b60e29a390eac24e9af85d6d241d280b69aaad6e55c8f",
+        "e0e44ca7769bfb8b2ed2e9f0dd7533269aa31ce52c4c7a916eda2790547f61cf",
     },
     "assist/templates/deepagents/general_instructions.md.j2": {
         "0f5dba480391779b384f36cf38e152fef197871bbc7f52868f29e1c355ac02ab",
@@ -1789,8 +1793,10 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "1e29940e8056a59bc3c600963ffe9a3c045c04703a4aaf07db7a165a17941552",
         "9c836d4083d013349f5a97e3c6b1e4164f43450d16b3dc49a16938c47ffc239f",
         "9f613e0e20df7c7f66f7f6628b6c085ff35fa54d7495b1b2c703fa7d5470e449",
+        "bdb56dec7e6c9d66f1f59981d625ef27c6ea8d64541809a17f91f20931607a38",
     },
     "assist/templates/deepagents/research_instructions.txt.j2": {
+        "4773a00a6aefa3727a8c37f3511951f1af59e56af5ccfbb3cf6123a36b14f8f8",
         "379e55c61addf130f00a29a6221f16de89964e23b5c1e98cf9746f38211fb071",
         "85dec6ea05cfaa2aed2cd943ff5144107a729b71be04042a78c2ed7458c0e1fe",
         "1eb422252324557261eba5948883bfe01d116c80f13b485b60ec922c3ddc72c6",
@@ -1800,9 +1806,12 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "eb8fadd6b3a275dbc4c3fa86ad34b2c7a312d3e74651a61255c75a8c9b7e59a6",
     },
     "assist/templates/deepagents/sub_research.txt.j2": {
+        "eb4ac0efc1ff4ed5b6c55a918c21c673b83f69b97e6d0239a3ebde6fe00d25b1",
+        "6c612ae348627060d532a5f3a286657641d0345fe8cae4537bad711ef80e93df",
         "ea51549d2bae79ee031b6b5a8fdc0872708a6f7536303f5f1ba68512c0db3415",
         "2adcfe28db08132dd20a8f37cecfeb303605be6d9ba0378db78a4b239c246eb1",
         "5a1e784f8c29d0b5c3e291da6490fff8a78595355b478806a5025cf9efc25e58",
+        "fc494968b68f77a2099f8850ccfc6bd9d466ca10e56ccac3c7a0d2d524d81ffa",
     },
     "assist/templates/receptionist_system.md.j2": {
         "f2bfbc35fb540f64c385b74c7bf590517b80bc5ee9abd660eb3ad736bb3adb8e",
@@ -1966,6 +1975,7 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "cancel_async_task": {"72f0b2b9a7b781b4e3e60facf9899f59faa94743f32f2b43d1fa16e0bc1af01b"},
     "get_async_task_result": {"8752493ed656605373caa6e21c68c7f475f4d5229c7fb25f5c6591ce006337c4"},
     "get_async_task_status": {"c33c01ff704822245b71c109bbd185c0d5407d7cc23d2426698177850a7da85e"},
+    "get_thread_data": {"cf48da0160665da8de0518a09d717575b50334c69d87878b96455495c1f09be8"},
     "create_schedule": {"17ae4733ba78d32789761332c0b782600873027412beecd2a7d2d2b548392f34"},
     "create_subscription": {"72476dc729012cbe0f9d65af14dc1541a7fb2a9e88e5f29730f9b68969fc7974"},
     "delete_schedule": {"ac6a06a26f9df248183a12c5aab9ecaafe637804ac61c2f4d9edca588d15359f"},
@@ -1978,6 +1988,7 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "grep": {"387cc9b610ca8e760fab5ba9e2fdb5b598db6ff10cbee60eb31f4f5027f7534b"},
     "list_allowed_hosts": {"75f484c4031eb56e305320f9d599e1b81f7cf4402b55cf971d296bc3575dfd36"},
     "list_async_tasks": {"4e23d3e6bc9be65808d2d08749b75e36204dd46d3c4853c71e8f9dc3e071de6a"},
+    "list_thread_data": {"13253ce41b29a0b349474ba47f72ada0439a91cbc3b86e770098c0308f2dd971"},
     "list_regions": {"10fb83255f542acbe460605fd06fa01fcb6061e138df0c5194c38177e1a6a079"},
     "list_schedules": {"e0cd57bcb7cd8a6c27e84a665534daf714ef7867e8c95795252c3981caf7217e"},
     "list_subscriptions": {"dcb6ac3c9c61a0dab7c30d0ea6311d20fe5e3502cbc748145ba8032ee1cd931f"},
@@ -2002,6 +2013,7 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "request_egress": {"84fdeccfd7466d726247ecc6c482c1bded92bf33eb54a7ce137cd42c233c35b4"},
     "resume_schedule": {"884f79fb96c7e374a2e204ed9f00203243607a71a1440a954936a0516a612183"},
     "search_internet": {"a240ffc08228c91577dde743290e775c51b5aa1c3b059cd147f490fa999def13"},
+    "search_thread_data": {"6d8f14f76518a8531d3b6b764a6c98485db139d1f4ebb46ff491c2ff78f8a88b"},
     "send_email": {
         "13a0df1decb69fe0f4839784c892bd4d5b68b341beef6c5985e799f8d86ab9a7",
         "24507d2f519918733b0db1404c15d4f956d29e75f70f03a1d7b2e383a3913cac",
@@ -2141,9 +2153,9 @@ _TOOL_RESULT_METADATA = {
 }
 
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "9cb6cc70ac312f0e07a4fa7b68f98aaa4041ca80f7925acc425ee579cefeb7a5"
+    "bb744f6b4c10c74a89f6cf4bc0b85131017ecdce6f7d960e0c45851d032a59e7"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "154d079fbd2a2f91b1e6a7bcf5cb5c0e0bb434983b28378ab86aff718e00a128"
+    "3dda2fa36bd24b3cb2b0dcda8d2cf3c6f311901e0fc1e2003f3638146092ea82"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
@@ -3085,7 +3097,8 @@ def _tool_classification(path: str, name: str, origin: str) -> str:
     if origin.startswith("deepagents") or name == "load_skill" \
             or origin.startswith("langchain.agents.middleware") \
             or origin in {"assist.async_subagents",
-                          "assist.events.thread_description"} \
+                          "assist.events.thread_description",
+                          "assist.thread_datastore"} \
             or name == "quiet":
         return "framework-kernel candidate"
     return "skill-scoped candidate"
