@@ -126,7 +126,10 @@ def _format_task(task: dict[str, Any], *, include_result: bool = True,
         fields["result"] = task.get("result")
         fields["error"] = task.get("error")
         if sources:
-            fields["sources"] = sources
+            fields["sources"] = [
+                {**source, "source_link": f"[Source](ref:{source['id']})"}
+                for source in sources
+            ]
     return json.dumps(fields, ensure_ascii=False)
 
 
