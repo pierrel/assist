@@ -510,6 +510,13 @@ until `ASSIST_PHONE_API_TOKEN` is set in an ignored owner-only deployment
 environment file. Send that value only as `Authorization: Bearer <token>` from
 the phone; never pass it into a sandbox or commit it. The API exposes visible
 thread snapshots, durable idempotent sends, and bounded workspace snapshots.
+The current thread snapshot includes optional `thread.active_run` observation
+metadata: public Run ID, logical work ID and status. Running root work takes
+priority over pending follow-ups; pending, completed, child and awaiting-approval
+work is not advertised for a new live observer. This read-only discovery creates
+no Send receipt and exposes no Run input or private execution context. Existing
+Run event streams still follow one logical work ID and end at completion or an
+approval stop.
 `GET /threads/{tid}/approval` returns a complete pending proposal to send, archive
 or move email to Trash. `POST` to the same path requires `kind`, `token`, and `decision` (`approve`
 or `reject`); outbound email also accepts `decision="edit"` with `to`, `subject`
