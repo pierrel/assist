@@ -1256,7 +1256,7 @@ def _web_toolset(root: Path, *, full: bool) -> list:
     tools = (
         schedule_tools(ScheduleStore(str(root)))
         + subscription_tools(SubscriptionStore(str(root)))
-        + notify_tools(lambda _tid: None)
+        + notify_tools(lambda _tid, _reason: "queued")
         + quiet_tools(lambda _tid, _run_id: False)
         + thread_description_tools(lambda _tid, _description: None)
         + email_tools() + gmail_tools()
@@ -1991,7 +1991,7 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "modify_schedule": {"2b82e293c48bbdfcaaafe797533693b7d15653b7f3dd2e996c6c06f27a0c16ca"},
     "modify_subscription": {"eebbeda47d86c17fda5ae6d6332ab74c5663be9068fe470189e9f45ef0adf769"},
     "new_thread": {"110cfb0e827f07c9d800a314d4bc119aa3f107422983a7b2bca9bea2d01f29cf"},
-    "notify": {"3c2aef11b380cda5d273b7303e544960478f2834d1757b8d7ee1dd87189015aa"},
+    "notify": {"c30a7c95d4a0c36c1838ae31ff26ecb20ead9d49ef16465ec89b633eabd85689"},
     "open_thread": {"d9d2c013e8759960c87b9114d1cbac06e9f606b18cc956d7b9b25acfd49c9722"},
     "pause_schedule": {"f4650ba6d1e6b58948b8a09821a1cf1dbfcfb8820a3ae5e63b64dc5841eb2265"},
     "propose_region_download": {"638cb587cde24979bcd6ee36a7169d8b61bec09afd2ab7adf2afecb3f1695d58"},

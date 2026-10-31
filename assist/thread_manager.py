@@ -352,7 +352,7 @@ class ThreadManager:
         if not working_dir:
             working_dir = self.make_default_working_dir(tdir)
 
-        # A triage turn (untrusted inbound message) gets the reduced reply-only tool set +
+        # A triage turn (untrusted inbound message) gets reply + reasoned phone alert tools and
         # its distinct reply HITL gate; normal turns get the full web tools and mail HITL.
         tools = (_web_triage_tools if triage else
                  _web_tools + (browser_tools if assistant_id == "general-agent" else ()))

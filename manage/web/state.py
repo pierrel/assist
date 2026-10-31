@@ -40,7 +40,7 @@ from assist.events.thread_description import thread_description_tools
 from assist.events.reply import reply_tools, REPLY_INTERRUPT_ON
 from assist.events.email import email_tools, EMAIL_INTERRUPT_ON
 from assist.gmail import gmail_tools, GMAIL_INTERRUPT_ON
-from assist.events.notify import notify_tools
+from assist.events.notify import notify_tools, valid_reason
 from assist.events.inbound import InboundLog
 from assist.backlog import MessageBacklog
 from assist.run_service import RunService
@@ -149,15 +149,15 @@ MESSAGE_BACKLOG = MessageBacklog(ROOT)
 # the legacy backlog is read only during startup migration.
 RUN_SERVICE = RunService(ROOT)
 # Normal turns get the config tools (schedule + subscription). A TRIAGE turn (untrusted
-# inbound SMS) gets ONLY send_reply, HITL-gated — never the host-effect config tools — so an
+# inbound SMS) gets HITL-gated send_reply and a reasoned phone alert, never the host-effect config tools, so an
 # injected text can't plant/delete a subscription or schedule (MANAGER.get(triage=True)).
 # notify_tools takes an injected mark-urgent callback (notify.py never imports web
 # state → no import cycle).  The lambda is NOT redundant: `_mark_urgent` is defined
 # ~300 lines below (kept beside the symmetric _UNSEEN block), but this runs at import
 # time, so a bare `notify_tools(_mark_urgent)` would NameError — the lambda DEFERS the
 # lookup to tool-call time.  (Do not "simplify" it away.)
-# Lands in the NORMAL tool set ONLY — never the triage set — so an untrusted inbound
-# SMS can't force an urgent badge on Pierre's phone.
+# Both normal and SMS-triage turns may request this bounded phone alert.
+# This exposes no schedule, subscription, recipient or outgoing-SMS capability.
 # geo (region download-on-demand) — wired only when the travel-infra dir is configured
 # for the web service (holds regions.json / catalog.json / proposals.json + input/). When
 # unset (the default until the deploy passes it), the geo stores + tools are simply absent,
@@ -211,14 +211,14 @@ def _request_quiet(tid: str, run_id: str) -> bool:
 
 
 set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE)
-              + notify_tools(lambda tid: _mark_urgent(tid))
+              + notify_tools(lambda tid, reason: _mark_urgent(tid, reason))
               + quiet_tools(_request_quiet)
               + thread_description_tools(
                   lambda tid, description: set_description(tid, description))
               + _geo_tools + email_tools() + gmail_tools() + [get_location]
               + frequency_tools(FREQUENCY_STORE))
 set_execution_egress_tools(_egress_tools)
-set_web_triage_tools(reply_tools())
+set_web_triage_tools(reply_tools() + notify_tools(lambda tid, reason: _mark_urgent(tid, reason)))
 set_web_interrupt_on({**EMAIL_INTERRUPT_ON, **GMAIL_INTERRUPT_ON})
 set_web_triage_interrupt_on(REPLY_INTERRUPT_ON)
 _raw = os.getenv("ASSIST_DOMAINS", "")
@@ -639,27 +639,95 @@ def _urgent_path(tid: str) -> str:
     return os.path.join(MANAGER.thread_dir(tid), "urgent_response")
 
 
-def _mark_urgent(tid: str) -> None:
-    """Flag ``tid`` urgent (from the notify tool): the live set + a BEST-EFFORT
-    durable marker (OSError swallowed — a marker write must never fail the turn)."""
+def _phone_alert(tid: str) -> dict | None:
+    """Read a bounded reasoned marker; empty legacy badges have no phone alert."""
+    try:
+        with open(_urgent_path(tid)) as source:
+            raw = source.read(2049)
+    except FileNotFoundError:
+        return None
+    if not raw.strip():
+        return None
+    value = json.loads(raw)
+    if (len(raw) > 2048 or not isinstance(value, dict)
+            or not isinstance(value.get('id'), str) or len(value['id']) != 32
+            or any(char not in '0123456789abcdef' for char in value['id'])
+            or not valid_reason(value.get('reason')) or not isinstance(value.get('phone_ack'), bool)):
+        raise ValueError('invalid phone alert marker')
+    return value
+
+
+def _mark_urgent(tid: str, reason: str | None = None) -> str:
+    """Persist one reasoned phone alert per urgent cycle; legacy badge callers remain valid."""
+    if reason is not None and not valid_reason(reason):
+        raise ValueError('invalid phone alert reason')
     with _NOTIFICATION_LOCK:
+        if reason is not None:
+            previous = _phone_alert(tid)
+            value = previous or {'id': secrets.token_hex(16), 'phone_ack': False}
+            value['reason'] = reason
+            _atomic_write(_urgent_path(tid), json.dumps(value, ensure_ascii=False), create_parent=False)
+            result = ('handled' if value['phone_ack'] else 'pending') if previous else 'queued'
+        else:
+            # Existing non-notify badge callers do not invent a reason or buzz.
+            try:
+                if not os.path.exists(_urgent_path(tid)):
+                    _atomic_write(_urgent_path(tid), '', create_parent=False)
+            except OSError:
+                pass  # Legacy badge-only callers remain best effort.
+            result = 'pending'
         _NOTIFICATION_REVISIONS[tid] = secrets.token_hex(16)
         _URGENT.add(tid)
-        try:
-            open(_urgent_path(tid), "w").close()
-        except OSError:
-            pass
+        return result
 
 
-def _clear_urgent(tid: str) -> None:
-    """Clear ``tid``'s urgent flag (its page was opened): drop the set entry + the
-    marker. Missing-ok and never-raise, paired under the marker lock."""
+_PHONE_NOTIFICATION_CURSOR = ""
+
+
+def _phone_notifications() -> dict:
+    """Rotate bounded pending batches so a failed phone receipt cannot starve others."""
+    global _PHONE_NOTIFICATION_CURSOR
     with _NOTIFICATION_LOCK:
-        _URGENT.discard(tid)
+        pending = []
+        ordered = sorted(_URGENT)
+        ordered = ([tid for tid in ordered if tid > _PHONE_NOTIFICATION_CURSOR]
+                   + [tid for tid in ordered if tid <= _PHONE_NOTIFICATION_CURSOR])
+        for tid in ordered:
+            _PHONE_NOTIFICATION_CURSOR = tid
+            try:
+                value = _phone_alert(tid)
+            except (OSError, ValueError):
+                continue
+            if value is not None and not value['phone_ack']:
+                pending.append({'thread_id': tid, 'id': value['id'], 'reason': value['reason']})
+                if len(pending) == 16:
+                    break
+        return {'notifications': pending}
+
+
+def _ack_phone_notification(tid: str, notification_id: str) -> dict:
+    """Acknowledge only this current cycle, never recreate a cleared or newer alert."""
+    with _NOTIFICATION_LOCK:
+        value = _phone_alert(tid)
+        if value is None or value['id'] != notification_id:
+            return {'acknowledged': False}
+        if not value['phone_ack']:
+            value['phone_ack'] = True
+            _atomic_write(_urgent_path(tid), json.dumps(value, ensure_ascii=False), create_parent=False)
+        return {'acknowledged': True}
+
+
+def _clear_urgent(tid: str) -> bool:
+    """Clear the durable urgent cycle before memory; return false on storage failure."""
+    with _NOTIFICATION_LOCK:
         try:
             os.remove(_urgent_path(tid))
-        except OSError:
+        except FileNotFoundError:
             pass
+        except OSError:
+            return False
+        _URGENT.discard(tid)
+        return True
 
 
 def _has_urgent(tid: str) -> bool:
