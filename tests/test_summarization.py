@@ -455,7 +455,11 @@ def test_qwen38_summary_keeps_nonthinking_sampling():
     calls = []
     def provider(request):
         calls.append(json.loads(request.content))
-        return _response("summary")
+        chunk = {"id": "test", "object": "chat.completion.chunk", "model": "Qwen3.8-27B.gguf",
+                 "choices": [{"index": 0, "delta": {"role": "assistant", "content": "summary"},
+                              "finish_reason": "stop"}]}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              content=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
     with patch("assist.model_manager._get_config", return_value=OpenAIConfig(
             "http://unit.test/v1", "Qwen3.8-27B.gguf", "EMPTY", LIMIT)):
         model = select_assistant_model(0.1)
