@@ -895,7 +895,7 @@ def create_research_agent(model: BaseChatModel,
     # Includes the same retry/bad-request layers the top-level agent has,
     # so a transient APIConnectionError (incl. APITimeoutError) deep in a
     # sub-research-agent loop doesn't kill the parent thread.  Without
-    # the retry layers, a 600s LLM timeout on a single sub-agent call
+    # the retry layers, a 600s LLM read timeout on a single sub-agent call
     # bubbles up as an unretried APITimeoutError and ends the thread —
     # observed on the vegan-pizza thread 2026-05-03 18:09 after 90 min
     # of work.  Without LoopDetection + EmptyResponseRecovery, the
