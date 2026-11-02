@@ -113,13 +113,15 @@ class _BoundedSSEStreamingResponse(StreamingResponse):
         except TimeoutError:
             return
         finally:
-            close = getattr(self.body_iterator, "aclose", None)
-            if close is not None:
-                await close()
-            if self._on_close is not None:
-                result = self._on_close()
-                if inspect.isawaitable(result):
-                    await result
+            try:
+                close = getattr(self.body_iterator, "aclose", None)
+                if close is not None:
+                    await close()
+            finally:
+                if self._on_close is not None:
+                    result = self._on_close()
+                    if inspect.isawaitable(result):
+                        await result
 
 
 class _StrictModel(BaseModel):
@@ -1684,21 +1686,31 @@ async def run_events(tid: str, run_id: str, request: Request) -> StreamingRespon
                             detail="run-store-unavailable") from error
     if not _SSE_SLOTS.acquire(blocking=False):
         raise HTTPException(status_code=429, detail="Too many phone event streams")
-    observing = await anyio.to_thread.run_sync(
-        _open_observation, tid, status["work_id"])
-    journal_state = await anyio.to_thread.run_sync(
-        lambda: RUN_STREAMS.snapshot_if_changed(tid, status["work_id"], None))
-    journal_revision, journal = journal_state if journal_state is not None else (None, None)
+    observing = False
     released = False
 
     async def release_slot() -> None:
         nonlocal released
         if not released:
             released = True
-            if observing:
-                await anyio.to_thread.run_sync(
-                    RUN_STREAMS.close_observer, tid, status["work_id"])
-            _SSE_SLOTS.release()
+            # Disconnect cancels the stream scope; return its owned resources anyway.
+            with anyio.CancelScope(shield=True):
+                try:
+                    if observing:
+                        await anyio.to_thread.run_sync(
+                            RUN_STREAMS.close_observer, tid, status["work_id"])
+                finally:
+                    _SSE_SLOTS.release()
+
+    try:
+        observing = await anyio.to_thread.run_sync(
+            _open_observation, tid, status["work_id"])
+        journal_state = await anyio.to_thread.run_sync(
+            lambda: RUN_STREAMS.snapshot_if_changed(tid, status["work_id"], None))
+        journal_revision, journal = journal_state if journal_state is not None else (None, None)
+    except BaseException:
+        await release_slot()
+        raise
 
     async def events():
         nonlocal journal, journal_revision, status

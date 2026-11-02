@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from types import SimpleNamespace
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -1425,6 +1426,85 @@ def test_sse_blocked_send_hits_outer_deadline_and_releases_its_stream_slot(monke
 
     assert closed == []  # Header backpressure can prevent the generator from starting.
     assert slot.acquire(blocking=False)
+
+
+def _running_sse_fixture(monkeypatch, close_observer):
+    """Use synthetic Run data while retaining real route/ASGI stream ownership."""
+    slot = threading.BoundedSemaphore(1)
+    status = {"status": "running", "work_id": "work-a", "thread_status": "processing"}
+    journal = SimpleNamespace(snapshot_if_changed=lambda *_: None,
+                              close_observer=close_observer)
+    monkeypatch.setattr(phone_api, "_SSE_SLOTS", slot)
+    monkeypatch.setattr(phone_api, "RUN_STREAMS", journal)
+    monkeypatch.setattr(phone_api, "_logical_status_with_revision_and_token",
+                        lambda *_: (status, 1, "observation-a"))
+    monkeypatch.setattr(phone_api, "_open_observation", lambda *_: True)
+    monkeypatch.setattr(phone_api, "_observation_invalidation",
+                        lambda *_: (1, "observation-a", "processing"))
+
+    async def connected():
+        return False
+
+    return slot, SimpleNamespace(is_disconnected=connected)
+
+
+@pytest.mark.parametrize("disconnect_at", ["headers", "body"])
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_sse_disconnect_returns_slot_and_closes_observer_once(
+        monkeypatch, disconnect_at, close_fails):
+    """Real ASGI disconnect cancellation returns capacity before/after body start."""
+    closed = []
+
+    def close_observer(*_):
+        closed.append(True)
+        if close_fails:
+            raise RuntimeError("synthetic observer close failure")
+
+    slot, request = _running_sse_fixture(monkeypatch, close_observer)
+
+    async def exercise():
+        response = await phone_api.run_events("thread-a", "run-a", request)
+        started = anyio.Event()
+
+        async def send(message):
+            if disconnect_at == "headers" and message["type"] == "http.response.start":
+                started.set()
+                await anyio.sleep_forever()
+            elif disconnect_at == "body" and message["type"] == "http.response.body":
+                started.set()
+
+        async def receive():
+            await started.wait()
+            return {"type": "http.disconnect"}
+
+        with pytest.raises(RuntimeError, match="synthetic observer close failure") if close_fails else nullcontext():
+            await response({"type": "http", "asgi": {"spec_version": "2.0"}}, receive, send)
+
+    asyncio.run(exercise())
+    assert closed == [True]
+    assert slot.acquire(blocking=False)
+    assert not slot.acquire(blocking=False)
+
+
+@pytest.mark.parametrize("failure_at", ["open", "snapshot"])
+def test_sse_preparation_failure_returns_its_acquired_slot(monkeypatch, failure_at):
+    """A preparation exception cannot strand capacity before response handoff."""
+    closed = []
+    slot, request = _running_sse_fixture(monkeypatch, lambda *_: closed.append(True))
+
+    def fail(*_):
+        raise RuntimeError("synthetic preparation failure")
+
+    if failure_at == "open":
+        monkeypatch.setattr(phone_api, "_open_observation", fail)
+    else:
+        monkeypatch.setattr(phone_api.RUN_STREAMS, "snapshot_if_changed", fail)
+
+    with pytest.raises(RuntimeError, match="synthetic preparation failure"):
+        asyncio.run(phone_api.run_events("thread-a", "run-a", request))
+    assert closed == ([] if failure_at == "open" else [True])
+    assert slot.acquire(blocking=False)
+    assert not slot.acquire(blocking=False)
 
 
 def test_busy_phone_acceptance_advertises_its_active_future_worker_journal(monkeypatch):
