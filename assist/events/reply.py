@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 import requests
 from langgraph.config import get_config
@@ -34,6 +35,11 @@ def _sender() -> str | None:
     return ((get_config() or {}).get("configurable") or {}).get(SMS_SENDER_KEY)
 
 
+def valid_sms_recipient(value: str) -> bool:
+    """Accept bounded numeric modem recipients, never raw caller labels."""
+    return isinstance(value, str) and re.fullmatch(r"\+?[0-9]{1,20}", value) is not None
+
+
 def send_outbound_sms(recipient: str, text: str) -> str | None:
     """Send one SMS through the configured phone endpoint.
 
@@ -41,6 +47,8 @@ def send_outbound_sms(recipient: str, text: str) -> str | None:
     their recipient-specific policy and presentation; this shared host-side boundary owns
     endpoint authentication, bounded delivery, and redirect refusal.
     """
+    if not valid_sms_recipient(recipient):
+        return "recipient is unavailable or unsafe; no SMS attempted"
     url = os.getenv("ASSIST_SMS_OUTBOUND_URL")
     secret = os.getenv("ASSIST_SMS_SECRET")
     if not url or not secret:

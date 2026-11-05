@@ -96,3 +96,18 @@ def test_subscriptions_vanish_when_thread_dir_removed(tmp_path):
     assert store.for_thread("t2") == []                  # gone
     assert store.route("+15551234567").id == "keep"      # t2's no longer routed
     assert all(s.thread_id != "t2" for s in store.all())
+
+
+def test_legacy_sms_and_call_routes_remain_separate(tmp_path):
+    from dataclasses import replace
+    (tmp_path / 'sms').mkdir()
+    (tmp_path / 'calls').mkdir()
+    store = SubscriptionStore(str(tmp_path))
+    legacy = Subscription.from_dict({'id': 'old', 'thread_id': 'sms', 'sender_regexp': '.*', 'template': '{text}', 'created_at': '2026-01-01T00:00:00'})
+    store.add(legacy)
+    call = replace(legacy, id='calls', thread_id='calls', event_kind='call', created_at='2026-02-01T00:00:00')
+    store.add(call)
+    assert legacy.event_kind == 'sms'
+    assert store.route('+15555550100').id == 'old'
+    assert store.route('+15555550100', 'call').id == 'calls'
+    assert Subscription.from_dict(call.to_dict()) == call

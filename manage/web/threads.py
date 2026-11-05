@@ -4836,6 +4836,11 @@ def _scheduled_dispatch(tid: str, prompt: str, tz: str | None) -> None:
     _execute_run(run.id, tid)
 
 
+def _dispatch_admitted_event_run(run_id: str, tid: str) -> None:
+    """Serialize replayable event wakeups with startup recovery of that Run."""
+    _RESUME_SCHEDULER.submit(run_id, tid)
+
+
 def _dispatch_event(sender: str, text: str) -> None:
     """Route an inbound message to its subscription's thread and run the triage turn there,
     with the sender in the run config so send_reply can target it. No matching subscription
@@ -4853,21 +4858,9 @@ def _dispatch_event(sender: str, text: str) -> None:
         logging.warning("inbound message matched Pi preview thread %s; not dispatched", sub.thread_id)
         return
     rendered = sub.render(sender, text)
-    stage = _get_status(sub.thread_id).get("stage")
     run = _create_run(sub.thread_id, rendered, sender=sender)
-    if stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == sub.thread_id:
-        # A follow-up to a busy thread (busy status, or holding the slot with no
-        # busy status written yet). The Run above is already durable; either the
-        # serial scheduler executes it after a paused head or the current triage
-        # consumes the pending Run as an interjection.
-        if stage == "paused":
-            # A paused thread has RELEASED the slot — dispatching directly would
-            # acquire immediately and run on the mid-flight checkpoint. Route
-            # through the serial worker, behind the queued resume/recovery
-            # (same as post_message).
-            _RESUME_SCHEDULER.submit(run.id, sub.thread_id)
-        else:
-            _execute_run(run.id, sub.thread_id)
+    if _get_status(sub.thread_id).get("stage") == "paused":
+        _RESUME_SCHEDULER.submit(run.id, sub.thread_id)
     else:
         _execute_run(run.id, sub.thread_id)
 

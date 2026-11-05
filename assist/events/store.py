@@ -36,12 +36,12 @@ class SubscriptionStore(PerThreadJsonStore[Subscription]):
     def _from_dict(d: dict) -> Subscription:
         return Subscription.from_dict(d)
 
-    def route(self, sender: str) -> Subscription | None:
-        """The subscription that handles a message from ``sender``: the FIRST match by
+    def route(self, sender: str, event_kind: str = "sms") -> Subscription | None:
+        """The subscription handling ``event_kind`` from ``sender``: the FIRST match by
         creation order (earliest ``created_at``) across all threads. Returns None when
         nothing matches — the caller records + logs the message but fires no turn (a
         catch-all is expressible as the regexp ``.*``)."""
-        matches = [s for s in self.all() if s.matches(sender)]
+        matches = [s for s in self.all() if s.event_kind == event_kind and s.matches(sender)]
         if not matches:
             return None
         return min(matches, key=lambda s: (s.created_at or ""))

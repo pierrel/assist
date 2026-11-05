@@ -4,13 +4,14 @@ config, so a subscription belongs to the thread it's created in and its matching
 fire turns there).
 
 Built by ``subscription_tools(store)`` and wired into the web ``AgentSpec`` (not core
-built-ins): a subscription's effect needs the inbound-SMS route + the phone daemon, which
-only the web deployment has. Tools never raise into the agent loop — every failure returns a
+built-ins): SMS uses the inbound-SMS route; observed call outcomes use the
+authenticated phone API. These effects belong to the web deployment. Tools never raise into the agent loop — every failure returns a
 corrective string.
 """
 from __future__ import annotations
 
 import os
+from typing import Literal
 from datetime import datetime, timezone
 
 from langgraph.config import get_config
@@ -25,15 +26,19 @@ def _thread_id() -> str | None:
 
 def _line(s: Subscription) -> str:
     preview = s.template.strip().splitlines()[0] if s.template.strip() else "(empty template)"
-    return f"[{s.id}] sender ~ /{s.sender_regexp}/\n    template: {preview[:80]}"
+    return f"[{s.id}] {s.event_kind} sender ~ /{s.sender_regexp}/\n    template: {preview[:80]}"
 
 
 def subscription_tools(store) -> list:
     """Return the thread-scoped subscription tools closing over ``store``."""
 
-    def create_subscription(sender_regexp: str, template: str) -> str:
-        """Subscribe THIS thread to inbound messages whose SENDER matches SENDER_REGEXP.
+    def create_subscription(sender_regexp: str, template: str, event_kind: Literal["sms", "call"] = "sms") -> str:
+        """Subscribe THIS thread to SMS or call events whose SENDER matches SENDER_REGEXP.
 
+        Choose event_kind="call" for incoming-call outcomes; the default is SMS.
+        Calls supply an observed outcome in {text}, never an assumed voicemail transcript.
+        Earliest matching subscription wins within that kind. When splitting a catchall,
+        create the specific subscription first, then exclude its sender from the catchall.
         On each matching message a turn runs here with TEMPLATE rendered — put your whole
         instruction to yourself in TEMPLATE (how to decide what to do, your rules), using
         the literal slots {sender} and {text} where the message's sender and body go. You
@@ -54,9 +59,11 @@ def subscription_tools(store) -> list:
                     f"Load the 'regexp' skill for help writing it.")
         if not template.strip():
             return "Couldn't subscribe: template is empty — write your triage instruction."
+        if event_kind not in {"sms", "call"}:
+            return "Couldn't subscribe: event_kind must be sms or call."
         sub = Subscription(id=os.urandom(6).hex(), thread_id=tid,
                            sender_regexp=sender_regexp, template=template,
-                           created_at=datetime.now(timezone.utc).isoformat())
+                           created_at=datetime.now(timezone.utc).isoformat(), event_kind=event_kind)
         try:
             store.add(sub)
         except SubscriptionCapExceeded as e:
@@ -74,14 +81,17 @@ def subscription_tools(store) -> list:
         return "\n".join(_line(s) for s in subs)
 
     def modify_subscription(subscription_id: str, sender_regexp: str | None = None,
-                            template: str | None = None) -> str:
+                            template: str | None = None,
+                            event_kind: Literal["sms", "call"] | None = None) -> str:
         """Change an existing subscription. Pass ONLY the field(s) you're changing + the id;
         omitted fields keep their current value."""
         tid = _thread_id()
         if not tid:
             return "No active thread."
-        if sender_regexp is None and template is None:
-            return "Nothing to change — pass sender_regexp and/or template."
+        if sender_regexp is None and template is None and event_kind is None:
+            return "Nothing to change — pass sender_regexp, template, or event_kind."
+        if event_kind is not None and event_kind not in {"sms", "call"}:
+            return "Couldn't change it: event_kind must be sms or call."
         if sender_regexp is not None:
             try:
                 validate_regexp(sender_regexp)
@@ -95,7 +105,8 @@ def subscription_tools(store) -> list:
             return replace(
                 s,
                 sender_regexp=sender_regexp if sender_regexp is not None else s.sender_regexp,
-                template=template if template is not None else s.template)
+                template=template if template is not None else s.template,
+                event_kind=event_kind if event_kind is not None else s.event_kind)
         try:
             saved = store.update(tid, subscription_id, _apply)
         except SubscriptionNotFound:
