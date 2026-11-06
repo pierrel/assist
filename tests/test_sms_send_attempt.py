@@ -126,3 +126,12 @@ def test_notify_replay_uses_archived_effect_before_current_owner_config(outgoing
     result=notify.notify_tools(lambda tid:None)[0]('urgent',SimpleNamespace(tool_call_id='existing-notify'))
     assert ('SMS sent.' if status=='sent' else 'SMS outcome unknown') in result
     assert configured_archive().read(identity)['number']=='+15555550100'
+
+
+def test_unknown_send_logs_category_without_private_payload(outgoing, monkeypatch, caplog):
+    def lost(*args, **kwargs):
+        raise requests.Timeout('private-secret private-body +15555550100')
+    monkeypatch.setattr(reply.requests, 'post', lost)
+    assert reply.send_outbound_sms('+15555550100', 'private-body', attempt_id='private-id').status == 'unknown'
+    assert 'event=send_unknown' in caplog.text
+    assert all(value not in caplog.text for value in ['private-id', 'private-body', '+15555550100', 'private-secret'])

@@ -65,16 +65,19 @@ def send_outbound_sms(recipient: str, text: str, *, attempt_id: str | None = Non
     """
     supplied_identity = attempt_id is not None
     attempt_id = attempt_id or uuid.uuid4().hex
+    correlation = hashlib.sha256(str(attempt_id).encode()).hexdigest()[:16]
     try:
         archive = configured_archive()
-    except (ValueError, OSError, sqlite3.Error):
+    except (ValueError, OSError, sqlite3.Error) as error:
+        logger.warning("sms_boundary event=archive_open_failed correlation=%s error_type=%s", correlation, type(error).__name__)
         return SmsResult("unknown" if supplied_identity else "not_sent",
                          "archive unavailable; no new send attempted; no automatic retry")
     try:
         row, created = archive.record(attempt_id, "outgoing", recipient, text, "unknown")
     except ValueError:
         return SmsResult("not_sent", "invalid or conflicting attempt; no new send attempted")
-    except (OSError, sqlite3.Error):
+    except (OSError, sqlite3.Error) as error:
+        logger.warning("sms_boundary event=send_claim_failed correlation=%s error_type=%s", correlation, type(error).__name__)
         return SmsResult("unknown" if supplied_identity else "not_sent",
                          "archive unavailable; no new send attempted; no automatic retry")
     if not created:
@@ -104,11 +107,14 @@ def send_outbound_sms(recipient: str, text: str, *, attempt_id: str | None = Non
                     detail = "" if status != "unknown" else detail
         except (requests.RequestException, ValueError):
             # Do not log request exceptions: their string can contain endpoint secrets.
-            logger.warning("outbound SMS response unavailable or invalid")
+            logger.warning("sms_boundary event=send_response_invalid correlation=%s", correlation)
+    if status == "unknown":
+        logger.warning("sms_boundary event=send_unknown correlation=%s", correlation)
     try:
         row, _ = archive.record(attempt_id, "outgoing", recipient, text, status)
         return SmsResult(row["status"], detail)
-    except (ValueError, OSError, sqlite3.Error):
+    except (ValueError, OSError, sqlite3.Error) as error:
+        logger.warning("sms_boundary event=send_receipt_failed correlation=%s error_type=%s", correlation, type(error).__name__)
         # The phone may already have sent it. Report the observation without retry.
         return SmsResult(status, "receipt storage failed; no automatic retry")
 

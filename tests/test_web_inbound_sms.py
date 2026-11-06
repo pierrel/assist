@@ -459,7 +459,7 @@ def test_missing_or_invalid_destination_storage_is_not_silently_acknowledged(cli
 
 
 @pytest.mark.parametrize('source_time',['malformed-time','2026-10-28T00:00:00',''])
-def test_unusable_incoming_time_archives_only_and_retries_same_identity(client,monkeypatch,source_time):
+def test_unusable_incoming_time_archives_only_and_retries_same_identity(client,monkeypatch,source_time,caplog):
     from assist.events.sms_archive import configured_archive
     monkeypatch.setenv('ASSIST_SMS_SECRET','s3cret')
     monkeypatch.setattr(threads,'_execute_run',lambda *args: pytest.fail('invalid time dispatched'))
@@ -474,3 +474,30 @@ def test_unusable_incoming_time_archives_only_and_retries_same_identity(client,m
     assert response.status_code==200 and response.json()['status']=='duplicate'
     assert configured_archive().read('unusable-time')==saved
     assert threads._runs().list('t-sub')==[]
+    assert caplog.text.count('event=timestamp_archive_only') == 1
+    if source_time:
+        assert source_time not in caplog.text
+    assert 'reason=' + ('naive' if source_time == '2026-10-28T00:00:00' else 'malformed') in caplog.text
+    assert 'exact synthetic history' not in caplog.text and 'unusable-time' not in caplog.text
+
+
+def test_admission_failure_logs_only_hashed_identity_and_category(client, monkeypatch, caplog):
+    monkeypatch.setenv('ASSIST_SMS_SECRET','s3cret')
+    def failed(*args, **kwargs):
+        raise OSError('PRIVATE-BODY +15555550100 credential-canary')
+    monkeypatch.setattr(threads, '_create_run', failed)
+    response = client.post('/inbound/sms', json=_body(mid='private-id', text='PRIVATE-BODY'),
+                           headers={'X-Assist-SMS-Secret':'s3cret'})
+    assert response.status_code == 503
+    assert 'event=run_admission_failed' in caplog.text and 'error_type=OSError' in caplog.text
+    assert all(value not in caplog.text for value in ['private-id', 'PRIVATE-BODY', '+15555550100', 'credential-canary'])
+
+
+def test_archive_open_failure_uses_existing_http_conversion_and_safe_log(client, monkeypatch, caplog):
+    monkeypatch.setenv('ASSIST_SMS_SECRET','s3cret')
+    def failed(): raise OSError('private-body +15555550100 secret-canary')
+    monkeypatch.setattr(threads, 'configured_archive', failed)
+    response = client.post('/inbound/sms', json=_body(), headers={'X-Assist-SMS-Secret':'s3cret'})
+    assert response.status_code == 503
+    assert 'event=archive_open_failed error_type=OSError' in caplog.text
+    assert all(value not in caplog.text for value in ['private-body', '+15555550100', 'secret-canary'])

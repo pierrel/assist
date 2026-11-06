@@ -4928,22 +4928,27 @@ def _sms_archive():
     try:
         return configured_archive()
     except (ValueError, OSError, sqlite3.Error) as error:
-        logging.error("SMS archive unavailable: %s", type(error).__name__)
+        logging.error("sms_boundary event=archive_open_failed error_type=%s", type(error).__name__)
         raise HTTPException(status_code=503, detail="SMS archive is unavailable") from error
 
 
 def _admit_inbound_sms(payload: _InboundSms):
     """Persist routing, then admit a normal Run or honor a deleted destination."""
+    correlation = hashlib.sha256(payload.message_id.encode()).hexdigest()[:16]
     archive = _sms_archive()
     if not SMS_RECORD_ID_RE.fullmatch(payload.message_id):
         raise HTTPException(status_code=400, detail="invalid message_id")
     occurred_at = payload.occurred_at
+    timestamp_reason = "missing" if occurred_at is None else None
     if occurred_at is not None:
         try:
             if datetime.fromisoformat(occurred_at).utcoffset() is None:
+                timestamp_reason = "naive"
                 occurred_at = None
         except ValueError:
+            timestamp_reason = "malformed"
             occurred_at = None
+    boundary = "archive"
     try:
         with _RUN_ADMISSION_LOCK:
             sub = SUBSCRIPTION_STORE.route(payload.sender, occurred_at=occurred_at) if occurred_at and not payload.archive_only else None
@@ -4951,6 +4956,9 @@ def _admit_inbound_sms(payload: _InboundSms):
             row, created = archive.record(payload.message_id, "incoming", payload.sender,
                                            payload.text, "received", occurred_at=occurred_at,
                                            handling=handling)
+            if created and timestamp_reason:
+                logging.warning("sms_boundary event=timestamp_archive_only correlation=%s reason=%s", correlation, timestamp_reason)
+            boundary = "run_admission"
             if row["thread_id"] is None:
                 return {"status": "accepted" if created else "duplicate"}, None
             try:
@@ -4978,6 +4986,7 @@ def _admit_inbound_sms(payload: _InboundSms):
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except (OSError, sqlite3.Error, RunStoreUnavailable) as error:
+        logging.warning("sms_boundary event=%s_failed correlation=%s error_type=%s", boundary, correlation, type(error).__name__)
         raise HTTPException(status_code=503, detail="SMS storage is unavailable") from error
 
 
