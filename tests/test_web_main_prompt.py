@@ -11,8 +11,8 @@ from assist import promptable
 
 
 @pytest.mark.parametrize(("guidance_skills", "expected_sha256"), [
-    (False, "8882e9c05b78c24680127933b996cf9e41950af36e9a7a05bf6eabc61503b710"),
-    (True, "adca74dcf3bb322d6239f00a639c276aa3e195d010c82c898b581b7152ea6fb4"),
+    (False, "e80688684282efa16cd1df1ada930f8655825ae1349b67c067bc227a55484790"),
+    (True, "808edb6e42d4005b095af9a5a866c8d3c361fd319190e8291ff0f39d825cabc6"),
 ])
 def test_deep_web_main_prompt_preserves_the_merged_rewrite(
     guidance_skills, expected_sha256,

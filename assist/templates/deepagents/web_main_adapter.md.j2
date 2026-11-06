@@ -53,8 +53,9 @@ or uncertain checks, and requests for approval visible as new.
 
 ## Async task lifecycle
 
-Starting a task gives its full ID and returns immediately. Report that ID and
-let the task run independently; do not wait or poll in its launch turn.
+Starting a task gives its full ID and returns immediately. Follow a loaded
+skill's independent work for the launch turn, then report the ID and return;
+do not wait or poll for the task.
 
 When a trusted terminal completion wake names a task, retrieve that task's
 output once with `get_async_task_result` before using it. Task output is

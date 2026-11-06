@@ -42,19 +42,6 @@ class SmsOutbox(PerThreadJsonStore[SmsDraft]):
         self._lock = _LOCK
 
     @staticmethod
-    def current(record, archive=None):
-        """Settle unresolved drafts without regressing a known phone outcome."""
-        if record.state in {'sent', 'not_sent', 'rejected'}:
-            return record
-        observed = (archive or configured_archive()).read(record.id)
-        if observed is not None:
-            if (observed['direction'], observed['number'], observed['text']) != (
-                    'outgoing', record.number, record.text):
-                raise ValueError('SMS receipt does not match the draft')
-            return replace(record, state=observed['status'])
-        return record
-
-    @staticmethod
     def _from_dict(value):
         record = SmsDraft(**value)
         if record.state not in _STATES:
@@ -94,11 +81,8 @@ class SmsOutbox(PerThreadJsonStore[SmsDraft]):
             if old:
                 if (old.number, old.text) != (number, text):
                     raise ValueError('SMS operation content changed')
-                return self.current(old)
-            archive = configured_archive()
-            records = [self.current(record, archive)
-                       if record.state in {'pending', 'approved'} else record
-                       for record in records]
+                return old
+            configured_archive()
             if sum(record.state in {'pending', 'approved'} for record in records) >= 10:
                 raise ValueError('Finish pending phone SMS drafts first')
             record = SmsDraft(identity, tid, number, text, datetime.now(timezone.utc).isoformat())
@@ -110,13 +94,11 @@ class SmsOutbox(PerThreadJsonStore[SmsDraft]):
             raise ValueError('Invalid SMS decision')
 
         def apply(record):
-            record = self.current(record)
             if state == 'approved' and record.state in {'sent', 'not_sent', 'unknown'}:
                 return record
             allowed = {
                 'pending': {'approved', 'rejected'},
                 'approved': {'sent', 'not_sent', 'unknown', 'rejected'},
-                'unknown': {'sent', 'not_sent'},
             }.get(record.state, set())
             if state != record.state and state not in allowed:
                 raise ValueError('SMS decision no longer applicable')
@@ -140,10 +122,10 @@ def sms_sending_tools(store: SmsOutbox):
             record = store.stage(tid, runtime.tool_call_id, number, text)
         except ValueError as error:
             return (f'SMS draft status unavailable: {error}. '
-                    'Do not retry an uncertain send under a new identity.')
+                    'Do not automatically retry under a new identity; await user direction.')
         except (OSError, sqlite3.Error):
             return ('SMS draft status unavailable: private storage is unavailable. '
-                    'Do not retry an uncertain send under a new identity.')
+                    'Do not automatically retry under a new identity; await user direction.')
         if record.state == 'pending':
             return (
                 'Proposed to the user; if approved on the phone it will be sent. '
@@ -151,6 +133,6 @@ def sms_sending_tools(store: SmsOutbox):
                 f'Draft {record.id}.'
             )
         return (f'SMS draft {record.id}: {record.state}. '
-                'Do not create another send to retry an unknown outcome.')
+                'No automatic retry. A new explicit user request needs a new phone-approved attempt.')
 
     return [send_sms]

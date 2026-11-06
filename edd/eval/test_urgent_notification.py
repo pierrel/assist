@@ -32,7 +32,7 @@ class TestUrgentNotification(TestCase):
             return AgentHarness(create_agent(
                 self.model, self.root,
                 spec=prompt_rewrite_web_main_spec(
-                    tools=notify_tools(lambda _tid: None))))
+                    tools=notify_tools(lambda _tid, _reason: "queued"))))
 
     def test_imminent_deadline_is_flagged_with_a_message(self):
         agent = self._agent()

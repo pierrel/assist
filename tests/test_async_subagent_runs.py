@@ -8,6 +8,13 @@ import pytest
 from types import SimpleNamespace
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage
+from langgraph_sdk.errors import InternalServerError
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
+from starlette.applications import Starlette
+from starlette.responses import Response
+from starlette.routing import Route
 
 from manage.web import threads
 import manage.web as web
@@ -310,6 +317,98 @@ def test_six_tools_round_trip_through_real_private_asgi(monkeypatch, tmp_path):
             task_id, runtime("cancel"))
 
     assert submitted
+
+
+def test_missing_async_task_reference_returns_tool_result(monkeypatch, tmp_path):
+    _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    threads.MANAGER.reserve("ordinary")
+    parent = threads._create_run("parent", "question")
+    configure_async_subagent_app(web._agent_app)
+    runtime = SimpleNamespace(tool_call_id="missing")
+
+    with async_task_context(AsyncTaskContext(
+            "parent", parent.id, parent.work_id)):
+        for task_id in ("bogus-id", "ordinary"):
+            for name, args in (
+                    ("get_async_task_status", (task_id, runtime)),
+                    ("get_async_task_result", (task_id, runtime)),
+                    ("update_async_task", (task_id, "noop", runtime)),
+                    ("cancel_async_task", (task_id, runtime))):
+                assert TOOLS[name].func(*args) == (
+                    f"Task `{task_id}` was not found in this conversation.")
+
+        graph = StateGraph(MessagesState)
+        graph.add_node("tools", ToolNode(async_task_tools))
+        graph.add_node("reply", lambda state: {"messages": [AIMessage(
+            content="I could not update it: " + state["messages"][-1].content)]})
+        graph.add_edge(START, "tools")
+        graph.add_edge("tools", "reply")
+        graph.add_edge("reply", END)
+        result = graph.compile().invoke({"messages": [AIMessage(
+            content="", tool_calls=[{"name": "update_async_task",
+                                     "args": {"task_id": "bogus-id",
+                                              "instructions": "noop"},
+                                     "id": "missing-update",
+                                     "type": "tool_call"}])]},
+            {"configurable": {"thread_id": "parent"}})
+        assert result["messages"][-2].content == (
+            "Task `bogus-id` was not found in this conversation.")
+        assert result["messages"][-1].content.startswith("I could not update it:")
+
+
+def test_async_task_server_error_is_not_reported_as_missing(monkeypatch):
+    async def unavailable(_request):
+        return Response(status_code=503)
+
+    monkeypatch.setattr(async_tasks, "_APP", Starlette(routes=[
+        Route("/threads/{task_id}", unavailable)]))
+    runtime = SimpleNamespace(tool_call_id="server-error")
+
+    with async_task_context(AsyncTaskContext("parent", "run", "work")):
+        for name, args in (
+                ("get_async_task_status", ("sub-unavailable", runtime)),
+                ("get_async_task_result", ("sub-unavailable", runtime)),
+                ("update_async_task", ("sub-unavailable", "new work", runtime)),
+                ("cancel_async_task", ("sub-unavailable", runtime))):
+            with pytest.raises(InternalServerError):
+                TOOLS[name].func(*args)
+
+
+def test_research_task_acceptance_and_completion_create_durable_parent_wake(
+        monkeypatch, tmp_path):
+    """The research tool reaches a persisted child Run and ordinary parent wake."""
+    submitted = _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    prompt = "What does the HoloBeam 4K projector cost at Aster Electronics today?"
+    parent = threads._create_run("parent", prompt)
+    configure_async_subagent_app(web._agent_app)
+    runtime = SimpleNamespace(tool_call_id="research-start")
+
+    with async_task_context(AsyncTaskContext("parent", parent.id, parent.work_id)):
+        launched = TOOLS["start_async_task"].func(
+            prompt, "research-agent", runtime)
+    task_id = launched.split("task_id: ", 1)[1].split(".", 1)[0]
+    child = threads._runs().list(task_id)[0]
+    assert child.assistant_id == "research-agent"
+    assert child.text == prompt
+    assert child.status == "pending"
+
+    threads._runs().claim("parent", parent.id)
+    threads._runs().transition("parent", parent.id, "success", result="quick answer")
+    threads._runs().claim(task_id, child.id)
+    completed = threads._runs().transition(
+        task_id, child.id, "success", result="Sourced deep finding")
+    wake = threads._complete_child_handoff(completed)
+
+    assert wake is not None and wake.origin == "task-completion"
+    assert wake.status == "pending"
+    assert wake.thread_id == "parent"
+    assert task_id in wake.text
+    assert "Sourced deep finding" not in wake.text
+    assert (wake.id, "parent", {"user_priority": False}) in submitted
+    assert SERVICE.get_thread(task_id)["values"]["async_task"]["result"] == (
+        "Sourced deep finding")
 
 
 def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
