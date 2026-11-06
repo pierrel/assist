@@ -21,8 +21,10 @@ from assist.git_sync import GitSyncError, _OID, _directory, identity
 
 _OBJECT_DIR = re.compile(r"[0-9a-f]{2}\Z")
 _OBJECT_FILE = re.compile(r"[0-9a-f]{38}\Z")
+# Interrupted Git pack writers leave inert temporary files in this directory.
 _PACK_FILE = re.compile(
-    r"(?:pack-[0-9a-f]{40}\.(?:pack|idx|rev|bitmap|keep|mtimes)|multi-pack-index)\Z"
+    r"(?:pack-[0-9a-f]{40}\.(?:pack|idx|rev|bitmap|keep|mtimes)"
+    r"|multi-pack-index|tmp_pack_[A-Za-z0-9]{6})\Z"
 )
 _INFO_FILE = {"packs", "commit-graph"}
 _SPLIT_GRAPH_FILE = re.compile(r"graph-[0-9a-f]{40}\.graph\Z")

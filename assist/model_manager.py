@@ -50,15 +50,11 @@ _PROBE_TIMEOUT_S = 10.0
 # TCP handshake against an unreachable endpoint burned the full 600s
 # of httpcore connect retries before raising.  Splitting the four
 # phases lets connect fail fast (10s) while still giving long
-# generations the headroom they empirically need (read=600s, matches
-# the per-thread queue ``hold_timeout_s``).
+# generations the headroom they empirically need (read=600s).
 #
 # Read note on ``read``: this is httpx's *idle-byte* timeout, not a
-# total-response cap.  With a streaming endpoint a slow generation
-# that emits tokens continuously will not trip it.  ChatOpenAI's
-# default ``streaming=False`` means ``read`` is effectively the cap
-# on time-from-request-write to first response byte; for genuinely
-# long synthesis calls operators can bump ``ASSIST_LLM_READ_TIMEOUT_S``.
+# total-response cap.  Streaming keeps a productive generation alive
+# as long as the endpoint emits bytes before each read timeout.
 #
 # Each value is read on every ``_build_request_timeout`` call.  In
 # practice ``ThreadManager.model`` is a lazy property cached for the
@@ -289,6 +285,7 @@ def _build_openai_chat_model(
     api_key: str,
     enable_thinking: bool | None = None,
     request_timeout: httpx.Timeout | None = None,
+    streaming: bool = True,
 ) -> BaseChatModel:
     """Create a ``ChatOpenAI`` instance with the cache-buster callback.
 
@@ -316,6 +313,9 @@ def _build_openai_chat_model(
         "max_retries": 0,
         # Custom endpoints otherwise omit the usage that drives compaction.
         "stream_usage": True,
+        # LangChain aggregates streamed chunks back into one AIMessage for
+        # invoke/ainvoke, while HTTPX's read timeout remains an idle timeout.
+        "streaming": streaming,
         "timeout": request_timeout or _build_request_timeout(),
         "callbacks": [_ModelNotFoundCacheBuster()],
         "base_url": base_url,
@@ -373,10 +373,9 @@ def select_chat_model(
 def select_capture_model() -> BaseChatModel:
     """Build a short, tool-free model client for judged live captures.
 
-    Capture calls are raw synchronous model requests, unlike a normal Assist
-    graph call, so they must not inherit its generously long 600-second read
-    timeout.  The non-streaming endpoint is bounded by this response deadline;
-    the capture worker's queue hold is deliberately longer.
+    Capture calls keep non-streaming requests with a shorter read idle timeout.
+    Its default 90-second read limit is shorter than the worker's
+    separate 110-second wall cap and 120-second queue hold.
     """
     timeout_s = env_float("ASSIST_CAPTURE_LLM_RESPONSE_TIMEOUT_S", 90.0)
     if timeout_s <= 0 or timeout_s >= 120.0:
@@ -388,7 +387,7 @@ def select_capture_model() -> BaseChatModel:
     )
     model = _build_openai_chat_model(
         config.model, temperature=0.0, base_url=config.url, api_key=config.api_key,
-        enable_thinking=False, request_timeout=timeout,
+        enable_thinking=False, request_timeout=timeout, streaming=False,
     )
     model.profile = {"max_input_tokens": config.context_len}
     return model

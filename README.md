@@ -510,6 +510,13 @@ until `ASSIST_PHONE_API_TOKEN` is set in an ignored owner-only deployment
 environment file. Send that value only as `Authorization: Bearer <token>` from
 the phone; never pass it into a sandbox or commit it. The API exposes visible
 thread snapshots, durable idempotent sends, and bounded workspace snapshots.
+The current thread snapshot includes optional `thread.active_run` observation
+metadata: public Run ID, logical work ID and status. Running root work takes
+priority over pending follow-ups; pending, completed, child and awaiting-approval
+work is not advertised for a new live observer. This read-only discovery creates
+no Send receipt and exposes no Run input or private execution context. Existing
+Run event streams still follow one logical work ID and end at completion or an
+approval stop.
 `GET /threads/{tid}/approval` returns a complete pending proposal to send, archive
 or move email to Trash. `POST` to the same path requires `kind`, `token`, and `decision` (`approve`
 or `reject`); outbound email also accepts `decision="edit"` with `to`, `subject`
@@ -654,14 +661,27 @@ set together: `ASSIST_VOICE_SECRET`, `ASSIST_VOICE_PIN`,
 canonical E.164 values (for example, `+15555550100`). The PIN is at least six
 digits; it and the transport secret belong only in the ignored `.deploy.env`.
 
-### Urgent SMS notifications
+### Phone attention notifications
 
-The web-only `notify(message)` tool always marks the current thread urgent. When the
-host also configures `URGENT_SMS_RECIPIENT` and `URGENT_SMS_THREAD_URL_BASE` in its
-ignored environment file, it immediately texts that fixed recipient with the message
-and a link to the thread. These values intentionally do not use an `ASSIST_` prefix, so
-they are not passed into sandboxes. If the recipient is absent, Assist logs the missing
-configuration and keeps the in-app urgent behavior without sending SMS.
+`notify(message)` queues a phone-only alert with a meaningful single-line reason,
+at most 200 characters. Both owner turns and restricted incoming-SMS turns can
+request it; no other owner tools are exposed to an SMS sender. This tool never
+sends an SMS or uses an SMS fallback. Ordinary SMS send/reply approvals remain
+separate.
+
+One alert is coalesced per urgent thread until it is opened. Repeated calls update
+the reason without another buzz. The authenticated phone API exposes pending
+reasons and exact-cycle acknowledgments; acknowledgment does not clear the urgent
+badge. Opening the thread on phone or browser clears it through the existing
+read-receipt path. Empty legacy urgent markers remain badges without inventing a
+phone-alert reason.
+
+The phone consumes alerts through its existing UI service, saves a per-thread
+receipt and records the reason before requesting finite feedback. Lost ACKs and
+client restarts do not intentionally repeat the same attempt. Tool results say
+queued, pending or handled; none establishes physical vibration. The notification
+viewer records request/failure outcomes privately. A phone offline or asleep may
+not poll until connectivity resumes; this adds no modem or hardware wake channel.
 
 ### Email mailbox
 
@@ -1219,6 +1239,10 @@ source from mutable `origin` or clear user edits. See the historical procedures
 in `docs/2026-09-27-thread-git-compatibility.org` and
 `docs/2026-09-27-web-git-operator-recovery.org`.
 
+Host Git verification leaves interrupted `tmp_pack_` files with six alphanumeric
+suffix characters in place and admits them only as bounded, independent regular
+files. Commit integrity and publication verification remain unchanged.
+
 The phone uses its own Git credential and persistent checkout, not an Assist
 Git-object proxy. Sending a message neither commits nor pulls phone work.
 After a successful Run, it fetches and fast-forwards only a clean local
@@ -1357,6 +1381,7 @@ make status
 make logs
 ```
 
+Notification reasons are single-line Unicode text; control characters and line or paragraph separators are rejected. If clearing an urgent marker fails in storage, its active cycle remains visible and the phone open acknowledgment reports `cleared: false`; a later successful open clears it.
 
 ### Private SMS history
 

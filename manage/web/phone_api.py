@@ -114,13 +114,15 @@ class _BoundedSSEStreamingResponse(StreamingResponse):
         except TimeoutError:
             return
         finally:
-            close = getattr(self.body_iterator, "aclose", None)
-            if close is not None:
-                await close()
-            if self._on_close is not None:
-                result = self._on_close()
-                if inspect.isawaitable(result):
-                    await result
+            try:
+                close = getattr(self.body_iterator, "aclose", None)
+                if close is not None:
+                    await close()
+            finally:
+                if self._on_close is not None:
+                    result = self._on_close()
+                    if inspect.isawaitable(result):
+                        await result
 
 
 class _StrictModel(BaseModel):
@@ -572,6 +574,22 @@ def _thread_history(tid: str, before: str | None) -> tuple[list[dict], bool, boo
     return messages, has_more, True
 
 
+def _active_thread_run(tid: str) -> dict[str, str] | None:
+    """Select public observation identity, never a message or local Send receipt."""
+    try:
+        with threads._RUN_ADMISSION_LOCK:
+            _thread_dir(tid)
+            latest = {run.work_id: run for run in threads._runs().list(tid)
+                      if run.mode == "turn"}
+            selected = next((run for run in latest.values() if run.status == "running"), None)
+            if selected is not None:
+                return {"id": selected.id, "work_id": selected.work_id,
+                        "status": selected.status}
+    except RunStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail="run-store-unavailable") from error
+    return None
+
+
 def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
     _thread_dir(tid)
     notification_revision = state._notification_revision(tid)
@@ -649,6 +667,7 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
             "description": _stored_thread_title(tid),
             "harness": read_thread_engine(_thread_dir(tid)).name,
             "status": status.get("stage", "ready"),
+            "active_run": _active_thread_run(tid),
             "approval_count": approval_count,
             "approval_results": approval_results,
             "error": ("Thread failed; inspect Assist Web for details."
@@ -669,7 +688,8 @@ def _open_thread(tid: str, viewed_revision: str | None) -> dict[str, Any]:
 
     Snapshot/history reads remain outside the marker lock. A second identity
     check under that lock makes a concurrent mark survive the acknowledgement.
-    Empty legacy bodies retain their unconditional clear behavior.
+    Empty legacy bodies bypass revision checks. Storage failure retains the
+    active urgent cycle and returns cleared=false.
     """
     _thread_dir(tid)
     notification_revision = state._notification_revision(tid)
@@ -685,8 +705,8 @@ def _open_thread(tid: str, viewed_revision: str | None) -> dict[str, Any]:
                 and notification_revision != state._notification_revision(tid)):
             return {"thread_id": tid, "cleared": False}
         state._clear_unseen_response(tid)
-        state._clear_urgent(tid)
-    return {"thread_id": tid, "cleared": True}
+        cleared = state._clear_urgent(tid)
+    return {"thread_id": tid, "cleared": cleared}
 
 
 def _thread_repo_summary(tid: str, status: dict[str, Any]) -> tuple[str | None, str]:
@@ -1391,6 +1411,22 @@ def _workspace_archive(tid: str) -> bytes:
 router = APIRouter(prefix=PHONE_API_PREFIX, dependencies=[Depends(_authenticate)])
 
 
+@router.get('/notifications')
+async def phone_notifications() -> dict[str, Any]:
+    return await anyio.to_thread.run_sync(state._phone_notifications)
+
+
+@router.post('/notifications/{tid}/{notification_id}/ack')
+async def acknowledge_phone_notification(tid: str, notification_id: str) -> dict[str, Any]:
+    def acknowledge():
+        _thread_dir(tid)
+        try:
+            return state._ack_phone_notification(tid, notification_id)
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=503, detail='Phone notification storage unavailable') from error
+    return await anyio.to_thread.run_sync(acknowledge)
+
+
 @router.get("/threads")
 async def list_threads() -> dict[str, Any]:
     return await anyio.to_thread.run_sync(_list_threads)
@@ -1707,21 +1743,31 @@ async def run_events(tid: str, run_id: str, request: Request) -> StreamingRespon
                             detail="run-store-unavailable") from error
     if not _SSE_SLOTS.acquire(blocking=False):
         raise HTTPException(status_code=429, detail="Too many phone event streams")
-    observing = await anyio.to_thread.run_sync(
-        _open_observation, tid, status["work_id"])
-    journal_state = await anyio.to_thread.run_sync(
-        lambda: RUN_STREAMS.snapshot_if_changed(tid, status["work_id"], None))
-    journal_revision, journal = journal_state if journal_state is not None else (None, None)
+    observing = False
     released = False
 
     async def release_slot() -> None:
         nonlocal released
         if not released:
             released = True
-            if observing:
-                await anyio.to_thread.run_sync(
-                    RUN_STREAMS.close_observer, tid, status["work_id"])
-            _SSE_SLOTS.release()
+            # Disconnect cancels the stream scope; return its owned resources anyway.
+            with anyio.CancelScope(shield=True):
+                try:
+                    if observing:
+                        await anyio.to_thread.run_sync(
+                            RUN_STREAMS.close_observer, tid, status["work_id"])
+                finally:
+                    _SSE_SLOTS.release()
+
+    try:
+        observing = await anyio.to_thread.run_sync(
+            _open_observation, tid, status["work_id"])
+        journal_state = await anyio.to_thread.run_sync(
+            lambda: RUN_STREAMS.snapshot_if_changed(tid, status["work_id"], None))
+        journal_revision, journal = journal_state if journal_state is not None else (None, None)
+    except BaseException:
+        await release_slot()
+        raise
 
     async def events():
         nonlocal journal, journal_revision, status

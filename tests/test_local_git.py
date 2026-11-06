@@ -1,7 +1,10 @@
 """Real Git fixtures for the private host credential boundary."""
 
 from pathlib import Path
+import os
+import struct
 import subprocess
+import zlib
 
 import pytest
 
@@ -341,4 +344,75 @@ def test_maintenance_sidecars_share_object_byte_bound(repositories, monkeypatch)
         assert host.same_tip() == identity(str(server))
     (objects / "bitmap-ref-tips_dBGwLz").write_bytes(b"x" * 64)
     with pytest.raises(GitSyncError, match="Git objects exceed the host operation limit"):
+        LocalGit(str(source), str(server))
+
+
+def test_interrupted_index_pack_does_not_block_verified_publish(repositories):
+    source, server, _ = repositories
+    desired = commit(server, "server.txt", "preserved result\n")
+    size = 1024 * 1024
+    remaining = size >> 4
+    header = bytearray([0x80 | (3 << 4) | (size & 15)])
+    while remaining:
+        value = remaining & 127
+        remaining >>= 7
+        header.append(value | (128 if remaining else 0))
+    incomplete = (struct.pack("!4sII", b"PACK", 2, 1) + header
+                  + zlib.compress(os.urandom(size))[:262144])
+    writer = subprocess.Popen(["git", "index-pack", "--stdin"], cwd=server,
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE)
+    try:
+        writer.stdin.write(incomplete)
+        writer.stdin.flush()
+        temporary, = (server / ".git/objects/pack").glob("tmp_pack_*")
+        writer.kill()  # Only this synthetic, deliberately blocked Git process.
+        writer.wait(timeout=3)
+    finally:
+        if writer.poll() is None:
+            writer.kill()
+            writer.wait(timeout=3)
+        writer.stdin.close()
+        writer.stdout.close()
+        writer.stderr.close()
+    before = temporary.read_bytes()
+    assert before and temporary.stat().st_nlink == 1
+    with LocalGit(str(source), str(server)) as host:
+        assert host.same_tip() == ("assist/thread", desired)
+        assert host.publish("assist/thread", desired) == desired
+    assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == desired
+    assert temporary.read_bytes() == before
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "directory"])
+def test_temporary_pack_requires_independent_regular_storage(repositories, kind):
+    source, server, _ = repositories
+    pack = server / ".git/objects/pack"
+    target = pack / "tmp_pack_ABC123"
+    if kind == "directory":
+        target.mkdir()
+    else:
+        ordinary = pack / "tmp_pack_DEF456"
+        ordinary.write_bytes(b"inert")
+        if kind == "symlink":
+            target.symlink_to(ordinary)
+        else:
+            target.hardlink_to(ordinary)
+    with pytest.raises(GitSyncError, match="independent regular storage"):
+        LocalGit(str(source), str(server))
+
+
+def test_temporary_pack_name_and_object_budget_still_enforced(repositories, monkeypatch):
+    source, server, _ = repositories
+    pack = server / ".git/objects/pack"
+    bad = pack / "tmp_pack_unrecognized"
+    bad.write_bytes(b"inert")
+    with pytest.raises(GitSyncError, match="Unsupported Git object entry"):
+        LocalGit(str(source), str(server))
+    bad.unlink()
+    ordinary_bytes = sum(p.stat().st_size for p in (server / ".git/objects").rglob("*")
+                         if p.is_file())
+    monkeypatch.setattr(local_git, "_OBJECT_LIMIT", ordinary_bytes + 63)
+    (pack / "tmp_pack_ABC123").write_bytes(b"x" * 64)
+    with pytest.raises(GitSyncError, match="host operation limit"):
         LocalGit(str(source), str(server))
