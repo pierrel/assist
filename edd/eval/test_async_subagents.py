@@ -14,11 +14,12 @@ import os
 import re
 import stat
 import tempfile
+import time
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel
 
@@ -167,8 +168,9 @@ def _start(description: str, subagent_type: str) -> str:
     _TASK_TYPES[task_id] = subagent_type
     _TASK_STATUSES[task_id] = "pending"
     return (f"Started subagent. task_id: {task_id}. In the user reply, call "
-            "it a subagent or task, never background or async. Report this full ID "
-            "and return now; the result will trigger a follow-up.")
+            "it a subagent or task, never background or async. Report this full ID. "
+            "Do any independent work required by a loaded skill, then return "
+            "without waiting or polling; the result will trigger a follow-up.")
 
 
 class _TaskIdInput(BaseModel):
@@ -1441,8 +1443,8 @@ class TestPromptRewriteGuidanceSkills(TestAsyncSubagentSupervisor):
     """Candidate-only capability coverage for the two main guidance skills.
 
     These rows do not compare an outcome with the pre-skill profile: neither
-    capability exists there. They prove the new catalog's loaded procedures use
-    the existing lifecycle workers without adding a tool or performing research.
+    capability exists there. They prove the loaded procedures use the intended
+    context and research task lifecycles.
     """
 
     @staticmethod
@@ -1490,12 +1492,14 @@ class TestPromptRewriteGuidanceSkills(TestAsyncSubagentSupervisor):
     def test_research_skill_loads_then_dispatches_research(self):
         with patch("assist.tools.requests.get",
                    side_effect=AssertionError("capability probe must not fetch")) as get, \
+             patch("assist.tools._query_engine", return_value=([], False)) as query, \
              patch.dict(os.environ,
-                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1"},
+                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1",
+                         "ASSIST_SEARCH_URL": "http://searxng.test"},
                         clear=False):
             agent = self._candidate_agent()
             agent.message(
-                "What current national rail discount programs are available?")
+                "Which Amtrak discount programs are available in the United States today?")
 
         get.assert_not_called()
 
@@ -1514,6 +1518,10 @@ class TestPromptRewriteGuidanceSkills(TestAsyncSubagentSupervisor):
                          ["start_async_task"])
         self.assertEqual(
             batches[load_index + 1][0]["args"].get("subagent_type"), "research-agent")
+        self.assertTrue(any(call["name"] == "search_internet"
+                            for batch in batches[load_index + 2:]
+                            for call in batch), batches)
+        query.assert_called()
 
 
 class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
@@ -1540,27 +1548,227 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
     def _agent(self, **kwargs) -> AgentHarness:
         return super()._agent(spec=prompt_rewrite_web_main_spec(), **kwargs)
 
+    def test_existing_thread_research_gives_quick_answer(self):
+        """A later natural movie question loads research in an existing thread.
+
+        An ordinary greeting establishes real prior conversation history without
+        a loaded research skill. The next prompt gives only the desired outcome;
+        search is synthetic and no web-search HTTP request escapes.
+        """
+        prompt = "What horror movies are coming to theaters this weekend?"
+        prior = "Hi."
+
+        class SearchResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"results": [{
+                    "title": "The Lantern House - horror film theater release",
+                    "url": "https://cinema.example/releases/lantern-house",
+                    "content": "The Lantern House is a horror film opening in U.S. theaters Friday.",
+                }], "unresponsive_engines": []}
+
+        with patch.dict(os.environ, {
+                "ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1",
+                "ASSIST_SEARCH_URL": "http://searxng.test"}, clear=False), \
+             patch("assist.tools.requests.get", return_value=SearchResponse()) as get:
+            agent = self._agent()
+            prior_reply = agent.message(prior)
+            self.assertTrue(prior_reply.strip())
+            seeded = agent.all_messages()
+            state = agent.agent.get_state(
+                {"configurable": {"thread_id": agent.thread_id}}).values
+            self.assertNotIn("research", state.get("active_skills") or {})
+            self.assertNotIn("search_internet",
+                             state.get("loaded_skill_tools") or ())
+            self.assertFalse(any(call.get("name") == "load_skill"
+                                 and call.get("args", {}).get("name") == "research"
+                                 for message in seeded
+                                 if isinstance(message, AIMessage)
+                                 for call in (message.tool_calls or [])), seeded)
+            prior_call_ids = {call["id"] for message in seeded
+                              if isinstance(message, AIMessage)
+                              for call in (message.tool_calls or [])}
+            provider_saw_prior = []
+            generate = self.model._generate
+
+            def observe_provider_messages(messages, *args, **kwargs):
+                provider_saw_prior.append(
+                    any(isinstance(message, HumanMessage)
+                        and message.content == prior for message in messages)
+                    and any(isinstance(message, AIMessage)
+                            and message.content == prior_reply
+                            for message in messages)
+                    and any(isinstance(message, HumanMessage)
+                            and message.content == prompt
+                            for message in messages))
+                return generate(messages, *args, **kwargs)
+
+            with patch.object(self.model, "_generate",
+                              side_effect=observe_provider_messages):
+                quick_reply = agent.message(prompt)
+
+        self.assertTrue(any(provider_saw_prior),
+                        "The actual model request omitted the prior turn")
+        batches = [[call for call in message.tool_calls
+                    if call["id"] not in prior_call_ids]
+                   for message in agent.all_messages()
+                   if isinstance(message, AIMessage) and message.tool_calls]
+        batches = [batch for batch in batches if batch]
+        calls = [call for batch in batches for call in batch]
+        loads = [(i, call) for i, batch in enumerate(batches) for call in batch
+                 if call.get("name") == "load_skill"
+                 and call.get("args", {}).get("name") == "research"]
+        starts = [(i, call) for i, batch in enumerate(batches) for call in batch
+                  if call.get("name") == "start_async_task"
+                  and call.get("args", {}).get("subagent_type") == "research-agent"]
+        searches = [(i, call) for i, batch in enumerate(batches) for call in batch
+                    if call.get("name") == "search_internet"]
+        self.assertEqual(len(loads), 1, calls)
+        self.assertEqual(len(starts), 1, calls)
+        self.assertTrue(searches, calls)
+        self.assertLess(loads[0][0], starts[0][0], batches)
+        self.assertTrue(all(starts[0][0] < index for index, _ in searches), batches)
+        original_line = starts[0][1]["args"]["description"].splitlines()[0]
+        self.assertEqual(original_line.removeprefix("Original user request:")
+                         .strip().strip('"“”'), prompt)
+        self.assertRegex(searches[0][1]["args"]["query"].lower(),
+                         r"horror|scary|slasher")
+        self.assertIn("Lantern House", quick_reply)
+        self.assertIn("cinema.example/releases/lantern-house", quick_reply)
+        self.assertFalse(any(call.get("name") == "get_async_task_result"
+                             for call in calls), calls)
+        get.assert_called()
+
+    def _check_quick_answer_then_deeper_research_followup(
+            self, deep_price, comparison):
+        """A natural external question receives two honest, sourced replies.
+
+        Prompt: ``What does the HoloBeam 4K projector cost at Aster Electronics
+        today?`` Search returns a synthetic product result; the research task
+        remains pending until its trusted completion
+        wake supplies an aligned or corrected sourced price. The first reply
+        must follow an actual search call after the accepted task launch. The
+        second reply must identify its saved report and compare the deep result
+        with the earlier answer.
+        """
+        prompt = "What does the HoloBeam 4K projector cost at Aster Electronics today?"
+
+        class SearchResponse:
+            status_code = 200
+            text = ("<main>HoloBeam 4K projector: $899. "
+                    "Shipping and tax are calculated at checkout.</main>")
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"results": [{
+                    "title": "HoloBeam 4K - Aster Electronics",
+                    "url": "https://aster-electronics.example/products/holobeam-4k",
+                    "content": "HoloBeam 4K projector costs $899 today.",
+                }], "unresponsive_engines": []}
+
+        with patch.dict(os.environ, {
+                "ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1",
+                "ASSIST_SEARCH_URL": "http://searxng.test"}, clear=False), \
+             patch("assist.tools.requests.get", return_value=SearchResponse()) as get:
+            agent = self._agent()
+            started = time.monotonic()
+            quick_reply = agent.message(prompt)
+            quick_seconds = time.monotonic() - started
+            first_calls = self._calls(agent)
+            research = [call for call in first_calls
+                        if call.get("name") == "start_async_task"
+                        and call.get("args", {}).get("subagent_type") == "research-agent"]
+            self.assertEqual(len(research), 1, first_calls)
+            self.assertIn(prompt, research[0]["args"]["description"])
+            launch_at = first_calls.index(research[0])
+            search_at = next(index for index, call in enumerate(first_calls)
+                             if call.get("name") == "search_internet")
+            self.assertLess(launch_at, search_at, first_calls)
+            batches = [message.tool_calls for message in agent.all_messages()
+                       if isinstance(message, AIMessage) and message.tool_calls]
+            launch_batch = next(index for index, batch in enumerate(batches)
+                                if research[0] in batch)
+            search_batch = next(index for index, batch in enumerate(batches)
+                                if any(call.get("name") == "search_internet"
+                                       for call in batch))
+            self.assertLess(launch_batch, search_batch, batches)
+            self.assertFalse(any(call.get("name") == "get_async_task_result"
+                                 for call in first_calls), first_calls)
+            self.assertRegex(quick_reply, r"(?is)\$899")
+            self.assertIn("aster-electronics.example", quick_reply.lower())
+            self.assertRegex(quick_reply, r"(?i)(research|subagent|deeper)")
+            get.assert_called()
+
+            task_id = _task_id_for_call(research[0])
+            _TASK_RESULTS[task_id] = (
+                f"Aster Electronics' current product page lists {deep_price} "
+                "for the HoloBeam 4K. The earlier indexed $899 search snippet "
+                "is stale if the current price differs. "
+                "Shipping and tax are additional and calculated at checkout. "
+                "Source: https://aster-electronics.example/products/holobeam-4k"
+            )
+            (Path(_TASK_ROOT) / "references").mkdir()
+            before_wake = len(first_calls)
+            followup = agent.message(_completion_wake(task_id, "success"))
+            full_seconds = time.monotonic() - started
+
+        print(f"quick_reply_s={quick_seconds:.1f} full_followup_s={full_seconds:.1f}")
+
+        wake_calls = self._calls(agent)[before_wake:]
+        self.assertTrue(any(call.get("name") == "get_async_task_result"
+                            and call.get("args", {}).get("task_id") == task_id
+                            for call in wake_calls), wake_calls)
+        self.assertFalse(any(call.get("name") in {"search_internet", "read_url"}
+                             for call in wake_calls), wake_calls)
+        self.assertIn(deep_price, followup)
+        self.assertRegex(followup, comparison)
+        self.assertRegex(followup, r"(?i)shipping|tax")
+        reports = list((Path(_TASK_ROOT) / "references").glob("*.md"))
+        self.assertEqual(len(reports), 1,
+                         f"reports={reports}; follow-up={followup!r}; calls={wake_calls}")
+        self.assertIn(reports[0].name, followup)
+        report = reports[0].read_text()
+        self.assertIn(deep_price, report)
+        self.assertRegex(report, r"(?i)shipping|tax")
+        self.assertIn("https://aster-electronics.example/products/holobeam-4k", report)
+
+    def test_quick_answer_then_deeper_research_followup_aligned(self):
+        self._check_quick_answer_then_deeper_research_followup(
+            "$899", r"(?i)(agree|confirm|consistent|same)")
+
+    def test_quick_answer_then_deeper_research_followup_corrected(self):
+        self._check_quick_answer_then_deeper_research_followup(
+            "$949", r"(?i)(contradict|correct|wrong|changed|outdated|stale)")
+
     def test_research_launch_returns_without_polling(self):
-        """A checked local fact can start research without polling it.
+        """A checked local fact starts research and one independent quick search.
 
         Prompt sequence:
         1. ``I need a compatible charging cable for my cargo e-bike. Check my
            notes for the exact model, then find the right one.``
         2. Trusted context completion naming the bike model.
 
-        The first turn grounds the request. The completion turn starts the new
-        research task, then returns for its completion wake without polling or
-        doing other work.
+        The first turn grounds the request. The context completion launches the
+        research task with the original request and checked model, then searches
+        independently without polling the child.
         """
         prompt = (
             "I need a compatible charging cable for my cargo e-bike. Check my "
             "notes for the exact model, then find the right one."
         )
         with patch.dict(os.environ,
-                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1"},
+                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1",
+                         "ASSIST_SEARCH_URL": "http://searxng.test"},
                         clear=False), \
              patch("assist.tools.requests.get",
-                   side_effect=AssertionError("async lifecycle eval must not fetch")) as get:
+                   side_effect=AssertionError("async lifecycle eval must not fetch")) as get, \
+             patch("assist.tools._query_engine", return_value=([], False)) as query:
             agent = self._agent()
             agent.message(prompt)
             first_calls = self._calls(agent)
@@ -1590,9 +1798,15 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
         self.assertTrue(skill_was_loaded(agent, "research"), wake_calls)
         research_index = wake_calls.index(research_tasks[0])
         after_research_launch = wake_calls[research_index + 1:]
-        self.assertEqual(after_research_launch, [])
+        self.assertIn(prompt, research_tasks[0]["args"]["description"])
+        self.assertRegex(research_tasks[0]["args"]["description"],
+                         r"(?i)yuba\s+kombi\s+e5")
+        self.assertTrue(any(call.get("name") == "search_internet"
+                            for call in after_research_launch), wake_calls)
+        self.assertFalse(any(call.get("name") == "get_async_task_result"
+                             for call in after_research_launch), wake_calls)
+        query.assert_called()
         self.assertNotRegex(reply, r"I kept making the same `get_async_task_result` call")
-        self.assertNotRegex(reply, r"(?i)\bcompatible cable\b")
 
     def test_pending_context_status_checks_once_then_returns(self):
         """A natural status question observes a pending task once.
@@ -1639,38 +1853,21 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
         self.assertEqual(status_calls[0].get("args", {}).get("task_id"), context_id)
         self.assertRegex(reply, r"(?i)(pending|running|still|not.*(?:return|finish))")
 
-    def test_answers_current_product_price(self):
-        candidate = os.environ.get("ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS") == "1"
-        with patch("assist.tools.requests.get",
-                   side_effect=AssertionError("research eval must not fetch")) as get:
-            agent = self._agent()
-            agent.message(
-                "What does the HoloBeam 4K projector cost at Aster Electronics today?")
-            starts = [call for call in self._calls(agent)
-                      if call.get("name") == "start_async_task"]
-            research = next(call for call in reversed(starts)
-                            if call.get("args", {}).get(
-                                "subagent_type") == "research-agent")
-            if candidate:
-                self.assertTrue(skill_was_loaded(agent, "research"))
-            self.assertFalse(any(call.get("args", {}).get("subagent_type") == "delegate-agent"
-                                 for call in starts), starts)
-            task_id = _task_id_for_call(research)
-            reply = agent.message(_completion_wake(task_id, "success"))
-        get.assert_not_called()
-        self.assertTrue(any(
-            call.get("name") == "get_async_task_result"
-            and call.get("args", {}).get("task_id") == task_id
-            for call in self._calls(agent)), self._calls(agent))
-        self.assertRegex(reply, r"(?is)HoloBeam.*\$?899")
-
     def test_dispatches_research_for_vague_media_identification(self):
-        """Sparse, externally verifiable cultural clues start research."""
+        """Sparse cultural clues receive a tentative search-backed match."""
+        hit = {
+            "title": "The Wind Harbor (2019) - Series Guide",
+            "url": "https://series-guide.example/the-wind-harbor",
+            "content": ("The Wind Harbor is a 2019 animated children's series "
+                        "with striking hand-painted art and adult fans."),
+        }
         with patch.dict(os.environ,
-                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1"},
+                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1",
+                         "ASSIST_SEARCH_URL": "http://searxng.test"},
                         clear=False), \
              patch("assist.tools.requests.get",
                    side_effect=AssertionError("research eval must not fetch")) as get, \
+             patch("assist.tools._query_engine", return_value=([hit], False)) as query, \
              stub_research_subagent(_VAGUE_ANIMATION_RESEARCH_RESULT):
             agent = self._agent()
             initial_reply = agent.message(
@@ -1688,50 +1885,12 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
                 f"Calls: {self._calls(agent)}; reply: {initial_reply!r}",
             )
             self.assertTrue(skill_was_loaded(agent, "research"), self._calls(agent))
-            self.assertNotRegex(initial_reply, r"(?i)\bWind Harbor\b")
+            self.assertRegex(initial_reply, r"(?i)\bWind Harbor\b")
+            self.assertTrue(any(call.get("name") == "search_internet"
+                                for call in self._calls(agent)), self._calls(agent))
 
         get.assert_not_called()
-
-    def test_uses_direct_research_findings_for_current_product_price(self):
-        """Current product price → checked direct findings → grounded answer.
-
-        Prompt: ``What does the HoloBeam 4K projector cost at Aster Electronics
-        today?`` The candidate must load ``research``, dispatch one
-        research task without a report-storage instruction, check its completion
-        wake, and answer from the credible canned direct findings.
-        """
-        with patch.dict(os.environ,
-                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1"},
-                        clear=False), \
-             patch("assist.tools.requests.get",
-                   side_effect=AssertionError("research eval must not fetch")) as get:
-            agent = self._agent()
-            initial_reply = agent.message(
-                "What does the HoloBeam 4K projector cost at Aster Electronics today?")
-            research_tasks = [
-                call for call in self._calls(agent)
-                if call.get("name") == "start_async_task"
-                and call.get("args", {}).get("subagent_type") == "research-agent"
-            ]
-            self.assertEqual(len(research_tasks), 1, self._calls(agent))
-            research = research_tasks[0]
-            self.assertTrue(skill_was_loaded(agent, "research"), self._calls(agent))
-            self.assertNotRegex(initial_reply, r"(?is)HoloBeam.*\$?899")
-            self.assertNotRegex(
-                research["args"]["description"],
-                r"(?is)\b(?:save|store|references?)\b|\.md\b",
-            )
-            task_id = _task_id_for_call(research)
-            _TASK_RESULTS[task_id] = _PROJECTOR_RESEARCH_RESULT
-            before_wake = len(self._calls(agent))
-            reply = agent.message(_completion_wake(task_id, "success"))
-
-        get.assert_not_called()
-        self.assertTrue(any(
-            call.get("name") == "get_async_task_result"
-            and call.get("args", {}).get("task_id") == task_id
-            for call in self._calls(agent)[before_wake:]), self._calls(agent))
-        self.assertRegex(reply, r"(?is)HoloBeam.*\$?899")
+        query.assert_called()
 
     def test_local_dining_help_does_not_research(self):
         """A local dining preference is not an external-fact research request."""

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import http.client
 import hashlib
 import json
 import logging
@@ -15,7 +16,8 @@ import time
 import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from types import SimpleNamespace
+from urllib.parse import urlencode, urlsplit
 from uuid import uuid4
 
 from assist.browser import authority
@@ -173,22 +175,28 @@ def _sandbox_generations(threads_root: str,
         raise ValueError("invalid browser thread ID")
     work_dir = (os.path.join(root, thread_id, "domain")
                 if thread_id is not None else None)
-    output = _bounded_cli(
-        ["docker", "ps", "--all", "--no-trunc",
-         "--filter", "label=assist.sandbox=true", "--format", "{{.ID}}"],
-        limit=65536, timeout=5)
-    generations = output.decode("ascii").splitlines()
-    if not generations:
-        return set()
-    mounts = _bounded_cli(
-        ["docker", "inspect", "--format", "{{json .Mounts}}", *generations],
-        limit=262144, timeout=5).decode("utf-8").splitlines()
-    if len(mounts) != len(generations):
-        raise BrowserUnavailable("sandbox generation scan is incomplete")
+    # One Engine list contains both IDs and mounts. Keep acquisition inside the
+    # existing byte/deadline-bounded CLI transport; a second inspect can race
+    # container auto-removal. The wire cap includes HTTP headers and framing.
+    query = urlencode({"all": "1", "filters": json.dumps({"label": ["assist.sandbox=true"]})})
+    request = (f"GET /containers/json?{query} HTTP/1.1\r\n"
+               "Host: docker\r\nConnection: close\r\nAccept-Encoding: identity\r\n\r\n").encode("ascii")
+    try:
+        wire = _bounded_cli(["docker", "system", "dial-stdio"], payload=request,
+                            limit=262144, timeout=5)
+        with http.client.HTTPResponse(SimpleNamespace(makefile=lambda _mode: io.BytesIO(wire))) as response:
+            response.begin()
+            if response.status != 200:
+                raise ValueError("Docker snapshot request failed")
+            snapshot = json.loads(response.read())
+        if not isinstance(snapshot, list):
+            raise ValueError("invalid container list")
+        mounts = [(entry["Id"], entry["Mounts"]) for entry in snapshot]
+    except Exception as error:
+        raise BrowserUnavailable("sandbox generation scan is unavailable") from error
     found = set()
-    for generation, raw in zip(generations, mounts, strict=True):
-        entries = json.loads(raw)
-        if not isinstance(entries, list):
+    for generation, entries in mounts:
+        if not isinstance(generation, str) or not isinstance(entries, list):
             raise BrowserUnavailable("sandbox generation scan is malformed")
         if any(entry.get("Destination") == "/workspace"
                and (os.path.realpath(entry.get("Source", "")) == work_dir

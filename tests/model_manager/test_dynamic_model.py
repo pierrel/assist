@@ -443,9 +443,11 @@ class TestSelectAssistantModel(TestCase):
 
                 def respond(request):
                     bodies.append(json.loads(request.content))
-                    return httpx.Response(200, json={"id": "test", "object": "chat.completion",
+                    chunk = {"id": "test", "object": "chat.completion.chunk",
                         "created": 0, "model": name, "choices": [{"index": 0,
-                        "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]})
+                        "delta": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]}
+                    return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                        content=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
 
                 with httpx.Client(transport=httpx.MockTransport(respond)) as client:
                     root = model.root_client.with_options(http_client=client)
@@ -491,6 +493,13 @@ class TestRequestTimeoutAndRetries(TestCase):
         with patch.dict("os.environ", {"ASSIST_MODEL_URL": "http://x/v1"}):
             llm = model_manager.select_chat_model(0.1)
         self.assertEqual(llm.max_retries, 0)
+
+    def test_capture_keeps_its_nonstreaming_read_timeout(self):
+        config = OpenAIConfig("http://test/v1", "fixture", "EMPTY", 32768)
+        with patch.object(model_manager, "_get_config", return_value=config):
+            model = model_manager.select_capture_model()
+        self.assertFalse(model.streaming)
+        self.assertEqual(model.request_timeout.read, 90.0)
 
     def test_env_overrides_apply_to_each_phase(self):
         with patch.dict("os.environ", {

@@ -39,7 +39,7 @@ class SubscriptionStore(PerThreadJsonStore[Subscription]):
         return Subscription.from_dict(d)
 
     def route(self, sender: str, *, occurred_at: str | None = None) -> Subscription | None:
-        """The subscription that handles a message from ``sender``: the FIRST match by
+        """The subscription handling a message from ``sender``: the FIRST match by
         creation order (earliest ``created_at``) across all threads. When an arrival
         time is supplied, only subscriptions created strictly before it qualify.
         Missing/invalid subscription times cannot establish eligibility. Returns None when

@@ -94,7 +94,8 @@ def build_thread_repo(tmp: str, branch: str) -> str:
 
 @contextmanager
 def stub_research_subagent(findings="(stubbed research findings)", *,
-                           report_dir: str | None = None):
+                           report_dir: str | None = None,
+                           task_result_suffix: str = ""):
     """Patch ``create_research_agent`` so the research subagent returns ``findings``
     immediately — no real search, so the eval is rate-limit-free (no SearXNG burst)
     and deterministic (canned findings vs stochastic search).
@@ -106,7 +107,9 @@ def stub_research_subagent(findings="(stubbed research findings)", *,
     context deterministically. When ``report_dir`` is supplied, the stub also
     writes the bare Markdown filename requested in the specialist brief there
     and returns its `/references/` path, matching the synchronous research
-    specialist's report contract. See ``AGENTS.md`` testing guideline #5 and
+    specialist's report contract. ``task_result_suffix`` appends synthetic text
+    to the returned task message without changing the saved report, allowing
+    separate coverage of those untrusted inputs. See ``AGENTS.md`` testing guideline #5 and
     ``docs/2026-07-06-research-eval-mocking.org``.  ALWAYS use this in an eval that
     triggers research but is not itself testing research/search behavior.
 
@@ -140,7 +143,7 @@ def stub_research_subagent(findings="(stubbed research findings)", *,
                 with open(report_path, "w", encoding="utf-8") as report:
                     report.write(findings)
                 content = f"Saved research report to /references/{filename}."
-            return {"messages": messages + [AIMessage(content=content)]}
+            return {"messages": messages + [AIMessage(content=content + task_result_suffix)]}
         return RunnableLambda(_result)
     with patch("assist.agent.create_research_agent", _stub):
         yield

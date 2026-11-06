@@ -30,7 +30,7 @@ where reliability is harder than with frontier APIs.
   skills are progressively-disclosed capability bundles. Assist-owned skills
   live under `assist/skills/<name>/SKILL.md`; supervisor-only workflows live
   under `assist/main_skills/`; ordinary-main grounding and occasional private-state
-  maintenance guidance, including the main agent's direct-results research
+  maintenance guidance, including research
   workflow, live under `assist/main_guidance_skills/`; the delegate's
   report-backed research workflow lives under `assist/caller_skills/`; domain skills use
   `.claude/skills/`. The ordinary web, CLI, and Assist voice-call paths receive
@@ -92,7 +92,10 @@ where reliability is harder than with frontier APIs.
   needs a blocked sandbox host pauses for the thread's normal exact-host
   approval card and resumes only after your decision. A delegate is the same
   Assist construction with synchronous specialists but no self-delegation or
-  web-supervisor tools.
+  web-supervisor tools. On an ordinary web research question, the main agent
+  starts the research task and makes a quick search for a provisional sourced
+  answer. When the task finishes with usable findings, it follows up with a
+  fuller answer and a report in `references/`.
 
 - **Resilient context handling.** Large tool results are evicted to
   disk before overflowing context, context-overflow errors are caught
@@ -104,7 +107,14 @@ where reliability is harder than with frontier APIs.
 
 - **Loop and stall guards.** Repeating tool calls and empty model
   responses are detected and recovered automatically — keeps small
-  models from getting stuck in degenerate states.
+  models from getting stuck in degenerate states. Near the main/delegate
+  execution limit, the agent receives one trusted warning to finish a clear
+  path or report completed work, unfinished work, and blockers honestly. A
+  50-superstep finalization window extends the original 500-superstep budget;
+  these are graph steps, not model calls. The hard stop remains terminal if
+  the agent does not finish. Checkpoint continuations retain the warning;
+  a new turn resets it. Each invocation retains LangGraph's existing budget
+  semantics, including a fresh budget when resuming a checkpoint.
 
 - **Git domain integration.** Each thread works in its own git branch
   of a configured "domain" repo (your life repo, your work repo, etc.)
@@ -139,6 +149,9 @@ Snapshot reads and background probes do not clear notifications.
   timezone takes precedence. Schedule listings include the stored timezone so
   a later replacement can preserve it; Assist asks rather than guessing when
   no timezone is known.
+
+- **Thread descriptions.** The ordinary web assistant can update the current
+  thread's description when asked, and the change is saved with the thread.
 
 - **Pi web preview.** A new web thread can explicitly select a bounded Pi
   preview; Deep Agents remains the default. Pi threads are visibly labelled,
@@ -497,6 +510,13 @@ until `ASSIST_PHONE_API_TOKEN` is set in an ignored owner-only deployment
 environment file. Send that value only as `Authorization: Bearer <token>` from
 the phone; never pass it into a sandbox or commit it. The API exposes visible
 thread snapshots, durable idempotent sends, and bounded workspace snapshots.
+The current thread snapshot includes optional `thread.active_run` observation
+metadata: public Run ID, logical work ID and status. Running root work takes
+priority over pending follow-ups; pending, completed, child and awaiting-approval
+work is not advertised for a new live observer. This read-only discovery creates
+no Send receipt and exposes no Run input or private execution context. Existing
+Run event streams still follow one logical work ID and end at completion or an
+approval stop.
 `GET /threads/{tid}/approval` returns a complete pending proposal to send, archive
 or move email to Trash. `POST` to the same path requires `kind`, `token`, and `decision` (`approve`
 or `reject`); outbound email also accepts `decision="edit"` with `to`, `subject`
@@ -641,14 +661,27 @@ set together: `ASSIST_VOICE_SECRET`, `ASSIST_VOICE_PIN`,
 canonical E.164 values (for example, `+15555550100`). The PIN is at least six
 digits; it and the transport secret belong only in the ignored `.deploy.env`.
 
-### Urgent SMS notifications
+### Phone attention notifications
 
-The web-only `notify(message)` tool always marks the current thread urgent. When the
-host also configures `URGENT_SMS_RECIPIENT` and `URGENT_SMS_THREAD_URL_BASE` in its
-ignored environment file, it immediately texts that fixed recipient with the message
-and a link to the thread. These values intentionally do not use an `ASSIST_` prefix, so
-they are not passed into sandboxes. If the recipient is absent, Assist logs the missing
-configuration and keeps the in-app urgent behavior without sending SMS.
+`notify(message)` queues a phone-only alert with a meaningful single-line reason,
+at most 200 characters. Both owner turns and restricted incoming-SMS turns can
+request it; no other owner tools are exposed to an SMS sender. This tool never
+sends an SMS or uses an SMS fallback. Ordinary SMS send/reply approvals remain
+separate.
+
+One alert is coalesced per urgent thread until it is opened. Repeated calls update
+the reason without another buzz. The authenticated phone API exposes pending
+reasons and exact-cycle acknowledgments; acknowledgment does not clear the urgent
+badge. Opening the thread on phone or browser clears it through the existing
+read-receipt path. Empty legacy urgent markers remain badges without inventing a
+phone-alert reason.
+
+The phone consumes alerts through its existing UI service, saves a per-thread
+receipt and records the reason before requesting finite feedback. Lost ACKs and
+client restarts do not intentionally repeat the same attempt. Tool results say
+queued, pending or handled; none establishes physical vibration. The notification
+viewer records request/failure outcomes privately. A phone offline or asleep may
+not poll until connectivity resumes; this adds no modem or hardware wake channel.
 
 ### Email mailbox
 
@@ -1206,6 +1239,10 @@ source from mutable `origin` or clear user edits. See the historical procedures
 in `docs/2026-09-27-thread-git-compatibility.org` and
 `docs/2026-09-27-web-git-operator-recovery.org`.
 
+Host Git verification leaves interrupted `tmp_pack_` files with six alphanumeric
+suffix characters in place and admits them only as bounded, independent regular
+files. Commit integrity and publication verification remain unchanged.
+
 The phone uses its own Git credential and persistent checkout, not an Assist
 Git-object proxy. Sending a message neither commits nor pulls phone work.
 After a successful Run, it fetches and fast-forwards only a clean local
@@ -1344,6 +1381,7 @@ make status
 make logs
 ```
 
+Notification reasons are single-line Unicode text; control characters and line or paragraph separators are rejected. If clearing an urgent marker fails in storage, its active cycle remains visible and the phone open acknowledgment reports `cleared: false`; a later successful open clears it.
 
 ### Private SMS history
 
@@ -1357,12 +1395,14 @@ changing the host URL. Inbound ingestion and archive tools can be deployed first
 The normal web profile exposes the `sms-history` skill and bounded search/read
 tools. Untrusted SMS-triage runs do not receive those tools.
 
-Incoming subscription routing uses the original durable phone observation time:
-only subscriptions created strictly before it can match. Missing arrival times
+Incoming subscription routing uses the original timezone-aware modem SMS source timestamp:
+only subscriptions created strictly before it can match. The inbound endpoint
+normalizes malformed or timezone-naive incoming metadata to missing source time
+before both routing and storage; recording time never authorizes a Run. Missing arrival times
 and explicit `archive_only` bootstrap receipts are archived without creating a
 Run. Among eligible matches the earliest-created subscription still wins. Stable
 receipt IDs keep archive/Run admission idempotent. Deploy this host support before
-the matching phone retained-inventory transport; never replace observation time
+the matching phone source-identity transport; never replace source time
 with a history rediscovery time. Existing archived handling decisions are kept.
 
 Ordinary web turns also expose `send_sms` and the `send-sms` skill. A request to
@@ -1371,19 +1411,20 @@ approval. It does not send or suspend the turn. The number must come from the
 user, a trusted contact file, or the correspondent of an archived message.
 Open the thread on the phone and choose Review. The existing SMS screen requires
 two physical taps before the fixed root helper can send. Rejection is retained
-until acknowledged; uncertain attempts must not be retried with a new identity.
+until acknowledged. Unknown is terminal; do not automatically retry. An explicit
+new user request can prepare a new attempt requiring fresh phone confirmation.
 Drafts live beside thread status, outside its Git workspace. The approval list
 shows active drafts and up to ten recent results within its shared byte budget;
 durable identities remain available
-for replay and receipt reconciliation. Local phone SMS remains usable offline.
-Phone snapshots reconcile only the active drafts and ten recent saved results,
-sharing that projection for counts and result visibility. A known phone outcome
-cannot regress to an older unknown receipt. Draft creation validates the private
-archive before returning a pending result.
-Staging reconciles only pending/approved drafts for capacity; unrelated uncertain
-history does not trigger archive reads. Matching settled replays retain their
-saved result even if the archive is unavailable. Unresolved replay errors report
-unavailable status without claiming the earlier message was not sent.
+for duplicate-confirmation protection and history. Local phone SMS remains usable offline.
+Phone snapshots project only saved draft states. Only an explicit authenticated
+phone result finishes an approved draft; the archive's write-before-effect
+unknown is not a completion signal. Unknown stays terminal without background
+settlement. A lost callback can leave an approved draft until the existing
+on-phone Review reads its exact journal identity and reports the outcome.
+Draft creation validates private archive configuration before returning a new
+pending result; replaying a saved draft does not require archive availability.
+No archive polling or staging-time reconciliation is used for draft status.
 The shared phone approval response drops old SMS result cards first when its
 combined byte budget is exceeded, without deleting their durable records. Active
 SMS drafts keep complete recipient/text previews. If necessary, the existing
@@ -1392,10 +1433,17 @@ never silently truncated. Other combinations that still exceed the limit retain
 the existing explicit size error.
 
 All received texts are archived even when no subscription matches. Matching
-messages receive a durable Run before acknowledgment. Outgoing receipts retain
+messages receive a durable Run before acknowledgment. If a frozen destination
+has since been deleted, the archived receipt is acknowledged without rerouting
+or recreating work. Storage errors and invalid destination entries remain
+unavailable. Frozen thread/prompt routing
+bridges archive and Run stores; normal dispatch-key deduplication and Run lifecycle
+own execution, without archive run-id/admitted mirrors. See
+[the ingestion/Run boundary design](docs/2026-10-28-sms-ingestion-run-boundary.org). Outgoing receipts retain
 `sent` (ModemManager accepted), `not_sent` or `unknown`; `sent` does not prove
-carrier delivery. A timeout is unknown and must not be retried as another send.
-The phone retries only its journal handoff and keeps independent identical texts.
+carrier delivery. A timeout is unknown and is not automatically retried.
+The phone retries only its journal handoff; equal sender/source-time/content
+observations deliberately collapse under the accepted identity policy.
 Archive files are never automatically copied into source/thread Git workspaces.
 Explicit requests to quote or export SMS follow the existing privacy rules.
 

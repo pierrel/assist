@@ -159,12 +159,27 @@ class TestSpecWiring(_CreateAgentHarness):
         """Async lifecycle tools alone do not select the web prompt contract."""
         from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
         from assist.middleware.prompt_composition import PromptCompositionMiddleware
+        from assist.middleware.search_runaway_breaker import SearchRunawayBreakerMiddleware
+        from assist.middleware.search_unavailable_breaker import SearchUnavailableBreakerMiddleware
         from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
+        from assist.tools import search_internet
 
         legacy = self._build(spec=AgentSpec(
             async_subagent_tools=_async_task_tools))
         web_main = self._build(spec=AgentSpec(
             async_subagent_tools=_async_task_tools, web_main=True))
+        web_research = self._build(spec=AgentSpec(
+            async_subagent_tools=_async_task_tools, web_main=True,
+            main_guidance_skills=True))
+
+        assert search_internet not in legacy["tools"]
+        assert search_internet not in web_main["tools"]
+        assert search_internet in web_research["tools"]
+        for guard in (SearchUnavailableBreakerMiddleware,
+                      SearchRunawayBreakerMiddleware):
+            assert not any(isinstance(item, guard) for item in legacy["middleware"])
+            assert not any(isinstance(item, guard) for item in web_main["middleware"])
+            assert any(isinstance(item, guard) for item in web_research["middleware"])
 
         assert not any(isinstance(item, PromptCompositionMiddleware)
                        for item in legacy["middleware"])
@@ -214,8 +229,9 @@ class TestSpecWiring(_CreateAgentHarness):
         research = load_skill(candidate_skills, "research")
         assert "# Research workflow" in research
         normalized_research = " ".join(research.split())
-        assert "returns direct grounded findings" in normalized_research
-        assert "Save the final Markdown report" not in normalized_research
+        assert "start one `research-agent` task" in normalized_research
+        assert "one quick search" in normalized_research
+        assert "`/user/references/<task_id>.md`" in normalized_research
 
     def test_explicit_empty_async_tools_disable_all_delegation(self):
         kwargs = self._build(spec=AgentSpec(async_subagent_tools=()))

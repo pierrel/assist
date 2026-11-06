@@ -144,6 +144,28 @@ def test_tool_node_injects_runtime_when_model_calls_start(protocol):
     assert "task_id: sub-" in result["messages"][-1].content
 
 
+def test_invalid_tool_calls_return_errors_to_agent(protocol):
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", ToolNode(async_task_tools))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+
+    with async_task_context(AsyncTaskContext("parent", "parent-run", "work")):
+        result = graph.compile().invoke({"messages": [AIMessage(
+            content="", tool_calls=[
+                {"name": "update_async_task", "args": {"task_id": "sub-unknown"},
+                 "id": "missing-instructions", "type": "tool_call"},
+                {"name": "unknown_tool", "args": {}, "id": "unknown-tool",
+                 "type": "tool_call"},
+            ])]}, {"configurable": {"thread_id": "parent"}})
+
+    by_id = {message.tool_call_id: message for message in result["messages"][1:]}
+    assert set(by_id) == {"missing-instructions", "unknown-tool"}
+    assert all(message.status == "error" for message in by_id.values())
+    assert "instructions" in by_id["missing-instructions"].content
+    assert "unknown_tool" in by_id["unknown-tool"].content
+
+
 def test_status_result_list_update_and_cancel_are_parent_scoped(protocol):
     _, tasks = protocol
     context = AsyncTaskContext("parent", "parent-run", "parent-work")
@@ -173,6 +195,10 @@ def test_status_result_list_update_and_cancel_are_parent_scoped(protocol):
             "get_async_task_status"].func(task_id, _runtime("foreign"))
         assert "not found in this conversation" in TOOLS[
             "get_async_task_result"].func(task_id, _runtime("foreign-result"))
+        assert "not found in this conversation" in TOOLS[
+            "update_async_task"].func(task_id, "noop", _runtime("foreign-update"))
+        assert "not found in this conversation" in TOOLS[
+            "cancel_async_task"].func(task_id, _runtime("foreign-cancel"))
 
 
 def test_terminal_result_is_separate_from_status(protocol):

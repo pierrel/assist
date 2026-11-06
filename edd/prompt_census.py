@@ -1246,6 +1246,7 @@ def _web_toolset(root: Path, *, full: bool) -> list:
     from assist.gmail import gmail_tools
     from assist.events.notify import notify_tools
     from assist.events.quiet import quiet_tools
+    from assist.events.thread_description import thread_description_tools
     from assist.events.store import SubscriptionStore
     from assist.events.tools import subscription_tools
     from assist.frequency import FrequencyDecisionStore, frequency_tools
@@ -1258,8 +1259,9 @@ def _web_toolset(root: Path, *, full: bool) -> list:
         schedule_tools(ScheduleStore(str(root)))
         + subscription_tools(SubscriptionStore(str(root)))
         + sms_archive_tools() + sms_sending_tools(SmsOutbox(str(root)))
-        + notify_tools(lambda _tid: None)
+        + notify_tools(lambda _tid, _reason: "queued")
         + quiet_tools(lambda _tid, _run_id: False)
+        + thread_description_tools(lambda _tid, _description: None)
         + email_tools() + gmail_tools()
         + [get_location]
         + frequency_tools(FrequencyDecisionStore(str(root)))
@@ -1556,8 +1558,9 @@ def _expected_async_task_id() -> str:
 def _expected_async_launch() -> str:
     task_id = _expected_async_task_id()
     return (f"Started subagent. task_id: {task_id}. In the user reply, call it a "
-            "subagent or task, never background or async. Report this full ID and "
-            "return now; the result will trigger a follow-up.")
+            "subagent or task, never background or async. Report this full ID. "
+            "Do any independent work required by a loaded skill, then return "
+            "without waiting or polling; the result will trigger a follow-up.")
 
 
 def _source_manifest(trace: CensusTrace) -> list[dict[str, Any]]:
@@ -1714,6 +1717,7 @@ _TOOL_ORIGINS = {
     "email_delete": "assist.gmail",
     "start_async_task": "assist.async_subagents",
     "task": "deepagents.middleware.subagents",
+    "update_thread_description": "assist.events.thread_description",
     "travel": "assist.tools",
     "update_async_task": "assist.async_subagents",
     "write_file": "deepagents.middleware.filesystem",
@@ -1722,6 +1726,8 @@ _TOOL_ORIGINS = {
 
 _DECLARED_TEMPLATE_RENDER_HASHES = {
     "assist/templates/deepagents/assist_core.md.j2": {
+        "38df01b275f021a2c4a9b1ec2fbcb0a3647e0d17a6f178880357c4dc2be32dde",
+        "57ef7e208aa13a838514651c329a3a2dcdcee0d1f8e92d85b61827c6e126b054",
         "b1c0d98c75c412efb574a32146abc3f06c78e60b1344bff5d589350423bf9285",
         "a225e7ff34ceea8981ffacfa40fc6424d94739bcb8bfcbd231245e7036a1975a",
         "c2bf45bb658da376155de7bcd91a6f36dea61a6dd73999721513cd4b62c91527",
@@ -1991,7 +1997,7 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "modify_schedule": {"2b82e293c48bbdfcaaafe797533693b7d15653b7f3dd2e996c6c06f27a0c16ca"},
     "modify_subscription": {"eebbeda47d86c17fda5ae6d6332ab74c5663be9068fe470189e9f45ef0adf769"},
     "new_thread": {"110cfb0e827f07c9d800a314d4bc119aa3f107422983a7b2bca9bea2d01f29cf"},
-    "notify": {"3c2aef11b380cda5d273b7303e544960478f2834d1757b8d7ee1dd87189015aa"},
+    "notify": {"c30a7c95d4a0c36c1838ae31ff26ecb20ead9d49ef16465ec89b633eabd85689"},
     "open_thread": {"d9d2c013e8759960c87b9114d1cbac06e9f606b18cc956d7b9b25acfd49c9722"},
     "pause_schedule": {"f4650ba6d1e6b58948b8a09821a1cf1dbfcfb8820a3ae5e63b64dc5841eb2265"},
     "propose_region_download": {"638cb587cde24979bcd6ee36a7169d8b61bec09afd2ab7adf2afecb3f1695d58"},
@@ -2006,9 +2012,10 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
         "13a0df1decb69fe0f4839784c892bd4d5b68b341beef6c5985e799f8d86ab9a7",
         "24507d2f519918733b0db1404c15d4f956d29e75f70f03a1d7b2e383a3913cac",
     },
-    "start_async_task": {"eddaad4cd7c4daac2dcb056eda682895987de8d4c2ba869fc00f2a2aa8157793"},
+    "start_async_task": {"0a2c37a2bbf4b089b70718458de5658631d6d77bc966633f213ca8f64f5bd80c"},
     "travel": {"00329efd850f0564a51fc91cda1cef386988a8538eb4dbf9c58a3103f99f9384"},
-    "update_async_task": {"f01d4f360963e9d7c9f00b36e0518dc09e6a26a4cab50f304e893c613655a5b4"},
+    "update_thread_description": {"1abe177f3264e32649ce647fe4630f53ef6b465349466d968b343bc941d05c76"},
+    "update_async_task": {"e8235e1f22357f4622ae03e87da2eb31252e4d8ba4ee5175b5ad64e871a0ebc4"},
     "write_file": {"9bfc37771fdc668c20dd0a508eef41a79a36743e3a368efb4d48024e6fcd9a38"},
     "write_todos": {"48687d0ff93c2b303781aaed33f8230ba2eeaf3d158ad19b27c968aad39c1601"},
 }
@@ -2140,9 +2147,9 @@ _TOOL_RESULT_METADATA = {
 }
 
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "4236eaa1c27f9864abf00a07a633ece6a9acc883c4e0ce19cd1f492bf960b8e7"
+    "a256a5fd2f385238d1b3ef958febdc5f5a9790025ad010648f2208a2f2287c4b"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "aaea0bf318e3429bc170bc7a9ee1c5ab4637ba2706e48ba5519a46c5b1115ba9"
+    "9a03ab34367fc404246ece5c35487eea103e56b7d964a94b6d9d4134ca9215c5"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
@@ -3083,7 +3090,9 @@ def _tool_classification(path: str, name: str, origin: str) -> str:
         return "fixed-role tool"
     if origin.startswith("deepagents") or name == "load_skill" \
             or origin.startswith("langchain.agents.middleware") \
-            or origin == "assist.async_subagents" or name == "quiet":
+            or origin in {"assist.async_subagents",
+                          "assist.events.thread_description"} \
+            or name == "quiet":
         return "framework-kernel candidate"
     return "skill-scoped candidate"
 
