@@ -1301,7 +1301,7 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     # thread-description tool; the schema clarifies that update_async_task
     # accepts subagent task IDs and notify describes phone-only attention.
     # Historical P0-P2b3 rows stay unchanged.
-    assert len(current_prompt) == 27_367
+    assert len(current_prompt) == 27_718
     assert len(schemas) == 19_365
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 37
