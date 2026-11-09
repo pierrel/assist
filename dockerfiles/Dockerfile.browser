@@ -6,6 +6,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN pip install --no-cache-dir playwright==1.58.0 \
     && python -m playwright install --with-deps --only-shell chromium \
+    && apt-get update && apt-get install -y --no-install-recommends chromium \
+    && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 10001 --create-home browser
 
 COPY assist/browser/runner.py /opt/assist/browser_runner.py
