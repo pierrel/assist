@@ -4,14 +4,16 @@ and ``_ResumeScheduler`` (Phase 2 of docs/2026-07-08-fair-scheduling.org).
 Exercises the pieces the queue-primitive tests (test_fair_scheduling.py) can't:
 the ``except ThreadPauseRequested`` branch, the pending-message carry across a pause
 (so the user's bubble doesn't vanish), the resume dispatch via the dedicated scheduler
-thread, and the round-robin routing of a new message that arrives while paused.
+thread, and the held routing of a new message that arrives while paused.
 
 ``MANAGER.get`` / sandbox / domain hooks are stubbed (same shape as
 test_web_process_message_e2e.py); the pause is raised where the middleware would raise
-it (out of the agent run), and the real ``THREAD_QUEUE`` is used un-mocked.
+it (out of the agent run). The dispatch-contention test waits for the real quantum
+timer to request that pause and uses un-mocked model and Run queues.
 """
 import contextlib
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,7 +24,7 @@ from manage.web import threads
 from manage.web.state import _get_status
 from assist.location import LocationSnapshot
 from assist.browser.authority import mark_new_thread
-from assist.thread_queue import ThreadPauseRequested
+from assist.thread_queue import ThreadAffinityQueue, ThreadPauseRequested
 
 
 class _PausingChat:
@@ -106,6 +108,87 @@ def test_pause_carries_pending_and_submits_resume(wired):
     # Lossless + no re-run: the paused message() ran once, then resume() ran once —
     # the turn was NOT restarted with the original message.
     assert calls == [("message", "hello"), ("resume",)]
+
+
+def test_dispatch_waiter_runs_before_paused_holder_resumes(wired, monkeypatch):
+    first_tid, _ = wired
+    second_tid = "t-next"
+    root = Path(web.MANAGER.root_dir)
+    (root / second_tid).mkdir()
+    mark_new_thread(str(root), second_tid)
+    queue = ThreadAffinityQueue(quantum_s=0.03, hold_timeout_s=1.5)
+    scheduler = threads._ResumeScheduler()
+    monkeypatch.setattr(threads, "THREAD_QUEUE", queue)
+    monkeypatch.setattr(threads, "_RESUME_SCHEDULER", scheduler)
+    monkeypatch.setattr(threads, "_recovery_prep", lambda _q: None)
+    order = []
+    first_started = threading.Event()
+    second_started = threading.Event()
+    first_resumed = threading.Event()
+    resumed_worker_done = threading.Event()
+    boundary_wait = threading.Event()
+
+    class Chat:
+        agent = None
+        on_queue_state = None
+
+        def __init__(self, tid):
+            self.thread_id = tid
+
+        def message(self, text):
+            if self.thread_id == second_tid:
+                order.append("second")
+                second_started.set()
+                return "second answer"
+            order.append("first")
+            first_started.set()
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                if threads.active_handle().pause_requested:
+                    raise ThreadPauseRequested("quantum pause")
+                boundary_wait.wait(0.005)
+            raise AssertionError("the dispatch waiter never requested a pause")
+
+        def resume(self):
+            order.append("first resume")
+            first_resumed.set()
+            return "first answer"
+
+        def pending_reply(self):
+            return None
+
+        def get_messages(self):
+            return []
+
+        def get_raw_messages(self):
+            return []
+
+    chats = {tid: Chat(tid) for tid in (first_tid, second_tid)}
+    monkeypatch.setattr(web.MANAGER, "get", lambda tid, **_kwargs: chats[tid])
+    first = threads._create_run(first_tid, "long turn")
+    second = threads._create_run(second_tid, "short turn")
+    execute = threads._execute_run
+
+    def execute_and_signal(run_id, tid, **kwargs):
+        execute(run_id, tid, **kwargs)
+        if tid == first_tid and run_id != first.id:
+            resumed_worker_done.set()
+
+    monkeypatch.setattr(threads, "_execute_run", execute_and_signal)
+
+    scheduler.start()
+    scheduler.submit(first.id, first_tid)
+    assert first_started.wait(1)
+    scheduler.submit(second.id, second_tid)
+
+    assert resumed_worker_done.wait(2)
+    assert first_resumed.is_set()
+    assert second_started.is_set()
+    assert order == ["first", "second", "first resume"]
+    first_runs = threads._runs().list(first_tid)
+    assert [run.status for run in first_runs] == ["interrupted", "success"]
+    assert first_runs[1].work_id == first.work_id
+    assert threads._runs().get(second_tid, second.id).status == "success"
 
 
 def test_pause_publishes_paused_before_an_inline_successor_or_follower(wired, monkeypatch):
@@ -219,6 +302,52 @@ def test_resume_scheduler_reservation_is_invisible_until_committed_once():
     assert q.get_nowait()["run_id"] == "resume"
     with pytest.raises(threads.queue.Empty):
         q.get_nowait()
+
+
+def test_dispatch_probe_ignores_same_thread_and_uncommitted_reservations():
+    dispatch = threads._PriorityRunQueue()
+    affinity = ThreadAffinityQueue(quantum_s=0.02, hold_timeout_s=1)
+    affinity.set_dispatch_waiter_probe(
+        lambda tid: len(dispatch.waiting_for_other(tid)))
+    ticket = dispatch.reserve({"run_id": "other", "tid": "other"})
+
+    with affinity.acquire("holder") as handle:
+        dispatch.put({"run_id": "same", "tid": "holder"})
+        threading.Event().wait(0.08)
+        assert not handle.pause_requested
+        dispatch.commit(ticket)
+        deadline = time.monotonic() + 0.3
+        while time.monotonic() < deadline and not handle.pause_requested:
+            threading.Event().wait(0.005)
+        assert handle.pause_requested
+
+
+def test_dispatch_probe_skips_cancelled_and_browser_held_wakes(wired):
+    _, _ = wired
+    tid = "t-held"
+    root = Path(web.MANAGER.root_dir)
+    (root / tid).mkdir()
+    mark_new_thread(str(root), tid)
+    scheduler = threads._ResumeScheduler()
+    cancelled = threads._create_run(tid, "cancelled")
+    threads._runs().transition(tid, cancelled.id, "cancelled")
+    reset = threads._create_run(tid, "reset", user_origin=True,
+                                revocation_pending=True)
+    held = threads._create_run(tid, "behind reset")
+    scheduler.submit(cancelled.id, tid)
+    scheduler.submit(held.id, tid)
+
+    assert scheduler._dispatch_waiter_count("other") == 0
+    assert threads._runs().get(tid, held.id).status == "pending"
+    threads._runs().transition(tid, reset.id, "cancelled")
+    assert scheduler._dispatch_waiter_count("other") == 1
+
+    scheduler._q.get_nowait()  # cancelled
+    scheduler._q.get_nowait()  # held, now runnable
+    unbound = threads._runs().create(tid, "general-agent", "unbound",
+                                     approval_id="missing")
+    scheduler.submit(unbound.id, tid)
+    assert scheduler._dispatch_waiter_count("other") == 0
 
 
 def test_resume_scheduler_dedupes_only_queued_run_ids():
