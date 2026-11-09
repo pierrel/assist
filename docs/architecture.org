@@ -1,0 +1,151 @@
+#+title: Assist architecture
+
+This is the architecture of merged Assist =main= at
+=df4bb845df34289427ec85992ae5d1120906f5e2=. It shows the ordinary Deep
+Agents web path and the interfaces other clients use. A Pi preview thread,
+voice call, inbound SMS, scheduled prompt, or child task enters through a
+different admission route, then uses the same durable Run service where that
+route creates a Run. The diagrams show ownership and major data
+flows, not a function call graph.
+
+[[file:architecture.svg]]
+
+The source is [[file:architecture.dot][architecture.dot]]. Regenerate the SVG
+locally with =dot -Tsvg docs/architecture.dot -o docs/architecture.svg=.
+Solid arrows carry requests, control, or work. Dashed arrows write or read
+durable state. Arrow labels say what crosses each boundary. The numbered IDs
+are stable component names for discussing later changes.
+
+* Component key
+
+The overview shows request admission and execution. The second view shows the
+authority boundary around tools and external effects:
+
+[[file:architecture-boundaries.svg]]
+
+Edit [[file:architecture-boundaries.dot][architecture-boundaries.dot]] and render
+it with =dot -Tsvg docs/architecture-boundaries.dot -o docs/architecture-boundaries.svg=.
+The same IDs identify the same components
+in both views. An ID shown in only one view keeps that meaning.
+
+** Entry and orchestration
+
+- *C1a HTTP clients.* The browser talks to [[file:../manage/web/threads.py][web
+  routes]]. Authenticated phone requests enter through
+  [[file:../manage/web/phone_api.py][phone_api.py]]. Their client
+  implementations are outside this map. The Agent Protocol used by C7 is a
+  private in-process adapter, not a public web route.
+- *C1b Local embedders.* The CLI builds a local Thread in
+  [[file:../manage/cli.py][manage/cli.py]]. EmacsOS embeds Assist through
+  [[file:../assist/spec.py][AgentSpec]]. This direct route does not pass through
+  the FastAPI boundary or the web Run admission service.
+- *C2 Web/API boundary.* [[file:../manage/web/app.py][app.py]] owns FastAPI;
+  [[file:../manage/web/threads.py][threads.py]] admits web messages and renders
+  thread state. [[file:../manage/web/run_stream.py][run_stream.py]] journals
+  stream events. [[file:../manage/web/state.py][state.py]] owns web process
+  singletons and lifespan recovery.
+- *C3 Durable Runs.* [[file:../assist/run_service.py][RunService]] persists Run
+  identities and transitions. [[file:../manage/web/threads.py][=_create_run=,
+  =_accept_message_run= and =queue_recovery_runs=]] admit work before dispatch
+  and reconstruct pending work after restart. The legacy backlog is migration
+  input, not new-work authority.
+- *C4 Dispatch + affinity.* [[file:../manage/web/threads.py][=_PriorityRunQueue=
+  and =_ResumeScheduler=]] carry wake notifications and execute Run IDs.
+  [[file:../assist/thread_queue.py][ThreadAffinityQueue]] serializes model
+  turns with thread affinity. An ordinary first web turn runs in a FastAPI
+  =BackgroundTask=; the resume scheduler handles resumptions and recoveries.
+  The web worker [[file:../manage/web/threads.py][=_process_message=]] owns the
+  per-run Git, sandbox and browser control before it constructs C5. In-memory
+  queues do not replace Run records.
+
+** Agent and durable state
+
+- *C5 Thread runtime.* [[file:../assist/thread_manager.py][ThreadManager]]
+  owns thread directories, a shared SQLite checkpointer and model selection.
+  [[file:../assist/thread.py][Thread]] builds and invokes the graph and resumes
+  from checkpoints.
+- *C6 Agent assembly.* [[file:../assist/agent.py][=create_agent=]] assembles
+  Deep Agents with its backend, tools, skills, prompt and middleware.
+  [[file:../assist/spec.py][AgentSpec]] adds embedder capabilities.
+  [[file:../assist/backends.py][backends.py]] routes workspace, private state
+  and skill paths.
+- *C7 Child task handoff.* [[file:../assist/async_subagents.py][=start_async_task=
+  and task tools]] call a private Agent Protocol ASGI app via in-process
+  transport. [[file:../manage/web/__init__.py][Web composition]] keeps it off
+  the public app; [[file:../manage/web/protocol_service.py][WebAgentProtocolService]]
+  maps child calls to C3's durable Runs. [[file:../manage/web/threads.py][=_execute_child_run= and
+  =_complete_child_handoff=]] execute its durable Run and create an ordinary
+  parent follow-up Run after completion.
+- *C9 Durable thread state.* [[file:../assist/run_service.py][RunService]]
+  writes Run JSON under the thread root. [[file:../assist/thread_manager.py][ThreadManager]]
+  stores LangGraph checkpoints in =threads.db= and owns thread directories.
+  [[file:../manage/web/state.py][state.py]] writes UI status markers. The
+  workspace can be a per-thread Git checkout or ordinary files.
+
+** Authority and external effects
+
+- *C8 Host authorities.* [[file:../assist/domain_manager.py][DomainManager]]
+  and [[file:../assist/thread_git.py][ThreadGit]] manage thread Git state and
+  publication through the web worker's
+  [[file:../manage/web/thread_git_lifecycle.py][GitLifecycle]].
+  [[file:../assist/sandbox_manager.py][SandboxManager]] owns turn
+  containers; [[file:../assist/browser/manager.py][BrowserManager]] and
+  [[file:../assist/browser/authority.py][browser authority]] own browser
+  lifetime and leases. [[file:../assist/egress/store.py][EgressStore]] owns
+  exact host/port grants.
+- *C10 Execution sandbox.* [[file:../assist/sandbox.py][DockerSandboxBackend]]
+  sends file and shell tools to a per-turn container with a bound workspace.
+  [[file:../assist/sandbox_manager.py][SandboxManager]] creates and cleans it.
+  Non-Git web work can fall back to a host backend when Docker is unavailable;
+  Git-bound turns fail closed. The CLI is host-backed.
+- *C11 Browser worker.* C6's browser tools call the host-side
+  [[file:../assist/browser/manager.py][BrowserManager]], which controls the
+  session and invokes [[file:../assist/browser/runner.py][BrowserWorker]] inside
+  the turn sandbox. The worker runs page actions with Chromium.
+  [[file:../assist/browser/storage.py][storage.py]] holds a limited later-turn
+  storage snapshot, not live tabs.
+- *C12 Model endpoint.* [[file:../assist/model_manager.py][model_manager.py]]
+  discovers and selects the OpenAI-compatible chat model. Inference is outside
+  Assist and uses =ASSIST_MODEL_URL=.
+- *C13 Egress proxy.* [[file:../assist/sandbox_manager.py][SandboxManager]]
+  starts the proxy and isolated networks. [[file:../assist/egress/store.py][EgressStore]]
+  projects approved grants; [[file:../assist/egress/client_map.py][client_map.py]]
+  attributes browser traffic. It gates sandbox and browser network traffic,
+  not host Python tool requests.
+- *C14 Domain Git remote.* [[file:../assist/thread_git.py][ThreadGit]] and
+  [[file:../assist/git_sync.py][git_sync.py]] prepare and verify publication of
+  a thread branch. The remote is optional for non-Git threads.
+- *C15 Network destinations.* [[file:../assist/tools.py][tools.py]] provides
+  search and URL fetching; [[file:../assist/geo/tools.py][geo/tools.py]] and
+  related travel tools call configured services. Websites visited by C11 are
+  also destinations. Host Python tools call services directly; sandbox and
+  browser requests cross C13's allowlist and exact-grant boundary first.
+
+* Read one web request
+
+A browser =POST /thread/{tid}/message= reaches C2. Its admission call runs
+off the event loop, and C3 writes the Run before C4 receives its ID. C4 wakes
+a worker; it acquires the affinity slot, then claims the Run before C5 invokes
+C6. The agent can call
+C10 tools, start a C7 child, or send a model request to C12. C5 checkpoints its
+graph in C9; C3 persists the Run outcome. C2 projects status and stream events
+for the browser. Restart recovery scans C3 and requeues unfinished IDs; queue
+membership itself is not durable.
+
+C8 remains host-side authority for Git publication, sandbox lifetime, browser
+leases and sandbox/browser network grants. Page content and workspace files in
+C10/C11 are untrusted inputs to C6. They cannot grant their own network
+access. A child
+result returns through C7's private in-process adapter and a new parent Run,
+so the parent can receive it even
+after the original user turn has ended.
+
+* Conditional paths and limits of this view
+
+The web route can select a Pi preview engine instead of C6's Deep Agents
+graph; its implementation is [[file:../assist/pi_runtime.py][PiRuntimeManager]].
+The CLI and embedders can use host-backed or embedder-supplied backends, so
+C10/C11 depict the ordinary sandboxed web path. Inbound SMS, schedules, voice
+and approvals have their own interfaces and rules; this map does not detail
+those workflows or external client internals. The component names describe
+current responsibilities, not proposed citation or browser changes.

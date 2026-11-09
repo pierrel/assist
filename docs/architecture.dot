@@ -1,0 +1,44 @@
+digraph Assist {
+  graph [label="Assist · request, Run and agent path", labelloc=t,
+         fontname="DejaVu Sans", fontsize=23, bgcolor="white",
+         rankdir=TB, pad=0.25, nodesep=0.6, ranksep=0.68,
+         splines=polyline, outputorder=edgesfirst];
+  node [shape=box, style="rounded,filled", color="#34506a",
+        fillcolor="#f2f7fc", fontname="DejaVu Sans", fontsize=15,
+        margin="0.19,0.14"];
+  edge [fontname="DejaVu Sans", fontsize=11, color="#49647d",
+        arrowsize=0.7];
+
+  C1a [label="C1a  HTTP clients\nBrowser UI · phone API",
+       fillcolor="#e5edf5"];
+  C1b [label="C1b  Local embedders\nCLI · EmacsOS via AgentSpec",
+       fillcolor="#e5edf5"];
+  C2 [label="C2  Web/API boundary\nFastAPI routes · status/stream projection"];
+  C3 [label="C3  Durable Runs\nadmission · transitions · recovery"];
+  C4 [label="C4  Dispatch + affinity\nworker wakes · one active model turn"];
+  C5 [label="C5  Thread runtime\nmanager · checkpointed Thread"];
+  C6 [label="C6  Agent assembly\nDeep Agents · tools · skills · middleware"];
+  C7 [label="C7  Child task handoff\nprivate ASGI · child → follow-up Run"];
+  C8 [label="C8  Host authorities\nGit · sandbox · browser · egress"];
+  C9 [label="C9  Durable thread state\nRun JSON · checkpoints · status · files",
+      fillcolor="#fff4d7"];
+  C10 [label="C10  Execution sandbox\nfile and shell tools", fillcolor="#fff0df",
+       color="#a46b36"];
+  C12 [label="C12  Model endpoint\nOpenAI-compatible HTTP",
+       fillcolor="#f3f3f3"];
+
+  C1a -> C2 [label="HTTP requests"];
+  C2 -> C3 [label="admit before dispatch"];
+  C3 -> C4 [label="Run ID wake / restart recovery"];
+  C4 -> C5 [label="claim + execute Run"];
+  C1b -> C5 [label="local Thread / AgentSpec"];
+  C5 -> C6 [label="construct + invoke graph"];
+  C6 -> C7 [label="start task / read result"];
+  C7 -> C3 [label="child + follow-up Runs", constraint=false];
+  C4 -> C8 [label="per-run Git / sandbox / browser control"];
+  C6 -> C8 [label="browser tool calls", constraint=false];
+  C3 -> C9 [label="Run records", style=dashed];
+  C5 -> C9 [label="checkpoints + files", style=dashed];
+  C6 -> C10 [label="tool calls"];
+  C6 -> C12 [label="model requests"];
+}
