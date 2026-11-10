@@ -27,8 +27,8 @@ you the page's **real links**. Use it.
 
 ## Find the file — with `read_url`
 
-`read_url(url)` returns the page's readable text **plus** a "Links on this
-page:" list of real URLs (absolute). That link list is how you navigate.
+For HTML, `read_url(url)` returns the page's readable text **plus** a "Links on
+this page:" list of real URLs (absolute). That link list is how you navigate.
 
 1. `read_url` the URL the user gave (or the site homepage).
 2. In the surfaced links, pick the one section that would hold your file —

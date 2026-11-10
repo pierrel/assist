@@ -24,6 +24,8 @@ import logging
 import math
 import os
 import re
+import subprocess
+import sys
 import time
 import threading
 from datetime import datetime, timezone
@@ -247,18 +249,39 @@ def _extract_main_content(html: str, base_url: str = "") -> str:
     return f"{text}\n\nLinks on this page:\n" + "\n".join(lines) + more
 
 
+def _read_pdf_url(url: str) -> str:
+    """Fetch and parse an untrusted PDF within one process wall limit."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "assist.pdf_text"], input=url.encode("utf-8"),
+            capture_output=True, timeout=30, check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError("PDF fetch and text extraction exceeded 30 seconds") from e
+    if result.returncode != 0:
+        if result.returncode == 3:
+            raise ValueError("PDF URL returned an HTTP error")
+        if result.returncode == 4:
+            raise TimeoutError("PDF URL request timed out")
+        if result.returncode == 5:
+            raise ConnectionError("PDF URL request failed")
+        raise ValueError("PDF text unavailable (encrypted, scanned, or malformed)")
+    return result.stdout.decode("utf-8", errors="replace")
+
+
 def read_url(url: str) -> str:
     """Extract the readable content from the given url.
 
     Returns the page's main article text where the page marks one
     (``<article>``/``<main>``) so the char budget holds signal, not nav/footer
     chrome; degrades to a whole-page text strip (scripts/styles removed) when
-    the page marks no article. A compact ``Links on this page:`` list (absolute
+    the page marks no article. For HTML, a compact ``Links on this page:`` list (absolute
     URLs) follows the text, so this tool can NAVIGATE a site — find the page or
     downloadable file to fetch — without reading raw HTML. Returns the FULL
-    extracted text (not truncated) —
-    the offload middleware saves a large result to a file and hands the agent a
-    preview + path to grep, so full page content stays reachable without flooding
+    extracted HTML text (not truncated); for PDFs, extracts up to 25 pages
+    and 200,000 characters from URLs ending in ``.pdf`` in a bounded child process —
+    the offload middleware saves a large returned extract to a file and hands the agent a
+    preview + path to grep, so it stays reachable without flooding
     context. The error path returns a short ``Error fetching URL:`` string inline.
 
     Per-host throttled (~1s between calls to the same host) so a burst of
@@ -269,13 +292,21 @@ def read_url(url: str) -> str:
     host = urlparse(url).hostname or ""
     _host_throttle(host)
     try:
+        if urlparse(url).path.lower().endswith(".pdf"):
+            return _read_pdf_url(url)
         resp = requests.get(
             url,
             headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"},
-            timeout=15,
+            timeout=15, stream=True,
         )
-        resp.raise_for_status()
-        return _extract_main_content(resp.text, base_url=url)
+        try:
+            resp.raise_for_status()
+            content_type = resp.headers.get("Content-Type", "")
+            if isinstance(content_type, str) and "application/pdf" in content_type.lower():
+                raise ValueError("PDF response needs a direct .pdf URL for bounded text extraction")
+            return _extract_main_content(resp.text, base_url=url)
+        finally:
+            resp.close()
     except Exception as e:
         return f"Error fetching URL: {e}"
 
