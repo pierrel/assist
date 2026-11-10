@@ -515,4 +515,3 @@ def test_model_can_get_list_and_search_host_records_without_write_tool(tmp_path)
     assert len(tool_results) == 2
     assert all(record_id in item.content and URL in item.content
                for item in tool_results)
-

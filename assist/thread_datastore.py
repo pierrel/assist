@@ -458,4 +458,3 @@ class ReferenceBindingMiddleware(AgentMiddleware):
         if resolved == last.content:
             return None
         return {"messages": [last.model_copy(update={"content": resolved})]}
-
