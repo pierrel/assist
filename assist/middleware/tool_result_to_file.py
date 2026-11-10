@@ -112,7 +112,7 @@ class ToolResultToFileMiddleware(AgentMiddleware):
     Sync (``wrap_tool_call``) + async (``awrap_tool_call``) — subagents invoke through
     the async path. A listed tool may return a ToolMessage directly or wrap it in a
     LangGraph Command state update; both shapes are offloaded. Anything else passes
-    through untouched; any failure falls back to the original result.
+    through untouched; an offload-write failure returns the current result.
 
     ``tools`` is a POSITIVE allowlist — a tool not listed is never touched (containment
     by construction).  ``preview_style`` is per-instantiation: ``head`` for read_url
@@ -121,10 +121,12 @@ class ToolResultToFileMiddleware(AgentMiddleware):
     ``.../large_tool_results/untrusted-`` family
     (see ``UNTRUSTED_OFFLOAD_MARK``) so ``UrlProvenanceMiddleware`` won't provenance a URL read
     back from it; the default writes ``.../large_tool_results/<id>``.
-    ``page_navigation=True`` gives a read_url offload a narrower page marker
-    and records its actual path in ToolMessage metadata so its links can
+    ``page_navigation=True`` gives a successful read_url offload a narrower page
+    marker and records its actual path in ToolMessage metadata so its links can
     support same-host navigation without granting that property to a
-    model-written file, shell output, or child output. ``offload_root``
+    model-written file, shell output, or child output. Fetch-error text becomes
+    an error ToolMessage even below the offload threshold and gets no page-path
+    metadata. Page previews omit model-authored request arguments. ``offload_root``
     (per-instantiation) sets the parent: ``""`` (default) → StateBackend-routed
     ``/large_tool_results/…``; ``"/tmp"`` → the sandbox's real per-turn fs so shell +
     file tools share one path (see the module docstring).
@@ -164,6 +166,10 @@ class ToolResultToFileMiddleware(AgentMiddleware):
         if not isinstance(result.content, str):
             return result
         content = result.content
+        if self._page_navigation and content.startswith("Error fetching URL:"):
+            # read_url returns failures as text. Mark the existing ToolMessage
+            # as an error so its echoed request cannot masquerade as a page.
+            result = result.model_copy(update={"status": "error"})
         if len(content) <= self._floor:
             return result
         # Sanitize before persisting so a later grep/read_file can't re-inject raw
@@ -185,10 +191,13 @@ class ToolResultToFileMiddleware(AgentMiddleware):
             logger.warning("ToolResultToFile: write to %s failed: %s", path, write.error)
             return result
         args = request.tool_call.get("args") or {}
-        source = next((str(v) for v in args.values() if isinstance(v, str)), "")[:120]
+        # A page preview is navigation evidence. Its request arguments are
+        # model-authored, so only the fetched page content belongs in it.
+        source = ("" if self._page_navigation else
+                  next((str(v) for v in args.values() if isinstance(v, str)), "")[:120])
         preview = _preview_message(result, content, request.tool_call.get("name", "tool"),
                                    source, path, self._style)
-        if self._page_navigation:
+        if self._page_navigation and result.status != "error":
             return preview.model_copy(update={"additional_kwargs": {
                 **preview.additional_kwargs, PAGE_OFFLOAD_PATH_KEY: path}})
         return preview

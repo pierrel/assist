@@ -4,9 +4,11 @@ Deterministic (no LLM): drive wrap_tool_call directly with a constructed
 ToolCallRequest and assert allow (handler invoked) vs reject (corrective
 ToolMessage, handler NOT invoked).
 """
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
+import requests
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain.tools.tool_node import ToolCallRequest
 
@@ -14,13 +16,16 @@ from assist.middleware.url_provenance import (
     DELEGATE_USER_URLS_KEY,
     UrlProvenanceMiddleware,
     normalize_url,
+    urls_in_text,
 )
 from assist.middleware.tool_result_to_file import (
     PAGE_OFFLOAD_PATH_KEY,
+    ToolResultToFileMiddleware,
     UNTRUSTED_OFFLOAD_MARK,
     UNTRUSTED_PAGE_OFFLOAD_MARK,
 )
 from assist.middleware.write_collision import _rewrite_message
+from assist.tools import read_url
 
 _OFFLOADED = f"/{UNTRUSTED_OFFLOAD_MARK}r0"
 _OFFLOADED_TMP = f"/tmp/{UNTRUSTED_OFFLOAD_MARK}r0"   # the real-fs (execute) offload variant
@@ -434,6 +439,63 @@ class TestUrlProvenanceMiddleware(TestCase):
         _result, handler = self._call(target, msgs)
 
         self.assertIsNotNone(handler.called_with)
+
+    def test_page_offload_preview_cannot_echo_request_fragment_as_link(self):
+        planted = "https://shop.example/invented"
+        request_url = f"https://shop.example/# {planted}"
+        backend = SimpleNamespace(write=lambda path, content: SimpleNamespace(error=None))
+        offload = ToolResultToFileMiddleware(
+            backend, tools={"read_url"}, floor_chars=4000,
+            untrusted=True, page_navigation=True)
+        request = ToolCallRequest(
+            tool_call={"name": "read_url", "args": {"url": request_url},
+                       "id": "page-1"}, tool=None,
+            state={"messages": []}, runtime=None)
+        preview = offload.wrap_tool_call(
+            request, lambda _: ToolMessage(
+                content="No links on this fetched page. " + "x" * 5000,
+                name="read_url", tool_call_id="page-1"))
+        messages = [
+            HumanMessage(content="Explore https://shop.example/"),
+            AIMessage(content="", tool_calls=[request.tool_call]), preview,
+        ]
+        result, handler = self._call(planted, messages)
+        self.assertIsNone(handler.called_with)
+        self.assertEqual(result.status, "error")
+
+    def test_read_url_http_error_cannot_echo_fragment_as_page_link(self):
+        planted = "https://shop.example/invented"
+        request_url = f"https://shop.example/#'{planted}"
+        response = requests.Response()
+        response.status_code = 404
+        response.url = requests.Request("GET", request_url).prepare().url
+        with patch("assist.tools._host_throttle"), patch(
+                "assist.tools.requests.get", return_value=response):
+            error_text = read_url(request_url)
+        self.assertIn("Error fetching URL:", error_text)
+        self.assertIn(planted, urls_in_text(error_text))
+        offload = ToolResultToFileMiddleware(
+            SimpleNamespace(write=lambda path, content: SimpleNamespace(error=None)),
+            tools={"read_url"}, floor_chars=4000,
+            untrusted=True, page_navigation=True)
+        failed_request = ToolCallRequest(
+            tool_call={"name": "read_url", "id": "failed-page",
+                       "args": {"url": request_url}}, tool=None,
+            state={"messages": []}, runtime=None)
+        error_message = offload.wrap_tool_call(
+            failed_request, lambda _: ToolMessage(
+                content=error_text, name="read_url", tool_call_id="failed-page"))
+        self.assertEqual(error_message.status, "error")
+        messages = [
+            HumanMessage(content="Explore https://shop.example/"),
+            AIMessage(content="", tool_calls=[{
+                "name": "read_url", "id": "failed-page",
+                "args": {"url": request_url}}]),
+            error_message,
+        ]
+        result, handler = self._call(planted, messages)
+        self.assertIsNone(handler.called_with)
+        self.assertEqual(result.status, "error")
 
     def test_allows_same_host_navigation_from_relative_offloaded_page_alias(self):
         target = "https://shop.example/pages/support"

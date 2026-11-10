@@ -147,12 +147,24 @@ def test_small_result_returned_inline():
 
 
 def test_short_error_stays_inline_under_floor():
-    # A read_url error string is short → under the floor → inline (no error-prefix
-    # special-case needed now; the floor is the tool-agnostic gate).
+    # The default non-page-navigation instance uses only the length gate.
     backend = _StubBackend()
     err = "Error fetching URL: timeout"
     out = _run(_mw(backend), _Req(), _msg(err))
     assert out.content == err and not backend.written
+
+
+def test_page_navigation_marks_long_fetch_error_without_page_proof():
+    backend = _StubBackend()
+    mw = ToolResultToFileMiddleware(
+        backend, tools={"read_url"}, floor_chars=4000,
+        untrusted=True, page_navigation=True)
+    err = "Error fetching URL: https://shop.example/#'https://shop.example/invented "
+    out = _run(mw, _Req(), ToolMessage(
+        content=err + "x" * 5000, name="read_url", tool_call_id="page-error"))
+    assert out.status == "error"
+    assert PAGE_OFFLOAD_PATH_KEY not in out.additional_kwargs
+    assert len(out.content) < _PREVIEW_CHARS + 500
 
 
 def test_tool_not_in_allowlist_untouched():
