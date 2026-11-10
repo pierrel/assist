@@ -1,0 +1,35 @@
+#+title: Context evidence URL authority
+#+date: 2026-11-10
+
+* Historical supersessions
+
+This document supersedes the URL-authority sentence in the Change section of
+=2026-11-10-context-evidence-handoff.org=. The context projection did require
+a corresponding narrow change to the legacy synchronous task URL guard.
+
+* Boundary
+
+The context projection includes model-chosen =request_args=. A URL in a grep
+pattern with =No matches found= is not evidence that the file contained that
+URL. The legacy main normally trusts research =task= results for source
+navigation, so scanning the whole context projection would grant the invented
+URL authority.
+
+For an identified context =task=, the guard reads only successful =read_file=
+=observed_result= text from a complete host-rendered projection. It excludes
+model-chosen selectors, failed reads, offloaded untrusted content, and partial
+task previews. If the full projection is offloaded, the caller can read the
+original actual file to establish a URL through the existing direct-file path.
+Ordinary research =task= results and user, search, and direct-file URL sources
+keep their existing behavior. A task result that literally contains the context
+projection marker is conservatively excluded from raw scanning even if a later
+task reused its call ID; this can exclude a research task that quotes that exact
+marker. Async task results remain excluded. Reading an offloaded packet gives
+the caller its factual contents but does not grant URL navigation authority.
+
+* Checks
+
+The regression covers a URL only in a model-chosen grep pattern, successful
+context file content, read errors, offloaded untrusted files, a partial task
+preview, a direct file read, an owner URL, and an ordinary research task result.
+It also covers a later task reusing the context task's call ID.

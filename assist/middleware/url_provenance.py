@@ -31,9 +31,11 @@ results are model-authored data. Read-url offloads use the narrower
 same-host link evidence. Shell and child results use the generic marker and cannot.
 Delegate graphs exclude a sixth channel: their synchronous ``task`` specialist
 results, because the delegate authored those briefs and could ask a specialist to
-echo an invented URL. The legacy main retains trusted synchronous ``task`` results so
-research-specialist citations can reach its navigation tool; the V2 research
-orchestrator itself has no ``read_url``.
+echo an invented URL. The legacy main retains trusted synchronous research
+``task`` results so specialist citations can reach its navigation tool.
+Context ``task`` results include model-chosen file/search selectors; only
+successful actual file-read text in their complete host projection can
+provenance URLs. The V2 research orchestrator itself has no ``read_url``.
 
 SAME-HOST NAVIGATION (2026-07-21): a normalized destination that appeared in
 fetched-page content is fetchable IF its host is already trusted (a user URL or search
@@ -74,6 +76,7 @@ search-unavailable and 404-looped ~90 min. Guidance now tells the orchestrator t
 (not re-dispatch) when it has no sources, so removing it there is safe.
 See docs/2026-07-08-research-reread-runaway.org.
 """
+import json
 import logging
 import re
 from typing import Any, Callable
@@ -86,6 +89,7 @@ from langgraph.config import get_config
 from langgraph.types import Command
 
 from assist.middleware.loop_detection import _messages_from_state
+from assist.middleware.context_evidence import CONTEXT_EVIDENCE_MARKER
 from assist.middleware.tool_result_to_file import (
     UNTRUSTED_OFFLOAD_MARK,
     UNTRUSTED_PAGE_OFFLOAD_MARK,
@@ -279,8 +283,16 @@ def _is_untrusted_result(
     name = getattr(m, "name", None)
     if name in {_READ_TOOL, _SHELL_TOOL, *_ASYNC_TASK_TOOLS}:
         return True
-    if name == _SYNC_SUBAGENT_TOOL and not trust_task_results:
-        return True
+    if name == _SYNC_SUBAGENT_TOOL:
+        if not trust_task_results:
+            return True
+        tc = calls_by_id.get(getattr(m, "tool_call_id", None))
+        # The context child's result includes model-chosen search selectors.
+        # Its successful file observations are handled separately in _seen_urls.
+        # The marker also excludes raw scanning when a later task reused its ID.
+        if ((tc and (tc.get("args") or {}).get("subagent_type") == "context-agent")
+                or CONTEXT_EVIDENCE_MARKER in _message_text(m)):
+            return True
     if name in _FILE_READ_TOOLS:                 # a file read — verify its target
         if not trust_task_results:
             # Delegate specialists save reports in the same filesystem namespace as
@@ -293,6 +305,33 @@ def _is_untrusted_result(
             return True
         return _reads_offloaded(tc, _message_text(m))
     return False
+
+
+def _context_file_urls(message: ToolMessage) -> tuple[str, ...]:
+    """URLs in actual context file reads, excluding model-chosen selectors."""
+    if message.status != "success":
+        return ()
+    content = _message_text(message)
+    if not content.startswith(CONTEXT_EVIDENCE_MARKER):
+        return ()
+    try:
+        observations = json.loads(content.split("\n", 1)[1])["observations"]
+    except (IndexError, ValueError, KeyError, TypeError):
+        return ()
+    if not isinstance(observations, list):
+        return ()
+    urls = []
+    for observation in observations:
+        if not isinstance(observation, dict) or observation.get("tool") != "read_file":
+            continue
+        args = observation.get("request_args")
+        result = observation.get("observed_result")
+        if (observation.get("status") != "success" or not isinstance(args, dict)
+                or not isinstance(result, str)
+                or _reads_offloaded({"args": args}, result)):
+            continue
+        urls.extend(urls_in_text(result))
+    return tuple(urls)
 
 
 def _is_page_content(m: ToolMessage, calls_by_id: dict) -> bool:
@@ -343,7 +382,9 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True,
     a file (ToolResultToFileMiddleware writes it there and the model greps it). So a
     URL appearing only inside fetched-page content — direct or offloaded — never
     becomes trusted authority. A real same-host page link is separately navigable;
-    a new host requires another trusted source such as search. Delegate mode also excludes its synchronous specialist results,
+    a new host requires another trusted source such as search. A context ``task``
+    projection contributes only successful actual file-read content, not its
+    model-chosen selectors or partial preview. Delegate mode also excludes its synchronous specialist results,
     sets ``trust_human_messages=False``, and adds only
     admission-frozen, brief-intersected owner URL seeds later. RESIDUAL: a model that FOLLOWS a multi-step injection to
     ``write_file`` an arbitrary URL then ``read_file`` it can still self-launder —
@@ -362,6 +403,12 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True,
             continue
         if isinstance(m, HumanMessage) and not trust_human_messages:
             continue
+        if isinstance(m, ToolMessage) and trust_task_results and m.name == _SYNC_SUBAGENT_TOOL:
+            call = calls_by_id.get(m.tool_call_id)
+            if call and (call.get("args") or {}).get("subagent_type") == "context-agent":
+                for url in _context_file_urls(m):
+                    _record_url(seen, url)
+                continue
         if isinstance(m, ToolMessage) and _is_untrusted_result(
                 m, calls_by_id, trust_task_results=trust_task_results):
             continue
