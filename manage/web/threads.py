@@ -6106,6 +6106,9 @@ class _ResumeScheduler:
                                       and (candidate.resume or candidate.resume_decision is not None)), None)
                     if successor is not None and successor.status not in {"pending", "running"}:
                         continue
+                    if (successor is not None and successor.status == "pending"
+                            and successor not in _runs_before_browser_reset(runs)):
+                        continue
                 elif run.status not in {"running", "interrupted"} and not (
                         run.mode == "child" and run.status in {"success", "error", "timeout"}):
                     continue

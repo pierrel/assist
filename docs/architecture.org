@@ -245,7 +245,8 @@ after the original user turn has ended.
   =_on_cap=]]. The probe snapshots queued wakes before disk reads, excludes
   same-thread, browser-reset-held, approval-blocked and canceled wakes, plus
   interrupted predecessors whose newest resume/decision successor is no longer
-  pending or running. The active-time cap remains independent of those reads.
+  pending or running, or whose pending successor is held behind a browser-reset
+  fence. The active-time cap remains independent of those reads.
 - [[file:../tests/test_fair_scheduling_integration.py][The integrated fairness
   regression]], [[file:../tests/test_event_late_replay.py][late replay test]]
   and [[file:../tests/test_thread_queue.py][cap test]] cover the handoff. C8
