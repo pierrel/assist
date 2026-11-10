@@ -22,10 +22,9 @@ fabricated URL by writing it into its reasoning, then fetching it — see
 can't name an exfil URL and have a follow-up read of it pass, a read-becomes-write);
 ``execute`` (shell) OUTPUT (arbitrary bytes — a cat'd download, a large log the agent
 re-reads from its real-fs offload — never a URL source); and a ``read_file``/``grep``
-of OFFLOADED untrusted content, written under
-the ``…/large_tool_results/untrusted-{data,page}-`` family (in state, or
-``/tmp/large_tool_results/…`` for a real-fs offload) — the SAME content laundered
-through a file; and async task-management results, whose descriptions and child
+of OFFLOADED content under ``…/large_tool_results/`` (in state or real fs),
+whose original tool channel is no longer recoverable from a later file read;
+and async task-management results, whose descriptions and child
 results are model-authored data. Read-url offloads use the narrower
 ``untrusted-page-`` marker: they remain excluded as authority but can supply only
 same-host link evidence. Shell and child results use the generic marker and cannot.
@@ -82,6 +81,7 @@ import re
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
+from deepagents.backends.utils import validate_path
 from langchain.agents.middleware import AgentMiddleware
 from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -91,7 +91,7 @@ from langgraph.types import Command
 from assist.middleware.loop_detection import _messages_from_state
 from assist.middleware.context_evidence import CONTEXT_EVIDENCE_MARKER
 from assist.middleware.tool_result_to_file import (
-    UNTRUSTED_OFFLOAD_MARK,
+    _OFFLOAD_DIR,
     UNTRUSTED_PAGE_OFFLOAD_MARK,
 )
 
@@ -145,19 +145,12 @@ _MAX_LISTED = 8
 # reduce to the same key, and a prose ``…/page.`` matches the clean ``…/page``.
 _TRAILING = ".,;:!?)]}'\""
 _DEFAULT_PORTS = {"http": 80, "https": 443}
-# File-read tools whose result can surface OFFLOADED untrusted content: a large read_url,
-# execute, or child task result is written to a …/large_tool_results/untrusted-*
-# namespace and the model greps/
-# read_files it back (ToolResultToFileMiddleware). That read is still the untrusted content,
-# laundered through a file — so URLs in it must stay untrusted.
+# File reads can surface any offloaded result. Deepagents' native eviction writes
+# to /large_tool_results/<call_id> without retaining the original tool's trust
+# channel, so a reread cannot grant URL authority.
 _FILE_READ_TOOLS = {"read_file", "grep"}
-# UNTRUSTED offloads use disjoint .../large_tool_results/untrusted-data-* and
-# .../large_tool_results/untrusted-page-* namespaces.
-# by ToolResultToFileMiddleware, which sets the untrusted-ness AT WRITE TIME (where it knows
-# the tool). We key on that exact fragment (imported, so writer + guard can't drift): a bare
-# prose mention of "large_tool_results" can't match it, and a normal (future-trusted) offload
-# at .../large_tool_results/<id> is NOT excluded — no mixing of trusted/untrusted.
-_OFFLOAD_MARK = UNTRUSTED_OFFLOAD_MARK
+# Explicit page offloads remain distinct for same-host link navigation.
+_OFFLOAD_MARK = f"{_OFFLOAD_DIR}/"
 _PAGE_OFFLOAD_MARK = UNTRUSTED_PAGE_OFFLOAD_MARK
 # The LOCATION args of read_file/grep (NOT the grep `pattern`, which is a search term):
 # a marker here means the read TARGETS offloaded content.
@@ -236,27 +229,26 @@ def urls_in_text(text: str) -> tuple[str, ...]:
 
 
 def _is_offload_path(value: Any, marker: str) -> bool:
-    path = str(value)
-    return (path.startswith(marker)
-            or path.startswith(f"/{marker}")
-            or path.startswith(f"/tmp/{marker}"))
+    try:
+        path = validate_path(str(value))
+    except (TypeError, ValueError):
+        return False
+    return path.startswith(f"/{marker}") or path.startswith(f"/tmp/{marker}")
 
 
 def _reads_offloaded(tool_call: dict, content: str) -> bool:
     """True if a ``read_file``/``grep`` (whose originating call IS known) touched
-    OFFLOADED untrusted content (read_url page, execute output, or child output) —
-    the same untrusted content laundered through a file. Two ways it shows up: the read's TARGET PATH contains an untrusted namespace
+    OFFLOADED content whose original tool channel is unavailable —
+    the same content laundered through a file. Two ways it shows up: the read's TARGET PATH contains the offload namespace
     (checked on the LOCATION args only — path/file_path/glob, not the grep ``pattern``),
     OR the result names an offloaded file (grep's default ``files_with_matches`` lists
     matching paths, so a grep-all that hit the offload dir shows it). Over-matches only
     make the model re-search — never trust more."""
     args = tool_call.get("args") or {}
-    if any(_is_offload_path(args.get(k, ""), marker)
-           for k in _OFFLOAD_PATH_KEYS
-           for marker in (_OFFLOAD_MARK, _PAGE_OFFLOAD_MARK)):
+    if any(_is_offload_path(args.get(k, ""), _OFFLOAD_MARK)
+           for k in _OFFLOAD_PATH_KEYS):
         return True
-    return any(marker in (content or "")
-               for marker in (_OFFLOAD_MARK, _PAGE_OFFLOAD_MARK))
+    return _OFFLOAD_MARK in (content or "")
 
 
 def _reads_page_offload(tool_call: dict) -> bool:
@@ -276,7 +268,7 @@ def _is_untrusted_result(
     read_url page content directly, ``execute`` (shell) output, async task-management
     output, or a delegate's synchronous specialist and file-read output when
     task-result trust is disabled. Other roles also exclude a ``read_file``/``grep``
-    of OFFLOADED untrusted content (read_url page or execute/child output). Fails
+    of OFFLOADED content with unknown original tool provenance. Fails
     CLOSED: a file read whose originating ``tool_call`` is missing from
     the message list (e.g. summarization dropped it) is treated as untrusted — we can't
     verify its target wasn't the offload dir, so we don't provenance its URLs."""
@@ -376,10 +368,9 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True,
     content; (3) ``execute`` (shell) output — arbitrary bytes (a cat'd download, a log the
     agent re-reads from its real-fs offload), never a URL source; (4) async
     task-management results — model-authored briefs and child output; and (5) a
-    ``read_file``/``grep`` of OFFLOADED untrusted content (read_url page,
-    execute output, or child result)
-    under an ``…/large_tool_results/untrusted-{data,page}-`` namespace — the SAME content laundered through
-    a file (ToolResultToFileMiddleware writes it there and the model greps it). So a
+    ``read_file``/``grep`` of OFFLOADED content (including native eviction at
+    ``…/large_tool_results/<call_id>``) — the SAME content laundered through
+    a file (DeepAgents or ToolResultToFileMiddleware writes it there). So a
     URL appearing only inside fetched-page content — direct or offloaded — never
     becomes trusted authority. A real same-host page link is separately navigable;
     a new host requires another trusted source such as search. A context ``task``
@@ -456,26 +447,26 @@ def _display_url(raw: str) -> str:
 
 
 def _correction(allowed: dict[str, list[str]]) -> str:
-    # No sourced URLs in context yet. Shared by both read_url agents: the searcher HAS
-    # search_internet (so "search first" is the right nudge if it simply hasn't searched),
-    # while the fact-checker does NOT (an empty list there means search already came back
-    # empty/unavailable, so stop). Cover both without inspecting tool availability:
-    # search-if-you-can, otherwise stop — never keep guessing.
+    # A provenance refusal makes no network request. It cannot establish whether
+    # the URL exists or works, even when the model copied it from a report.
+    # Search-capable callers can find an independent URL; otherwise report the
+    # source as unverified rather than declaring a dead link.
     if not allowed:
         return (
-            "That URL was a guess: it appears in no search result, the question, or any "
-            "trusted source in your context, so it would be a dead link. You have no "
-            "sourced URLs to read. Do NOT type URLs from memory or keep trying different "
-            "guesses. If you can run search_internet, do that first to find real URLs; if "
-            "search has already come back empty or unavailable, report that you could not "
-            "find reliable sources for this and stop."
+            "That URL was not fetched: it has no trusted provenance in this turn. "
+            "No HTTP request was made, so its existence and reachability are unknown. "
+            "Do not construct URLs from memory or try variants. If you can run "
+            "search_internet, search for an independent source first; if search has "
+            "already come back empty or unavailable, report that you could not "
+            "find reliable sources for this and stop. Treat untried links as "
+            "unverified."
         )
     listed = sorted(variants[0] for variants in allowed.values())[:_MAX_LISTED]
     urls = "\n".join(f"- {u}" for u in listed)
     return (
-        "That URL was not fetched: it does not appear in any search result, the "
-        "question, or a trusted source in your context, so it is a guess and would be a "
-        "dead link. Do NOT type URLs from memory. Read one of the URLs already in "
+        "That URL was not fetched: it lacks trusted provenance in this turn. "
+        "No HTTP request was made, so its existence and reachability are unknown. "
+        "Do not construct URLs from memory. Read one of the URLs already in "
         "context instead:\n"
         f"{urls}"
     )

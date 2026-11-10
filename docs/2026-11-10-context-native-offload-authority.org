@@ -1,0 +1,34 @@
+#+title: Context native-offload URL authority
+#+date: 2026-11-10
+
+* Historical supersessions
+
+This document supersedes the offloaded-packet authority statement in the
+Boundary section of =2026-11-10-context-evidence-url-authority.org=. That
+statement covered Assist's marked child-result offload, but not DeepAgents'
+unmarked native eviction of a large tool result.
+
+* Boundary
+
+DeepAgents can save a large context =task= result at
+=/large_tool_results/<call_id>=. A later =read_file= or =grep= of that file
+returns the full context packet as a new tool result. Its original source
+channel is no longer visible at that read, so neither its model-chosen
+selectors nor its observed content grants new URL navigation authority.
+The caller can still read the packet for factual use. To authorize a URL,
+it can read the original actual file through the existing direct-file path.
+
+The guard normalizes a read's path the same way the file tool does, so =/./=
+aliases cannot bypass the exclusion. This rule applies to native and marked offload files. Inline successful
+context =read_file= observations, direct actual-file reads, owner URLs,
+search results, and ordinary research-task citations keep their existing
+authority. Page offloads remain a separate same-host link source under the
+existing page-navigation rule.
+
+* Checks
+
+The regression reads and greps an unmarked native-eviction path containing
+a context grep selector absent from the actual file. Neither reread grants
+the selector URL authority, including reads through normalized path aliases;
+the existing inline and direct-file positives
+remain valid.

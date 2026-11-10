@@ -75,6 +75,9 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertIsNone(handler.called_with, "fabricated URL must NOT reach the tool")
         self.assertEqual(result.status, "error")
         self.assertIn("not fetched", result.content)
+        self.assertIn("No HTTP request was made", result.content)
+        self.assertIn("reachability are unknown", result.content)
+        self.assertNotIn("dead link", result.content)
         self.assertIn("https://shop.example/f91w", result.content)  # lists a real one
 
     def test_allows_user_provided_url(self):
@@ -719,6 +722,9 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertEqual(result.status, "error")
         self.assertIn("could not find reliable sources", result.content)  # stop branch
         self.assertIn("search_internet", result.content)                  # search-first branch
+        self.assertIn("No HTTP request was made", result.content)
+        self.assertIn("reachability are unknown", result.content)
+        self.assertNotIn("dead link", result.content)
         self.assertNotIn("none yet", result.content)                      # old fallback gone
 
     def test_empty_url_passes_through(self):

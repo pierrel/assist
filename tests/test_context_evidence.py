@@ -212,6 +212,27 @@ def test_model_chosen_selector_does_not_grant_url_authority():
                                 tool_call_id="packet-8")
     assert _seen_urls([legacy_call, packet_preview, packet_read, packet_result],
                       trust_task_results=True) == {}
+    # Deepagents' native eviction uses an unmarked call-ID path. Its source
+    # channel is not retained when the model rereads the evicted packet.
+    native_read = _read("/large_tool_results/task-2", call_id="native-8")
+    native_result = ToolMessage(content=projection, name="read_file",
+                                tool_call_id="native-8")
+    assert _seen_urls([legacy_call, packet_preview, native_read, native_result],
+                      trust_task_results=True) == {}
+    for alias in ("/./large_tool_results/task-2",
+                  "/tmp/./large_tool_results/task-2"):
+        aliased_read = _read(alias, call_id="native-alias")
+        aliased_result = ToolMessage(content=projection, name="read_file",
+                                     tool_call_id="native-alias")
+        assert _seen_urls([legacy_call, packet_preview, aliased_read, aliased_result],
+                          trust_task_results=True) == {}
+    native_grep = AIMessage(content="", tool_calls=[{
+        "name": "grep", "args": {"pattern": "source", "path": "/large_tool_results/task-2"},
+        "id": "native-9",
+    }])
+    grep_result = ToolMessage(content=projection, name="grep", tool_call_id="native-9")
+    assert _seen_urls([legacy_call, packet_preview, native_grep, grep_result],
+                      trust_task_results=True) == {}
     failed_file = project_context_evidence([
         _read(invented, call_id="file-6"),
         ToolMessage(content="Error reading " + invented,
