@@ -600,7 +600,8 @@ def test_enforcement_is_exercised_not_inferred(census):
 
     leaf = census["observations"]["research-leaf-provenance"]
     assert leaf["tool_messages"][0]["status"] == "error"
-    assert "URL was a guess" in leaf["tool_messages"][0]["content"]
+    assert "URL was not fetched" in leaf["tool_messages"][0]["content"]
+    assert "reachability are unknown" in leaf["tool_messages"][0]["content"]
 
 
 def test_fixed_role_delegate_input_boundaries(census):
