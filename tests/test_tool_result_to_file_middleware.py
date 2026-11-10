@@ -7,6 +7,8 @@ matters (no LLM).
 """
 from types import SimpleNamespace
 
+import pytest
+
 from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.types import Command
@@ -165,6 +167,57 @@ def test_page_navigation_marks_long_fetch_error_without_page_proof():
     assert out.status == "error"
     assert PAGE_OFFLOAD_PATH_KEY not in out.additional_kwargs
     assert len(out.content) < _PREVIEW_CHARS + 500
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("async_call", [False, True])
+def test_page_fetch_error_stays_error_when_offload_write_raises(wrapped, async_call):
+    class RaisingBackend:
+        def write(self, path, content):
+            raise OSError("offload unavailable")
+
+    mw = ToolResultToFileMiddleware(
+        RaisingBackend(), tools={"read_url"}, floor_chars=4000,
+        untrusted=True, page_navigation=True)
+    original = ToolMessage(
+        content="Error fetching URL: https://shop.example/#'https://shop.example/invented "
+                + "x" * 5000,
+        name="read_url", tool_call_id="failed-page")
+    result = Command(update={"messages": [original]}) if wrapped else original
+    request = _Req()
+    if async_call:
+        import asyncio
+        out = asyncio.run(mw.awrap_tool_call(request, lambda _: _async_result(result)))
+    else:
+        out = _run(mw, request, result)
+    message = out.update["messages"][0] if wrapped else out
+    assert message.status == "error"
+    assert message.content == original.content
+    assert PAGE_OFFLOAD_PATH_KEY not in message.additional_kwargs
+
+
+@pytest.mark.parametrize("write_mode", ["returned_error", "raised_error"])
+def test_successful_page_write_failure_keeps_original_result(write_mode):
+    class FailedBackend:
+        def write(self, path, content):
+            if write_mode == "raised_error":
+                raise OSError("offload unavailable")
+            return SimpleNamespace(error="offload unavailable")
+
+    mw = ToolResultToFileMiddleware(
+        FailedBackend(), tools={"read_url"}, floor_chars=4000,
+        untrusted=True, page_navigation=True)
+    original = ToolMessage(
+        content="Fetched page https://shop.example/real " + "x" * 5000,
+        name="read_url", tool_call_id="page")
+    out = _run(mw, _Req(), original)
+    assert out is original
+    assert out.status == "success"
+    assert PAGE_OFFLOAD_PATH_KEY not in out.additional_kwargs
+
+
+async def _async_result(result):
+    return result
 
 
 def test_tool_not_in_allowlist_untouched():

@@ -497,6 +497,33 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertIsNone(handler.called_with)
         self.assertEqual(result.status, "error")
 
+    def test_read_url_http_error_write_exception_cannot_echo_page_link(self):
+        planted = "https://shop.example/invented"
+        request_url = f"https://shop.example/#'{planted}"
+        class FailedOffload:
+            def write(self, path, content):
+                raise OSError("offload unavailable")
+        offload = ToolResultToFileMiddleware(
+            FailedOffload(), tools={"read_url"}, floor_chars=4000,
+            untrusted=True, page_navigation=True)
+        call = {"name": "read_url", "id": "failed-page",
+                "args": {"url": request_url}}
+        request = ToolCallRequest(
+            tool_call=call, tool=None, state={"messages": []}, runtime=None)
+        error_message = offload.wrap_tool_call(
+            request, lambda _: ToolMessage(
+                content=f"Error fetching URL: {request_url} " + "x" * 5000,
+                name="read_url", tool_call_id="failed-page"))
+        assert error_message.status == "error"
+        messages = [
+            HumanMessage(content="Explore https://shop.example/"),
+            AIMessage(content="", tool_calls=[call]),
+            error_message,
+        ]
+        result, handler = self._call(planted, messages)
+        self.assertIsNone(handler.called_with)
+        self.assertEqual(result.status, "error")
+
     def test_allows_same_host_navigation_from_relative_offloaded_page_alias(self):
         target = "https://shop.example/pages/support"
         msgs = [

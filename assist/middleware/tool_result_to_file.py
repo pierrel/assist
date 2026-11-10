@@ -112,7 +112,8 @@ class ToolResultToFileMiddleware(AgentMiddleware):
     Sync (``wrap_tool_call``) + async (``awrap_tool_call``) — subagents invoke through
     the async path. A listed tool may return a ToolMessage directly or wrap it in a
     LangGraph Command state update; both shapes are offloaded. Anything else passes
-    through untouched; an offload-write failure returns the current result.
+    through untouched; an offload-write failure returns the current result,
+    with a read_url fetch error still marked as an error.
 
     ``tools`` is a POSITIVE allowlist — a tool not listed is never touched (containment
     by construction).  ``preview_style`` is per-instantiation: ``head`` for read_url
@@ -166,10 +167,6 @@ class ToolResultToFileMiddleware(AgentMiddleware):
         if not isinstance(result.content, str):
             return result
         content = result.content
-        if self._page_navigation and content.startswith("Error fetching URL:"):
-            # read_url returns failures as text. Mark the existing ToolMessage
-            # as an error so its echoed request cannot masquerade as a page.
-            result = result.model_copy(update={"status": "error"})
         if len(content) <= self._floor:
             return result
         # Sanitize before persisting so a later grep/read_file can't re-inject raw
@@ -222,6 +219,26 @@ class ToolResultToFileMiddleware(AgentMiddleware):
         return replace(result, update={**result.update, "messages": changed})
 
     def _safe_offload(self, request, result):
+        if self._page_navigation and request.tool_call.get("name") in self._tools:
+            # read_url returns failures as text. Normalize before the optional
+            # write so every fallback keeps the error status and cannot turn
+            # an echoed request into page-link evidence.
+            def mark(message):
+                if (isinstance(message, ToolMessage)
+                        and isinstance(message.content, str)
+                        and message.content.startswith("Error fetching URL:")
+                        and message.status != "error"):
+                    return message.model_copy(update={"status": "error"})
+                return message
+
+            if isinstance(result, ToolMessage):
+                result = mark(result)
+            elif (isinstance(result, Command) and isinstance(result.update, dict)
+                  and isinstance(result.update.get("messages"), list)):
+                messages = result.update["messages"]
+                changed = [mark(message) for message in messages]
+                if any(before is not after for before, after in zip(messages, changed)):
+                    result = replace(result, update={**result.update, "messages": changed})
         try:
             return self._offload(request, result)
         except SandboxContainerLostError:
