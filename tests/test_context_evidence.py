@@ -197,8 +197,11 @@ def test_model_chosen_selector_does_not_grant_url_authority():
         AIMessage(content="done"),
     ])
     context_result = ToolMessage(content=context_file, name="task", tool_call_id="task-2")
+    # The packet is useful evidence but cannot establish URL authority. The
+    # legacy parent can read the original file under its existing policy.
+    assert _seen_urls([legacy_call, context_result], trust_task_results=True) == {}
     assert normalize_url(actual) in _seen_urls(
-        [legacy_call, context_result], trust_task_results=True)
+        [legacy_call, context_result, read, read_result], trust_task_results=True)
     assert _seen_urls([legacy_call, ToolMessage(
         content=context_file, name="task", tool_call_id="task-2", status="error")],
         trust_task_results=True) == {}
@@ -254,3 +257,51 @@ def test_model_chosen_selector_does_not_grant_url_authority():
     for messages in ([owner], [read, read_result], [research_call, research_result],
                      [legacy_call, legacy_result, read, read_result]):
         assert normalize_url(actual) in _seen_urls(messages, trust_task_results=True)
+
+
+def test_conversation_history_read_cannot_grant_context_url_authority():
+    """Raw pre-summary messages can contain an assistant-invented URL."""
+    invented = "https://invented.example/from-history"
+    context_call = AIMessage(content="", tool_calls=[{
+        "name": "task", "args": {"description": "Find notes",
+                             "subagent_type": "context-agent"}, "id": "task-history",
+    }])
+    for path in ("/conversation_history/thread-1.md",
+                 "/./conversation_history/thread-1.md",
+                 "/tmp/./conversation_history/thread-1.md"):
+        read = _read(path, call_id="read-history")
+        result = ToolMessage(content="assistant once wrote " + invented,
+                             name="read_file", tool_call_id="read-history")
+        projection = project_context_evidence([
+            read, result, AIMessage(content="Found the note"),
+        ])
+        task_result = ToolMessage(content=projection, name="task",
+                                  tool_call_id="task-history")
+        assert _seen_urls([context_call, task_result], trust_task_results=True) == {}
+        assert _seen_urls([read, result], trust_task_results=True) == {}
+
+    grep = AIMessage(content="", tool_calls=[{
+        "name": "grep", "args": {"pattern": "from-history", "path": "/"},
+        "id": "grep-history",
+    }])
+    hit = ToolMessage(content="/conversation_history/thread-1.md: " + invented,
+                      name="grep", tool_call_id="grep-history")
+    projection = project_context_evidence([grep, hit, AIMessage(content="Found a hit")])
+    assert _seen_urls([context_call, ToolMessage(
+        content=projection, name="task", tool_call_id="task-history")],
+        trust_task_results=True) == {}
+
+    source = "https://source.example/actual-file"
+    actual_read = _read("/notes/source.md", call_id="actual-read")
+    actual_result = ToolMessage(content="Source " + source, name="read_file",
+                                tool_call_id="actual-read")
+    actual_projection = project_context_evidence([
+        actual_read, actual_result, AIMessage(content="Found a source"),
+    ])
+    assert _seen_urls([context_call, ToolMessage(
+        content=actual_projection, name="task", tool_call_id="task-history")],
+        trust_task_results=True) == {}
+    assert normalize_url(source) in _seen_urls(
+        [context_call, ToolMessage(content=actual_projection, name="task",
+                                   tool_call_id="task-history"), actual_read, actual_result],
+        trust_task_results=True)

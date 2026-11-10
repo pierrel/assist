@@ -21,10 +21,10 @@ fabricated URL by writing it into its reasoning, then fetching it — see
 ``_seen_urls``); ``read_url`` PAGE CONTENT (the untrusted channel — an injected page
 can't name an exfil URL and have a follow-up read of it pass, a read-becomes-write);
 ``execute`` (shell) OUTPUT (arbitrary bytes — a cat'd download, a large log the agent
-re-reads from its real-fs offload — never a URL source); and a ``read_file``/``grep``
-of OFFLOADED content under ``…/large_tool_results/`` (in state or real fs),
-whose original tool channel is no longer recoverable from a later file read;
-and async task-management results, whose descriptions and child
+re-reads from its real-fs offload — never a URL source); a ``read_file``/``grep``
+of evicted results under ``…/large_tool_results/`` or raw pre-summary messages
+under ``…/conversation_history/``, whose original source is not recoverable
+from a later file read; and async task-management results, whose descriptions and child
 results are model-authored data. Read-url offloads use the narrower
 ``untrusted-page-`` marker: they remain excluded as authority but can supply only
 same-host link evidence. Shell and child results use the generic marker and cannot.
@@ -32,9 +32,10 @@ Delegate graphs exclude a sixth channel: their synchronous ``task`` specialist
 results, because the delegate authored those briefs and could ask a specialist to
 echo an invented URL. The legacy main retains trusted synchronous research
 ``task`` results so specialist citations can reach its navigation tool.
-Context ``task`` results include model-chosen file/search selectors; only
-successful actual file-read text in their complete host projection can
-provenance URLs. The V2 research orchestrator itself has no ``read_url``.
+Context ``task`` results mix model-chosen selectors and recorded file bytes, so
+the packet never grants URL authority. A legacy parent can read an original
+actual file under its existing policy. The V2 research orchestrator itself has
+no ``read_url``.
 
 SAME-HOST NAVIGATION (2026-07-21): a normalized destination that appeared in
 fetched-page content is fetchable IF its host is already trusted (a user URL or search
@@ -75,7 +76,6 @@ search-unavailable and 404-looped ~90 min. Guidance now tells the orchestrator t
 (not re-dispatch) when it has no sources, so removing it there is safe.
 See docs/2026-07-08-research-reread-runaway.org.
 """
-import json
 import logging
 import re
 from typing import Any, Callable
@@ -145,12 +145,13 @@ _MAX_LISTED = 8
 # reduce to the same key, and a prose ``…/page.`` matches the clean ``…/page``.
 _TRAILING = ".,;:!?)]}'\""
 _DEFAULT_PORTS = {"http": 80, "https": 443}
-# File reads can surface any offloaded result. Deepagents' native eviction writes
-# to /large_tool_results/<call_id> without retaining the original tool's trust
-# channel, so a reread cannot grant URL authority.
+# File reads can surface evicted tool results or raw pre-summary conversation
+# history. Neither retains a trustworthy source channel for URL authority.
 _FILE_READ_TOOLS = {"read_file", "grep"}
 # Explicit page offloads remain distinct for same-host link navigation.
 _OFFLOAD_MARK = f"{_OFFLOAD_DIR}/"
+_HISTORY_OFFLOAD_MARK = "conversation_history/"
+_UNTRUSTED_OFFLOAD_MARKS = (_OFFLOAD_MARK, _HISTORY_OFFLOAD_MARK)
 _PAGE_OFFLOAD_MARK = UNTRUSTED_PAGE_OFFLOAD_MARK
 # The LOCATION args of read_file/grep (NOT the grep `pattern`, which is a search term):
 # a marker here means the read TARGETS offloaded content.
@@ -237,18 +238,17 @@ def _is_offload_path(value: Any, marker: str) -> bool:
 
 
 def _reads_offloaded(tool_call: dict, content: str) -> bool:
-    """True if a ``read_file``/``grep`` (whose originating call IS known) touched
-    OFFLOADED content whose original tool channel is unavailable —
-    the same content laundered through a file. Two ways it shows up: the read's TARGET PATH contains the offload namespace
-    (checked on the LOCATION args only — path/file_path/glob, not the grep ``pattern``),
-    OR the result names an offloaded file (grep's default ``files_with_matches`` lists
-    matching paths, so a grep-all that hit the offload dir shows it). Over-matches only
-    make the model re-search — never trust more."""
+    """Detect reads of evicted tool output or raw conversation history.
+
+    The target path or a broad grep result can expose these mixed-source files.
+    Only location arguments count as targets; the grep pattern is a search term.
+    Over-matching makes the model re-search, never trust more.
+    """
     args = tool_call.get("args") or {}
-    if any(_is_offload_path(args.get(k, ""), _OFFLOAD_MARK)
-           for k in _OFFLOAD_PATH_KEYS):
+    if any(_is_offload_path(args.get(k, ""), mark)
+           for k in _OFFLOAD_PATH_KEYS for mark in _UNTRUSTED_OFFLOAD_MARKS):
         return True
-    return _OFFLOAD_MARK in (content or "")
+    return any(mark in (content or "") for mark in _UNTRUSTED_OFFLOAD_MARKS)
 
 
 def _reads_page_offload(tool_call: dict) -> bool:
@@ -268,10 +268,11 @@ def _is_untrusted_result(
     read_url page content directly, ``execute`` (shell) output, async task-management
     output, or a delegate's synchronous specialist and file-read output when
     task-result trust is disabled. Other roles also exclude a ``read_file``/``grep``
-    of OFFLOADED content with unknown original tool provenance. Fails
+    of evicted tool output or conversation history with unknown original
+    source provenance. Fails
     CLOSED: a file read whose originating ``tool_call`` is missing from
     the message list (e.g. summarization dropped it) is treated as untrusted — we can't
-    verify its target wasn't the offload dir, so we don't provenance its URLs."""
+    verify its target wasn't an offload or history file, so we don't provenance its URLs."""
     name = getattr(m, "name", None)
     if name in {_READ_TOOL, _SHELL_TOOL, *_ASYNC_TASK_TOOLS}:
         return True
@@ -279,9 +280,8 @@ def _is_untrusted_result(
         if not trust_task_results:
             return True
         tc = calls_by_id.get(getattr(m, "tool_call_id", None))
-        # The context child's result includes model-chosen search selectors.
-        # Its successful file observations are handled separately in _seen_urls.
-        # The marker also excludes raw scanning when a later task reused its ID.
+        # Context packets mix recorded tool bytes with model-chosen selectors;
+        # neither the packet nor a later reused task ID grants URL authority.
         if ((tc and (tc.get("args") or {}).get("subagent_type") == "context-agent")
                 or CONTEXT_EVIDENCE_MARKER in _message_text(m)):
             return True
@@ -297,33 +297,6 @@ def _is_untrusted_result(
             return True
         return _reads_offloaded(tc, _message_text(m))
     return False
-
-
-def _context_file_urls(message: ToolMessage) -> tuple[str, ...]:
-    """URLs in actual context file reads, excluding model-chosen selectors."""
-    if message.status != "success":
-        return ()
-    content = _message_text(message)
-    if not content.startswith(CONTEXT_EVIDENCE_MARKER):
-        return ()
-    try:
-        observations = json.loads(content.split("\n", 1)[1])["observations"]
-    except (IndexError, ValueError, KeyError, TypeError):
-        return ()
-    if not isinstance(observations, list):
-        return ()
-    urls = []
-    for observation in observations:
-        if not isinstance(observation, dict) or observation.get("tool") != "read_file":
-            continue
-        args = observation.get("request_args")
-        result = observation.get("observed_result")
-        if (observation.get("status") != "success" or not isinstance(args, dict)
-                or not isinstance(result, str)
-                or _reads_offloaded({"args": args}, result)):
-            continue
-        urls.extend(urls_in_text(result))
-    return tuple(urls)
 
 
 def _is_page_content(m: ToolMessage, calls_by_id: dict) -> bool:
@@ -368,14 +341,14 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True,
     content; (3) ``execute`` (shell) output — arbitrary bytes (a cat'd download, a log the
     agent re-reads from its real-fs offload), never a URL source; (4) async
     task-management results — model-authored briefs and child output; and (5) a
-    ``read_file``/``grep`` of OFFLOADED content (including native eviction at
-    ``…/large_tool_results/<call_id>``) — the SAME content laundered through
-    a file (DeepAgents or ToolResultToFileMiddleware writes it there). So a
+    ``read_file``/``grep`` of evicted content or raw pre-summary messages
+    (``…/large_tool_results/<call_id>`` or ``…/conversation_history/``) — mixed-source
+    content laundered through a file. So a
     URL appearing only inside fetched-page content — direct or offloaded — never
     becomes trusted authority. A real same-host page link is separately navigable;
     a new host requires another trusted source such as search. A context ``task``
-    projection contributes only successful actual file-read content, not its
-    model-chosen selectors or partial preview. Delegate mode also excludes its synchronous specialist results,
+    projection never grants URL authority; a legacy caller can read an actual
+    source file itself. Delegate mode also excludes its synchronous specialist results,
     sets ``trust_human_messages=False``, and adds only
     admission-frozen, brief-intersected owner URL seeds later. RESIDUAL: a model that FOLLOWS a multi-step injection to
     ``write_file`` an arbitrary URL then ``read_file`` it can still self-launder —
@@ -394,12 +367,6 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True,
             continue
         if isinstance(m, HumanMessage) and not trust_human_messages:
             continue
-        if isinstance(m, ToolMessage) and trust_task_results and m.name == _SYNC_SUBAGENT_TOOL:
-            call = calls_by_id.get(m.tool_call_id)
-            if call and (call.get("args") or {}).get("subagent_type") == "context-agent":
-                for url in _context_file_urls(m):
-                    _record_url(seen, url)
-                continue
         if isinstance(m, ToolMessage) and _is_untrusted_result(
                 m, calls_by_id, trust_task_results=trust_task_results):
             continue
