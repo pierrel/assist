@@ -1,12 +1,17 @@
 #+title: Assist architecture
 
-This is the architecture of merged Assist =main= at
-=df4bb845df34289427ec85992ae5d1120906f5e2=. It shows the ordinary Deep
+The overview uses merged Assist runtime =df4bb845df34289427ec85992ae5d1120906f5e2=
+(the architecture baseline merged in =ecb665c6=). It shows the ordinary Deep
 Agents web path and the interfaces other clients use. A Pi preview thread,
 voice call, inbound SMS, scheduled prompt, or child task enters through a
 different admission route, then uses the same durable Run service where that
 route creates a Run. The diagrams show ownership and major data
 flows, not a function call graph.
+
+The component key also links the implemented browser delta in this checkout:
+[[file:browser-site-compatibility.org][browser compatibility map and local review guide]].
+It uses the same C8/C10/C11/C13 IDs and shows the changed control and network
+connections. Other separately deployed feature branches are outside this view.
 
 [[file:architecture.svg]]
 
@@ -101,7 +106,9 @@ in both views. An ID shown in only one view keeps that meaning.
 - *C11 Browser worker.* C6's browser tools call the host-side
   [[file:../assist/browser/manager.py][BrowserManager]], which controls the
   session and invokes [[file:../assist/browser/runner.py][BrowserWorker]] inside
-  the turn sandbox. The worker runs page actions with Chromium.
+  the turn sandbox. In this branch the worker controls full native Chromium
+  with software rendering and a sealed private CDP channel; see the
+  [[file:browser-site-compatibility.org][browser compatibility view]].
   [[file:../assist/browser/storage.py][storage.py]] holds a limited later-turn
   storage snapshot, not live tabs.
 - *C12 Model endpoint.* [[file:../assist/model_manager.py][model_manager.py]]
@@ -111,7 +118,9 @@ in both views. An ID shown in only one view keeps that meaning.
   starts the proxy and isolated networks. [[file:../assist/egress/store.py][EgressStore]]
   projects approved grants; [[file:../assist/egress/client_map.py][client_map.py]]
   attributes browser traffic. It gates sandbox and browser network traffic,
-  not host Python tool requests.
+  not host Python tool requests. The
+  [[file:browser-site-compatibility.org][browser view]] describes this branch's
+  bounded browser connection burst and the retained destination policy.
 - *C14 Domain Git remote.* [[file:../assist/thread_git.py][ThreadGit]] and
   [[file:../assist/git_sync.py][git_sync.py]] prepare and verify publication of
   a thread branch. The remote is optional for non-Git threads.
@@ -232,4 +241,6 @@ The CLI and embedders can use host-backed or embedder-supplied backends, so
 C10/C11 depict the ordinary sandboxed web path. Inbound SMS, schedules, voice
 and approvals have their own interfaces and rules; this map does not detail
 those workflows or external client internals. The component names describe
-current responsibilities, not proposed citation or browser changes.
+current responsibilities. The linked browser view describes this branch's
+implemented compatibility delta; separately deployed features need their own
+source-specific views.

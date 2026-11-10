@@ -10,7 +10,9 @@ It is not just a coding assistant, but should be able to help with any project o
 
 See [README.org](README.org) for detailed concepts and architecture.
 See [the current architecture map](docs/architecture.org) for the merged
-component diagram and code owners.
+component diagram and code owners, and the
+[browser compatibility review guide](docs/browser-site-compatibility.org) for
+this branch's control and network changes.
 
 ## Current Capabilities
 
