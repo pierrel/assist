@@ -16,11 +16,12 @@ delegates are exceptions: their HumanMessages are model-authored briefs, so the
 web host supplies only brief-form URLs canonically
 matched to owner-authored Runs already accepted when the child Run is admitted;
 the brief may remove owner userinfo but cannot add or change it.
-Five channels are deliberately NOT provenance sources, because
+Tool errors and six channels are deliberately NOT provenance sources, because
 their content is attacker-derivable: the model's OWN prior text (else it launders a
 fabricated URL by writing it into its reasoning, then fetching it — see
 ``_seen_urls``); ``read_url`` PAGE CONTENT (the untrusted channel — an injected page
 can't name an exfil URL and have a follow-up read of it pass, a read-becomes-write);
+``write_file``/``edit_file`` results (which can echo a model-chosen path),
 ``execute`` (shell) OUTPUT (arbitrary bytes — a cat'd download, a large log the agent
 re-reads from its real-fs offload — never a URL source); and a ``read_file``/``grep``
 of OFFLOADED untrusted content, written under
@@ -30,7 +31,7 @@ through a file; and async task-management results, whose descriptions and child
 results are model-authored data. Read-url offloads use the narrower
 ``untrusted-page-`` marker: they remain excluded as authority but can supply only
 same-host link evidence. Shell and child results use the generic marker and cannot.
-Delegate graphs exclude a sixth channel: their synchronous ``task`` specialist
+Delegate graphs exclude an additional channel: their synchronous ``task`` specialist
 results, because the delegate authored those briefs and could ask a specialist to
 echo an invented URL. The legacy main retains trusted synchronous ``task`` results so
 research-specialist citations can reach its navigation tool; the V2 research
@@ -115,6 +116,7 @@ DELEGATE_USER_URLS_KEY = "assist_delegate_user_urls"
 # it by construction means moving the `execute` offload onto the shell-readable fs
 # (docs/2026-07-22-offload-to-real-fs.org) can't launder URLs into the trusted set.
 _SHELL_TOOL = "execute"
+_MODEL_WRITE_TOOLS = {"write_file", "edit_file"}
 # URLs as they appear in tool results / text. Stop at whitespace and the quote
 # delimiters that bracket a URL in the search output (Python-repr ``'...'`` /
 # JSON ``"..."``). We deliberately DO NOT stop at ``)`` / ``]`` / ``}``: those are
@@ -269,15 +271,16 @@ def _is_untrusted_result(
         trust_task_results: bool = True,
 ) -> bool:
     """A ToolMessage whose content must NOT provenance URLs — the untrusted channels:
-    read_url page content directly, ``execute`` (shell) output, async task-management
-    output, or synchronous specialist and file-read output when task-result
+    read_url page content directly, write/edit results, ``execute`` (shell) output,
+    any tool error, async task-management output, or synchronous specialist and file-read output when task-result
     trust is disabled. Other roles also exclude a ``read_file``/``grep``
     of OFFLOADED untrusted content (read_url page or execute/child output). Fails
     CLOSED: a file read whose originating ``tool_call`` is missing from
     the message list (e.g. summarization dropped it) is treated as untrusted — we can't
     verify its target wasn't the offload dir, so we don't provenance its URLs."""
     name = getattr(m, "name", None)
-    if name in {_READ_TOOL, _SHELL_TOOL, *_ASYNC_TASK_TOOLS}:
+    if m.status == "error" or name in {
+            _READ_TOOL, _SHELL_TOOL, *_MODEL_WRITE_TOOLS, *_ASYNC_TASK_TOOLS}:
         return True
     if name == _SYNC_SUBAGENT_TOOL and not trust_task_results:
         return True
@@ -298,12 +301,15 @@ def _is_untrusted_result(
 def _is_page_content(m: ToolMessage, calls_by_id: dict) -> bool:
     """Content allowed to contribute same-host navigation paths.
 
-    Direct ``read_url`` output qualifies. A ``read_file``/``grep`` qualifies only
-    when its target has the page-specific offload marker written by the ``read_url``
-    middleware. Shell and child-task results never qualify. This classifier is separate from
+    Successful ``read_url`` output qualifies. A successful ``read_file``/``grep``
+    qualifies only when its target has the page-specific offload marker written
+    by the ``read_url`` middleware. Errors can echo model-chosen paths; shell
+    and child-task results never qualify. This classifier is separate from
     ``_is_untrusted_result``: `_seen_urls` uses that broader predicate to exclude trust
     sources, while `_page_content_urls` uses only this predicate for navigation paths."""
     name = getattr(m, "name", None)
+    if m.status == "error":
+        return False
     if name == _READ_TOOL:
         return True
     if name in _FILE_READ_TOOLS:
@@ -329,14 +335,15 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True,
     (e.g. a stripped trailing paren on a Wikipedia URL).
 
     Normally scans ``HumanMessage`` content (a URL the user pasted) and TRUSTED ``ToolMessage``
-    content (search results, non-offloaded ``read_file``/``grep`` results). Five channels
+    content (search results, non-offloaded ``read_file``/``grep`` results). Tool errors and six channels
     are always EXCLUDED because their content is attacker-derivable: (1) the model's own
     ``AIMessage`` — else it launders a fabricated URL by writing it into its reasoning
     first, then fetching it (observed on Qwen3.6, 14 of 24 fetches slipped through this
     way); (2) ``read_url`` results — arbitrary, possibly attacker-controlled page
-    content; (3) ``execute`` (shell) output — arbitrary bytes (a cat'd download, a log the
-    agent re-reads from its real-fs offload), never a URL source; (4) async
-    task-management results — model-authored briefs and child output; and (5) a
+    content; (3) ``write_file``/``edit_file`` results — model-chosen paths can be
+    echoed even in a host-authored collision error; (4) ``execute`` (shell) output — arbitrary bytes (a cat'd download, a log the
+    agent re-reads from its real-fs offload), never a URL source; (5) async
+    task-management results — model-authored briefs and child output; and (6) a
     ``read_file``/``grep`` of OFFLOADED untrusted content (read_url page,
     execute output, or child result)
     under an ``…/large_tool_results/untrusted-{data,page}-`` namespace — the SAME content laundered through

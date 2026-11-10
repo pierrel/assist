@@ -19,6 +19,7 @@ from assist.middleware.tool_result_to_file import (
     UNTRUSTED_OFFLOAD_MARK,
     UNTRUSTED_PAGE_OFFLOAD_MARK,
 )
+from assist.middleware.write_collision import _rewrite_message
 
 _OFFLOADED = f"/{UNTRUSTED_OFFLOAD_MARK}r0"
 _OFFLOADED_TMP = f"/tmp/{UNTRUSTED_OFFLOAD_MARK}r0"   # the real-fs (execute) offload variant
@@ -76,6 +77,34 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertEqual(result.status, "error")
         self.assertIn("not fetched", result.content)
         self.assertIn("https://shop.example/f91w", result.content)  # lists a real one
+
+    def test_write_file_collision_cannot_authorize_model_written_url(self):
+        planted = "https://invented.example/claim"
+        messages = [
+            AIMessage(content="", tool_calls=[{
+                "name": "write_file", "id": "write-1",
+                "args": {"file_path": f"/report {planted} notes.txt", "content": ""},
+            }]),
+            ToolMessage(
+                content=_rewrite_message(f"/report {planted} notes.txt"),
+                name="write_file", tool_call_id="write-1", status="error",
+            ),
+        ]
+        result, handler = self._call(planted, messages)
+        self.assertIsNone(handler.called_with)
+        self.assertEqual(result.status, "error")
+
+    def test_successful_mutation_result_cannot_authorize_model_written_url(self):
+        planted = "https://invented.example/claim"
+        for name in ("write_file", "edit_file"):
+            with self.subTest(name=name):
+                messages = [ToolMessage(
+                    content=f"Updated /report {planted} notes.txt",
+                    name=name, tool_call_id="mutation-1",
+                )]
+                result, handler = self._call(planted, messages)
+                self.assertIsNone(handler.called_with)
+                self.assertEqual(result.status, "error")
 
     def test_allows_user_provided_url(self):
         # A URL in the question itself is provenanced (copyable, not invented).
@@ -308,6 +337,22 @@ class TestUrlProvenanceMiddleware(TestCase):
         result, handler = self._call(planted, msgs)
         self.assertIsNone(handler.called_with,
                           "a same-host URL seen only in execute output must NOT be navigable")
+        self.assertEqual(result.status, "error")
+
+    def test_failed_page_offload_read_cannot_authorize_same_host_path(self):
+        planted = "https://shop.example/invented"
+        path = f"/{UNTRUSTED_PAGE_OFFLOAD_MARK}{planted}"
+        messages = [
+            HumanMessage(content="Explore https://shop.example/"),
+            AIMessage(content="", tool_calls=[{
+                "name": "read_file", "id": "failed-read",
+                "args": {"file_path": path},
+            }]),
+            ToolMessage(content=f"File not found: {path}",
+                        name="read_file", tool_call_id="failed-read", status="error"),
+        ]
+        result, handler = self._call(planted, messages)
+        self.assertIsNone(handler.called_with)
         self.assertEqual(result.status, "error")
 
     def test_allows_same_host_navigation_from_a_fetched_page(self):
