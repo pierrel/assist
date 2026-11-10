@@ -254,7 +254,7 @@ def _read_pdf_url(url: str) -> str:
     try:
         result = subprocess.run(
             [sys.executable, "-m", "assist.pdf_text"], input=url.encode("utf-8"),
-            capture_output=True, timeout=30, check=False,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30, check=False,
         )
     except subprocess.TimeoutExpired as e:
         raise TimeoutError("PDF fetch and text extraction exceeded 30 seconds") from e

@@ -76,6 +76,7 @@ def test_read_url_pdf_uses_bounded_child_and_preserves_error_contract():
             args=[], returncode=0, stdout=b"Page 1: certified outcome", stderr=b"")) as run:
         assert "certified outcome" in tools.read_url("https://example.org/report.pdf")
     assert run.call_args.kwargs["timeout"] == 30
+    assert run.call_args.kwargs["stderr"] == subprocess.DEVNULL
     assert run.call_args.kwargs["input"] == b"https://example.org/report.pdf"
     with patch.object(tools.subprocess, "run", return_value=subprocess.CompletedProcess(
             args=[], returncode=2, stdout=b"", stderr=b"")):
