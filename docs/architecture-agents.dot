@@ -15,7 +15,7 @@ digraph Agents {
   C18 [label="C18  Context\nmemory + time rider"];
   C6 [label="C6  Agent assembly\nordinary web main graph", fillcolor="#e5edf5"];
   C7 [label="C7  Child task handoff\nbrief → durable child → parent wake"];
-  C20 [label="C20a–d  Web child profiles\ncontext · research · critique · delegate",
+  C20 [label="Web child profiles\nC20a  Context\nC20b  Research\nC20c  Critique\nC20d  Delegate",
        fillcolor="#fff4d7"];
 
   C19 -> C6 [label="profile"];
