@@ -29,8 +29,11 @@ the ``…/large_tool_results/untrusted-{data,page}-`` family (in state, or
 ``/tmp/large_tool_results/…`` for a real-fs offload) — the SAME content laundered
 through a file; and async task-management results, whose descriptions and child
 results are model-authored data. Read-url offloads use the narrower
-``untrusted-page-`` marker: they remain excluded as authority but can supply only
-same-host link evidence. Shell and child results use the generic marker and cannot.
+``untrusted-page-`` marker and a host-authored path on the successful tool
+result: they remain excluded as authority but can supply only same-host link
+evidence. The guarded ``write_file``/``edit_file`` tools cannot target the
+reserved offload namespace.
+Shell and child results use the generic marker and cannot.
 Delegate graphs exclude an additional channel: their synchronous ``task`` specialist
 results, because the delegate authored those briefs and could ask a specialist to
 echo an invented URL. The legacy main retains trusted synchronous ``task`` results so
@@ -77,6 +80,7 @@ search-unavailable and 404-looped ~90 min. Guidance now tells the orchestrator t
 See docs/2026-07-08-research-reread-runaway.org.
 """
 import logging
+import posixpath
 import re
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
@@ -89,6 +93,7 @@ from langgraph.types import Command
 
 from assist.middleware.loop_detection import _messages_from_state
 from assist.middleware.tool_result_to_file import (
+    PAGE_OFFLOAD_PATH_KEY,
     UNTRUSTED_OFFLOAD_MARK,
     UNTRUSTED_PAGE_OFFLOAD_MARK,
 )
@@ -240,6 +245,16 @@ def _is_offload_path(value: Any, marker: str) -> bool:
             or path.startswith(f"/tmp/{marker}"))
 
 
+def _canonical_path(value: Any) -> str:
+    return posixpath.normpath("/" + str(value).lstrip("/"))
+
+
+def _is_reserved_offload_path(value: Any) -> bool:
+    path = _canonical_path(value)
+    return any(path == root or path.startswith(root + "/")
+               for root in ("/large_tool_results", "/tmp/large_tool_results"))
+
+
 def _reads_offloaded(tool_call: dict, content: str) -> bool:
     """True if a ``read_file``/``grep`` (whose originating call IS known) touched
     OFFLOADED untrusted content (read_url page, execute output, or child output) —
@@ -272,13 +287,18 @@ def _is_untrusted_result(
 ) -> bool:
     """A ToolMessage whose content must NOT provenance URLs — the untrusted channels:
     read_url page content directly, write/edit results, ``execute`` (shell) output,
-    any tool error, async task-management output, or synchronous specialist and file-read output when task-result
-    trust is disabled. Other roles also exclude a ``read_file``/``grep``
+    any tool error, and async task-management output. A guarded child with
+    task-result trust disabled accepts only search results as new-host sources;
+    other roles also exclude a ``read_file``/``grep``
     of OFFLOADED untrusted content (read_url page or execute/child output). Fails
     CLOSED: a file read whose originating ``tool_call`` is missing from
     the message list (e.g. summarization dropped it) is treated as untrusted — we can't
     verify its target wasn't the offload dir, so we don't provenance its URLs."""
     name = getattr(m, "name", None)
+    if not trust_task_results and name != "search_internet":
+        # A guarded child may mint new-host URLs only from actual search
+        # results, not a model-controlled tool's echoed arguments.
+        return True
     if m.status == "error" or name in {
             _READ_TOOL, _SHELL_TOOL, *_MODEL_WRITE_TOOLS, *_ASYNC_TASK_TOOLS}:
         return True
@@ -298,12 +318,14 @@ def _is_untrusted_result(
     return False
 
 
-def _is_page_content(m: ToolMessage, calls_by_id: dict) -> bool:
+def _is_page_content(m: ToolMessage, calls_by_id: dict,
+                     page_paths: set[str]) -> bool:
     """Content allowed to contribute same-host navigation paths.
 
     Successful ``read_url`` output qualifies. A successful ``read_file``/``grep``
-    qualifies only when its target has the page-specific offload marker written
-    by the ``read_url`` middleware. Errors can echo model-chosen paths; shell
+    qualifies only when its exact target matches a host-recorded page offload
+    on a successful ``read_url`` result. A marker-shaped path alone is not
+    provenance. Errors can echo model-chosen paths; shell
     and child-task results never qualify. This classifier is separate from
     ``_is_untrusted_result``: `_seen_urls` uses that broader predicate to exclude trust
     sources, while `_page_content_urls` uses only this predicate for navigation paths."""
@@ -314,7 +336,11 @@ def _is_page_content(m: ToolMessage, calls_by_id: dict) -> bool:
         return True
     if name in _FILE_READ_TOOLS:
         tc = calls_by_id.get(getattr(m, "tool_call_id", None))
-        return tc is not None and _reads_page_offload(tc)
+        if tc is None or not _reads_page_offload(tc):
+            return False
+        args = tc.get("args") or {}
+        return any(_canonical_path(args.get(k)) in page_paths
+                   for k in _OFFLOAD_PATH_KEYS if args.get(k))
     return False
 
 
@@ -382,25 +408,32 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True,
 
 def _page_content_urls(messages: list) -> dict[str, list[str]]:
     """Normalized-to-original URL variants from page-compatible content: direct
-    ``read_url`` output or a page-marked read_url offload reread (see
+    ``read_url`` output or a host-recorded read_url offload reread (see
     ``_is_page_content``). NOT the exact inverse of ``_seen_urls``: shell and child-task
     output, direct or offloaded, are in NEITHER set.
-    These are the links a page actually surfaced; a fabricated path never appears
-    here. Credentialless same-host members are navigable (see wrap_tool_call);
+    These are the links a page actually surfaced; a fabricated marker-shaped
+    file path cannot contribute them. Credentialless same-host members are
+    navigable (see wrap_tool_call);
     credentialed requests also need exact trusted same-origin userinfo. This admits
     following a real link on an already-trusted site while still blocking a
     fabricated same-host path (the dead-URL flood), page-introduced credentials,
     and an exfil URL the model invents (or one printed into shell output on a
     trusted host)."""
     calls_by_id: dict[str, dict] = {}
+    page_paths: set[str] = set()
     for m in messages:
+        if (isinstance(m, ToolMessage) and m.name == _READ_TOOL
+                and m.status != "error"):
+            path = m.additional_kwargs.get(PAGE_OFFLOAD_PATH_KEY)
+            if isinstance(path, str) and _is_offload_path(path, _PAGE_OFFLOAD_MARK):
+                page_paths.add(_canonical_path(path))
         for tc in getattr(m, "tool_calls", None) or []:
             cid = tc.get("id")
             if cid:
                 calls_by_id[cid] = tc
     urls: dict[str, list[str]] = {}
     for m in messages:
-        if isinstance(m, ToolMessage) and _is_page_content(m, calls_by_id):
+        if isinstance(m, ToolMessage) and _is_page_content(m, calls_by_id, page_paths):
             for url in urls_in_text(_message_text(m)):
                 _record_url(urls, url)
     return urls
@@ -450,10 +483,10 @@ class UrlProvenanceMiddleware(AgentMiddleware):
     Corrective, not turn-ending: a rejected call returns an error ToolMessage
     listing the URLs the agent may actually read, so it retries with a real one.
     ``trust_human_messages=False`` excludes model-authored child briefs;
-    ``trust_task_results=False`` also excludes synchronous specialist and file
-    results. Async research children and the delegate's own guard use both.
+    ``trust_task_results=False`` accepts only actual search-result tool messages
+    as new-host sources. Async research children and the delegate's own guard use both.
     Admission-frozen, brief-intersected owner URL seeds from the durable child Run
-    can replace brief URLs. Page-marked same-host links
+    can replace brief URLs. Host-recorded page links
     remain navigation evidence but never cross-host authority.
     Stateless across turns except an intervention counter for logging."""
 
@@ -471,6 +504,17 @@ class UrlProvenanceMiddleware(AgentMiddleware):
         handler: Callable[[ToolCallRequest], "ToolMessage | Command"],
     ) -> "ToolMessage | Command":
         tool_call = request.tool_call
+        # The offload namespace belongs to host tool output. A model-written
+        # page-shaped file would otherwise make its later read look like a page.
+        if tool_call.get("name") in _MODEL_WRITE_TOOLS:
+            args = tool_call.get("args") or {}
+            if isinstance(args, dict) and any(
+                    _is_reserved_offload_path(args.get(k))
+                    for k in ("path", "file_path") if args.get(k)):
+                return ToolMessage(
+                    content="Error: large_tool_results is reserved for tool output.",
+                    name=tool_call["name"], tool_call_id=tool_call.get("id", ""),
+                    status="error")
         if tool_call.get("name", "") != _READ_TOOL:
             return handler(request)
 

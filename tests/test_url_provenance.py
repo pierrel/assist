@@ -16,6 +16,7 @@ from assist.middleware.url_provenance import (
     normalize_url,
 )
 from assist.middleware.tool_result_to_file import (
+    PAGE_OFFLOAD_PATH_KEY,
     UNTRUSTED_OFFLOAD_MARK,
     UNTRUSTED_PAGE_OFFLOAD_MARK,
 )
@@ -105,6 +106,17 @@ class TestUrlProvenanceMiddleware(TestCase):
                 result, handler = self._call(planted, messages)
                 self.assertIsNone(handler.called_with)
                 self.assertEqual(result.status, "error")
+
+    def test_guarded_child_does_not_trust_write_todos_echo(self):
+        planted = "https://invented.example/claim"
+        middleware = UrlProvenanceMiddleware(
+            trust_human_messages=False, trust_task_results=False)
+        handler = _Handler()
+        result = middleware.wrap_tool_call(_request(planted, [ToolMessage(
+            content=f"Saved todo: verify {planted}",
+            name="write_todos", tool_call_id="todo-1")]), handler)
+        self.assertIsNone(handler.called_with)
+        self.assertEqual(result.status, "error")
 
     def test_allows_user_provided_url(self):
         # A URL in the question itself is provenanced (copyable, not invented).
@@ -355,6 +367,44 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertIsNone(handler.called_with)
         self.assertEqual(result.status, "error")
 
+    def test_model_owned_page_offload_file_cannot_authorize_same_host_path(self):
+        planted = "https://shop.example/invented"
+        for mutation in ("write_file", "edit_file"):
+            with self.subTest(mutation=mutation):
+                messages = [
+                    HumanMessage(content="Explore https://shop.example/"),
+                    AIMessage(content="", tool_calls=[{
+                        "name": mutation, "id": "mutation-1",
+                        "args": {"file_path": _OFFLOADED_PAGE,
+                                 "content": planted},
+                    }]),
+                    ToolMessage(content="File updated", name=mutation,
+                                tool_call_id="mutation-1"),
+                    AIMessage(content="", tool_calls=[{
+                        "name": "read_file", "id": "page-read",
+                        "args": {"file_path": _OFFLOADED_PAGE},
+                    }]),
+                    ToolMessage(content=f"Follow {planted}", name="read_file",
+                                tool_call_id="page-read"),
+                ]
+                result, handler = self._call(planted, messages)
+                self.assertIsNone(handler.called_with)
+                self.assertEqual(result.status, "error")
+
+    def test_model_cannot_write_or_edit_reserved_page_offload_path(self):
+        for name, path in (
+                ("write_file", _OFFLOADED_PAGE),
+                ("edit_file", f"/large_tool_results/../{UNTRUSTED_PAGE_OFFLOAD_MARK}r0")):
+            with self.subTest(name=name):
+                request = ToolCallRequest(
+                    tool_call={"name": name, "args": {"file_path": path},
+                               "id": "mutation-1"},
+                    tool=None, state={"messages": []}, runtime=None)
+                handler = _Handler()
+                result = self.mw.wrap_tool_call(request, handler)
+                self.assertIsNone(handler.called_with)
+                self.assertEqual(result.status, "error")
+
     def test_allows_same_host_navigation_from_a_fetched_page(self):
         # SAME-HOST NAVIGATION (2026-07-21): the user pointed at a site; a link
         # the fetched page ACTUALLY surfaced, on THAT SAME HOST, is fetchable —
@@ -371,6 +421,9 @@ class TestUrlProvenanceMiddleware(TestCase):
         target = "https://shop.example/pages/support"
         msgs = [
             HumanMessage(content="download the manual from https://shop.example/"),
+            ToolMessage(content="Page preview; full text saved by read_url",
+                        name="read_url", tool_call_id="page-source",
+                        additional_kwargs={PAGE_OFFLOAD_PATH_KEY: _OFFLOADED_PAGE}),
             AIMessage(content="", tool_calls=[{
                 "name": "grep", "id": "page-grep",
                 "args": {"pattern": "support", "path": _OFFLOADED_PAGE}}]),
@@ -386,6 +439,9 @@ class TestUrlProvenanceMiddleware(TestCase):
         target = "https://shop.example/pages/support"
         msgs = [
             HumanMessage(content="download the manual from https://shop.example/"),
+            ToolMessage(content="Page preview; full text saved by read_url",
+                        name="read_url", tool_call_id="page-source",
+                        additional_kwargs={PAGE_OFFLOAD_PATH_KEY: _OFFLOADED_PAGE}),
             AIMessage(content="", tool_calls=[{
                 "name": "grep", "id": "page-grep-relative",
                 "args": {"pattern": "support",

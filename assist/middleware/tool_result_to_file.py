@@ -71,6 +71,9 @@ UNTRUSTED_OFFLOAD_MARK = f"{_OFFLOAD_DIR}/untrusted-data-"
 # Read-url content remains page-link evidence for same-host navigation. Keep it
 # distinguishable from arbitrary child/shell output under the shared untrusted prefix.
 UNTRUSTED_PAGE_OFFLOAD_MARK = f"{_OFFLOAD_DIR}/untrusted-page-"
+# Host-authored ToolMessage metadata proves which page offload path was actually
+# created; the prefix alone could also name a model-written file.
+PAGE_OFFLOAD_PATH_KEY = "assist_page_offload_path"
 
 
 def _preview(content: str, style: str) -> str:
@@ -118,9 +121,10 @@ class ToolResultToFileMiddleware(AgentMiddleware):
     ``.../large_tool_results/untrusted-`` family
     (see ``UNTRUSTED_OFFLOAD_MARK``) so ``UrlProvenanceMiddleware`` won't provenance a URL read
     back from it; the default writes ``.../large_tool_results/<id>``.
-    ``page_navigation=True`` gives a read_url offload a narrower page marker so its
-    links can support same-host navigation without granting that property to shell or
-    child output. ``offload_root``
+    ``page_navigation=True`` gives a read_url offload a narrower page marker
+    and records its actual path in ToolMessage metadata so its links can
+    support same-host navigation without granting that property to a
+    model-written file, shell output, or child output. ``offload_root``
     (per-instantiation) sets the parent: ``""`` (default) → StateBackend-routed
     ``/large_tool_results/…``; ``"/tmp"`` → the sandbox's real per-turn fs so shell +
     file tools share one path (see the module docstring).
@@ -182,8 +186,12 @@ class ToolResultToFileMiddleware(AgentMiddleware):
             return result
         args = request.tool_call.get("args") or {}
         source = next((str(v) for v in args.values() if isinstance(v, str)), "")[:120]
-        return _preview_message(result, content, request.tool_call.get("name", "tool"),
-                                source, path, self._style)
+        preview = _preview_message(result, content, request.tool_call.get("name", "tool"),
+                                   source, path, self._style)
+        if self._page_navigation:
+            return preview.model_copy(update={"additional_kwargs": {
+                **preview.additional_kwargs, PAGE_OFFLOAD_PATH_KEY: path}})
+        return preview
 
     def _offload(self, request: ToolCallRequest, result):
         if request.tool_call.get("name") not in self._tools:

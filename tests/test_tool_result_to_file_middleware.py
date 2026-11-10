@@ -8,10 +8,12 @@ matters (no LLM).
 from types import SimpleNamespace
 
 from langchain_core.messages import ToolMessage
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.types import Command
 
 from assist.middleware.tool_result_to_file import (
     ToolResultToFileMiddleware, _DEFAULT_FLOOR_CHARS, _PREVIEW_CHARS,
+    PAGE_OFFLOAD_PATH_KEY,
     UNTRUSTED_OFFLOAD_MARK, UNTRUSTED_PAGE_OFFLOAD_MARK)
 
 
@@ -103,10 +105,29 @@ def test_read_url_page_offload_has_distinct_navigation_marker():
         page_navigation=True,
     )
 
-    _run(mw, _Req(), _msg("x" * 5000))
+    out = _run(mw, _Req(), _msg("x" * 5000))
 
     path = next(iter(backend.written))
     assert path.startswith(f"/{UNTRUSTED_PAGE_OFFLOAD_MARK}")
+    assert out.additional_kwargs[PAGE_OFFLOAD_PATH_KEY] == path
+
+
+def test_page_offload_proof_survives_command_and_checkpoint_serialization():
+    backend = _StubBackend()
+    mw = ToolResultToFileMiddleware(
+        backend, tools={"read_url"}, floor_chars=4000,
+        untrusted=True, page_navigation=True)
+    cmd = Command(update={"messages": [ToolMessage(
+        content="page text " * 1000, name="read_url", tool_call_id="page-1")],
+        "other": "preserved"})
+    out = _run(mw, _Req(), cmd)
+    path = next(iter(backend.written))
+    message = out.update["messages"][0]
+    assert out.update["other"] == "preserved"
+    assert message.additional_kwargs[PAGE_OFFLOAD_PATH_KEY] == path
+    serializer = JsonPlusSerializer()
+    restored = serializer.loads_typed(serializer.dumps_typed(message))
+    assert restored.additional_kwargs[PAGE_OFFLOAD_PATH_KEY] == path
 
 
 def test_trusted_offload_has_no_untrusted_marker():
