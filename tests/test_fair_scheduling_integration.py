@@ -350,6 +350,28 @@ def test_dispatch_probe_skips_cancelled_and_browser_held_wakes(wired):
     assert scheduler._dispatch_waiter_count("other") == 0
 
 
+def test_dispatch_probe_skips_interrupted_predecessor_behind_approval(wired):
+    tid, _ = wired
+    service = threads._runs()
+    predecessor = threads._create_run(tid, "first")
+    service.claim(tid, predecessor.id)
+    service.transition(tid, predecessor.id, "interrupted")
+    successor = threads._create_run(
+        tid, None, work_id=predecessor.work_id, resume=True)
+    service.claim(tid, successor.id)
+    action = {"name": "send_email", "args": {"to": "reader@example.test"}}
+    service.publish_approval(
+        tid, successor.id, action=action, requests=[action],
+        proposal={"kind": "send_email", "action": action},
+        interrupt_id="gate", checkpoint_id="checkpoint")
+    scheduler = threads._ResumeScheduler()
+    scheduler.submit(predecessor.id, tid)
+
+    assert service.pending_approval(tid) is not None
+    assert service.get(tid, predecessor.id).status == "interrupted"
+    assert scheduler._dispatch_waiter_count("other") == 0
+
+
 def test_resume_scheduler_dedupes_only_queued_run_ids():
     q = threads._PriorityRunQueue()
     item = {"kind": "run", "run_id": "same", "tid": "thread"}

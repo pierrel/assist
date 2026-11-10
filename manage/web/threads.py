@@ -6091,12 +6091,12 @@ class _ResumeScheduler:
                     if (approval is None or approval.blocked_reason
                             or approval.execution_run_id != run.id):
                         continue
+                elif (run.mode != "child" and run.status in {"pending", "running", "interrupted"}
+                      and (_runs().pending_approval(tid) is not None
+                           or _runs().unfinished_approval_continuation(tid) is not None)):
+                    continue
                 if run.status == "pending":
                     if run not in _runs_before_browser_reset(runs):
-                        continue
-                    if (run.mode != "child" and run.approval_id is None
-                            and (_runs().pending_approval(tid) is not None
-                                 or _runs().unfinished_approval_continuation(tid) is not None)):
                         continue
                 elif run.status not in {"running", "interrupted"} and not (
                         run.mode == "child" and run.status in {"success", "error", "timeout"}):
