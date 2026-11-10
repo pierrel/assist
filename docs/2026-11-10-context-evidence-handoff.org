@@ -1,0 +1,42 @@
+#+title: Context evidence handoff
+#+date: 2026-11-10
+
+* Problem
+
+A context child read a ballot note with no election date, then returned a
+final summary claiming that the note mentioned a June special election. The
+main agent repeated that invented note history in a research
+brief. The child had read the right file; its final prose lost the boundary
+between file contents and interpretation.
+
+* Change
+
+The ordinary context agent still chooses which local files to inspect. At
+completion, =ContextEvidenceMiddleware= replaces its final prose with paired
+=ls=, =glob=, =grep=, and =read_file= tool observations from its recorded graph
+messages. Each observation retains the model-chosen request arguments, tool
+status, and returned content. The caller can see a paginated read's offset and
+limit or the scope of an empty search. An unpaired recorded call is counted;
+ambiguous and reversed call/result IDs cannot become observations.
+
+The same context-agent factory feeds synchronous =task= callers and web async
+children. The hook is limited to the ordinary context template; the separate
+critique template keeps its existing final response. Existing child-result
+offload writes large results to a file that the caller can read in full.
+
+The observations are evidence of what tools returned, not proof of file
+authorship, a complete search, or the truth of model-chosen query arguments.
+Errors, truncated results, and missing checkpoint history remain visible as
+limits. The main agent still decides what the evidence means and may make an
+unsupported claim of its own. This change does not validate final research
+facts, reduce delegation depth, or change URL authority: async task results
+and their offloaded reads are not URL provenance sources.
+
+* Checks
+
+Portable regression tests cover source bytes replacing invented child prose,
+selectors and errors, incomplete and ambiguous call pairs, synchronous and
+async hook behavior, the web child and synchronous task handoffs, full-result
+offload recovery, and model-chosen URL arguments staying outside read-url
+authority. Real model outcome evidence and its limits are recorded separately
+in the dated research evaluation report.

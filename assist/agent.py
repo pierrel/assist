@@ -43,6 +43,7 @@ from assist.research_cleanup import ReferencesCleanupRunnable
 from assist.sandbox import DockerSandboxBackend, SandboxContainerLostError
 from docker.errors import NotFound as DockerNotFound
 from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
+from assist.middleware.context_evidence import ContextEvidenceMiddleware
 from assist.middleware.json_validation_middleware import JsonValidationMiddleware
 from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddleware
 from assist.middleware.output_sanitization import OutputSanitizationMiddleware
@@ -743,6 +744,8 @@ def create_context_agent(model: BaseChatModel,
     execution_egress_tools = _execution_egress(backend)
     egress_skills = _egress_skills_middleware(backend, execution_egress_tools)
     logging_mw = ModelLoggingMiddleware("context-agent")
+    evidence_mw = ([ContextEvidenceMiddleware()]
+                   if prompt_template == "deepagents/context_agent.md.j2" else [])
 
     agent = create_deep_agent(
         model=model,
@@ -752,7 +755,7 @@ def create_context_agent(model: BaseChatModel,
         backend=backend,
         tools=list(execution_egress_tools),
         middleware=[BoundedSummarizationMiddleware(model, backend)] + base_mw + middleware
-        + ([egress_skills] if egress_skills is not None else []) + [logging_mw],
+        + ([egress_skills] if egress_skills is not None else []) + [logging_mw] + evidence_mw,
     )
 
     # 500 graph steps ≈ 45 model calls with deepagents' ~11 nodes per cycle.
