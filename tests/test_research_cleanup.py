@@ -115,7 +115,7 @@ class TestReferencesCleanup:
             {}, config={"configurable": {"thread_datastore_path": store.path}})
         report = (refs / "report.md").read_text()
         assert f"[Source](<{url}>)" in report
-        assert "ask me to verify" in report
+        assert "reference unresolved" in report
         assert "ref:" not in report
         assert "[Owner](https://owner.example/home)" in report
         assert "`curl https://api.example/v1`" in report

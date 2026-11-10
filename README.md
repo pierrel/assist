@@ -78,7 +78,8 @@ where reliability is harder than with frontier APIs.
   Explicit Markdown links using those IDs resolve in replies, streams, and
   saved research reports. Ordinary URLs pass through unchanged. Source binding
   preserves URL identity, not page availability or support for a claim. Unknown
-  source IDs produce a recoverable unavailable-link message.
+  source IDs produce an unresolved-reference message that does not claim the
+  link was checked.
 
 - **Specialized agents and skills out of the box.**
   - **Research agent** rigorous fact-checking and critiquing with

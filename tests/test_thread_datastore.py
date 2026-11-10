@@ -72,17 +72,17 @@ def test_unknown_refs_have_recoverable_feedback_and_ordinary_urls_are_unchanged(
     assert resolve_references(f"[Decider]({URL})", store) == f"[Decider]({URL})"
     assert resolve_references(f"[Decider]({WRONG_URL})", store) == f"[Decider]({WRONG_URL})"
     assert resolve_references(f"Source: {WRONG_URL}", store) == f"Source: {WRONG_URL}"
-    assert "ask me to verify" in resolve_references("[Decider](ref:r0000000000000000)", store)
-    assert "ask me to verify" in resolve_references("[Decider](ref:bad!)", store)
+    assert "reference unresolved" in resolve_references("[Decider](ref:r0000000000000000)", store)
+    assert "reference unresolved" in resolve_references("[Decider](ref:bad!)", store)
     for malformed_target in ("r123[bad", "r123\nbad"):
         malformed_link = f"[Decider](ref:{malformed_target})"
         assert "ref:" not in resolve_references(malformed_link, store)
-        assert "ask me to verify" in ReferenceStream(store).push(malformed_link)
+        assert "reference unresolved" in ReferenceStream(store).push(malformed_link)
     malformed = ReferenceStream(store)
     assert malformed.push("[Decider](ref:bad") == ""
-    assert "ask me to verify" in malformed.push("!)")
+    assert "reference unresolved" in malformed.push("!)")
     assert "ref:" not in resolve_references("[Decider](ref:" + "a" * 300 + ")", store)
-    assert "ask me to verify" in resolve_references("[Decider](ref:)", store)
+    assert "reference unresolved" in resolve_references("[Decider](ref:)", store)
     stream = ReferenceStream(store)
     assert stream.push("[Decider](https://decider.example/2026/10/12/the-11") == "[Decider](https://decider.example/2026/10/12/the-11"
     assert stream.push("-best-horror-movies-now-streaming-on-shudder)") == "-best-horror-movies-now-streaming-on-shudder)"
@@ -91,11 +91,20 @@ def test_unknown_refs_have_recoverable_feedback_and_ordinary_urls_are_unchanged(
     assert stream.push(record_id + ".") == URL + "."
     assert stream.push("", final=True) == ""
     assert resolve_references("[Source](HTTPS://wrong.example/page)", store) == "[Source](HTTPS://wrong.example/page)"
-    assert "ask me to verify" in resolve_references("ref:" + "a" * 100, store)
-    assert resolve_references("ref:", store) == "[source link unavailable: ask me to verify it again]"
+    assert "reference unresolved" in resolve_references("ref:" + "a" * 100, store)
+    assert resolve_references("ref:", store) == "[source reference unresolved; link reachability was not checked]"
     wikipedia = "https://en.wikipedia.org/wiki/Mercury_(element)"
     register_source(store, wikipedia)
     assert resolve_references(f"Source: {wikipedia}.", store) == f"Source: {wikipedia}."
+
+
+def test_truncated_source_id_is_not_a_reachability_result(tmp_path):
+    store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+    record_id = register_source(store, URL, "Decider")
+    assert resolve_references(f"[Decider](ref:{record_id})", store) == f"[Decider](<{URL}>)"
+    assert resolve_references(f"[Decider]({URL})", store) == f"[Decider]({URL})"
+    assert resolve_references(f"[Decider](ref:{record_id[:-3]})", store) == (
+        "Decider [source reference unresolved; link reachability was not checked]")
 
 
 def test_bound_url_containing_ref_text_stays_byte_exact(tmp_path):
@@ -481,7 +490,7 @@ def test_stream_does_not_join_citations_across_tool_messages(tmp_path):
     text = "".join(thread_module.extract_content_text(payload)
                    for mode, payload in chunks if mode == "messages")
     assert URL not in text
-    assert "ask me to verify" in text
+    assert "reference unresolved" in text
 
 
 def test_model_can_get_list_and_search_host_records_without_write_tool(tmp_path):

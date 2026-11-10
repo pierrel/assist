@@ -24,7 +24,7 @@ _LABEL_ATOM = r"(?:\\[^\n]|\[(?:\\[^\n]|[^\[\]\\\n])*\]|[^\[\]\\\n])"
 _LABEL_OPEN = re.compile(r"\[(?:" + _LABEL_ATOM + r"){1,500}\]")
 _STREAM_PREFIXES = {"r", "re", "ref"}
 _RECORD_ID = re.compile(r"r[0-9a-f]{32}\Z")
-_UNBOUND = "[source link unavailable: ask me to verify it again]"
+_UNBOUND = "[source reference unresolved; link reachability was not checked]"
 BOUND_FILE_URLS_ARTIFACT = "assist_bound_file_urls"
 
 

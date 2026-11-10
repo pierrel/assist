@@ -20,9 +20,9 @@ record before delivery. Start in
 The contract covers explicit source references in streamed replies, canonical
 history and saved research reports. Ordinary URLs and code examples remain
 untouched. An invalid or foreign source ID produces a recoverable
-unavailable-link message. Binding establishes URL identity, not page
-availability, the destination after a redirect, or whether the page supports
-a claim.
+unresolved-reference message. It does not report link reachability. Binding
+establishes URL identity, not page availability, the destination after a
+redirect, or whether the page supports a claim.
 
 * Exact diff inventory
 
