@@ -3,11 +3,10 @@
 
 * Current scope of this packet
 
-These are local working notes for the citation change. The separate baseline
-architecture review will define the shared component map. After that baseline
-is approved and merged, this packet can add citation-specific architecture
-changes and rendered diagrams. No component map or diagram in this file is
-ready for review yet.
+These are local working notes for the citation change. The merged
+[[file:architecture.org][baseline architecture]] names the components below.
+The citation delta diagram shows only changed connections; it is not a new
+map of the whole application.
 
 The user-visible problem is precise: a search result supplied one URL, but an
 assistant reply changed that URL's path. The essential change is to let the
@@ -27,12 +26,12 @@ a claim.
 
 * Exact diff inventory
 
-Compared from merge base =45d930494c48b704c11a50555972838cc84524c8=
-to feature head =4a1978821c3f20bbc8f171b17b8ac56f555971cb=,
-=git diff --numstat main...HEAD= reports 38 changed files, 2,408 added and
-200 deleted lines. The categories below separate the code to read from the
-validation and guidance. Raw churn shows reading volume, not risk or semantic
-importance.
+The original inventory was measured from =45d93049= to =4a197882=: 38
+files, +2,408/−200 lines. The architecture rebase places the feature on
+=ecb665c6=; its current reviewed patch spans 39 files, +2,550/−194 at
+=65ef0242= before the local packet and current census correction. The
+categories below describe the original feature inventory; raw churn shows
+reading volume, not risk or semantic importance.
 
 - Production Python: 14 files, +1,038/−159. The largest additions are the
   new [[file:../assist/thread_datastore.py][thread datastore and resolver]]
@@ -55,8 +54,8 @@ Two new production files do different jobs. =thread_datastore.py= contains both
 thread-owned generic text records and the source resolver. The new
 =research_sandbox_files.py= is a helper for existing research cleanup; its
 file creation alone does not establish a separate architectural component.
-The baseline architecture work will determine how to group these jobs in a
-shared diagram.
+The merged baseline groups the source record with C9 thread state and leaves
+the sandbox file helper within the C10/completion implementation.
 
 * Guided reading of the essential change
 
@@ -137,10 +136,22 @@ availability or factual support. Earlier measured main and leaf counts remain
 in PR302's detailed validation prose; this documentation-only pilot does not
 rerun models or rewrite those accounts.
 
-* Pending architecture presentation
+* Delta from the merged architecture baseline
 
-After the separately reviewed baseline architecture is approved and merged,
-add a citation delta diagram using its established component names and
-connections. The private uncommitted diagram draft was preserved outside the
-feature branch; it is not a baseline or a reviewed representation of the
-system.
+[[file:source-citation-binding-delta.png]]
+
+The editable graph is [[file:source-citation-binding-delta.dot][source-citation-binding-delta.dot]];
+[[file:source-citation-binding-delta.svg][SVG]] retains scalable labels. The
+C6 tool-result binder registers a successful C15 retrieval URL in a
+thread-owned C9 source record. C6 gives the model an opaque link and binds
+an explicit reference in its final message. C5 checkpoints that bound message
+in C9 and binds streamed chunks before C2 delivers live output. C7 imports
+a child record into the parent thread before
+the completion wake, so a copied child reference still resolves. The C11
+browser path registers its observed page URL through the same host record.
+The C6 URL guard still decides whether a child may call =read_url=;
+C8's browser grants remain separate. A source ID alone grants neither.
+
+These are connections among existing baseline components, plus a source
+record inside C9. The sandbox report file helper remains an implementation
+detail of C10 and the completion path, not a new architectural node.

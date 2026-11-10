@@ -1,0 +1,23 @@
+digraph citation_delta {
+  graph [rankdir=TB, bgcolor="white", pad="0.22", nodesep="0.42", ranksep="0.70", fontname="DejaVu Sans"];
+  node [shape=box, style="rounded,filled", fillcolor="#edf4fa", color="#46617b", fontname="DejaVu Sans", fontsize=11];
+  edge [color="#46617b", fontname="DejaVu Sans", fontsize=10];
+  c15 [label="C15 Network destinations\nsearch service / pages"];
+  c11 [label="C11 Browser worker\nobserved page"];
+  c9 [label="C9 Thread state\nsource record + URL"];
+  c6 [label="C6 Agent assembly\nregister URL + bind final"];
+  c5 [label="C5 Thread runtime\nbind stream"];
+  c7 [label="C7 Child handoff\nimport source record"];
+  c2 [label="C2 Web/API\nlive resolved link"];
+  c8 [label="C8 Host authority\nseparate browser / sandbox grants"];
+  c15 -> c6 [label="typed search / read result"];
+  c11 -> c9 [label="register observed URL"];
+  c6 -> c9 [label="register source URL"];
+  c9 -> c6 [label="source ID + exact URL"];
+  c6 -> c5 [label="explicit ref in stream"];
+  c5 -> c2 [label="resolve stream"];
+  c5 -> c9 [label="checkpoint bound reply"];
+  c7 -> c9 [label="import before wake"];
+  c6 -> c15 [style=dashed, label="URL guard at tool call"];
+  c8 -> c11 [style=dashed, label="browser grants remain separate"];
+}
