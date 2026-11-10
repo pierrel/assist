@@ -31,6 +31,7 @@ from .utils import (agent_tool_calls, create_filesystem,
 
 class _StaticShell:
     status_code = 200
+    headers = {"Content-Type": "text/html"}
 
     def __init__(self, scenario):
         self.text = (
@@ -41,6 +42,9 @@ class _StaticShell:
             "</main></html>")
 
     def raise_for_status(self):
+        pass
+
+    def close(self):
         pass
 
 
