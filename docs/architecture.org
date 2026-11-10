@@ -121,6 +121,90 @@ in both views. An ID shown in only one view keeps that meaning.
   also destinations. Host Python tools call services directly; sandbox and
   browser requests cross C13's allowlist and exact-grant boundary first.
 
+** Agent and guidance view
+
+This view follows the ordinary Deep Agents web main on merged =main= at
+=df4bb845=. It uses the same C6/C7 IDs as the overview. The four named child
+types are product Assist agents, not development roles.
+
+[[file:architecture-agents.svg]]
+
+Edit [[file:architecture-agents.dot][architecture-agents.dot]] and render it
+with =dot -Tsvg docs/architecture-agents.dot -o docs/architecture-agents.svg=.
+The arrow into C20a–d carries a self-contained brief. A terminal child result
+returns through C7 as untrusted evidence; C7 creates a new parent Run, whose
+agent retrieves the result with =get_async_task_result=.
+
+*** Guidance entering the main agent
+
+- *C19 AgentSpec.* [[file:../assist/spec.py][AgentSpec]] supplies
+  embedder tools, skill routes, backend and delegation mode.
+  [[file:../assist/thread_manager.py][ThreadManager.get]] chooses the ordinary
+  web profile; [[file:../assist/agent.py][=create_agent=]] constructs C6 from it.
+- *C16 Static guidance.* [[file:../assist/web_main_prompt.py][The web
+  renderer]] assembles the Assist purpose, Deep Agents web adapter and evidence
+  guidance from [[file:../assist/templates/deepagents/assist_core.md.j2][the
+  core template]]. [[file:../assist/middleware/prompt_composition.py][Prompt
+  composition]] puts the framework's base before that Assist core for this
+  profile. The static text gives the agent its purpose, evidence rules, tool
+  lifecycle and workspace boundaries.
+- *C17 Skills.* [[file:../assist/middleware/skills_middleware.py][Skills
+  middleware]] presents a dynamic catalog of skill names and descriptions.
+  =load_skill= reveals a matching skill's body and declared tool contracts;
+  normal compositions withhold those tools until that skill loads. The ordinary
+  web main draws from [[file:../assist/main_guidance_skills/][grounding, research
+  and thread-state guidance]], [[file:../assist/main_skills/][main-only
+  orchestration]], [[file:../assist/skills/][shared skills]], and any present
+  domain or web-supplied sources. The catalog is not the full set of skill bodies.
+- *C18 Context.* [[file:../assist/middleware/memory_middleware.py][Memory
+  middleware]] reloads repository =AGENTS.md= and, when private thread state
+  exists, =/agent/memory.md= each turn. [[file:../assist/middleware/context_rider_middleware.py][The
+  context rider]] adds current time context for the model call when supplied;
+  it is not checkpointed as conversation history. Conversation messages and
+  graph checkpoints belong to C5/C9.
+
+*** Child work and other agent profiles
+
+- *C7 Child task handoff.* [[file:../assist/async_subagents.py][Task tools]]
+  launch a child with one self-contained description as its user message; the
+  child does not receive the parent's conversation. The private Agent Protocol
+  adapter and [[file:../manage/web/threads.py][completion handoff]] connect
+  child Runs to a later parent Run.
+- *C20a Context.* [[file:../assist/agent.py][=create_context_agent=]] uses
+  [[file:../assist/templates/deepagents/context_agent.md.j2][context_agent.md.j2]]
+  for read-only local discovery. It receives its own system guidance and
+  filesystem tools, not C16's ordinary web core or C17's main skill catalog.
+- *C20b Research.* [[file:../assist/agent.py][=create_research_agent(leaf=True)=]]
+  uses [[file:../assist/templates/deepagents/sub_research.txt.j2][sub_research.txt.j2]]
+  with search/read tools to gather external evidence. The web child is a leaf;
+  the separate synchronous legacy research lead can dispatch inner specialists.
+- *C20c Critique.* [[file:../assist/thread_manager.py][ThreadManager.get]] builds
+  a read-only context-style graph with
+  [[file:../assist/templates/deepagents/dev_critique.md.j2][dev_critique.md.j2]]
+  to review the supplied code diff. It does not inherit the main's tool set.
+- *C20d Delegate.* [[file:../assist/agent.py][=create_agent=]] uses
+  [[file:../assist/templates/deepagents/general_instructions.md.j2][general_instructions.md.j2]]
+  in delegate role, shared/domain skills and its caller research guidance.
+  It owns one whole task with synchronous context, research and critique
+  specialists. Main-only planning skills, web lifecycle tools and
+  self-delegation are absent.
+
+[[file:../assist/async_subagents.py][SUBAGENTS]] defines these four web task
+names. Each graph has its own system prompt and available tool schemas; only
+the delegate uses C17's general skill catalog and C18's repository memory.
+Each receives C7's brief as its user message. The brief is not the parent's
+system guidance or full conversation history.
+
+- *Direct and restricted paths.* A local embedder can construct C6 with
+  [[file:../assist/spec.py][AgentSpec]] without C7 or web Runs. With no explicit
+  async task tools and no private thread memory, [[file:../assist/agent.py][=create_agent=]]
+  registers synchronous context, research and critique specialists through
+  =task=; that research profile can itself use search, critique and fact-check
+  specialists. The web delegate also has synchronous specialists. Web triage
+  instead receives an explicit empty async tool set and cannot delegate.
+  These profiles have different tools and guidance; C16/C17 describe the
+  ordinary web main specifically.
+
 * Read one web request
 
 A browser =POST /thread/{tid}/message= reaches C2. Its admission call runs

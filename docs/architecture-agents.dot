@@ -1,0 +1,28 @@
+digraph Agents {
+  graph [label="Assist · ordinary web agent and guidance", labelloc=t,
+         fontname="DejaVu Sans", fontsize=23, bgcolor="white",
+         rankdir=TB, pad=0.25, nodesep=0.45, ranksep=0.55,
+         splines=polyline, outputorder=edgesfirst];
+  node [shape=box, style="rounded,filled", color="#34506a",
+        fillcolor="#f2f7fc", fontname="DejaVu Sans", fontsize=15,
+        margin="0.19,0.14"];
+  edge [fontname="DejaVu Sans", fontsize=11, color="#49647d",
+        arrowsize=0.7];
+
+  C19 [label="C19  AgentSpec\nprofile + capabilities"];
+  C16 [label="C16  Static guidance\nbase + Assist web core"];
+  C17 [label="C17  Skills\ncatalog → loaded body + tools"];
+  C18 [label="C18  Context\nmemory + time rider"];
+  C6 [label="C6  Agent assembly\nordinary web main graph", fillcolor="#e5edf5"];
+  C7 [label="C7  Child task handoff\nbrief → durable child → parent wake"];
+  C20 [label="C20a–d  Web child profiles\ncontext · research · critique · delegate",
+       fillcolor="#fff4d7"];
+
+  C19 -> C6 [label="profile"];
+  C16 -> C6 [label="system text"];
+  C17 -> C6 [label="skill guidance"];
+  C18 -> C6 [label="turn context"];
+  C6 -> C7 [label="start / inspect task"];
+  C7 -> C20 [label="self-contained brief"];
+  C20:e -> C7:e [label="terminal result", constraint=false];
+}
