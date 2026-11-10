@@ -3,12 +3,14 @@ import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import MagicMock
 
 import pytest
 from types import SimpleNamespace
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain.tools.tool_node import ToolCallRequest
 from langgraph_sdk.errors import InternalServerError
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -26,7 +28,8 @@ from assist.async_subagents import (
     AsyncTaskContext, async_task_context, async_task_tools,
     configure_async_subagent_app,
 )
-from assist.middleware.url_provenance import DELEGATE_USER_URLS_KEY
+from assist.middleware import url_provenance
+from assist.middleware.url_provenance import DELEGATE_USER_URLS_KEY, UrlProvenanceMiddleware
 from assist.egress.store import EgressRequest, EgressStore, EgressWaiter, request_key
 from manage.web.protocol_service import SERVICE
 
@@ -1023,8 +1026,9 @@ def test_task_description_survives_fair_resume_generation(monkeypatch, tmp_path)
     assert task["description"] == "updated intent"
 
 
-def test_delegate_user_url_seeds_are_frozen_per_instruction_slice(
-        monkeypatch, tmp_path):
+@pytest.mark.parametrize("assistant_id", ["delegate-agent", "research-agent"])
+def test_child_user_url_seeds_are_frozen_per_instruction_slice(
+        monkeypatch, tmp_path, assistant_id):
     _root(monkeypatch, tmp_path)
     threads.MANAGER.reserve("parent")
     first_user = threads._create_run(
@@ -1037,35 +1041,135 @@ def test_delegate_user_url_seeds_are_frozen_per_instruction_slice(
     }
     SERVICE.create_thread("sub-delegate", metadata)
     original = SERVICE.create_run(
-        "sub-delegate", "delegate-agent",
+        "sub-delegate", assistant_id,
         "The model brief repeats https://owner.example/first", metadata=metadata)
     later_user = threads._create_run(
         "parent", "Later use https://owner.example/later too")
 
-    original_cfg = threads._delegate_configurable(original)
+    original_cfg = threads._child_url_configurable(original)
     assert original_cfg[DELEGATE_USER_URLS_KEY] == (
         "https://owner.example/first",)
 
     resume = threads._create_run(
-        original.thread_id, None, assistant_id="delegate-agent", mode="child",
+        original.thread_id, None, assistant_id=assistant_id, mode="child",
         parent_thread_id="parent", parent_run_id=original.parent_run_id,
         dispatch_key="resume", work_id=original.work_id, resume=True,
         delegate_user_urls=original.delegate_user_urls)
-    resume_cfg = threads._delegate_configurable(resume)
+    resume_cfg = threads._child_url_configurable(resume)
     assert resume_cfg[DELEGATE_USER_URLS_KEY] == (
         "https://owner.example/first",)
 
     update = SERVICE.create_run(
-        original.thread_id, "delegate-agent",
+        original.thread_id, assistant_id,
         "Updated model brief uses https://owner.example/later",
         multitask_strategy="interrupt", metadata={
             "parent_thread_id": "parent",
             "parent_run_id": later_user.id,
             "dispatch_key": "update",
         })
-    update_cfg = threads._delegate_configurable(update)
+    update_cfg = threads._child_url_configurable(update)
     assert update_cfg[DELEGATE_USER_URLS_KEY] == (
         "https://owner.example/later",)
+
+
+def test_research_child_admission_and_read_url_guard(monkeypatch, tmp_path):
+    _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    owner = threads._create_run(
+        "parent", "Read https://owner.example/article")
+    metadata = {
+        "parent_thread_id": "parent", "parent_run_id": owner.id,
+        "dispatch_key": f"{owner.work_id}:research",
+    }
+    SERVICE.create_thread("sub-research", metadata)
+    child = SERVICE.create_run(
+        "sub-research", "research-agent",
+        "Read https://owner.example/article and https://invented.example/claim",
+        metadata=metadata)
+    assert child.delegate_user_urls == ("https://owner.example/article",)
+    monkeypatch.setattr(url_provenance, "get_config", lambda: {
+        "configurable": threads._child_configurable(child)})
+    from assist.agent import create_research_agent
+    monkeypatch.setattr("assist.agent.create_deep_agent", lambda **kwargs: (
+        captured.update(kwargs) or MagicMock()))
+    captured = {}
+    create_research_agent(
+        MagicMock(), working_dir=str(tmp_path), leaf=True,
+        trust_human_messages=False)
+    guard = next(middleware for middleware in captured["middleware"]
+                 if isinstance(middleware, UrlProvenanceMiddleware))
+
+    def fetch(url, messages):
+        called = []
+        request = ToolCallRequest(
+            tool_call={"name": "read_url", "args": {"url": url}, "id": "read"},
+            tool=None, state={"messages": messages}, runtime=None)
+        result = guard.wrap_tool_call(
+            request, lambda _: called.append(url) or ToolMessage(
+                content="fetched", name="read_url", tool_call_id="read"))
+        return result, called
+
+    brief = [HumanMessage(content=child.text)]
+    assert fetch("https://owner.example/article", brief)[1]
+    denied, called = fetch("https://invented.example/claim", brief)
+    assert not called and denied.status == "error"
+    model_file = [
+        AIMessage(content="", tool_calls=[
+            {"name": "write_file", "id": "write", "args": {
+                "file_path": "/candidate.txt",
+                "content": "https://invented.example/claim"}},
+            {"name": "read_file", "id": "file", "args": {
+                "file_path": "/candidate.txt"}},
+        ]),
+        ToolMessage(content="https://invented.example/claim",
+                    name="read_file", tool_call_id="file"),
+    ]
+    denied, called = fetch("https://invented.example/claim", brief + model_file)
+    assert not called and denied.status == "error"
+    search = ToolMessage(
+        content="[{'url': 'https://found.example/page'}]",
+        name="search_internet", tool_call_id="search")
+    assert fetch("https://found.example/page", brief + [search])[1]
+
+
+def test_web_research_child_distrusts_brief_human_urls(monkeypatch, tmp_path):
+    _parent_and_metadata(monkeypatch, tmp_path)
+    monkeypatch.setattr(threads.MANAGER, "_model", object())
+    captured = {}
+    monkeypatch.setattr(
+        "assist.thread_manager.create_research_agent",
+        lambda *args, **kwargs: captured.update(kwargs) or object())
+    monkeypatch.setattr("assist.thread_manager.Thread", lambda *args, **kwargs: object())
+
+    threads.MANAGER.get(
+        "sub-stable", working_dir=str(tmp_path), assistant_id="research-agent")
+
+    assert captured["leaf"] is True
+    assert captured["trust_human_messages"] is False
+
+
+def test_research_child_cannot_borrow_another_parents_urls(monkeypatch, tmp_path):
+    _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("owner")
+    threads.MANAGER.reserve("other")
+    owner = threads._create_run("owner", "Inspect a document")
+    other = threads._create_run("other", "Read https://other.example/private")
+    metadata = {
+        "parent_thread_id": "owner", "parent_run_id": owner.id,
+        "dispatch_key": f"{owner.work_id}:research",
+    }
+    SERVICE.create_thread("sub-research", metadata)
+    forged = {**metadata, "parent_thread_id": "other", "parent_run_id": other.id}
+
+    with pytest.raises(HTTPException, match="Task metadata conflict") as error:
+        SERVICE.create_run(
+            "sub-research", "research-agent",
+            "Read https://other.example/private", metadata=forged)
+    assert error.value.status_code == 409
+    with pytest.raises(HTTPException, match="Task metadata conflict"):
+        SERVICE.create_run(
+            "sub-research", "research-agent", "Read the owner task",
+            metadata={**metadata, "parent_run_id": "missing"})
 
 
 def test_delegate_admission_includes_owner_interjection_already_accepted(

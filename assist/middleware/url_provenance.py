@@ -7,12 +7,13 @@ thread held 101 GB of such a runaway). Guidance reduces this a lot (a worked
 example + read-cap took guessing from ~86 to 0-3 per turn) but cannot guarantee
 zero — the small model still slips. This middleware makes a fabricated fetch
 *unreachable*: ``read_url`` is refused unless the URL is provenanced by a trusted
-message or an admission-frozen delegate seed.
+message or an admission-frozen owner URL seed.
 
 A provenanced URL is one the agent could have *copied* rather than *invented*:
 one textually present in a SEARCH RESULT, a non-offloaded ``read_file``/``grep``
-result outside delegate mode, or the USER's message. A delegate is the exception: its HumanMessage is
-the main model's brief, so the web host supplies only brief-form URLs canonically
+result outside guarded child mode, or the USER's message. Async research children and
+delegates are exceptions: their HumanMessages are model-authored briefs, so the
+web host supplies only brief-form URLs canonically
 matched to owner-authored Runs already accepted when the child Run is admitted;
 the brief may remove owner userinfo but cannot add or change it.
 Five channels are deliberately NOT provenance sources, because
@@ -103,11 +104,10 @@ _ASYNC_TASK_TOOLS = {
     "cancel_async_task",
     "list_async_tasks",
 }
-# Per-run trusted URL seeds for a delegate. The web composition root freezes the
+# Per-run trusted URL seeds for model-authored child briefs. The web host freezes the
 # intersection of its brief and already-accepted owner Runs; the model cannot write
 # the durable Run field or RunnableConfig.
-# Delegate HumanMessages are model-authored briefs, so they are deliberately not
-# provenance sources.
+# These child HumanMessages are deliberately not provenance sources.
 DELEGATE_USER_URLS_KEY = "assist_delegate_user_urls"
 # Shell output is an arbitrary, attacker-influenceable channel (a downloaded file
 # cat'd, a large `execute` log the agent re-reads from its real-fs offload) — it is
@@ -270,8 +270,8 @@ def _is_untrusted_result(
 ) -> bool:
     """A ToolMessage whose content must NOT provenance URLs — the untrusted channels:
     read_url page content directly, ``execute`` (shell) output, async task-management
-    output, or a delegate's synchronous specialist and file-read output when
-    task-result trust is disabled. Other roles also exclude a ``read_file``/``grep``
+    output, or synchronous specialist and file-read output when task-result
+    trust is disabled. Other roles also exclude a ``read_file``/``grep``
     of OFFLOADED untrusted content (read_url page or execute/child output). Fails
     CLOSED: a file read whose originating ``tool_call`` is missing from
     the message list (e.g. summarization dropped it) is treated as untrusted — we can't
@@ -283,10 +283,10 @@ def _is_untrusted_result(
         return True
     if name in _FILE_READ_TOOLS:                 # a file read — verify its target
         if not trust_task_results:
-            # Delegate specialists save reports in the same filesystem namespace as
-            # owner files. Their origin is not recoverable from a later file read, so
-            # delegate file results cannot mint URL authority. User URL seeds and
-            # page-marked same-host navigation remain available separately.
+            # Model-authored files share the owner's filesystem namespace. Their
+            # origin is not recoverable from a later read, so guarded child file
+            # results cannot mint URL authority. Owner URL seeds and page-marked
+            # same-host navigation remain available separately.
             return True
         tc = calls_by_id.get(getattr(m, "tool_call_id", None))
         if tc is None:                           # unknown target -> fail CLOSED
@@ -343,11 +343,14 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True,
     a file (ToolResultToFileMiddleware writes it there and the model greps it). So a
     URL appearing only inside fetched-page content — direct or offloaded — never
     becomes trusted authority. A real same-host page link is separately navigable;
-    a new host requires another trusted source such as search. Delegate mode also excludes its synchronous specialist results,
-    sets ``trust_human_messages=False``, and adds only
-    admission-frozen, brief-intersected owner URL seeds later. RESIDUAL: a model that FOLLOWS a multi-step injection to
-    ``write_file`` an arbitrary URL then ``read_file`` it can still self-launder —
-    that path is gated by the model's behavioral injection-resistance, not this guard."""
+    a new host requires another trusted source such as search. Async research
+    children and delegates exclude their model-authored HumanMessages and ordinary
+    file results; delegates also exclude synchronous specialist results. Their
+    brief URLs gain authority only through admission-frozen owner URL seeds.
+    RESIDUAL in profiles that retain file-result trust: a model that FOLLOWS a
+    multi-step injection to ``write_file`` an arbitrary URL then ``read_file`` it
+    can still self-launder; guarded async research children and delegates exclude
+    file results from URL authority."""
     # Map tool_call_id -> the call, so a file read can be traced to its TARGET path
     # (to tell an offloaded-read_url read from a legitimate report read).
     calls_by_id: dict[str, dict] = {}
@@ -435,14 +438,15 @@ def _correction(allowed: dict[str, list[str]]) -> str:
 
 
 class UrlProvenanceMiddleware(AgentMiddleware):
-    """Refuse ``read_url`` outside trusted messages or configured delegate seeds.
+    """Refuse ``read_url`` outside trusted messages or configured owner URL seeds.
 
     Corrective, not turn-ending: a rejected call returns an error ToolMessage
     listing the URLs the agent may actually read, so it retries with a real one.
-    ``trust_human_messages=False`` and ``trust_task_results=False`` form the delegate
-    boundary: model-authored task briefs, synchronous specialist results, and later
-    file reads are ignored; only admission-frozen, brief-intersected owner URL seeds
-    supplied from the durable child Run can replace them. Page-marked same-host links
+    ``trust_human_messages=False`` excludes model-authored child briefs;
+    ``trust_task_results=False`` also excludes synchronous specialist and file
+    results. Async research children and the delegate's own guard use both.
+    Admission-frozen, brief-intersected owner URL seeds from the durable child Run
+    can replace brief URLs. Page-marked same-host links
     remain navigation evidence but never cross-host authority.
     Stateless across turns except an intervention counter for logging."""
 

@@ -1,6 +1,7 @@
 """Web composition root for the Agent Protocol HTTP adapter."""
 from __future__ import annotations
 
+import json
 import os
 import threading
 from contextlib import ExitStack
@@ -253,6 +254,18 @@ class WebAgentProtocolService:
             required = {"parent_thread_id", "parent_run_id", "dispatch_key"}
             if set(metadata or {}) != required:
                 raise HTTPException(status_code=422, detail="Invalid task metadata")
+            try:
+                with open(marker) as stream:
+                    owner = json.load(stream)
+            except (OSError, ValueError) as exc:
+                raise HTTPException(status_code=409, detail="Task metadata conflict") from exc
+            # The task's parent thread is immutable; a later instruction may
+            # legitimately name a newer Run in that same parent thread.
+            if (not isinstance(owner, dict)
+                    or owner.get("parent_thread_id") != metadata["parent_thread_id"]
+                    or not any(parent.id == metadata["parent_run_id"]
+                               for parent in _runs().list(metadata["parent_thread_id"]))):
+                raise HTTPException(status_code=409, detail="Task metadata conflict")
             runs = _runs().list(thread_id)
             replay = next((candidate for candidate in runs
                            if candidate.dispatch_key == metadata["dispatch_key"]), None)
@@ -277,7 +290,7 @@ class WebAgentProtocolService:
                             cancelled = _runs().cancel_pending(thread_id, candidate.id)
                             _remove_egress_waiter(cancelled)
             delegate_user_urls: tuple[str, ...] = ()
-            if assistant_id == "delegate-agent":
+            if assistant_id in {"delegate-agent", "research-agent"}:
                 owner_urls: dict[str, set[str | None]] = {}
                 for parent in _runs().list(metadata["parent_thread_id"]):
                     if (parent.mode == "turn" and parent.origin is None

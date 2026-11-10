@@ -775,11 +775,11 @@ def _read_url_guards(*, trust_human_messages: bool = True,
       peptides real-URL re-read shape) — this is what bounds the crawl-to-death
       that raw curl has no guard against.
 
-    A delegate passes both switches false: its initial message and synchronous
-    specialist output are model-authored, and later file reads cannot distinguish
-    specialist reports from owner files. Admission-frozen user URL seeds arrive in
-    run config; direct trusted non-file tools and page-marked same-host links retain
-    their established behavior.
+    Async research children and delegates pass both switches false: their initial
+    messages are model-authored, and later file reads cannot establish provenance.
+    Delegates also exclude synchronous specialist output. Admission-frozen user
+    URL seeds arrive in run config; trusted search results and page-marked
+    same-host links retain their established behavior.
     """
     return [UrlProvenanceMiddleware(
         trust_human_messages=trust_human_messages,
@@ -799,8 +799,8 @@ def create_research_agent(model: BaseChatModel,
     The default research lead delegates searching, critique, and fact-checking.
     ``leaf=True`` instead builds the direct search/read worker used by subagent runs;
     it cannot recursively delegate on the single model slot.
-    ``trust_human_messages=False`` carries a delegate's URL trust boundary into
-    its synchronous search and fact-check specialists.
+    ``trust_human_messages=False`` excludes model-authored child briefs and
+    later file reads from URL authority for async research children.
 
     Returns a RollbackRunnable-wrapped agent — on BadRequestError the agent
     rolls back to a previous checkpoint.  Research agents only write additive
@@ -1007,7 +1007,8 @@ def create_research_agent(model: BaseChatModel,
                         page_navigation=True,
                         name="ToolResultToFileMiddleware_read_url")]
                        + _read_url_guards(
-                           trust_human_messages=trust_human_messages)
+                           trust_human_messages=trust_human_messages,
+                           trust_task_results=trust_human_messages)
                        if leaf else [])
                     + ([egress_skills] if egress_skills is not None else [])
                     + [logging_mw]),

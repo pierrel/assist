@@ -2568,16 +2568,16 @@ def _publish_phone_text(tid: str, work_id: str, text: str) -> None:
         RUN_STREAMS.publish_delta(tid, work_id, text[start:])
 
 
-def _delegate_configurable(run: Run) -> dict | None:
-    """Expose immutable brief-form URLs admitted by canonical owner match."""
-    if run.assistant_id != "delegate-agent":
+def _child_url_configurable(run: Run) -> dict | None:
+    """Expose immutable owner URL seeds to model-authored child briefs."""
+    if run.assistant_id not in {"delegate-agent", "research-agent"}:
         return None
     return {DELEGATE_USER_URLS_KEY: run.delegate_user_urls}
 
 
 def _child_configurable(run: Run) -> dict | None:
-    """Inject executor-owned identity for a child egress wait, if applicable."""
-    configurable = _delegate_configurable(run) or {}
+    """Inject admitted owner URLs and executor-owned child egress identity."""
+    configurable = _child_url_configurable(run) or {}
     if run.parent_thread_id is not None:
         configurable.update({
             EGRESS_ORIGIN_THREAD_ID: run.parent_thread_id,
