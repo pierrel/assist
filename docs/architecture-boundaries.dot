@@ -1,0 +1,41 @@
+digraph Boundaries {
+  graph [label="Assist · execution and authority boundaries", labelloc=t,
+         fontname="DejaVu Sans", fontsize=23, bgcolor="white",
+         rankdir=TB, pad=0.25, nodesep=0.65, ranksep=0.75,
+         splines=polyline, outputorder=edgesfirst];
+  node [shape=box, style="rounded,filled", color="#34506a",
+        fillcolor="#f2f7fc", fontname="DejaVu Sans", fontsize=15,
+        margin="0.20,0.15"];
+  edge [fontname="DejaVu Sans", fontsize=11, color="#49647d",
+        arrowsize=0.7];
+
+  C6 [label="C6  Agent assembly\nhost graph + tool dispatch"];
+  C8 [label="C8  Host authorities\ncontainer, browser, Git, grants"];
+  C9 [label="C9  Durable thread state\nthread files + Git checkout",
+      fillcolor="#fff4d7"];
+  C10 [label="C10  Execution sandbox\nper-turn container · file/shell tools",
+       fillcolor="#fff0df", color="#a46b36"];
+  C11 [label="C11  Browser worker\nChromium · untrusted page content",
+       fillcolor="#fff0df", color="#a46b36"];
+  C12 [label="C12  Model endpoint\nOpenAI-compatible HTTP",
+       fillcolor="#f3f3f3"];
+  C13 [label="C13  Egress proxy\nallowlist and exact grants",
+       fillcolor="#f3f3f3"];
+  C14 [label="C14  Domain Git remote\npublished thread branch",
+       fillcolor="#f3f3f3"];
+  C15 [label="C15  Network destinations\nweb pages · search · travel services",
+       fillcolor="#f3f3f3"];
+
+  C6 -> C10 [label="file / shell tool calls"];
+  C6 -> C8 [label="browser tool calls", constraint=false];
+  C6 -> C12 [label="model requests"];
+  C6 -> C15 [label="host tool HTTP requests"];
+  C8 -> C10 [label="create / retire container"];
+  C8 -> C11 [label="browser actions + lease / teardown"];
+  C8 -> C14 [label="verified Git publish"];
+  C10 -> C11 [label="hosts worker"];
+  C10 -> C13 [label="network requests"];
+  C11 -> C13 [label="attributed page requests"];
+  C13 -> C15 [label="allowed sandbox/browser requests"];
+  C10 -> C9 [label="bind-mounted workspace", style=dashed];
+}
