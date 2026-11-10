@@ -1806,9 +1806,7 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "eb8fadd6b3a275dbc4c3fa86ad34b2c7a312d3e74651a61255c75a8c9b7e59a6",
     },
     "assist/templates/deepagents/sub_research.txt.j2": {
-        "ea51549d2bae79ee031b6b5a8fdc0872708a6f7536303f5f1ba68512c0db3415",
-        "2adcfe28db08132dd20a8f37cecfeb303605be6d9ba0378db78a4b239c246eb1",
-        "5a1e784f8c29d0b5c3e291da6490fff8a78595355b478806a5025cf9efc25e58",
+        "952d77da9b2e1bc0f54fdb9486ffbe1033870d201578317869fbc17f3aa10ff0",
     },
     "assist/templates/receptionist_system.md.j2": {
         "f2bfbc35fb540f64c385b74c7bf590517b80bc5ee9abd660eb3ad736bb3adb8e",
@@ -2003,7 +2001,7 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "propose_region_download": {"638cb587cde24979bcd6ee36a7169d8b61bec09afd2ab7adf2afecb3f1695d58"},
     "quiet": {"37edd06eeaad498ac37a8509d6dfe30bb094bed2aa71e858f45b4990445bb715"},
     "read_file": {"2e139ac315b65f5b6614591642b26defae959ab6878fff990f26f0b997feb5af"},
-    "read_url": {"a4e5eae871d9956ee0227f48f8e86eb1c96b1740cb73a7e1a1e57a8cfae18716"},
+    "read_url": {"3e240a25237877389a37d1ee2f23f8f2d164337f85fae8d28b5e736b5be31905"},
     "remove_allowed_host": {"4bc5319afb9de4381fdd059f5bb35034caccacee5eb52b7443a6af2c27ed0498"},
     "request_egress": {"84fdeccfd7466d726247ecc6c482c1bded92bf33eb54a7ce137cd42c233c35b4"},
     "resume_schedule": {"884f79fb96c7e374a2e204ed9f00203243607a71a1440a954936a0516a612183"},
@@ -2149,7 +2147,7 @@ _TOOL_RESULT_METADATA = {
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "a256a5fd2f385238d1b3ef958febdc5f5a9790025ad010648f2208a2f2287c4b"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "9a03ab34367fc404246ece5c35487eea103e56b7d964a94b6d9d4134ca9215c5"
+    "3b1b5ea75cc9bcddb1c63a09d590adea035812df7ec7af82a23cd8eb39bc7b3e"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
