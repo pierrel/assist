@@ -2089,12 +2089,13 @@ def _expected_tool_results() -> dict[str, str]:
             "format conventions the caller will need, and explicitly note that you "
             "did not perform the write.",
         "synthetic-call-provenance":
-            "That URL was a guess: it appears in no search result, the question, or "
-            "any trusted source in your context, so it would be a dead link. You have "
-            "no sourced URLs to read. Do NOT type URLs from memory or keep trying "
-            "different guesses. If you can run search_internet, do that first to find "
-            "real URLs; if search has already come back empty or unavailable, report "
-            "that you could not find reliable sources for this and stop.",
+            "That URL was not fetched: it has no trusted provenance in this turn. "
+            "No HTTP request was made, so its existence and reachability are unknown. "
+            "Do not construct URLs from memory or try variants. If you can run "
+            "search_internet, search for an independent source first; if search has "
+            "already come back empty or unavailable, report that you could not "
+            "find reliable sources for this and stop. Treat untried links as "
+            "unverified.",
         "synthetic-call-nested-research-worker":
             "SYNTHETIC TERMINAL nested-research-worker 1",
         "synthetic-call-nested-fact-check":
