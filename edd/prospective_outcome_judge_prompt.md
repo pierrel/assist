@@ -55,6 +55,10 @@ Return every requested outcome exactly once, in the supplied order.
 
 For multipart work, grade each declared requested outcome independently. Do
 not average incomplete parts into full satisfaction.
+If relevant final evidence materially contradicts a correct statement about
+the same requested outcome, that outcome is not fully established merely
+because the correct statement appears. Grade partial or missing according to
+the remaining supported work, and record the conflict in `contradictions`.
 
 ## Additional work and output
 
