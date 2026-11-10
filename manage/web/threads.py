@@ -6098,6 +6098,14 @@ class _ResumeScheduler:
                 if run.status == "pending":
                     if run not in _runs_before_browser_reset(runs):
                         continue
+                elif run.status == "interrupted":
+                    position = next(index for index, candidate in enumerate(runs)
+                                    if candidate.id == run.id)
+                    successor = next((candidate for candidate in reversed(runs[position + 1:])
+                                      if candidate.work_id == run.work_id
+                                      and (candidate.resume or candidate.resume_decision is not None)), None)
+                    if successor is not None and successor.status not in {"pending", "running"}:
+                        continue
                 elif run.status not in {"running", "interrupted"} and not (
                         run.mode == "child" and run.status in {"success", "error", "timeout"}):
                     continue

@@ -16,8 +16,12 @@ def test_late_original_dispatch_after_recovery_successor_finished(tmp_path, monk
     original=service.create(tid,'general-agent','Incoming event',sender='+15555550100')
     service.claim(tid,original.id);service.transition(tid,original.id,'interrupted')
     successor=service.create(tid,'general-agent',None,work_id=original.work_id,sender=original.sender,resume=True)
+    scheduler=threads._ResumeScheduler()
+    scheduler.submit(original.id,tid)
+    assert scheduler._dispatch_waiter_count('other')==1
     service.claim(tid,successor.id);service.transition(tid,successor.id,'success')
     before=service.list(tid)
+    assert scheduler._dispatch_waiter_count('other')==0
     threads._execute_run_active(original.id,tid)
     assert service.list(tid)==before
     assert queued==[]
