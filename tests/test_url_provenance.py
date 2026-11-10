@@ -4,6 +4,7 @@ Deterministic (no LLM): drive wrap_tool_call directly with a constructed
 ToolCallRequest and assert allow (handler invoked) vs reject (corrective
 ToolMessage, handler NOT invoked).
 """
+from io import BytesIO
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
@@ -468,6 +469,7 @@ class TestUrlProvenanceMiddleware(TestCase):
         request_url = f"https://shop.example/#'{planted}"
         response = requests.Response()
         response.status_code = 404
+        response.raw = BytesIO()
         response.url = requests.Request("GET", request_url).prepare().url
         with patch("assist.tools._host_throttle"), patch(
                 "assist.tools.requests.get", return_value=response):
