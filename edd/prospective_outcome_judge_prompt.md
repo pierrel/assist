@@ -30,6 +30,8 @@ material conflict between the output and a supplied source, or within the
 output, in `contradictions` with decisive evidence IDs. An old claim corrected
 in the final artifact, or a faithful account of disagreement between sources,
 is not itself an output contradiction.
+Omitting a previously correct detail is incompleteness; record a contradiction
+only when an actual output claim also conflicts with the supplied evidence.
 
 Check support separately from whether a claim happens to be true. A citation
 to a source that does not establish the claimed fact leaves that claim
