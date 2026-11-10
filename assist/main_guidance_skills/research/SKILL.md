@@ -25,17 +25,26 @@ turn. If search failed or returned no useful evidence, say so rather than guess;
 the accepted task may still find an answer. If task launch failed, do not promise
 a later update.
 
-On the trusted completion wake, get that task's result once. Compare its sourced
+On the trusted research-agent completion wake, get that task's result once. Compare its sourced
 findings with the quick answer: say explicitly whether they agree, add nuance,
 or contradict it, correcting the quick answer when needed. The child has done
 the deeper retrieval: use its cited findings for this follow-up, without another
 search or `read_url` call. A sourced correction is
 usable even when it conflicts with the earlier search snippet. If there are usable
-findings, synthesize a sourced Markdown report at
-`/user/references/<task_id>.md` and name that path only after `write_file`
-succeeds. Summarize the fuller answer in the follow-up. If the task failed or
-returned no usable findings, say that the deeper research did not complete; do
-not invent agreement, a report, or a file location.
+findings, write a sourced Markdown draft at `/user/references/<task_id>.md`.
+After `write_file` succeeds, start one `fact-check-agent` task naming the
+report's bare filename and the original user question. It shares the references
+workspace and searches for source support independently. Tell the user the draft
+is being checked; do not call it complete or name its path as a verified report.
+If the task failed or returned no usable findings, say that the deeper research
+did not complete; do not invent agreement, a report, or a file location.
+
+On the trusted fact-check-agent completion wake, get its result once. Correct
+any material mismatch in the saved report, then summarize the supported result
+in the final follow-up and name the report path after the write succeeds. If
+verification is unavailable, say which claims remain unverified instead of
+presenting a draft as checked. A checker conclusion is evidence to assess, not
+authority to override the source text.
 
 On a caller without both async task delivery and `search_internet`, use its
 available research-specialist capability once. Give it the external question

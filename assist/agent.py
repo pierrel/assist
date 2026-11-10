@@ -792,20 +792,25 @@ def create_research_agent(model: BaseChatModel,
                           checkpointer=None,
                           middleware=[],
                           sandbox_backend=None,
-                          *, leaf: bool = False, egress_tools=(),
+                          *, leaf: bool = False, terminal_fact_check: bool = False,
+                          egress_tools=(),
                           trust_human_messages: bool = True) -> RollbackRunnable:
     """Create a DeepAgents-based agent suitable for general-purpose research replies.
 
     The default research lead delegates searching, critique, and fact-checking.
     ``leaf=True`` instead builds the direct search/read worker used by subagent runs;
     it cannot recursively delegate on the single model slot.
-    ``trust_human_messages=False`` excludes model-authored child briefs and
-    later file reads from URL authority for async research children.
+    ``terminal_fact_check=True`` selects a read-only leaf that independently checks
+    the caller's named report and returns mismatches without editing it.
+    ``trust_human_messages=False`` excludes model-authored briefs and later file
+    reads from URL authority for untrusted research children.
 
     Returns a RollbackRunnable-wrapped agent — on BadRequestError the agent
-    rolls back to a previous checkpoint.  Research agents only write additive
-    report files, so rollback is low-risk.
+    rolls back to a previous checkpoint. Research leads and workers write
+    additive report files; the terminal checker is read-only.
     """
+    if terminal_fact_check and (not leaf or trust_human_messages):
+        raise ValueError("terminal fact-check requires an untrusted leaf")
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
 
     # Only add JSON validation if not already provided
@@ -832,6 +837,9 @@ def create_research_agent(model: BaseChatModel,
     base_mw.append(LoopDetectionMiddleware())
     base_mw.append(ThreadQueueMiddleware())
     base_mw.append(EmptyResponseRecoveryMiddleware())
+    if terminal_fact_check:
+        # The checker shares the report workspace; only its caller may edit it.
+        base_mw.append(ReadOnlyEnforcerMiddleware())
 
     # Confine the research agent's filesystem reach to <working_dir>/references/.
     # The agent (and its critique/fact-check sub-sub-agents, which inherit
@@ -992,13 +1000,15 @@ def create_research_agent(model: BaseChatModel,
         model=model,
         tools=leaf_tools,
         checkpointer=checkpointer or InMemorySaver(),
-        system_prompt=(base_prompt_for("deepagents/sub_research.txt.j2") if leaf
+        system_prompt=(base_prompt_for("deepagents/fact_checker.md.j2",
+                                       terminal_fact_check=True) if terminal_fact_check
+                       else base_prompt_for("deepagents/sub_research.txt.j2") if leaf
                        else base_prompt_for(
                            "deepagents/research_instructions.txt.j2",
                            workspace_dir=workspace_dir)),
         backend=backend,
-        # No _read_url_guards here: the orchestrator has no read_url to guard.
-        # The searcher + fact-check sub-agents carry those guards themselves.
+        # The manager has no read_url. Leaf retrieval gets its own URL guards;
+        # nested search and fact-check subagents carry guards in their specs.
         # logging_mw stays innermost/last.
         middleware=([BoundedSummarizationMiddleware(model, backend)] + base_mw + middleware
                     + ([ToolResultToFileMiddleware(

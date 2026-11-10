@@ -372,6 +372,11 @@ class ThreadManager:
                 self.model, working_dir, self.checkpointer,
                 sandbox_backend=sandbox_backend, leaf=True,
                 trust_human_messages=False)
+        elif assistant_id == "fact-check-agent":
+            specialized = create_research_agent(
+                self.model, working_dir, self.checkpointer,
+                sandbox_backend=sandbox_backend, leaf=True,
+                terminal_fact_check=True, trust_human_messages=False)
         elif assistant_id not in {"general-agent", "delegate-agent"}:
             raise ValueError(f"unknown assistant: {assistant_id}")
         async_tools = (async_task_tools if assistant_id == "general-agent"

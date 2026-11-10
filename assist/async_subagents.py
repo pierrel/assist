@@ -34,6 +34,10 @@ SUBAGENTS = {
         "Research external topics thoroughly and return grounded findings with "
         "their sources."
     ),
+    "fact-check-agent": (
+        "Check a named report in the shared references workspace against "
+        "independently found sources; return mismatches to the caller."
+    ),
     "critique-agent": (
         "Review a supplied code diff for correctness, missing tests, simplicity, "
         "and security issues."

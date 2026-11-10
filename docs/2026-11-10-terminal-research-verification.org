@@ -1,0 +1,65 @@
+#+title: Terminal verification of a web research report
+#+date: 2026-11-10
+
+* Problem
+
+The ordinary web research path can save a report based on a research child's
+return without an independent check. In one captured Proposition 6 trial, the
+child report put Nevada's similar vote a week before California's. Nevada voted
+on the same day. The main agent can also add unsupported claims while writing
+the report, so checking only the child return is insufficient.
+
+* Small change
+
+After the research child returns useful findings, the main agent writes a draft
+in its existing references workspace and starts one terminal =fact-check-agent=
+Run. The checker uses the existing leaf research factory with search and page
+read tools. It reads the named draft, independently finds support for material
+claims, and returns mismatches. The main agent owns report edits and the final
+reply after the checker completion receipt. While the checker is pending, the
+draft is described as pending, not as a completed verified report.
+
+The terminal checker shares the existing references workspace. Its runtime
+profile is read-only and treats its task message as untrusted for URL authority.
+It uses the existing guarded-child search-only source policy: a URL echoed by
+the draft, a todo, or a failed page read cannot authorize a fetch. The terminal
+checker must independently find a new-host source through search.
+The existing synchronous research manager and its fact-check specialist retain
+their original report-file contract. This change adds no recursive research
+level, data store, validator, or retry loop.
+
+* Evidence and limits
+
+One private real web-main trial used the natural prompt: “Check the 2024
+California Proposition 6 result and give me a concise sourced explanation.”
+It made real search and page-read calls, saved a draft, launched a terminal
+checker, corrected the Nevada timing, and delivered a supported saved report
+and final reply. The three parent Runs and both child Runs succeeded within a
+30-minute hard wall; the private supervisor reconciled and reaped all scoped
+work. The final material answer passed manual source audit. This single result
+does not establish a repeated pass rate or a fix for other research quality
+failures.
+
+An unchanged three-measure California/Oregon ballot update was also attempted
+under a 1,800-second operational cap. The context and research children
+completed, and a terminal checker started, but the supervisor reserved the
+last 180 seconds for cleanup and canceled the still-active checker. No final
+parent continuation or completed requested update was delivered. This is a
+non-delivery, deadline-censored trial; partial draft notes and report are
+diagnostic artifacts, not a final quality verdict. A longer declared window
+is needed to test this outcome on the same candidate.
+
+The checker may describe source reachability too strongly even when it has
+only search-result evidence. Its return is evidence for the main agent to
+assess, not a substitute for claim-to-source review of the delivered report.
+The main agent can still introduce a new unsupported claim. Natural adjacent
+note-update coverage is needed before claiming broader research reliability.
+
+* Validation
+
+The focused tests pin the terminal role's web admission, strict leaf factory,
+search and page-read capability, read-only mutation denial, and unchanged
+legacy fact-check template. The closed prompt census records the changed
+async tool schema and rendered prompt transition. Private live traces retain
+the full Run graph, model-visible messages and tools, retrieval responses,
+saved report versions, and final reply.

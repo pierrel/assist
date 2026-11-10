@@ -1768,6 +1768,7 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
     "assist/templates/deepagents/fact_checker.md.j2": {
         "c8853dc566ad691ea9406fc2c42dcb01298ba24193fd0f81a3b8677205d0afef",
         "785c3a84e6a66ed8a13b60e29a390eac24e9af85d6d241d280b69aaad6e55c8f",
+        "2043bbc26bdcd96fbf272cd8d130a2dcebb96a31611dc95eb7fb24ee386abb95",
     },
     "assist/templates/deepagents/general_instructions.md.j2": {
         "0f5dba480391779b384f36cf38e152fef197871bbc7f52868f29e1c355ac02ab",
@@ -2012,7 +2013,7 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
         "13a0df1decb69fe0f4839784c892bd4d5b68b341beef6c5985e799f8d86ab9a7",
         "24507d2f519918733b0db1404c15d4f956d29e75f70f03a1d7b2e383a3913cac",
     },
-    "start_async_task": {"0a2c37a2bbf4b089b70718458de5658631d6d77bc966633f213ca8f64f5bd80c"},
+    "start_async_task": {"c1b56e1a56d5de6bc05b4d2404618b9abbe2e401d7c081391fb764f684791b03"},
     "travel": {"00329efd850f0564a51fc91cda1cef386988a8538eb4dbf9c58a3103f99f9384"},
     "update_thread_description": {"1abe177f3264e32649ce647fe4630f53ef6b465349466d968b343bc941d05c76"},
     "update_async_task": {"e8235e1f22357f4622ae03e87da2eb31252e4d8ba4ee5175b5ad64e871a0ebc4"},
@@ -2149,7 +2150,7 @@ _TOOL_RESULT_METADATA = {
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "a256a5fd2f385238d1b3ef958febdc5f5a9790025ad010648f2208a2f2287c4b"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "9a03ab34367fc404246ece5c35487eea103e56b7d964a94b6d9d4134ca9215c5"
+    "c02acc7185e5498767d68581a2adcfe0b2ce03e2da50001d2ade9598c2ba9d23"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:

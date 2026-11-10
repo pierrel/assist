@@ -185,6 +185,20 @@ def test_delegate_agent_is_a_fixed_allowed_assistant():
     ]
 
 
+def test_terminal_fact_checker_is_a_fixed_allowed_assistant():
+    client, service = _client()
+    response = client.post("/threads/child-1/runs", json={
+        "assistant_id": "fact-check-agent",
+        "input": {"messages": [{"role": "user", "content": "Check report.md for this question."}]},
+    })
+
+    assert response.status_code == 200
+    assert service.calls == [
+        ("create_run", "child-1", "fact-check-agent",
+         "Check report.md for this question.", None, None),
+    ]
+
+
 def test_unknown_assistant_and_privileged_fields_are_rejected():
     client, service = _client()
     unknown = client.post("/threads/child-1/runs", json={
