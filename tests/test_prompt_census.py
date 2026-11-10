@@ -80,6 +80,17 @@ def test_reaches_every_required_real_path(census):
                 if call["scenario"] == scenario] == [
                     "research-lead", scenario, "research-lead"]
 
+    terminal = _call(census, "terminal-fact-check")
+    legacy = _call(census, "nested-fact-check", 1)
+    assert terminal["path"] == "terminal-fact-check"
+    assert "caller names the report file" in _system_prompt(terminal)
+    assert "A provenance refusal makes no HTTP request" in _system_prompt(terminal)
+    assert "final_report.md" not in _system_prompt(terminal)
+    assert "final_report.md" in _system_prompt(legacy)
+    assert "search_internet" in terminal["visible_tools"]
+    assert "read_url" in terminal["visible_tools"]
+    assert "task" not in terminal["visible_tools"]
+
 
 def test_final_provider_tools_are_the_visible_tools(census):
     for call in census["calls"]:
@@ -1304,8 +1315,8 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     # Historical P0-P2b3 rows stay unchanged.
     assert len(current_prompt) == 27_718
     assert len(schemas) == 19_512
-    assert len(census["calls"]) == 29
-    assert len(census["tool_nodes"]) == 37
+    assert len(census["calls"]) == 30
+    assert len(census["tool_nodes"]) == 38
     assert len(census["findings"]) == 20
     # M3 records this checkout's exact source commit in each engine profile, so
     # both artifact size and fingerprint deliberately vary with capture source

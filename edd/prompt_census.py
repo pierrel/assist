@@ -54,6 +54,7 @@ REQUIRED_PATHS = {
     "context",
     "research-lead",
     "research-leaf",
+    "terminal-fact-check",
     "nested-research-worker",
     "nested-fact-check",
     "nested-report-critique",
@@ -70,6 +71,7 @@ EXPECTED_PATHS_BY_SCENARIO = {
     "context-read-only": ("context", "context", "context"),
     "research-lead": ("research-lead",),
     "research-leaf-provenance": ("research-leaf", "research-leaf"),
+    "terminal-fact-check": ("terminal-fact-check",),
     "nested-research-worker": (
         "research-lead", "nested-research-worker", "research-lead"),
     "nested-fact-check": (
@@ -1433,13 +1435,15 @@ def _invoke_context(trace: CensusTrace, root: Path) -> dict[str, Any]:
 
 
 def _invoke_research(trace: CensusTrace, root: Path, *, leaf: bool,
-                     scenario: str) -> dict[str, Any]:
+                     scenario: str, terminal_fact_check: bool = False) -> dict[str, Any]:
     from assist.agent import create_research_agent
     work = root / scenario
     work.mkdir()
     with _scenario(scenario):
         agent = create_research_agent(
-            RecordingChatModel(trace), str(work), leaf=leaf)
+            RecordingChatModel(trace), str(work), leaf=leaf,
+            terminal_fact_check=terminal_fact_check,
+            trust_human_messages=not terminal_fact_check)
         result = _invoke_agent(agent, scenario)
     return {"tool_messages": _tool_messages(result)}
 
@@ -1769,6 +1773,7 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "c8853dc566ad691ea9406fc2c42dcb01298ba24193fd0f81a3b8677205d0afef",
         "785c3a84e6a66ed8a13b60e29a390eac24e9af85d6d241d280b69aaad6e55c8f",
         "2043bbc26bdcd96fbf272cd8d130a2dcebb96a31611dc95eb7fb24ee386abb95",
+        "cd74db8ee03858945998f876462c6b32f2fef8db4f54f82d463ddf5c0e95b20a",
     },
     "assist/templates/deepagents/general_instructions.md.j2": {
         "0f5dba480391779b384f36cf38e152fef197871bbc7f52868f29e1c355ac02ab",
@@ -2148,9 +2153,9 @@ _TOOL_RESULT_METADATA = {
 }
 
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "a256a5fd2f385238d1b3ef958febdc5f5a9790025ad010648f2208a2f2287c4b"
+    "ca7fc6c90ac201a11f06714a559b066d34b6956e2ab0320144c4c1b7d66236be"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "c02acc7185e5498767d68581a2adcfe0b2ce03e2da50001d2ade9598c2ba9d23"
+    "b559833b71509b3ae70c617285ebf7abd86031387341ba85a7279b8967ca2b87"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
@@ -2640,6 +2645,7 @@ def _assert_declared_inputs(artifact: dict[str, Any]) -> None:
             "context-read-only": {"tool_messages"},
             "research-lead": {"tool_messages"},
             "research-leaf-provenance": {"tool_messages"},
+            "terminal-fact-check": {"tool_messages"},
             "nested-research-worker": {"tool_messages"},
             "nested-fact-check": {"tool_messages"},
             "nested-report-critique": {"tool_messages"},
@@ -2702,6 +2708,7 @@ def _assert_declared_inputs(artifact: dict[str, Any]) -> None:
                                   "synthetic-call-read-only-edit"],
             "research-lead": [],
             "research-leaf-provenance": ["synthetic-call-provenance"],
+            "terminal-fact-check": [],
             "nested-research-worker": ["synthetic-call-nested-research-worker"],
             "nested-fact-check": ["synthetic-call-nested-fact-check"],
             "nested-report-critique": ["synthetic-call-nested-report-critique"],
@@ -3084,7 +3091,7 @@ def _skill_tool_owners(source_manifest: list[dict[str, Any]], *,
 
 
 def _tool_classification(path: str, name: str, origin: str) -> str:
-    fixed = {"context", "research-lead", "research-leaf",
+    fixed = {"context", "research-lead", "research-leaf", "terminal-fact-check",
              "nested-research-worker", "nested-fact-check",
              "nested-report-critique", "receptionist", "thread-description"}
     if path in fixed:
@@ -3618,6 +3625,9 @@ def _capture_census() -> dict[str, Any]:
                     trace, root, leaf=False, scenario="research-lead")
                 observations["research-leaf-provenance"] = _invoke_research(
                     trace, root, leaf=True, scenario="research-leaf-provenance")
+                observations["terminal-fact-check"] = _invoke_research(
+                    trace, root, leaf=True, terminal_fact_check=True,
+                    scenario="terminal-fact-check")
                 for scenario in (
                         "nested-research-worker", "nested-fact-check",
                         "nested-report-critique"):
