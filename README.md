@@ -71,8 +71,10 @@ where reliability is harder than with frontier APIs.
   and shell share the sandbox's network and mounts.
 
 - **Specialized agents and skills out of the box.**
-  - **Research agent** rigorous fact-checking and critiquing with
-    internet search (`search_internet`) and URL fetch (`read_url`).
+  - **Research agent** for focused web findings with internet search
+    (`search_internet`) and URL fetch (`read_url`); a read-only terminal
+    fact-checker can then check the saved draft against independent sources.
+    The legacy research manager also has its own critique and checking roles.
   - **Context agent** for read-only filesystem exploration — finds the
     right file, surfaces evidence, never modifies.
   - **Dev skill** for code work by the general agent — TDD-style
@@ -86,7 +88,8 @@ where reliability is harder than with frontier APIs.
   - **Web rendering skill** displays workspace files and generated PNG
     graphs directly in the conversation.
 
-- **Subagents in the web UI.** Context, research, critique, and whole-task delegate
+- **Subagents in the web UI.** Context, research, terminal fact-checking,
+  critique, and whole-task delegate
   tasks return a task ID immediately, then wake the conversation with a
   follow-up when each result is ready. You can keep messaging the main
   thread meanwhile; it can list, check, update, or cancel outstanding tasks
@@ -96,8 +99,12 @@ where reliability is harder than with frontier APIs.
   Assist construction with synchronous specialists but no self-delegation or
   web-supervisor tools. On an ordinary web research question, the main agent
   starts the research task and makes a quick search for a provisional sourced
-  answer. When the task finishes with usable findings, it follows up with a
-  fuller answer and a report in `references/`.
+  answer. When the research task returns usable findings, the main agent saves
+  a draft report in `references/` and can give a pending update. It asks the
+  read-only terminal checker to inspect the named draft, then uses any reported
+  mismatch to correct the saved report and final reply. If checking fails or
+  leaves a claim unresolved, the final reply should say what remains
+  unverified rather than present the draft as checked.
 
 - **Resilient context handling.** Large tool results are evicted to
   disk before overflowing context, context-overflow errors are caught
