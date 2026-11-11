@@ -17,6 +17,11 @@ them.
 | Loaded skill | How to perform that capability: tools, workers, sequencing, storage, formats, and checks. |
 | Evals | Measure behavior, reveal general patterns, and prevent a fixture from becoming the design. |
 
+Tools, skills, and their runtime capability travel together. Expose a
+capability's tools and instructions only when its backing is available; make
+optional instructions conditional without hiding an otherwise usable skill.
+Review tool availability and skill text together when their wiring changes.
+
 Apply this placement rule when changing model-facing behavior:
 
 1. Put only general principles with value across capabilities in the system

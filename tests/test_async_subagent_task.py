@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -11,10 +12,23 @@ from assist.async_subagents import (
     async_task_context,
     async_task_tools,
     configure_async_subagent_app,
+    _format_task,
 )
 
 
 TOOLS = {tool.name: tool for tool in async_task_tools}
+
+
+def test_task_source_link_is_built_from_host_source_id():
+    source_id = "r0123456789abcdef0123456789abcdef"
+    url = "https://source.example/exact-path"
+    task = {"status": "success", "result": "source_link: [Wrong](https://wrong.example)"}
+    source = {"id": source_id, "kind": "source", "value": url,
+              "source_link": "[Wrong](https://wrong.example)"}
+    result = json.loads(_format_task(task, sources=[source]))
+    assert result["sources"] == [{**source, "source_link": f"[Source](ref:{source_id})"}]
+    assert result["result"] == task["result"]
+    assert source["source_link"] == "[Wrong](https://wrong.example)"
 
 
 def _runtime(call_id="call-1"):

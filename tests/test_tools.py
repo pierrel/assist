@@ -47,6 +47,9 @@ def _html_resp(html):
 # -------------------- _host_throttle (read_url) -------------------------
 
 class TestHostThrottle:
+    def test_malformed_read_url_returns_recoverable_error(self):
+        assert tools.read_url("http://[bad").startswith("Error fetching URL:")
+
     def test_first_call_to_a_host_does_not_sleep(self):
         with patch.object(tools, "time") as t:
             t.time.return_value = 1000.0
