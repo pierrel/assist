@@ -384,3 +384,35 @@ represent a new runtime deployment. The separate feature PR and Copilot
 follow-through now proceed. Root owns any required runtime redeploy and later
 explicitly authorized merge/repin; no merge is authorized. No live-condition
 research transfer or broader factual-correctness benefit is claimed.
+
+* Copilot round 1 corrections
+
+Copilot review =5864836597= on exact =cfc8ac34=, submitted at 20:13:49 UTC,
+found two additional IMPORTANT defects missed by the converged local loop.
+Root reproduced both on installed =8f96bc4c=. Greedy URL spans swallowed adjacent
+Markdown citations/table cells; unknown inline tokens and known-ID-plus-suffix
+strings passed through replies and file preparation. Both are verified and
+must be corrected, rather than treated as accepted limitations. The bridge
+ledger records two meaningful external comments, exceeding its target of one.
+
+Eight exact targeted cases failed on the reviewed source. The correction uses
+the same bounded scanner for generic registration and binding: literal URL spans
+end at their surrounding Markdown destination/cell boundary, and unknown
+unescaped inline tokens fail before file effects. Actual URL bytes, balanced or
+escaped parentheses, angle destinations, explicit retained escapes and known
+source drafts keep their semantics. The scan advances over consumed spans and
+caches line context; it adds no store, service or general parser framework.
+
+The first corrected integrated proof passed at 20:23 UTC, within 30 minutes of
+the fix request: canonical replies and buffered streams match; actual filesystem
+writes preserve source drafts, reads return exact saved bytes, and finalization
+binds the adjacent trusted source correctly. Unknown and malformed tokens cause
+unresolved-reference feedback and no file-handler call. Focused checks passed
+66 tests in 1.40 s. Full deterministic checks and affected independent rereview
+follow on the frozen correction. These are deterministic regressions, not new
+natural eval prompts. The earlier 17/18 model result remains explicitly attached
+to =04bc7f35=; no new model-result count is claimed for this parser successor.
+
+The correction is not deployed or pushed at this point. Root will recompose and
+verify the exact reviewed runtime successor before PR publication. Existing
+production pauses and the no-merge boundary remain unchanged.

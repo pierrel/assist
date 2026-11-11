@@ -137,6 +137,90 @@ def test_quote_bearing_source_and_ordinary_urls_remain_literal(tmp_path, quote):
     assert resolve_references(expected, store) == expected
 
 
+@pytest.mark.parametrize("layout", ["[Owner](https://owner.example)[Source](ref:{source})",
+                                    "[Owner](https://owner.example/a_(b))[Source](ref:{source})",
+                                    "[Owner]( https://owner.example)[Source](ref:{source})",
+                                    "[Owner](https://owner.example/a\\)b)[Source](ref:{source})",
+                                    "|https://owner.example|ref:{text}|",
+                                    "| See https://owner.example/a and https://other.example|ref:{text}|",
+                                    "|[Owner](https://owner.example)|ref:{text}|"])
+def test_url_literals_stop_at_surrounding_link_and_table_boundaries(tmp_path, monkeypatch, layout):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
+    text = store.put_text("EXACT_ID")
+    source = register_source(store, "https://source.example/exact")
+    raw = layout.format(source=source, text=text)
+    expected = raw.replace(f"ref:{text}", "EXACT_ID").replace(
+        f"(ref:{source})", "(<https://source.example/exact>)")
+    assert resolve_references(raw, store) == expected
+    assert resolve_references(expected, store) == expected
+    stream = ReferenceStream(store)
+    assert stream.push(raw) == ""
+    assert stream.push("", final=True) == expected
+    assert ReferenceBindingMiddleware().after_model(
+        {"messages": [AIMessage(content=raw)]}, None)["messages"][0].content == expected
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    backend = FilesystemBackend(root_dir=str(workspace), virtual_mode=True)
+    calls = []
+
+    def write(request):
+        calls.append(request)
+        args = request.tool_call["args"]
+        effect = backend.write(args["file_path"], args["content"])
+        return ToolMessage(content=effect.error or "Updated", status="error" if effect.error else "success",
+                           name="write_file", tool_call_id="file-call")
+
+    result = ReferenceBindingMiddleware().wrap_tool_call(
+        _request("write_file", file_path="/note.md", content=raw),
+        write)
+    assert result.status == "success" and len(calls) == 1
+    projected = raw.replace(f"ref:{text}", "EXACT_ID")
+    assert calls[0].tool_call["args"]["content"] == projected
+    assert (workspace / "note.md").read_text() == projected
+    resolve_host_report(str(workspace / "note.md"), store)
+    assert (workspace / "note.md").read_text() == expected
+
+
+def test_actual_url_bytes_escaped_literals_and_known_source_drafts_stay_exact(tmp_path, monkeypatch):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
+    text = store.put_text("EXACT_ID")
+    source = register_source(store, "https://source.example/exact")
+    raw = (f"https://owner.example/a|ref:{text}\n"
+           f"[Owner](<https://owner.example/a'\"|ref:{text}>)\n"
+           f"|https://owner.example/a\\|ref:{text}|\\ref:unknown|\n"
+           f"[Source](ref:{source})")
+    projected = resolve_references(raw, store, text_only=True)
+    assert projected == raw
+    bound = resolve_references(raw, store)
+    assert bound == raw.replace(f"(ref:{source})", "(<https://source.example/exact>)")
+    assert resolve_references(bound, store) == bound
+
+
+@pytest.mark.parametrize("placement", ["`ref:r00000000000000000000000000000000`",
+                                       "|ref:r00000000000000000000000000000000|",
+                                       "|ref:{text}-suffix|", "ref:"])
+def test_unknown_inline_references_fail_before_reply_or_file_effects(tmp_path, monkeypatch, placement):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
+    text = store.put_text("EXACT_ID")
+    raw = placement.format(text=text)
+    with pytest.raises(ValueError, match="unknown|malformed"):
+        resolve_references(raw, store)
+    calls = []
+    result = ReferenceBindingMiddleware().wrap_tool_call(
+        _request("write_file", file_path="/note.md", content=raw),
+        lambda request: calls.append(request))
+    assert result.status == "error" and calls == []
+    canonical = ReferenceBindingMiddleware().after_model(
+        {"messages": [AIMessage(content=raw)]}, None)["messages"][0].content
+    assert "reference unresolved" in canonical
+    stream = ReferenceStream(store)
+    assert stream.push(raw) == ""
+    assert stream.push("", final=True) == canonical
+
+
 def test_generic_only_file_projection_cannot_hide_an_existing_source(tmp_path, monkeypatch):
     store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
     monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)

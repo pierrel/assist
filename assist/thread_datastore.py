@@ -28,15 +28,66 @@ _RECORD_ID = re.compile(r"r[0-9a-f]{32}\Z")
 _UNBOUND = "[source reference unresolved; link reachability was not checked]"
 _MAX_TEXT_OUTPUT = 8 * 1024 * 1024
 _INLINE_REF = re.compile(r"ref:([A-Za-z0-9_-]*)", re.I)
-_TEXT_START = re.compile(r"https?://[^\s<>]+|\[|ref:([A-Za-z0-9_-]*)", re.I)
+_TEXT_START = re.compile(r"https?://|\[|ref:([A-Za-z0-9_-]*)", re.I)
+_URL_LITERAL = re.compile(r"https?://[^\s<>]+", re.I)
 BOUND_FILE_URLS_ARTIFACT = "assist_bound_file_urls"
 
 
+def _text_start(text: str, position: int, table_line: bool | None
+                ) -> tuple[re.Match | None, bool | None]:
+    """Keep URLs opaque inside their destination/cell; scan each prefix once."""
+    marker = _TEXT_START.search(text, position)
+    if marker is None:
+        return None, table_line
+    newline = text.rfind("\n", position, marker.start())
+    if table_line is None or newline >= 0:
+        first = newline + 1 if newline >= 0 else position
+        while first < marker.start() and text[first] in " \t":
+            first += 1
+        table_line = text[first:first + 1] == "|"
+    if not marker.group().lower().startswith(("http://", "https://")):
+        return marker, table_line
+    start, end = marker.span()
+    if start and text[start - 1] == "<":
+        return _URL_LITERAL.match(text, start), table_line
+    prefix = start
+    while prefix > position and text[prefix - 1].isspace():
+        prefix -= 1
+    destination = text[max(0, prefix - 2):prefix] == "]("
+    if not destination and not table_line:
+        return _URL_LITERAL.match(text, start), table_line
+    depth = 0
+    index = end
+    while index < len(text):
+        char = text[index]
+        if char.isspace() or char in "<>":
+            break
+        if char == "\\" and index + 1 < len(text) and text[index + 1] in "\\()|":
+            index += 2
+            continue
+        if table_line and char == "|":
+            break
+        if destination and char == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        elif destination and char == "(":
+            depth += 1
+        index += 1
+    return _URL_LITERAL.match(text, start, index), table_line
+
+
 def _check_text_value(value: str) -> None:
-    for token in _TEXT_START.finditer(value):
-        if (token.group(1) is not None
+    position = 0
+    table_line = None
+    while True:
+        token, table_line = _text_start(value, position, table_line)
+        if token is None:
+            break
+        if (token.group().lower().startswith("ref:")
                 and (token.start() == 0 or value[token.start() - 1] != "\\")):
             raise ValueError("unescaped reference syntax is reserved; an explicit preceding backslash is retained, never decoded")
+        position = token.end()
     if _sanitize(value) != value:
         raise ValueError("terminal control sequences are not supported in exact text")
 
@@ -239,8 +290,14 @@ def _resolve_once(text: str, store: ThreadDataStore,
         parts.append(piece)
 
     position = 0
-    scanner = _TEXT_START if bind_text else _STREAM_START
-    while marker := scanner.search(text, position):
+    table_line = None
+    while True:
+        if bind_text:
+            marker, table_line = _text_start(text, position, table_line)
+        else:
+            marker = _STREAM_START.search(text, position)
+        if marker is None:
+            break
         append(text[position:marker.start()])
         if marker.group().lower().startswith(("http://", "https://")):
             append(marker.group())
@@ -262,6 +319,8 @@ def _resolve_once(text: str, store: ThreadDataStore,
             row = store.get(token.group(1).lower())
             escaped = marker.start() > 0 and text[marker.start() - 1] == "\\"
             bound_url = None
+            if bind_text and not escaped and row is None:
+                raise ValueError("unknown or malformed inline reference; use the exact returned token or an explicit literal escape")
             if bind_text and row and row["kind"] != "source" and not escaped:
                 _check_text_value(row["value"])
                 used_text = True

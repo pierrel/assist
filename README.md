@@ -79,7 +79,10 @@ where reliability is harder than with frontier APIs.
   surrounding newlines in both exact old/new strings. Source drafts retain their
   existing finalization path. Unescaped `ref:` is reserved; a preceding backslash
   preserves a literal token and remains in the saved/output text. Unsafe joins
-  return explicit errors. Replies are buffered per message once generic records
+  and unknown/malformed inline tokens return explicit errors before file effects.
+  URL bytes stay literal within their Markdown destination or table cell;
+  adjacent citations and cells are scanned separately.
+  Replies are buffered per message once generic records
   exist, so streamed and saved text agree. Search results, successful URL reads, and observed browser
   pages capture exact source URLs as one kind of record and return opaque IDs.
   Explicit Markdown links using those IDs resolve in replies, streams, and
