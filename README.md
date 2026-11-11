@@ -72,12 +72,20 @@ where reliability is harder than with frontier APIs.
 
 - **Thread data and source links.** Managed threads keep host-owned text records
   in a SQLite datastore beside their description, outside the workspace. Host code
-  writes non-source text records; the agent can get, list, and search records in
-  its own thread. Search results, successful URL reads, and observed browser
+  and managed main/delegate/research agents can create immutable exact text with
+  `put_thread_data`, then get, list, and search their own thread's records.
+  Returned references work inline in replies, sentences, table cells and file
+  text. Generic file text is bound before writing; reference-bearing edits keep
+  surrounding newlines in both exact old/new strings. Source drafts retain their
+  existing finalization path. Unescaped `ref:` is reserved; a preceding backslash
+  preserves a literal token and remains in the saved/output text. Unsafe joins
+  return explicit errors. Replies are buffered per message once generic records
+  exist, so streamed and saved text agree. Search results, successful URL reads, and observed browser
   pages capture exact source URLs as one kind of record and return opaque IDs.
   Explicit Markdown links using those IDs resolve in replies, streams, and
   saved research reports. Ordinary URLs pass through unchanged. Source binding
-  preserves URL identity, not page availability or support for a claim. Unknown
+  preserves URL identity, not page availability or support for a claim. Generic
+  registration verifies no fact and grants no URL-fetch authority. Unknown
   source IDs produce an unresolved-reference message that does not claim the
   link was checked.
 

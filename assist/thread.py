@@ -195,7 +195,8 @@ class Thread:
         passes them only to visible main agents.
 
         ``thread_datastore_path`` supplies the host-owned record store used to
-        resolve source references before replies are streamed or checkpointed.
+        bind exact text and source references in replies and checkpoints.
+        Generic-bearing streamed messages are checked as a whole before emission.
         It is optional for embedders outside the managed web thread path.
 
         The remaining params are per-instance/run wiring: identity

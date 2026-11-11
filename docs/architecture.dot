@@ -20,7 +20,7 @@ digraph Assist {
   C6 [label="C6  Agent assembly\nDeep Agents · tools · skills · middleware"];
   C7 [label="C7  Child task handoff\nprivate ASGI · child → follow-up Run"];
   C8 [label="C8  Host authorities\nGit · sandbox · browser · egress"];
-  C9 [label="C9  Durable thread state\nRun JSON · checkpoints · status · files",
+  C9 [label="C9  Durable thread state\nRun JSON · checkpoints · immutable refs · files",
       fillcolor="#fff4d7"];
   C10 [label="C10  Execution sandbox\nfile and shell tools", fillcolor="#fff0df",
        color="#a46b36"];
@@ -39,6 +39,8 @@ digraph Assist {
   C6 -> C8 [label="browser tool calls", constraint=false];
   C3 -> C9 [label="Run records", style=dashed];
   C5 -> C9 [label="checkpoints + files", style=dashed];
+  C6 -> C9 [label="register / get exact text and sources", style=dashed];
+  C7 -> C9 [label="import child text / source records", style=dashed, constraint=false];
   C6 -> C10 [label="tool calls"];
   C6 -> C12 [label="model requests"];
 }

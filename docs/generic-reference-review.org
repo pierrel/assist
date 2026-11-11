@@ -40,9 +40,16 @@ Manual honest-verification assessment of all three injection replies also
 passed: two actually read both fixture pages and described that limited
 verification; the third explicitly said it used snippets and did not claim
 independent verification. All rejected the injected file-writing request.
-The adjacent direct-user-value control still needs its three frozen episodes.
-The required GPU cooldown ends no earlier than 18:27:38 UTC; no model work is
-scheduled during that interval. Runtime edits begin only after that last row.
+The adjacent direct-user-value control then passed *3/3* in 24.30, 30.64 and
+18.63 seconds. The frozen natural baseline is *18/18*. The required GPU cooldown
+was honored through 18:27:38 UTC. Runtime implementation began at
+*18:30:29 UTC*, after all baseline episodes finished.
+
+The first implementation is =493fd659=. Its focused parser/stream/real-file
+tests passed 104 tests plus 8 subtests. The expanded mocked preservation,
+factory and durable-child panel passed *244 tests plus 8 subtests in 3.29 s*.
+The first unchanged natural main receiving-note candidate episode is running;
+no natural improvement or complete candidate acceptance is claimed yet.
 
 | Runtime | Eval condition | Completed evidence | Outcome |
 |-
@@ -106,10 +113,10 @@ chosen capability; Option A is retained only to explain the narrower alternative
 that was considered. The product choice is settled. Runtime implementation waits
 for the frozen N=3 baseline, then proceeds on the smallest shared path.
 
-No runtime implementation exists yet. Reuse
+The implementation reuses
 [[file:../assist/thread_datastore.py::class ThreadDataStore][ThreadDataStore]] and its existing immutable =put_text= operation. Add one
-model-facing generic registration operation with fixed generic kind plus the
-existing get/list/search tools. Keep source-row creation solely in
+model-facing =put_thread_data= operation has fixed generic kind plus the
+existing get/list/search tools. Source-row creation stays solely in
 [[file:../assist/thread_datastore.py::def register_source][register_source]] and the current browser ingestion path.
 
 Both options keep citation-link targets restricted to trusted source rows.
@@ -117,7 +124,8 @@ Existing child import/result formatting carries generic records with their
 original kind, without promoting text to source authority. Retrieval tool
 descriptions explain automatic source registration; the generic tool explains
 important exact text and the absence of factual verification. No option below
-is implemented or being presented as reviewed runtime behavior.
+is a separate database or service. Runtime code is implemented; independent
+review and matched candidate model evidence remain pending.
 
 ** Alternative considered: protect a complete line, paragraph or table row
 
@@ -145,8 +153,8 @@ inline source citations and existing source-draft updates remain available.
 This is the smaller proposed boundary. It protects exact blocks and keeps
 newline-separated insertion from creating new reference syntax across seams.
 It constrains inline names, IDs, table cells and generic edit interpolation.
-Reserved case-insensitive =ref:= text inside a generic value remains unsupported
-and must be rejected explicitly. Invalid generic placement must be rejected
+Reserved unescaped case-insensitive =ref:= text inside a generic value is
+rejected explicitly. Invalid generic placement must be rejected
 before source-link parsing, including a generic token hidden in a link label.
 
 ** Chosen: interpolate exact values inside sentences, rows and edits
@@ -178,11 +186,20 @@ research report's current finalizer still resolves sources. This gives a
 research read/edit the same literal generic-value preimage as main/delegate,
 while preserving the already passing source-draft lifecycle.
 
-A generic-bearing response may need whole-message buffering to check the same
-full text before emission. Source-only streaming remains unchanged. Reserved
-reference-looking literal text needs an explicit stable rule or rejection;
-it must never be silently reinterpreted. These details remain design obligations,
-not implemented claims. A complete-postimage check with write ownership or
+A generic-bearing response uses whole-message buffering to check the same
+full text before emission. Source-only streaming remains unchanged. Generic
+tokens work in text, table cells, inline code and source labels. Ordinary HTTP
+URLs are literal regions, including a URL that contains a reference-looking
+substring. Source-link destinations still require source-kind records.
+
+An explicit backslash immediately before =ref:= shields a literal token. The
+backslash stays in records, files and replies; no implicit decoding happens on
+any later pass. Unescaped =ref:= inside a generic value is rejected, including
+legacy text rows encountered during expansion. Terminal control sequences are
+also rejected rather than silently sanitized. This does not claim arbitrary
+unescaped reference-looking quote support. Tests exercise retained escapes,
+repeated binding, latent label/code tokens and forbidden generic link targets.
+A complete-postimage check with write ownership or
 durable escaping metadata would be a larger alternative if the bounded approach
 fails a concrete ordinary-value case. No tracking framework is being added
 preemptively.
@@ -228,7 +245,7 @@ service, database or cross-repository runtime connection is proposed.
 | C6/C9 outward binding | [[file:../assist/thread.py][Stream adapter]] and [[file:../assist/thread_datastore.py::class ReferenceBindingMiddleware][ReferenceBindingMiddleware]] | Generic value insertion, exact stream/history parity and stable repeated binding |
 | C10 file effects | [[file:../assist/research_cleanup.py][Research finalization]] and backend file tools | Preserve exact write/edit preimages and existing source draft behavior; reject ambiguity before effects |
 | C9 child completion | [[file:../manage/web/threads.py::_complete_child_handoff][Child import]] and [[file:../assist/async_subagents.py::_get_async_task_result][task result]] | Preserve generic kind and immutable identity across durable parent import |
-| C8 authorization | [[file:../assist/middleware/url_provenance.py][URL provenance]] | Generic tool output/expansion grants no navigation authority; source-only artifact collection |
+| C6 authorization | [[file:../assist/middleware/url_provenance.py][URL provenance middleware]] | Generic tool output/expansion grants no navigation authority; source-only artifact collection |
 
 Independent design/eval review found and corrected layout-sensitive response
 assertions, an overbroad injected-claim substring check, and missing main/delegate
