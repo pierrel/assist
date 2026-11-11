@@ -36,7 +36,7 @@ def _check_text_value(value: str) -> None:
     for token in _TEXT_START.finditer(value):
         if (token.group(1) is not None
                 and (token.start() == 0 or value[token.start() - 1] != "\\")):
-            raise ValueError("unescaped ref: is reserved; an explicit preceding backslash is retained, never decoded")
+            raise ValueError("unescaped reference syntax is reserved; an explicit preceding backslash is retained, never decoded")
     if _sanitize(value) != value:
         raise ValueError("terminal control sequences are not supported in exact text")
 

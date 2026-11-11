@@ -273,3 +273,50 @@ def test_main_consumes_exact_values_from_completed_child(tmp_path, monkeypatch):
     calls = [call for message in result["messages"][len(history):]
              if isinstance(message, AIMessage) for call in message.tool_calls]
     assert sum(call["name"] == "get_async_task_result" for call in calls) == 1
+
+
+def test_inline_reference_file_update_capability(tmp_path, monkeypatch):
+    """Explicit mechanism probe; never counted as natural outcome acceptance."""
+    monkeypatch.setenv("ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS", "1")
+    reset_task_fixture()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
+    config = {"configurable": {"thread_id": "inline-capability",
+                               "thread_datastore_path": store.path},
+              "recursion_limit": 200}
+    prompts = (
+        "Use put_thread_data to register Mîra Vale and ZX-0Il1-7F0b as separate "
+        "exact values. Use the returned references inside a sentence and inside "
+        "a Markdown table row in /user/inline.md. The table row's status is Pending. "
+        "Do not retype either value in write_file content. Show me the file.",
+        "Read inline.md and change its table-row status to Ready. Use the same "
+        "returned references in BOTH exact edit_file old_string and new_string; "
+        "include the saved surrounding newline bytes in both. Keep the sentence "
+        "and values intact. Show me the updated file.",
+    )
+    results = []
+    with (patch("assist.tools.requests.get", side_effect=AssertionError("no network expected")),
+          patch("assist.agent.create_context_agent", _context_fixture),
+          stub_research_subagent("No external research findings are available.")):
+        agent = create_agent(select_assistant_model(0.1), str(workspace),
+                             spec=prompt_rewrite_web_main_spec(), thread_data_available=True)
+        for prompt in prompts:
+            result = agent.invoke({"messages": [HumanMessage(content=prompt)]}, config)
+            results.append(result)
+            _save_trace(tmp_path, prompts[:len(results)], results)
+    calls = [call for message in results[-1]["messages"] if isinstance(message, AIMessage)
+             for call in message.tool_calls]
+    rows = store.list(kind="text")
+    assert {row["value"] for row in rows} == {"Mîra Vale", "ZX-0Il1-7F0b"}
+    references = {f"ref:{row['id']}" for row in rows}
+    assert any(call["name"] == "write_file"
+               and all(ref in call["args"].get("content", "") for ref in references)
+               for call in calls)
+    assert any(call["name"] == "edit_file"
+               and all(ref in call["args"].get("old_string", "")
+                       and ref in call["args"].get("new_string", "") for ref in references)
+               for call in calls)
+    content = (workspace / "inline.md").read_text()
+    assert "Mîra Vale" in content and "ZX-0Il1-7F0b" in content
+    assert "Ready" in content and "Pending" not in content and "ref:" not in content
