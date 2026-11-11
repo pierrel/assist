@@ -77,8 +77,9 @@ where reliability is harder than with frontier APIs.
   Returned references work inline in replies, sentences, table cells and file
   text. Source and generic references both bind before supported writes/edits;
   reference-bearing edits keep surrounding newlines in both exact old/new
-  strings. Read the saved literal file before editing. Saved-file reads and
-  host/sandbox/parent report completion validate without rewriting bytes.
+  strings. Read the saved literal file before editing. Saved-file reads remain
+  literal; checker reads and host/sandbox/parent report completion validate
+  without rewriting bytes.
   Legacy or shell-written raw references outside literal URLs fail explicitly
   without replacement or pruning; no automatic migration is performed. An old
   source-token edit preimage now resolves to the canonical saved URL, so use

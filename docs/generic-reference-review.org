@@ -269,8 +269,8 @@ that ordinary edits remain usable. The explicit mechanism probe demonstrates
 reference-bearing edit fragments matching the saved file's exact bytes.
 
 All supported file-tool writes/edits eagerly expand *both source and generic
-references* in every role. Reads and host/sandbox/parent completion validate
-literal bytes without rewriting them. Unsupported raw legacy/shell drafts fail
+references* in every role. Saved-file reads remain literal; checker reads and host/sandbox/parent
+completion validate literal bytes without rewriting them. Unsupported raw legacy/shell drafts fail
 before cleanup. An old source-token edit preimage now binds to the canonical
 URL, so older unbound drafts require their actual literal preimage through an
 existing file operation; no migration or repair mechanism is added.
@@ -547,3 +547,35 @@ Guarded-child search-only authority still excludes file results. Inline-code
 boundaries reuse linear code-run pairing; CRLF normalization changes only lexical
 views, retaining output bytes. No new model panel or model counts are claimed.
 The current live deployment remains the verified temporary safety rollback.
+
+
+** Reviewed successor and pending deployment
+
+Exact runtime =c80672789f14fdd3d995f33a7296303728289dc6= passed the final
+full deterministic suite: *3054 tests plus 15 subtests*, 6 skipped and 1
+deselected in 112.53 s. The affected exact census passed *50 tests in 35.63 s*.
+The corrected checker paragraph changes exactly one of 29 captured prompt
+chains; the other 28 remain identical. Both retained affected design/doc and
+security reviews accepted the runtime. All 16 captured natural main/delegate
+file arguments remain byte-identical on this exact successor; no model run or
+new model-result count was added.
+
+Root composed this runtime with the existing live browser, research, PDF and
+stricter URL policy as =e388696b6b0c4a0c2517538b189d320c11bca46d=,
+tree =d72bf3f0=, with only README/architecture precision changes after the tested
+composition. The combined checks passed *3101 tests plus 21 subtests*, 7 skipped
+and 1 deselected in 116 s, and independent composition review accepted it.
+The precision changes state that saved reads remain literal while checker reads
+and host/sandbox/parent completion validate; ordinary reads do not run validation.
+This branch's follow-up contains only those documentation clarifications and
+this receipt. Its =assist/=, =manage/=, eval and test runtime bytes remain
+identical to =c8067278=.
+
+The reviewed correction is *not deployed*. Quiet deployment preflight found an
+active phone Run before stop/install at the 22:47 attempt and again at 22:53.
+Root recovered the no-effect outcome and aborted the blocked batch to release
+the lease. The verified current live version remains =aa511caa=, exact prior
+tree =f5152421=, with known earlier compact-table/unknown-reference limitations.
+Root explicitly authorized PR follow-through while this real deployment
+constraint persists and owns the retry. Review-thread source-fix explanations
+must not imply installed verification of this successor. No merge is authorized.
