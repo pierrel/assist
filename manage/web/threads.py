@@ -5937,6 +5937,12 @@ class _PriorityRunQueue:
         with self._cond:
             return not self._user and not self._background
 
+    def waiting_for_other(self, tid: str) -> tuple[dict, ...]:
+        """Snapshot queued wakes for other threads, excluding reservations."""
+        with self._cond:
+            return tuple(item.copy() for item in (*self._user, *self._background)
+                         if item["tid"] != tid)
+
     def promote(self, tid: str) -> None:
         with self._cond:
             for item in self._reserved.values():
@@ -6032,9 +6038,11 @@ class _ResumeScheduler:
     and BackgroundTasks all draw from ONE shared anyio threadpool (40 tokens), so N paused
     turns parking N workers — under the exact contention that triggers a pause — would
     starve the pool and stall request handling (a 2026-06-10-class outage). This thread
-    owns the parking instead, consuming ZERO pool tokens. Serial is correct: the LLM slot
-    is ``--parallel 1``, so only one resume can run at a time anyway. A resume that pauses
-    again simply re-submits itself here (round-robin, back of the queue).
+    owns the parking instead, consuming ZERO pool tokens. Eligible queued
+    notifications for other threads count as fairness waiters while its worker is
+    occupied. After a pause, user-priority and FIFO ordering select the next
+    notification, including the paused Run's requeued successor.
+    The LLM slot remains ``--parallel 1``.
 
     Startup queues abandoned heads before their followers. The queue is notification
     only; ``runs.json`` and ``status.json`` remain the recoverable authority."""
@@ -6046,6 +6054,7 @@ class _ResumeScheduler:
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
+        THREAD_QUEUE.set_dispatch_waiter_probe(self._dispatch_waiter_count)
         self._thread = threading.Thread(
             target=self._loop, name="resume-scheduler", daemon=True)
         self._thread.start()
@@ -6066,6 +6075,47 @@ class _ResumeScheduler:
     def promote(self, tid: str) -> None:
         """Promote work that must run before this user's pending message."""
         self._q.promote(tid)
+
+    def _dispatch_waiter_count(self, holder_tid: str) -> int:
+        """Count wakes passing fairness checks without queue locks during disk I/O."""
+        count = 0
+        for item in self._q.waiting_for_other(holder_tid):
+            tid, run_id = item["tid"], item["run_id"]
+            try:
+                runs = _runs().list(tid)
+                run = next((candidate for candidate in runs if candidate.id == run_id), None)
+                if run is None:
+                    continue
+                if run.approval_id is not None:
+                    approval = _runs().approval(tid, run.approval_id)
+                    if (approval is None or approval.blocked_reason
+                            or approval.execution_run_id != run.id):
+                        continue
+                elif (run.mode != "child" and run.status in {"pending", "running", "interrupted"}
+                      and (_runs().pending_approval(tid) is not None
+                           or _runs().unfinished_approval_continuation(tid) is not None)):
+                    continue
+                if run.status == "pending":
+                    if run not in _runs_before_browser_reset(runs):
+                        continue
+                elif run.status == "interrupted":
+                    position = next(index for index, candidate in enumerate(runs)
+                                    if candidate.id == run.id)
+                    successor = next((candidate for candidate in reversed(runs[position + 1:])
+                                      if candidate.work_id == run.work_id
+                                      and (candidate.resume or candidate.resume_decision is not None)), None)
+                    if successor is not None and successor.status not in {"pending", "running"}:
+                        continue
+                    if (successor is not None and successor.status == "pending"
+                            and successor not in _runs_before_browser_reset(runs)):
+                        continue
+                elif run.status not in {"running", "interrupted"} and not (
+                        run.mode == "child" and run.status in {"success", "error", "timeout"}):
+                    continue
+            except (OSError, RunStoreUnavailable):
+                continue
+            count += 1
+        return count
 
     def submit_resume(self, tid: str, rider, sender, accumulated_active_ms: float,
                       pending_text: str | None,
