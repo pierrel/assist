@@ -1,0 +1,86 @@
+#+title: Generic exact references: frozen initial panel
+#+date: 2026-11-11
+
+* Outcome and boundary
+
+Important exact strings should survive replies, user files and worker handoffs.
+This panel compares unchanged production-shaped agents before and after a
+bounded generic registration interface in the existing thread SQLite store.
+Baseline runtime source is =c2d27390044bd4013459fae7ccb2ce818bc221ad=, the merged
+citation change including fairness. Evaluation code alone is added first.
+Registration does not establish factual truth, correct source association or
+navigation authority. No research redesign or judge change belongs here.
+
+* Frozen natural rows
+
+The initial panel uses synthetic data and literal checks, without a model judge.
+The same prompts, fixture values and assertions apply to both conditions.
+Each row records its full messages and tool calls outside committed source.
+
+** Receiving note, main and delegate
+
+Prompt 1: Draft a short receiving note for these two shipments. Ask the recipient
+to keep them separate. First: Søren Quill, ID QL-01lI-7b92-0O5a, label “Hold at
+4 °C; do not freeze.” Second: Soren Quill, ID QL-0Il1-7b29-O05a, label “Room
+temperature only; protect from light.” Include each label exactly as written.
+
+Prompt 2: Save that note as receiving.md with an Awaiting inspection status for
+each shipment, and show me the finished note.
+
+Prompt 3: Update receiving.md: the first shipment passed inspection. Keep the
+second pending and preserve the identifying details and labels. Show the result.
+
+Expected: both names, both IDs and both quoted label strings remain exact and
+paired in replies and final file; only the first status changes. Main uses the
+ordinary web-main tool/guidance shape with deterministic async lifecycle fixture;
+delegate uses its production role. These are natural outcome rows, without
+required internal registration or reference syntax.
+
+** Research tool result
+
+Prompt: Compare the two Lumen archive awards for my application checklist.
+Give each award's name, application ID, and the eligibility sentence exactly,
+with its source. Keep the two entries separate.
+
+Search/read fixtures: “Lumen I1 Fellowship”, application ID =LM-I1l0-2027-a8f3=,
+eligibility “Applicants must have lived in Ålesund for 18 months.” at
+=https://awards.example/lumen-I1/2027/application-a8f3=; and “Lumen lI Fellowship”,
+application ID =LM-lI10-2027-a3f8=, eligibility “Applicants must have lived in
+Alesund for 81 months.” at
+=https://awards.example/lumen-lI/2027/application-a3f8=.
+
+Expected: every name, ID and eligibility string remains exact and paired with
+its own exact source URL. Fetches are synthetic; no claim of real-world truth
+is possible. This covers researcher tool-result to response and retained URL
+binding. An injected fixture instruction is a separate boundary control.
+
+** Parent-child completion
+
+Prompt: Find the two Lumen archive awards and give me an application checklist
+with each name, application ID and eligibility wording, and sources.
+
+The ordinary main lifecycle receives the preceding two-entry fixture as a
+completed research task result through its existing synthetic lifecycle tools.
+Expected: exact names, IDs, quotes and source associations in the final reply.
+This measures model consumption of a child result. Durable store import and
+real Run completion are separate deterministic integration contracts, not
+proven by the synthetic lifecycle row.
+
+* Preservation and explicit capability coverage
+
+Retain the existing natural Shudder source and follow-up rows plus the explicit
+report-write/read/update row in =edd/eval/test_source_reference_binding.py=.
+Deterministic controls cover generic registration bounds/immutability, no source
+minting or navigation authority, invalid/foreign refs, stream/history parity,
+ordinary links/code, literal nonrecursive insertion, file finalization, and
+durable child import. Explicit mechanism probes are never counted as natural
+acceptance. Baseline N=3, candidate N=3, confidence N=5 and stability N=10 follow
+the repository policy; invocations stay bounded with shared model admission.
+
+* Interpretation limits and historical context
+
+Exact preservation addresses mutation of copied values. The recent research
+diagnostic separately found a missing required 12-inch format, unsupported
+official-list verification and incorrect source association. A faithfully
+registered value alone cannot fix those categories. This effort will report
+them separately and does not duplicate the private research Before/After work.
