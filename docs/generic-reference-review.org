@@ -38,10 +38,30 @@ evidence of generic-reference benefit. Matched core baseline counts will use
 the corrected harness. The researcher row's request/fixture did not change;
 workspace/store isolation was subsequently corrected before remaining trials.
 
+The corrected-main exploratory condition reached its 300 s wall before a
+completed turn was captured. The original delegate condition reached its 240 s
+wall: it did call =shipment_records=, but a parallel context worker spent over
+three minutes searching the empty synthetic workspace and reading skills before
+returning. This is not evidence of exact-value corruption. Both timed outcomes
+remain separate from matched counts.
+
+The receiving-row fixture now stubs the unrelated context worker using the
+existing canned-subagent pattern. It returns no local documents initially and
+actual saved =receiving.md= bytes on later context requests. Main synthetic
+completion wakes use the same evidence. The real parent model still must call
+the ordinary shipment tool; the context fixture never supplies the original
+shipment values. Unexpected research remains canned in these non-research rows.
+This isolates exact-value work from context-discovery quality and will be held
+fixed across the matched baseline and candidate. File-read/update mechanism
+coverage is assessed separately from whether a parent chooses a direct read or
+uses the context worker's actual saved-file read.
+
 The initial deterministic regression run passed 92 tests, then reached its
 120 s cap at the first local ASGI exchange under the network-restricted
 sandbox. The same mocked panel is rerunning through supported local-network
-escalation. No complete-suite pass is claimed yet.
+escalation. That run passed *228 tests and 8 subtests in 2.76 s*. It covered
+thread records, URL provenance, async task/result and durable Run handoff,
+factory capabilities, research finalization and sandbox report transfer.
 
 * Proposed smallest implementation
 

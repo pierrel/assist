@@ -6,10 +6,12 @@ import functools
 import json
 import re
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.runnables import RunnableLambda
 
 from assist import tools
 from assist.agent import create_agent, create_research_agent
@@ -19,7 +21,7 @@ from assist.thread_datastore import ThreadDataStore
 
 from .test_async_subagents import reset_task_fixture
 from . import test_async_subagents as lifecycle
-from .utils import prompt_rewrite_web_main_spec
+from .utils import prompt_rewrite_web_main_spec, stub_research_subagent
 
 
 SHIPMENTS = (
@@ -88,6 +90,18 @@ def shipment_records() -> str:
                        for name, identifier, quote in SHIPMENTS], ensure_ascii=False)
 
 
+def _local_context(workspace):
+    note = Path(workspace, "receiving.md")
+    return ("Existing receiving.md:\n" + note.read_text() if note.exists()
+            else "No existing receiving note or relevant local shipment documents were found.")
+
+
+def _context_fixture(_model, working_dir, *_args, **_kwargs):
+    return RunnableLambda(lambda state: {
+        "messages": list(state.get("messages", [])) + [
+            AIMessage(content=_local_context(working_dir))]})
+
+
 def test_main_preserves_user_supplied_exact_values(tmp_path, monkeypatch):
     """Small adjacent control for user context, separate from tool-output rows."""
     monkeypatch.setenv("ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS", "1")
@@ -120,14 +134,29 @@ def test_receiving_note_preserves_user_values_through_file_update(tmp_path, monk
     config = {"configurable": {"thread_id": f"receiving-{profile}",
                                "thread_datastore_path": store.path},
               "recursion_limit": 200}
-    agent = create_agent(select_assistant_model(0.1), str(workspace), spec=spec,
-                         thread_data_available=True)
     results = []
     messages = []
-    with patch("assist.tools.requests.get", side_effect=AssertionError("no network expected")):
+    with (patch("assist.tools.requests.get", side_effect=AssertionError("no network expected")),
+          patch("assist.agent.create_context_agent", _context_fixture),
+          stub_research_subagent("No external research findings are available.")):
+        agent = create_agent(select_assistant_model(0.1), str(workspace), spec=spec,
+                             thread_data_available=True)
         for prompt in RECEIVING_PROMPTS:
             try:
                 result = agent.invoke({"messages": [HumanMessage(content=prompt)]}, config)
+                for _ in range(8):
+                    pending = next((task_id for task_id, status in lifecycle._TASK_STATUSES.items()
+                                    if status in {"pending", "running"}), None)
+                    if pending is None:
+                        break
+                    lifecycle._TASK_RESULTS[pending] = (
+                        _local_context(workspace)
+                        if lifecycle._TASK_TYPES[pending] == "context-agent"
+                        else "No external research findings are available.")
+                    result = agent.invoke({"messages": [HumanMessage(content=
+                        lifecycle._completion_wake(pending, "success"))]}, config)
+                else:
+                    raise AssertionError("shipment fixture exceeded eight completion wakes")
             except Exception as error:
                 partial = agent.get_state(config).values
                 _save_trace(tmp_path, RECEIVING_PROMPTS[:len(results) + 1], results + [partial])
@@ -145,7 +174,6 @@ def test_receiving_note_preserves_user_values_through_file_update(tmp_path, monk
     assert re.search(r"(?i)pending|awaiting inspection", saved[second:])
     calls = [call for message in messages if isinstance(message, AIMessage)
              for call in message.tool_calls]
-    assert any(call["name"] == "read_file" for call in calls)
     assert any(call["name"] == "edit_file" for call in calls)
     assert any(call["name"] == "shipment_records" for call in calls)
 
