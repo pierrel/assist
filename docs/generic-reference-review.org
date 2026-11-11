@@ -30,6 +30,7 @@ than published in this packet.
 | c2d2739 | Research clean, source links alongside entries | Both names/IDs/eligibility strings and their own exact URLs retained; 25.65 s | 1/1 PASS |
 | c2d2739 | Core main tool-output receiving row, 40 graph steps, 300 s wall | Shipment lookup; exact draft; exact saved receiving.md and render reply at checkpoint. Graph cap reached after 62.48 s; update unrun. | Capped harness outcome retained separately |
 | c2d2739 | Delegate tool-output, deterministic context fixture, 200 steps, 300 s wall | Real shipment lookup; exact reply; saved note read back; both initial statuses preserved; first status changed to Passed inspection while second stayed Awaiting inspection. 102.69 s. | 1/1 PASS |
+| c2d2739 | Main tool-output, deterministic context/lifecycle fixture, 200 steps, 300 s wall | Real shipment lookup; exact reply; both intermediate saved entries/statuses checked; exact final file with only the first status changed; 99.21 s. | 1/1 PASS |
 
 The checkpoint showed a completed save/render response at the cap. The main
 harness was corrected to submit only the new user message to its existing
@@ -69,7 +70,7 @@ The observed model is =Qwen3.8-27B-UD-Q4_K_XL.gguf=, provider fingerprint
 including its Qwen3.8 sampling/thinking selection, rather than assuming the
 older model named in historical guidance.
 
-* Proposed smallest implementation
+* Capability choice before runtime implementation
 
 No runtime implementation exists yet. Reuse
 [[file:../assist/thread_datastore.py::class ThreadDataStore][ThreadDataStore]] and its existing immutable =put_text= operation. Add one
@@ -77,22 +78,92 @@ model-facing generic registration operation with fixed generic kind plus the
 existing get/list/search tools. Keep source-row creation solely in
 [[file:../assist/thread_datastore.py::def register_source][register_source]] and the current browser ingestion path.
 
-Bare generic references insert text. Citation-link targets remain restricted
-to trusted source rows. Main/delegate file-tool content and edit preimages
-need the same generic expansion before effects; the research draft/finalization
-boundary remains owned by
-[[file:../assist/research_cleanup.py::class ReferencesCleanupRunnable][ReferencesCleanupRunnable]]. Existing child import and result formatting must
-carry generic records with their original kind, without promoting text to
-source authority. Retrieval tool descriptions explain automatic registration;
-the generic tool describes when to preserve important exact text and its limits.
+Both options keep citation-link targets restricted to trusted source rows.
+Existing child import/result formatting carries generic records with their
+original kind, without promoting text to source authority. Retrieval tool
+descriptions explain automatic source registration; the generic tool explains
+important exact text and the absence of factual verification. No option below
+is implemented or being presented as reviewed runtime behavior.
 
-Repeated-pass literal safety is being settled before implementation. The
-candidate approach rejects reserved =ref:= syntax in registered generic
-values and requires any generic-expanded result to already be stable under a
-second dry resolution. An ambiguous substitution must fail explicitly before
-file effects. Generic-bearing streamed messages may need buffering until the
-whole message is checked; source-only streaming can keep its current behavior.
-These are proposed contracts, not verified behavior.
+** Option A: protect a complete line, paragraph or table row
+
+The agent registers the complete exact block it wants preserved. Its generic
+token occupies a line by itself in a reply or =write_file= content, or in a
+research draft that the existing finalizer resolves. For example, the stored
+value can be this complete Markdown row:
+
+#+begin_example
+| Søren Quill | QL-01lI-7b92-0O5a | Hold at 4 °C; do not freeze. |
+#+end_example
+
+The model writes its table header and then =ref:<record-id>= alone on the next
+line. Binding inserts the complete stored row, preserving the surrounding
+newlines. To protect just an ID, it may put the ID on its own line. To place an
+ID inside a sentence or table cell, it instead registers that whole sentence
+or row. It cannot interpolate a generic token inside a larger line.
+
+Generic tokens are unsupported in =edit_file= arguments; the tool returns
+explicit feedback before effects. The agent reads the saved literal file and
+uses normal exact edits, as in the passing receiving-note baseline. A changed
+block can receive a new immutable record; an old record never changes. Ordinary
+inline source citations and existing source-draft updates remain available.
+
+This is the smaller proposed boundary. It protects exact blocks and keeps
+newline-separated insertion from creating new reference syntax across seams.
+It constrains inline names, IDs, table cells and generic edit interpolation.
+Reserved case-insensitive =ref:= text inside a generic value remains unsupported
+and must be rejected explicitly. Invalid generic placement must be rejected
+before source-link parsing, including a generic token hidden in a link label.
+
+** Option B: interpolate exact values inside sentences, rows and edits
+
+The agent can store =QL-01lI-7b92-0O5a= alone and place its generic token after
+=Shipment ID:= or inside a Markdown table cell. It can reuse a generic token
+in an edit preimage or replacement. This is more flexible than Option A.
+
+It requires a precise ownership contract for every pass. A first write must
+save literal exact text; a later read must return that text without granting
+URL authority to generic expansions. An edit must match the exact current
+preimage, and its *complete resulting file* must remain exact after later report
+finalization or checker reads. Validating =old_string= and =new_string= in
+isolation is insufficient. Source refs that were intentionally present before
+the edit must continue to work. Streamed and canonical messages must agree.
+
+The minimum safe implementation is not settled. A complete-postimage check
+would also need to bind its check to the actual write under the existing
+concurrency/ownership contract. Durable escaping or binding metadata is another
+possible approach, with additional representation and lifecycle work. A
+whole-message buffer could check inline response output, but does not by itself
+solve file edit seams. No new machinery is authorized by this option description.
+
+** Actual minimal edit-boundary counterexample
+
+A deterministic reproduction on unchanged =c2d2739= used a generic stored value
+of =[= and an existing trusted source URL. The proposed replacement value is
+stable when checked alone, yet joining it to the unchanged file creates source
+syntax that the existing resolver later changes:
+
+#+begin_example
+Existing file:             OLD Label](ref:r65caba095a7242391242644810866049)
+Edit old_string:          OLD
+Generic replacement value: [
+After the edit:            [ Label](ref:r65caba095a7242391242644810866049)
+After later source bind:  [ Label](<https://source.example/exact-article>)
+#+end_example
+
+The example used actual SQLite rows and the existing source resolver. It did
+not add a generic runtime implementation. The original value =[= contains no
+=ref:= literal: this is a join-boundary problem, not merely rejection of a
+reference-looking quote. Ordinary names and IDs such as =Søren Quill= and
+=QL-01lI-7b92-0O5a= do not themselves have this ambiguity. A quote containing
+literal =ref:= is a separate unresolved syntax boundary under either option;
+supporting it must not silently rewrite the quote on a later pass.
+
+The independent reviewer also demonstrated a message seam: =[= followed by
+= Label](ref:<source-id>)= forms a new link after generic insertion. Put-time
+reserved-syntax checks alone therefore cannot establish arbitrary inline
+literal safety. Option A preserves line boundaries to avoid that join; Option
+B must account for the complete result and repeated passes explicitly.
 
 * Architecture and review map
 
