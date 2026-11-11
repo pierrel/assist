@@ -147,6 +147,7 @@ def test_quote_bearing_source_and_ordinary_urls_remain_literal(tmp_path, quote):
                                     "[Owner](https://owner.example/a\\)b)[Source](ref:{source})",
                                     "|https://owner.example|ref:{text}|",
                                     "Owner | ID\n--- | ---\nhttps://owner.example|ref:{text}\n",
+                                    "https://owner.example|ref:{text}\n---|---\nOwner|ID\n",
                                     "http:// ref:{text}", "https://\nref:{text}",
                                     "[Owner](https://) ref:{text}",
                                     "| See https://owner.example/a and https://other.example|ref:{text}|",
@@ -243,10 +244,12 @@ def test_pipe_less_table_headers_respect_code_escapes_and_width(tmp_path, header
     assert resolve_references(raw, store) == expected
 
 
-def test_table_shaped_fenced_code_keeps_literal_url_bytes(tmp_path):
+@pytest.mark.parametrize("opening,middle", [("```", ""), ("```python", "```notclosing\n"),
+                                            ("```python", "````\n"), ("```python", "```\t\n")])
+def test_table_shaped_fenced_code_keeps_literal_url_bytes(tmp_path, opening, middle):
     store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
     text = store.put_text("EXACT_ID")
-    raw = f"```\nOwner | ID\n--- | ---\nhttps://owner.example|ref:{text}\n```\n"
+    raw = f"{opening}\n{middle}Owner | ID\n--- | ---\nhttps://owner.example|ref:{text}\n```\n"
     assert resolve_references(raw, store) == raw
 
 
@@ -269,7 +272,7 @@ def test_full_table_write_widened_edit_and_ambiguous_fragment_feedback(tmp_path,
         return ToolMessage(content=result.error or "Updated", status="error" if result.error else "success",
                            name=request.tool_call["name"], tool_call_id="file-call")
 
-    original = f"Lead\nOwner | ID\n--- | ---\nhttps://owner.example|ref:{first}\n"
+    original = f"Lead\n\nOwner | ID\n--- | ---\nhttps://owner.example|ref:{first}\n"
     assert binding.wrap_tool_call(_request("write_file", file_path="/note.md", content=original), effect).status == "success"
     note = workspace / "note.md"
     saved = original.replace(f"ref:{first}", "FIRST_ID")
@@ -288,6 +291,29 @@ def test_full_table_write_widened_edit_and_ambiguous_fragment_feedback(tmp_path,
     assert binding.wrap_tool_call(_request("edit_file", file_path="/note.md",
         old_string="\nhttps://owner.example|SECOND_ID\n",
         new_string="\nhttps://owner.example|LITERAL_ID\n"), effect).status == "success"
+
+
+@pytest.mark.parametrize("slashes", [0, 1, 2, 3, 4])
+def test_url_pipe_edit_ambiguity_uses_escape_pair_parity(tmp_path, monkeypatch, slashes):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    store.put_text("EXACT_ID")
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
+    prefix = "https://owner.example/a" + "\\" * slashes + "|"
+    request = _request("edit_file", file_path="/note.md", old_string="\n" + prefix + "OLD\n",
+                       new_string="\n" + prefix + "ref:unknown\n")
+    prepared = ReferenceBindingMiddleware()._bind_arguments(request)
+    if slashes % 2 == 0:
+        assert isinstance(prepared, ToolMessage) and prepared.status == "error"
+        assert "header/context" in prepared.content
+    else:
+        assert isinstance(prepared, ToolCallRequest) and prepared.tool_call == request.tool_call
+
+
+def test_table_shaped_paragraph_keeps_literal_url_bytes(tmp_path):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    text = store.put_text("EXACT_ID")
+    raw = f"Intro\nOwner | ID\n--- | ---\nhttps://owner.example|ref:{text}\n"
+    assert resolve_references(raw, store) == raw
 
 
 def test_generic_only_file_projection_cannot_hide_an_existing_source(tmp_path, monkeypatch):

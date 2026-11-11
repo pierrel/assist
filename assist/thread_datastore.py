@@ -16,6 +16,7 @@ from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.config import get_config
 from markdown.extensions.tables import TableProcessor
+from markdown.extensions.fenced_code import FencedBlockPreprocessor
 from assist.middleware.output_sanitization import _sanitize
 
 
@@ -34,9 +35,8 @@ _URL_LITERAL = re.compile(r"https?://[^\s<>]+", re.I)
 BOUND_FILE_URLS_ARTIFACT = "assist_bound_file_urls"
 
 
-def _table_width(row: str, border: bool | None = None) -> tuple[int, bool]:
-    """Count renderer-compatible cells with linear code-span/escape handling."""
-    row = row.strip(" ")
+def _table_pipes(row: str) -> list[int]:
+    """Find renderer-compatible pipes with linear code-span/escape handling."""
     tokens = list(TableProcessor.RE_CODE_PIPES.finditer(row))
     future, closes = {}, {}
     for token in reversed(tokens):
@@ -45,62 +45,75 @@ def _table_width(row: str, border: bool | None = None) -> tuple[int, bool]:
             size = len(token.group(2) or token.group(3)) - escaped
             closes[token.start()] = future.get(size - escaped, 0) if size > escaped else 0
             future[size] = token.end()
-    code_end, cells, left, right = 0, 1, False, False
+    code_end, pipes = 0, []
     for token in tokens:
         if token.start() < code_end:
             continue
         if token.group(2) or token.group(3):
             code_end = closes[token.start()]
         elif token.group(5):
-            cells += 1
-            left |= token.start() == 0
-            right |= token.end() == len(row)
+            pipes.append(token.start())
+    return pipes
+
+
+def _table_width(row: str, border: bool | None = None) -> tuple[int, bool]:
+    row = row.strip(" ")
+    pipes = _table_pipes(row)
+    left, right = bool(pipes) and pipes[0] == 0, bool(pipes) and pipes[-1] == len(row) - 1
     if border is None:
         border = left or right
-    return cells - (left + right if border else 0), border
+    return len(pipes) + 1 - (left + right if border else 0), border
 
 
 def _table_lines(text: str):
-    """Classify table rows without invoking the renderer's quadratic splitter."""
-    start, previous, table, fence = 0, None, False, None
+    """Recognize header/separator blocks and explicit rows with linear lookahead."""
+    start, table, fence, block_start = 0, False, None, True
     while start < len(text):
         end = text.find("\n", start)
         if end < 0:
             end = len(text)
         row = text[start:end]
         stripped = row.strip(" ")
-        marker = re.match(r" {0,3}(`{3,}|~{3,})", row)
-        if not table and (fence or marker):
-            if fence and marker and marker[1][0] == fence[0] and len(marker[1]) >= fence[1]:
+        marker = re.match(r"(`{3,}|~{3,})", row)
+        opening = (not fence and marker and FencedBlockPreprocessor.FENCED_BLOCK_RE.match(
+            row + "\n\n" + marker[1] + "\n"))
+        if fence or opening:
+            if fence and marker and marker[1] == fence and not row[marker.end():].strip(" "):
                 fence = None
-            elif not fence and marker:
-                fence = (marker[1][0], len(marker[1]))
-            previous, current = None, False
-        elif not stripped or (not table and row.startswith(("    ", "\t"))):
-            previous, table, current = None, False, False
+            elif opening:
+                fence = marker[1]
+            table, current, block_start = False, False, fence is None
+        elif not stripped:
+            table, current, block_start = False, False, True
+        elif not table and row.startswith(("    ", "\t")):
+            current, block_start = False, False
         else:
-            if previous is not None and "|" in stripped and set(stripped) <= set("|:- "):
-                width, border = _table_width(previous)
-                table |= (width > 1 or border) and _table_width(stripped, border)[0] == width
-            current = table or stripped.startswith("|")
-            previous = row
-        yield end, current
+            if block_start and end < len(text):
+                following_end = text.find("\n", end + 1)
+                separator = text[end + 1:following_end if following_end >= 0 else len(text)].strip(" ")
+                if "|" in separator and set(separator) <= set("|:- "):
+                    width, border = _table_width(row)
+                    table = (width > 1 or border) and _table_width(separator, border)[0] == width
+            current, block_start = table or stripped.startswith("|"), False
+        yield end, [start + pipe for pipe in _table_pipes(row)] if current else []
         start = end + 1
 
 
 def _text_scanner(text: str, edit_context: bool = False):
     """Keep URLs opaque inside their destination, label or actual table cell."""
     lines = iter(_table_lines(text))
-    line_end, table_line = next(lines, (len(text), False))
+    line_end, pipes = next(lines, (len(text), []))
+    pipe_index = 0
     label_end = -1
 
     def scan(position: int):
-        nonlocal line_end, table_line, label_end
+        nonlocal line_end, pipes, pipe_index, label_end
         marker = _TEXT_START.search(text, position)
         if marker is None:
             return None
         while marker.start() > line_end:
-            line_end, table_line = next(lines, (len(text), False))
+            line_end, pipes = next(lines, (len(text), []))
+            pipe_index = 0
         if not marker.group().lower().startswith(("http://", "https://")):
             if marker.group() == "[":
                 close = _label_close(text, marker.start())
@@ -115,11 +128,18 @@ def _text_scanner(text: str, edit_context: bool = False):
             prefix -= 1
         destination = text[max(0, prefix - 2):prefix] == "]("
         in_label = start < label_end
-        if not destination and not table_line and not in_label:
+        if not destination and not pipes and not in_label:
             literal = _URL_LITERAL.match(text, start) or marker
-            if edit_context and re.search(r"(?<!\\)\|[^\s<>]*?(?<!\\)ref:", literal.group(), re.I):
-                raise ValueError("ambiguous URL/pipe edit fragment; include table header/context, use literal values, or use a full write")
+            if edit_context:
+                literal_pipes = _table_pipes(literal.group())
+                if literal_pipes and any(token.start() > literal_pipes[0]
+                        and literal.group()[token.start() - 1] != "\\"
+                        for token in _INLINE_REF.finditer(literal.group())):
+                    raise ValueError("ambiguous URL/pipe edit fragment; include table header/context, use literal values, or use a full write")
             return literal
+        while pipe_index < len(pipes) and pipes[pipe_index] < start:
+            pipe_index += 1
+        cell_end = pipes[pipe_index] if pipe_index < len(pipes) else len(text)
         depth, index = 0, end
         while index < (label_end if in_label else len(text)):
             char = text[index]
@@ -128,7 +148,7 @@ def _text_scanner(text: str, edit_context: bool = False):
             if char == "\\" and index + 1 < len(text) and text[index + 1] in "\\()|":
                 index += 2
                 continue
-            if table_line and char == "|":
+            if index == cell_end:
                 break
             if destination and char == ")":
                 if depth == 0:

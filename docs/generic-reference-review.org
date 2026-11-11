@@ -448,3 +448,13 @@ and fake headers. The first original integrated proof remains 20:23 UTC; the
 expanded full-table/edit proof completed at 20:42 UTC. No new model panel or
 successor model pass rate is claimed. Affected reviews and full deterministic
 checks now run on the frozen successor before Root recomposition/redeployment.
+
+The affected pass additionally verified header-cell lookahead, exact installed
+fence closing and edit escape-pair parity. The edit ambiguity check now uses
+the same linear pipe lexer rather than wildcard suffix rescanning. A fake table
+inside a fenced block remains literal, including a nonclosing longer fence or
+fence-like line with trailing text/tab. Header rows are classified before binding;
+table-shaped continuation paragraphs remain ordinary text. Focused checks now
+pass 96 tests in 1.53 s. Deterministic replay of all 16 actual file calls from
+the six frozen main/delegate episodes leaves every argument byte unchanged.
+No new model result is inferred from that replay.
