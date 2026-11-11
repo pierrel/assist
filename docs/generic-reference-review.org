@@ -413,9 +413,9 @@ follow on the frozen correction. These are deterministic regressions, not new
 natural eval prompts. The earlier 17/18 model result remains explicitly attached
 to =04bc7f35=; no new model-result count is claimed for this parser successor.
 
-The correction is not deployed or pushed at this point. Root will recompose and
-verify the exact reviewed runtime successor before PR publication. Existing
-production pauses and the no-merge boundary remain unchanged.
+The correction was held from publication until Root recomposition and
+verification. The current delivery receipt is recorded below. Production pauses
+and the no-merge boundary remain unchanged.
 
 ** Affected-review completion and explicit edit-context boundary
 
@@ -468,3 +468,32 @@ The ambiguity guard caches the full URL once rather than copying it for every
 escaped token. Focused checks now pass 99 tests in 1.58 s; no new model run or
 natural-result count is claimed. The frozen successor receives only affected
 boundary/liveness/doc rereview plus the full deterministic suite.
+
+
+* Correction deployment and PR follow-through
+
+Root deployed and verified exact reviewed feature =a104be7b= at 21:15 UTC on
+2026-11-11 in composition =9ea14fedd601dcecd15f67b081352473c33eebe1=,
+tree =f64551c3fcab7b3bcd194ce4c55ff9eef6a063ca=. The composition preserves
+the prior live browser/research/PDF behavior. All 246 installed runtime files
+matched the composition; PID changed and HTTPS returned 200. Installed base
+reference/file/source checks and corrected adjacent links, compact/pipeless
+tables, 532-character label, strict unknown/suffix and no-effect ambiguity checks
+passed. Combined deterministic tests passed 3075 tests and 21 subtests, with
+7 skips and 1 deselection, in 114.55 s. Root's retained proportional composition
+review found no required correction. The inspected receipt is local at
+=/tmp/root-generic-reference-r1-live-proof-20261111/live-verification.json=.
+
+The feature's exact full deterministic suite passed 3028 tests and 15 subtests
+in 111.06 s. Both retained affected design/doc and security/liveness reviewers
+accepted =a104be7b= with no remaining concrete finding. All 16 captured natural
+receiving file calls remain byte-identical; earlier 17/18 model results stay
+attached to =04bc7f35=. No new model-result count is claimed.
+
+This deployment-note successor changes no runtime or eval input from =a104be7b=
+and does not represent another runtime deployment. PR317 will receive that
+reviewed correction after deployment, with replies/resolution for both verified
+R1 comments and a second bounded Copilot round. The bridge retains two meaningful
+external comments; none was waived. The 3116 Runs, zero runnable work/backlog and
+zero enabled schedules were unchanged, as were images and proxy configuration.
+Production research remains paused. No merge or repin is authorized.
