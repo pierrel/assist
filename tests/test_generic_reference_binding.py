@@ -631,3 +631,53 @@ def test_legacy_source_draft_edit_requires_literal_preimage_without_mutation(tmp
         _request("edit_file", file_path="/legacy.md", old_string=original, new_string="\nReplaced\n"), effect)
     assert result.status == "error"
     assert note.read_text() == original
+
+
+@pytest.mark.parametrize("target", ["r00000000000000000000000000000000", "bad!", "", "bad"])
+@pytest.mark.parametrize("tool", ["write_file", "edit_file"])
+def test_invalid_source_link_targets_never_reach_file_effects(tmp_path, monkeypatch, target, tool):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
+    raw = f"\n[S](ref:{target})\n"
+    args = {"content": raw} if tool == "write_file" else {"old_string": "\nOld\n", "new_string": raw}
+    calls = []
+    result = ReferenceBindingMiddleware().wrap_tool_call(
+        _request(tool, file_path="/note.md", **args), lambda request: calls.append(request))
+    assert result.status == "error" and calls == []
+    assert "source-link reference" in result.content
+    assert "reference unresolved" in resolve_references(raw, store)
+
+
+@pytest.mark.parametrize("raw", ["[Owner](https://owner.example)[S](ref:unknown)",
+                                 "`https://owner.example`[S](ref:unknown)",
+                                 "``https://owner.example/a`b``[S](ref:unknown)"])
+def test_saved_validation_catches_raw_citations_beside_url_delimiters_without_rewriting(tmp_path, raw):
+    report = tmp_path / "report.md"
+    report.write_text(raw)
+    before = report.read_bytes()
+    with pytest.raises(ValueError, match="unbound reference"):
+        validate_host_report(str(report))
+    assert report.read_bytes() == before
+
+
+@pytest.mark.parametrize("sandboxed", [False, True])
+@pytest.mark.parametrize("raw", ["[Owner](https://owner.example)[S](ref:unknown)",
+                                 "`https://owner.example`[S](ref:unknown)",
+                                 "``https://owner.example/a`b``[S](ref:unknown)"])
+def test_unbound_citation_adjacent_to_url_never_prunes_report_drafts(tmp_path, sandboxed, raw):
+    from langchain_core.runnables import RunnableLambda
+    from assist.research_cleanup import ReferencesCleanupRunnable
+    from tests.test_research_cleanup_sandbox import LocalSandboxTransport
+    refs = tmp_path / "references"
+    refs.mkdir()
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    def write(_state):
+        (refs / "final.md").write_text(raw)
+        (refs / "draft.md").write_text("keep on failure")
+        return {"messages": [AIMessage(content="FINAL_REPORT: final.md")]}
+    runner = ReferencesCleanupRunnable(RunnableLambda(write), str(refs),
+                                       LocalSandboxTransport() if sandboxed else None)
+    with pytest.raises(ValueError, match="unbound reference"):
+        runner.invoke({}, config={"configurable": {"thread_datastore_path": store.path}})
+    assert (refs / "final.md").read_bytes() == raw.encode()
+    assert (refs / "draft.md").read_text() == "keep on failure"

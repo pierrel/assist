@@ -579,3 +579,47 @@ tree =f5152421=, with known earlier compact-table/unknown-reference limitations.
 Root explicitly authorized PR follow-through while this real deployment
 constraint persists and owns the retry. Review-thread source-fix explanations
 must not imply installed verification of this successor. No merge is authorized.
+
+
+** Round 3: file rejection and status-oracle correction
+
+Copilot review =5866541550= on exact =c5c2a538=, submitted at 23:07:50 UTC,
+identified three verified findings. Unknown/malformed source-link targets became
+unresolved placeholders before file validation, allowing a file effect. The
+validation-only URL mask also swallowed closing link/code delimiters and an
+adjacent raw citation, allowing unsupported drafts to pass cleanup. Root
+independently reproduced both. These block that source from deployment regardless
+of phone activity. The third finding showed that span keyword searches could
+accept negated or historical shipment statuses. The bridge records three new
+meaningful findings, eight across the first three rounds.
+
+The bounded correction rejects a source-link result with no host source URL
+before a write/edit handler. Replies retain unresolved-reference feedback.
+Saved-file validation reuses the existing link/code URL boundaries, with table
+cell splitting disabled so pipe/ref URLs remain opaque after surrounding edits.
+It never substitutes or rewrites saved bytes. Host and sandbox invalid-report
+cases require both byte identity and no draft pruning. No new parser framework,
+store, ownership, postimage read or model invocation is added.
+
+The receiving oracle now extracts explicit Status/Current status fields or the
+corresponding Markdown table cell and requires every current value to match the
+allowed complete state. Parenthetical aliases pass only when both parts agree.
+Negation, historical clauses, previous-status-only evidence and contradictory
+duplicates fail. Natural prompts and fixtures remain unchanged.
+
+Both automated and independent manual regrade of all *12 original receiving
+episodes* passed: baseline main/delegate 3/3 each and candidate main/delegate
+3/3 each. Every final first shipment is Passed inspection and every second is
+Awaiting inspection, with one agreeing pending alias. All initial saves are
+awaiting. Baseline delegate trial 1 has no saved_notes snapshot; its successful
+turn-2 read_file result supplies the initial table proof after removing only
+line-number framing. Exploratory capped baseline roots are excluded. The exact
+regrade records paths and final-note hashes in the local diagnostic
+=/tmp/generic-r3-original-status-regrade.json=. Thus the existing overall
+*18/18 baseline and 17/18 candidate* survive the stronger oracle, with the same
+unrelated handoff miss. These are regraded originals, never new model episodes.
+
+The first affected correction panel passed *334 tests plus 8 subtests in 4.15 s*,
+including real file preservation, host/sandbox no-prune checks, parent paths,
+source authority and 18 status-oracle controls. Full checks and affected retained
+review follow on the frozen successor; no installed verification is claimed.

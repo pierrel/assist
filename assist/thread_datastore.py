@@ -34,7 +34,6 @@ _INLINE_REF = re.compile(r"ref:([A-Za-z0-9_-]*)", re.I)
 _TEXT_START = re.compile(r"https?://|\[|ref:([A-Za-z0-9_-]*)", re.I)
 _URL_LITERAL = re.compile(r"https?://[^\s<>]+", re.I)
 _LABEL_BOUNDARIES = re.compile(r"\\[^\n]|\[|\]|\n")
-_SAVED_FILE_REFS = re.compile(r"https?://[^\s<>]+|ref:([A-Za-z0-9_-]*)", re.I)
 BOUND_FILE_URLS_ARTIFACT = "assist_bound_file_urls"
 
 
@@ -127,9 +126,9 @@ def _generic_label_ends(text: str) -> dict[int, int]:
     return ends
 
 
-def _text_scanner(text: str, edit_context: bool = False):
-    """Keep URLs opaque inside their destination, label or actual table cell."""
-    lines = iter(_table_lines(text))
+def _text_scanner(text: str, edit_context: bool = False, *, table_cells: bool = True):
+    """Bound URLs by link/code delimiters; optionally split actual table cells."""
+    lines = iter(_table_lines(text)) if table_cells else iter(())
     line_end, pipes = next(lines, (len(text), []))
     pipe_index = 0
     label_end = -1
@@ -379,7 +378,7 @@ def _resolve_once(text: str, store: ThreadDataStore,
                   max_output_bytes: int | None = None, *,
                   bound_sources: list[str] | None = None,
                   text_only: bool = False, bind_text: bool = False,
-                  edit_context: bool = False) -> tuple[str, bool]:
+                  edit_context: bool = False, file_context: bool = False) -> tuple[str, bool]:
     """Substitute original tokens without scanning inserted text in this pass."""
     parts = []
     used = 0
@@ -409,6 +408,8 @@ def _resolve_once(text: str, store: ThreadDataStore,
                 position = marker.start() + 1
             else:
                 position, replacement, bound_url, label_used_text = link
+                if file_context and bound_url is None:
+                    raise ValueError("unknown or malformed source-link reference; use the exact returned source link")
                 used_text |= label_used_text
                 append(replacement)
                 if bound_sources is not None and bound_url is not None:
@@ -443,29 +444,38 @@ def resolve_references(text: str, store: ThreadDataStore,
                        edit_context: bool = False, file_context: bool = False) -> str:
     """Bind exact inline text and source refs; leave ordinary URLs unchanged.
 
-    Generic insertion must be stable under another full pass. Escapes are retained, not
-    decoded. Only source records contribute to ``bound_sources`` or link targets.
+    Generic insertion must be stable under another full pass. Escapes are retained,
+    not decoded. File contexts reject unbound source-link targets before effects;
+    replies keep unresolved-reference feedback. Only source records contribute to
+    ``bound_sources`` or link targets.
     """
     available = file_context or store.has_text_records()
     limit = (max_output_bytes if max_output_bytes is not None else
              _MAX_TEXT_OUTPUT if available else None)
     resolved, used_text = _resolve_once(
         text, store, limit, bound_sources=bound_sources,
-        bind_text=available, edit_context=edit_context)
+        bind_text=available, edit_context=edit_context, file_context=file_context)
     if used_text:
         check_limit = max_output_bytes if max_output_bytes is not None else _MAX_TEXT_OUTPUT
         complete = resolved
-        if _resolve_once(complete, store, check_limit, bind_text=True, edit_context=edit_context)[0] != complete:
+        if _resolve_once(complete, store, check_limit, bind_text=True, edit_context=edit_context, file_context=file_context)[0] != complete:
             raise ValueError("text insertion would create another reference; preserve literal boundaries")
     return resolved
 
 
 def validate_saved_file(text: str) -> None:
-    """Saved bytes are literal; reject raw references outside opaque URL spans."""
+    """Reject raw refs outside literal URLs, bounded by link/code delimiters.
+
+    Pipes stay inside saved URL spans regardless of later table-header edits.
+    Validation never substitutes or changes bytes.
+    """
     if len(text.encode("utf-8")) > _MAX_TEXT_OUTPUT:
         raise ValueError("saved file exceeds 8 MiB limit")
-    for token in _SAVED_FILE_REFS.finditer(text):
-        if (token.group(1) is not None
+    # Saved pipe/ref URLs stay literal even after surrounding table-header edits.
+    scanner, position = _text_scanner(text, table_cells=False), 0
+    while token := scanner(position):
+        position = token.end()
+        if (token.group().lower().startswith("ref:")
                 and (token.start() == 0 or text[token.start() - 1] != "\\")):
             raise ValueError("unbound reference in saved file; bind values with write_file/edit_file before saving")
 

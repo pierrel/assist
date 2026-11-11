@@ -89,6 +89,56 @@ def _assert_entries(text, entries):
     assert "ref:" not in text
 
 
+def _assert_current_status(text, entry_name, allowed_values):
+    """Match explicit current Status fields/cells, never narrative keywords."""
+    def plain(value):
+        return " ".join(value.strip(" \t`*_").split()).casefold()
+
+    allowed = {plain(value) for value in allowed_values}
+    values = []
+    for name, span in _entry_spans(text, SHIPMENTS):
+        if name != entry_name:
+            continue
+        for line in span.splitlines():
+            line = re.sub(r"^\s*(?:[-*+]|[0-9]+[.)])\s+", "", line)
+            label, colon, value = line.partition(":")
+            if colon and plain(label) in {"status", "current status"}:
+                values.append(plain(value))
+
+    def cells(line):
+        return [plain(cell) for cell in line.strip().strip("|").split("|")]
+
+    lines = text.splitlines()
+    column = None
+    for index, line in enumerate(lines):
+        if "|" not in line:
+            column = None
+            continue
+        row = cells(line)
+        if all(re.fullmatch(r":?-+:?", cell) for cell in row):
+            continue
+        headers = [number for number, cell in enumerate(row)
+                   if cell in {"status", "current status"}]
+        if headers and index + 1 < len(lines):
+            separator = cells(lines[index + 1])
+            if len(separator) == len(row) and all(
+                    re.fullmatch(r":?-+:?", cell) for cell in separator):
+                assert len(headers) == 1, "ambiguous current status columns"
+                column = headers[0]
+                continue
+        if column is not None and plain(entry_name) in row:
+            assert column < len(row), "missing current status cell"
+            values.append(row[column])
+
+    def matches(value):
+        if value in allowed:
+            return True
+        alias = re.fullmatch(r"([^()]+)\s+\(([^()]+)\)", value)
+        return bool(alias and plain(alias[1]) in allowed and plain(alias[2]) in allowed)
+
+    assert values and all(matches(value) for value in values), (entry_name, values)
+
+
 def shipment_records() -> str:
     """Retrieve the two incoming shipment records for receiving paperwork."""
     return json.dumps([{"recipient": name, "shipment_id": identifier, "label": quote}
@@ -178,13 +228,11 @@ def test_receiving_note_preserves_user_values_through_file_update(tmp_path, monk
     initial_save = saved_notes[1]
     _assert_entries(initial_save, SHIPMENTS)
     for name, *_rest in SHIPMENTS:
-        assert any(entry_name == name and re.search(r"(?i)awaiting inspection", span)
-                   for entry_name, span in _entry_spans(initial_save, SHIPMENTS))
+        _assert_current_status(initial_save, name, ("Awaiting inspection", "Pending"))
     saved = (workspace / "receiving.md").read_text()
     _assert_entries(saved, SHIPMENTS)
-    for index, pattern in ((0, r"(?i)pass"), (1, r"(?i)pending|awaiting inspection")):
-        assert any(name == SHIPMENTS[index][0] and re.search(pattern, span)
-                   for name, span in _entry_spans(saved, SHIPMENTS))
+    _assert_current_status(saved, SHIPMENTS[0][0], ("Passed inspection",))
+    _assert_current_status(saved, SHIPMENTS[1][0], ("Awaiting inspection", "Pending"))
     calls = [call for message in messages if isinstance(message, AIMessage)
              for call in message.tool_calls]
     assert any(call["name"] == "edit_file" for call in calls)
