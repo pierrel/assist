@@ -34,7 +34,9 @@ def test_registration_is_immutable_text_and_cannot_mint_a_source(tmp_path, monke
     assert ThreadDataStore(store.path).get(first["id"])["value"] == value
 
 
-@pytest.mark.parametrize("value", ["literal ref:r123", "A ReF: token", "ref:", "x" * (65536 + 1)])
+@pytest.mark.parametrize("value", ["literal ref:r123", "A ReF: token", "ref:", "x" * (65536 + 1),
+                                  "http:// ref:unknown", "https://\nref:unknown",
+                                  "[Owner](https://) ref:unknown"])
 def test_registration_rejects_reserved_syntax_and_oversize_without_writes(tmp_path, monkeypatch, value):
     store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
     monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
@@ -138,10 +140,15 @@ def test_quote_bearing_source_and_ordinary_urls_remain_literal(tmp_path, quote):
 
 
 @pytest.mark.parametrize("layout", ["[Owner](https://owner.example)[Source](ref:{source})",
+                                    "[https://owner.example](https://owner.example)[Source](ref:{source})",
+                                    "[See https://owner.example](https://owner.example)[Source](ref:{source})",
                                     "[Owner](https://owner.example/a_(b))[Source](ref:{source})",
                                     "[Owner]( https://owner.example)[Source](ref:{source})",
                                     "[Owner](https://owner.example/a\\)b)[Source](ref:{source})",
                                     "|https://owner.example|ref:{text}|",
+                                    "Owner | ID\n--- | ---\nhttps://owner.example|ref:{text}\n",
+                                    "http:// ref:{text}", "https://\nref:{text}",
+                                    "[Owner](https://) ref:{text}",
                                     "| See https://owner.example/a and https://other.example|ref:{text}|",
                                     "|[Owner](https://owner.example)|ref:{text}|"])
 def test_url_literals_stop_at_surrounding_link_and_table_boundaries(tmp_path, monkeypatch, layout):
@@ -188,6 +195,7 @@ def test_actual_url_bytes_escaped_literals_and_known_source_drafts_stay_exact(tm
     text = store.put_text("EXACT_ID")
     source = register_source(store, "https://source.example/exact")
     raw = (f"https://owner.example/a|ref:{text}\n"
+           f"https://owner.example|ref:{text}\n"
            f"[Owner](<https://owner.example/a'\"|ref:{text}>)\n"
            f"|https://owner.example/a\\|ref:{text}|\\ref:unknown|\n"
            f"[Source](ref:{source})")
@@ -200,6 +208,9 @@ def test_actual_url_bytes_escaped_literals_and_known_source_drafts_stay_exact(tm
 
 @pytest.mark.parametrize("placement", ["`ref:r00000000000000000000000000000000`",
                                        "|ref:r00000000000000000000000000000000|",
+                                       "Owner | ID\n--- | ---\nhttps://owner.example|ref:unknown\n",
+                                       "http:// ref:unknown", "https://\nref:unknown",
+                                       "[Owner](https://) ref:unknown",
                                        "|ref:{text}-suffix|", "ref:"])
 def test_unknown_inline_references_fail_before_reply_or_file_effects(tmp_path, monkeypatch, placement):
     store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
@@ -219,6 +230,64 @@ def test_unknown_inline_references_fail_before_reply_or_file_effects(tmp_path, m
     stream = ReferenceStream(store)
     assert stream.push(raw) == ""
     assert stream.push("", final=True) == canonical
+
+
+@pytest.mark.parametrize("header,table", [("`A|B` | ID", True), (r"A\|B | ID", True),
+                                          ("`A|B`", False), (r"A\|B", False),
+                                          ("A | B | C", False)])
+def test_pipe_less_table_headers_respect_code_escapes_and_width(tmp_path, header, table):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    text = store.put_text("EXACT_ID")
+    raw = f"{header}\n--- | ---\nhttps://owner.example|ref:{text}\n"
+    expected = raw.replace(f"ref:{text}", "EXACT_ID") if table else raw
+    assert resolve_references(raw, store) == expected
+
+
+def test_table_shaped_fenced_code_keeps_literal_url_bytes(tmp_path):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    text = store.put_text("EXACT_ID")
+    raw = f"```\nOwner | ID\n--- | ---\nhttps://owner.example|ref:{text}\n```\n"
+    assert resolve_references(raw, store) == raw
+
+
+def test_full_table_write_widened_edit_and_ambiguous_fragment_feedback(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    backend = FilesystemBackend(root_dir=str(workspace), virtual_mode=True)
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
+    first, second = store.put_text("FIRST_ID"), store.put_text("SECOND_ID")
+    binding = ReferenceBindingMiddleware()
+    calls = []
+
+    def effect(request):
+        calls.append(request)
+        args = request.tool_call["args"]
+        result = (backend.write(args["file_path"], args["content"])
+                  if request.tool_call["name"] == "write_file" else
+                  backend.edit(args["file_path"], args["old_string"], args["new_string"]))
+        return ToolMessage(content=result.error or "Updated", status="error" if result.error else "success",
+                           name=request.tool_call["name"], tool_call_id="file-call")
+
+    original = f"Lead\nOwner | ID\n--- | ---\nhttps://owner.example|ref:{first}\n"
+    assert binding.wrap_tool_call(_request("write_file", file_path="/note.md", content=original), effect).status == "success"
+    note = workspace / "note.md"
+    saved = original.replace(f"ref:{first}", "FIRST_ID")
+    assert note.read_text() == saved
+    before = len(calls)
+    for reference in (f"ref:{second}", "ref:unknown"):
+        result = binding.wrap_tool_call(_request("edit_file", file_path="/note.md",
+            old_string="\nhttps://owner.example|FIRST_ID\n",
+            new_string=f"\nhttps://owner.example|{reference}\n"), effect)
+        assert result.status == "error" and "header/context" in result.content
+        assert len(calls) == before and note.read_text() == saved
+    old = saved[saved.index("\n"):]
+    new = old.replace("FIRST_ID", f"ref:{second}")
+    assert binding.wrap_tool_call(_request("edit_file", file_path="/note.md", old_string=old, new_string=new), effect).status == "success"
+    assert note.read_text() == saved.replace("FIRST_ID", "SECOND_ID")
+    assert binding.wrap_tool_call(_request("edit_file", file_path="/note.md",
+        old_string="\nhttps://owner.example|SECOND_ID\n",
+        new_string="\nhttps://owner.example|LITERAL_ID\n"), effect).status == "success"
 
 
 def test_generic_only_file_projection_cannot_hide_an_existing_source(tmp_path, monkeypatch):

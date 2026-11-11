@@ -416,3 +416,35 @@ to =04bc7f35=; no new model-result count is claimed for this parser successor.
 The correction is not deployed or pushed at this point. Root will recompose and
 verify the exact reviewed runtime successor before PR publication. Existing
 production pauses and the no-merge boundary remain unchanged.
+
+** Affected-review completion and explicit edit-context boundary
+
+The retained reviewers found three remaining URL cases on =5821ae51=: URLs
+inside link labels, actual tables without outer pipes, and incomplete URL
+schemes that incorrectly signaled end-of-input. The latter also skipped put-time
+reserved-syntax validation. These are part of the same verified parser defects.
+
+Root selected a bounded linear table-header/pipe classifier. It reuses only the
+existing Markdown table lexical token regex and performs linear code-span pairing
+and pipe counting; it does not invoke the renderer's quadratic splitter or add
+a dependency. Source drafts, actual URL bytes, escaped/code/fake headers and
+standalone literal pipe URLs keep their meaning. Incomplete schemes remain
+literal and scanning continues. Oversized registration is rejected before scan.
+
+A table-row edit fragment can be byte-identical to a standalone URL containing
+=|ref:...=. Root explicitly accepted rejection before effects for that ambiguous
+reference-bearing edit, with feedback to include table header/context or use
+literal values. This exception includes an intentionally literal unescaped
+URL/pipe edit fragment. Other literal edits retain existing behavior. A full
+write is an option for new files; existing write-collision rules still apply.
+No backend read, full-file ownership/postimage tracking, syntax or service was
+added. Wider LF-bounded table context succeeds in the real file backend.
+
+Current focused proof passes 86 tests in 1.52 s: canonical reply/stream and real
+full-table write/read/finalize; widened-context edit; ambiguous known/unknown
+fragment rejection without effects; literal edit success; label/destination
+URLs; empty-scheme registration rejection; standalone URL bytes; escaped/code
+and fake headers. The first original integrated proof remains 20:23 UTC; the
+expanded full-table/edit proof completed at 20:42 UTC. No new model panel or
+successor model pass rate is claimed. Affected reviews and full deterministic
+checks now run on the frozen successor before Root recomposition/redeployment.

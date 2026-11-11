@@ -15,6 +15,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.config import get_config
+from markdown.extensions.tables import TableProcessor
 from assist.middleware.output_sanitization import _sanitize
 
 
@@ -33,57 +34,118 @@ _URL_LITERAL = re.compile(r"https?://[^\s<>]+", re.I)
 BOUND_FILE_URLS_ARTIFACT = "assist_bound_file_urls"
 
 
-def _text_start(text: str, position: int, table_line: bool | None
-                ) -> tuple[re.Match | None, bool | None]:
-    """Keep URLs opaque inside their destination/cell; scan each prefix once."""
-    marker = _TEXT_START.search(text, position)
-    if marker is None:
-        return None, table_line
-    newline = text.rfind("\n", position, marker.start())
-    if table_line is None or newline >= 0:
-        first = newline + 1 if newline >= 0 else position
-        while first < marker.start() and text[first] in " \t":
-            first += 1
-        table_line = text[first:first + 1] == "|"
-    if not marker.group().lower().startswith(("http://", "https://")):
-        return marker, table_line
-    start, end = marker.span()
-    if start and text[start - 1] == "<":
-        return _URL_LITERAL.match(text, start), table_line
-    prefix = start
-    while prefix > position and text[prefix - 1].isspace():
-        prefix -= 1
-    destination = text[max(0, prefix - 2):prefix] == "]("
-    if not destination and not table_line:
-        return _URL_LITERAL.match(text, start), table_line
-    depth = 0
-    index = end
-    while index < len(text):
-        char = text[index]
-        if char.isspace() or char in "<>":
-            break
-        if char == "\\" and index + 1 < len(text) and text[index + 1] in "\\()|":
-            index += 2
+def _table_width(row: str, border: bool | None = None) -> tuple[int, bool]:
+    """Count renderer-compatible cells with linear code-span/escape handling."""
+    row = row.strip(" ")
+    tokens = list(TableProcessor.RE_CODE_PIPES.finditer(row))
+    future, closes = {}, {}
+    for token in reversed(tokens):
+        if token.group(2) or token.group(3):
+            escaped = bool(token.group(2))
+            size = len(token.group(2) or token.group(3)) - escaped
+            closes[token.start()] = future.get(size - escaped, 0) if size > escaped else 0
+            future[size] = token.end()
+    code_end, cells, left, right = 0, 1, False, False
+    for token in tokens:
+        if token.start() < code_end:
             continue
-        if table_line and char == "|":
-            break
-        if destination and char == ")":
-            if depth == 0:
+        if token.group(2) or token.group(3):
+            code_end = closes[token.start()]
+        elif token.group(5):
+            cells += 1
+            left |= token.start() == 0
+            right |= token.end() == len(row)
+    if border is None:
+        border = left or right
+    return cells - (left + right if border else 0), border
+
+
+def _table_lines(text: str):
+    """Classify table rows without invoking the renderer's quadratic splitter."""
+    start, previous, table, fence = 0, None, False, None
+    while start < len(text):
+        end = text.find("\n", start)
+        if end < 0:
+            end = len(text)
+        row = text[start:end]
+        stripped = row.strip(" ")
+        marker = re.match(r" {0,3}(`{3,}|~{3,})", row)
+        if not table and (fence or marker):
+            if fence and marker and marker[1][0] == fence[0] and len(marker[1]) >= fence[1]:
+                fence = None
+            elif not fence and marker:
+                fence = (marker[1][0], len(marker[1]))
+            previous, current = None, False
+        elif not stripped or (not table and row.startswith(("    ", "\t"))):
+            previous, table, current = None, False, False
+        else:
+            if previous is not None and "|" in stripped and set(stripped) <= set("|:- "):
+                width, border = _table_width(previous)
+                table |= (width > 1 or border) and _table_width(stripped, border)[0] == width
+            current = table or stripped.startswith("|")
+            previous = row
+        yield end, current
+        start = end + 1
+
+
+def _text_scanner(text: str, edit_context: bool = False):
+    """Keep URLs opaque inside their destination, label or actual table cell."""
+    lines = iter(_table_lines(text))
+    line_end, table_line = next(lines, (len(text), False))
+    label_end = -1
+
+    def scan(position: int):
+        nonlocal line_end, table_line, label_end
+        marker = _TEXT_START.search(text, position)
+        if marker is None:
+            return None
+        while marker.start() > line_end:
+            line_end, table_line = next(lines, (len(text), False))
+        if not marker.group().lower().startswith(("http://", "https://")):
+            if marker.group() == "[":
+                close = _label_close(text, marker.start())
+                if close is not None and text[close + 1:close + 2] == "(":
+                    label_end = max(label_end, close)
+            return marker
+        start, end = marker.span()
+        if start and text[start - 1] == "<":
+            return _URL_LITERAL.match(text, start) or marker
+        prefix = start
+        while prefix > position and text[prefix - 1].isspace():
+            prefix -= 1
+        destination = text[max(0, prefix - 2):prefix] == "]("
+        in_label = start < label_end
+        if not destination and not table_line and not in_label:
+            literal = _URL_LITERAL.match(text, start) or marker
+            if edit_context and re.search(r"(?<!\\)\|[^\s<>]*?(?<!\\)ref:", literal.group(), re.I):
+                raise ValueError("ambiguous URL/pipe edit fragment; include table header/context, use literal values, or use a full write")
+            return literal
+        depth, index = 0, end
+        while index < (label_end if in_label else len(text)):
+            char = text[index]
+            if char.isspace() or char in "<>":
                 break
-            depth -= 1
-        elif destination and char == "(":
-            depth += 1
-        index += 1
-    return _URL_LITERAL.match(text, start, index), table_line
+            if char == "\\" and index + 1 < len(text) and text[index + 1] in "\\()|":
+                index += 2
+                continue
+            if table_line and char == "|":
+                break
+            if destination and char == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif destination and char == "(":
+                depth += 1
+            index += 1
+        return _URL_LITERAL.match(text, start, index) or marker
+
+    return scan
 
 
 def _check_text_value(value: str) -> None:
     position = 0
-    table_line = None
-    while True:
-        token, table_line = _text_start(value, position, table_line)
-        if token is None:
-            break
+    scanner = _text_scanner(value)
+    while token := scanner(position):
         if (token.group().lower().startswith("ref:")
                 and (token.start() == 0 or value[token.start() - 1] != "\\")):
             raise ValueError("unescaped reference syntax is reserved; an explicit preceding backslash is retained, never decoded")
@@ -273,7 +335,8 @@ def _link_at(text: str, start: int, store: ThreadDataStore,
 def _resolve_once(text: str, store: ThreadDataStore,
                   max_output_bytes: int | None = None, *,
                   bound_sources: list[str] | None = None,
-                  text_only: bool = False, bind_text: bool = False) -> tuple[str, bool]:
+                  text_only: bool = False, bind_text: bool = False,
+                  edit_context: bool = False) -> tuple[str, bool]:
     """Substitute original tokens without scanning inserted text in this pass."""
     parts = []
     used = 0
@@ -290,14 +353,8 @@ def _resolve_once(text: str, store: ThreadDataStore,
         parts.append(piece)
 
     position = 0
-    table_line = None
-    while True:
-        if bind_text:
-            marker, table_line = _text_start(text, position, table_line)
-        else:
-            marker = _STREAM_START.search(text, position)
-        if marker is None:
-            break
+    scanner = _text_scanner(text, edit_context) if bind_text else lambda pos: _STREAM_START.search(text, pos)
+    while marker := scanner(position):
         append(text[position:marker.start()])
         if marker.group().lower().startswith(("http://", "https://")):
             append(marker.group())
@@ -340,7 +397,7 @@ def _resolve_once(text: str, store: ThreadDataStore,
 def resolve_references(text: str, store: ThreadDataStore,
                        max_output_bytes: int | None = None, *,
                        bound_sources: list[str] | None = None,
-                       text_only: bool = False) -> str:
+                       text_only: bool = False, edit_context: bool = False) -> str:
     """Bind exact inline text and source refs; leave ordinary URLs unchanged.
 
     File arguments use ``text_only`` to retain source drafts. Generic insertion
@@ -352,15 +409,15 @@ def resolve_references(text: str, store: ThreadDataStore,
              _MAX_TEXT_OUTPUT if available and not text_only else None)
     resolved, used_text = _resolve_once(
         text, store, limit, bound_sources=bound_sources,
-        text_only=text_only, bind_text=available)
+        text_only=text_only, bind_text=available, edit_context=edit_context)
     if used_text:
         check_limit = max_output_bytes if max_output_bytes is not None else _MAX_TEXT_OUTPUT
-        complete = (_resolve_once(text, store, check_limit, bind_text=True)[0]
+        complete = (_resolve_once(text, store, check_limit, bind_text=True, edit_context=edit_context)[0]
                     if text_only else resolved)
         if (text_only
-                and _resolve_once(resolved, store, check_limit, bind_text=True)[0] != complete):
+                and _resolve_once(resolved, store, check_limit, bind_text=True, edit_context=edit_context)[0] != complete):
             raise ValueError("text insertion would change source-draft parsing; preserve literal boundaries")
-        if _resolve_once(complete, store, check_limit, bind_text=True)[0] != complete:
+        if _resolve_once(complete, store, check_limit, bind_text=True, edit_context=edit_context)[0] != complete:
             raise ValueError("text insertion would create another reference; preserve literal boundaries")
     return resolved
 
@@ -533,6 +590,8 @@ def put_thread_data(value: str, title: str = "") -> str:
     or file text, including sentences/table cells; do not reconstruct its ID.
     For edit_file with references, BOTH exact old_string and new_string must
     include their surrounding newline bytes. Read the saved file first.
+    For URL/pipe table edits, include the table header/context; an ambiguous
+    fragment is rejected. Literal values can avoid reference syntax in edits.
     Source URLs from retrieval already register automatically; use source_link
     for citations. This tool never verifies facts or creates source authority.
     Values are at most 65536 characters. Unescaped ref: is reserved; explicit
@@ -542,8 +601,8 @@ def put_thread_data(value: str, title: str = "") -> str:
     if store is None:
         return "Thread data is unavailable in this conversation."
     try:
-        if not isinstance(value, str):
-            raise ValueError("value must be text")
+        if not isinstance(value, str) or len(value) > 65536:
+            raise ValueError("value must be text with at most 65536 characters")
         _check_text_value(value)
         record_id = store.put_text(value, title=title)
     except ValueError as error:
@@ -598,7 +657,7 @@ class ReferenceBindingMiddleware(AgentMiddleware):
             for key in keys:
                 value = args.get(key)
                 if isinstance(value, str):
-                    resolved = resolve_references(value, store, text_only=True)
+                    resolved = resolve_references(value, store, text_only=True, edit_context=name == "edit_file")
                     if resolved != value:
                         replacements[key] = resolved
             if name == "edit_file" and replacements:

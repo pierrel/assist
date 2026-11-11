@@ -82,6 +82,9 @@ where reliability is harder than with frontier APIs.
   and unknown/malformed inline tokens return explicit errors before file effects.
   URL bytes stay literal within their Markdown destination or table cell;
   adjacent citations and cells are scanned separately.
+  URL/pipe edit fragments need their table header/context or literal values.
+  Ambiguous unescaped fragments fail before effects, including intentionally
+  literal URL/pipe fragments that cannot be distinguished from a table row.
   Replies are buffered per message once generic records
   exist, so streamed and saved text agree. Search results, successful URL reads, and observed browser
   pages capture exact source URLs as one kind of record and return opaque IDs.
