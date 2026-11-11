@@ -13,7 +13,7 @@ from assist import tools
 from assist.thread_datastore import (
     ReferenceBindingMiddleware, ReferenceStream, ThreadDataStore,
     get_thread_data, register_source, resolve_references, source_url,
-    resolve_host_report,
+    validate_host_report,
 )
 
 
@@ -299,13 +299,13 @@ def test_nested_malformed_brackets_match_canonical_stream(tmp_path):
         assert actual == expected, split
 
 
-def test_fact_check_report_read_resolves_host_source_without_registering_text(tmp_path, monkeypatch):
+def test_fact_check_report_read_uses_existing_source_for_literal_url_without_rebinding(tmp_path, monkeypatch):
     store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
     record_id = register_source(store, URL)
     monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
     request = SimpleNamespace(tool_call={"name": "read_file", "id": "read-1",
                                          "args": {"file_path": "final_report.md"}})
-    result = ToolMessage(content=f"[Source](ref:{record_id})",
+    result = ToolMessage(content=f"[Source](<{URL}>)",
                          tool_call_id="read-1", name="read_file")
 
     assert ReferenceBindingMiddleware()._bind_result(request, result).content == result.content
@@ -334,7 +334,7 @@ def test_local_report_binding_rejects_fifo_without_blocking(tmp_path):
     fifo = refs / "report.md"
     os.mkfifo(fifo)
     with pytest.raises(ValueError, match="regular file"):
-        resolve_host_report(str(fifo), store)
+        validate_host_report(str(fifo))
 
 
 def test_plain_brackets_do_not_stall_reply_stream(tmp_path):

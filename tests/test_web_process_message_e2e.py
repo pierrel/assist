@@ -430,7 +430,7 @@ def test_search_reference_reaches_phone_stream_and_durable_run(client, monkeypat
     assert _get_status("thread-e2e")["stage"] == "ready"
 
 
-def test_completion_resolves_only_its_named_report(client, tmp_path):
+def test_completion_validates_only_its_named_bound_report(client, tmp_path):
     from assist.thread_datastore import ThreadDataStore, register_source
 
     tid = "thread-e2e"
@@ -441,11 +441,11 @@ def test_completion_resolves_only_its_named_report(client, tmp_path):
     store = ThreadDataStore(web.MANAGER.thread_datastore_path(tid))
     record_id = register_source(store, url)
     report = references / f"{task_id}.md"
-    report.write_text(f"[Source](ref:{record_id})")
+    report.write_text(f"[Source](<{url}>)")
     unrelated = references / "user-notes.md"
     unrelated.write_text("[User link](https://unrelated.example/keep)")
 
-    threads._bind_task_report(
+    threads._validate_task_report(
         tid, threads._TASK_COMPLETION_RIDER + f"Task ID: {task_id}\nAgent: research-agent",
         str(tmp_path / tid))
 
@@ -453,7 +453,7 @@ def test_completion_resolves_only_its_named_report(client, tmp_path):
     assert unrelated.read_text() == "[User link](https://unrelated.example/keep)"
 
 
-def test_completion_binds_named_report_through_sandbox_transfer(client, tmp_path):
+def test_completion_validates_named_bound_report_through_sandbox_transfer(client, tmp_path):
     from assist.thread_datastore import ThreadDataStore, register_source
     from tests.test_research_cleanup_sandbox import LocalSandboxTransport
 
@@ -465,18 +465,18 @@ def test_completion_binds_named_report_through_sandbox_transfer(client, tmp_path
     url = "https://source.example/child-exact?a=1&b=2"
     record_id = register_source(store, url)
     report = refs / f"{task_id}.md"
-    report.write_text(f"[Source](ref:{record_id})")
+    report.write_text(f"[Source](<{url}>)")
     sandbox = LocalSandboxTransport()
     sandbox.work_dir = str(tmp_path / tid)
 
-    threads._bind_task_report(
+    threads._validate_task_report(
         tid, f"Task ID: {task_id}\nAgent: research-agent",
         str(tmp_path / tid), sandbox)
 
     assert report.read_text() == f"[Source](<{url}>)"
 
 
-def test_completion_worker_binds_report_written_during_parent_turn(
+def test_completion_worker_preserves_bound_report_written_during_parent_turn(
     client, monkeypatch, tmp_path,
 ):
     from assist.thread_datastore import ThreadDataStore, register_source
@@ -493,7 +493,7 @@ def test_completion_worker_binds_report_written_during_parent_turn(
     class Chat:
         def message(self, _text):
             assert not report.exists()
-            report.write_text(f"[Child](ref:{record_id})")
+            report.write_text(f"[Child](<{url}>)")
             return "I used the report"
 
         def pending_reply(self):
@@ -511,7 +511,7 @@ def test_completion_worker_binds_report_written_during_parent_turn(
     assert report.read_text() == f"[Child](<{url}>)"
 
 
-def test_resumed_completion_binds_report_written_after_pause(client, monkeypatch, tmp_path):
+def test_resumed_completion_preserves_bound_report_written_after_pause(client, monkeypatch, tmp_path):
     from assist.thread_datastore import ThreadDataStore, register_source
 
     tid = "thread-e2e"
@@ -525,7 +525,7 @@ def test_resumed_completion_binds_report_written_after_pause(client, monkeypatch
 
     class Chat:
         def resume(self):
-            report.write_text(f"[Child](ref:{record_id})")
+            report.write_text(f"[Child](<{url}>)")
             return "Report ready"
 
         def pending_reply(self):

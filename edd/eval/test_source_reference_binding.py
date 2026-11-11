@@ -63,7 +63,7 @@ def test_natural_horror_research_uses_exact_source_reference(tmp_path, follow_up
 
 
 def test_report_file_reread_update_capability_keeps_exact_source(tmp_path):
-    """Exercise requested draft reread and later update around finalization."""
+    """Exercise literal saved-file reread and update around validation."""
     rows = [{
         "title": "Decider: horror movies on Shudder",
         "url": SOURCE_URL,
@@ -90,30 +90,30 @@ def test_report_file_reread_update_capability_keeps_exact_source(tmp_path):
         "Please update that watchlist for a friend: add a short 'For a friend' "
         "heading, keep the three films, and keep the source link intact.",
     )
-    before_resolution = []
-    resolve = ReferencesCleanupRunnable._resolve_report_references
+    before_validation = []
+    validate = ReferencesCleanupRunnable._validate_report
 
-    def capture_resolution(self, basename, source_store):
-        before_resolution.append({"basename": basename,
+    def capture_validation(self, basename, source_store):
+        before_validation.append({"basename": basename,
                                   "content": (report.parent / basename).read_text()})
-        return resolve(self, basename, source_store)
+        return validate(self, basename, source_store)
 
     with (patch("assist.agent.search_internet", search_internet),
           patch("assist.agent.read_url", read_url),
-          patch.object(ReferencesCleanupRunnable, "_resolve_report_references",
-                       capture_resolution)):
+          patch.object(ReferencesCleanupRunnable, "_validate_report",
+                       capture_validation)):
         agent = create_research_agent(select_assistant_model(0.1), str(tmp_path),
                                       leaf=True, thread_data_available=True)
         first = agent.invoke({"messages": [{"role": "user", "content": prompts[0]}]}, config)
-        first_resolution_count = len(before_resolution)
+        first_validation_count = len(before_validation)
         first_text = report.read_text()
         second = agent.invoke(
             {"messages": first["messages"] + [HumanMessage(content=prompts[1])]}, config)
 
     (tmp_path / "messages.json").write_text(json.dumps({
         "prompts": prompts,
-        "before_resolution": before_resolution,
-        "first_resolution_count": first_resolution_count,
+        "before_validation": before_validation,
+        "first_validation_count": first_validation_count,
         "first_report": first_text,
         "final_report": report.read_text(),
         "first": [message.model_dump(mode="json") for message in first["messages"]],
@@ -144,8 +144,8 @@ def test_report_file_reread_update_capability_keeps_exact_source(tmp_path):
                for call in successful_later_calls)
     source = store.list(kind="source")[0]
     assert source["value"] == SOURCE_URL
-    assert any(f"ref:{source['id']}" in entry["content"]
-               for entry in before_resolution[:first_resolution_count]
+    assert any(SOURCE_URL in entry["content"] and "ref:" not in entry["content"]
+               for entry in before_validation[:first_validation_count]
                if entry["basename"] == report.name)
     assert any(f"ref:{source['id']}" in str(call.get("args", {}).get("content", ""))
                for call in calls if call["name"] == "write_file")
@@ -157,7 +157,7 @@ def test_report_file_reread_update_capability_keeps_exact_source(tmp_path):
     later_reads = [message.content for message in second["messages"]
                    if isinstance(message, ToolMessage)
                    and message.tool_call_id in later_read_ids]
-    assert any(f"ref:{source['id']}" in text for text in first_reads)
+    assert any(SOURCE_URL in text and "ref:" not in text for text in first_reads)
     assert any(SOURCE_URL in text and "ref:" not in text for text in later_reads)
     assert "for a friend" not in first_text.lower()
     assert re.search(r"(?im)^\s*#{1,6}\s+For a friend\b[^\n]*$",

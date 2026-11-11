@@ -46,7 +46,7 @@ class WritesReport:
         return {"messages": [AIMessage(content="FINAL_REPORT: final.md")]}
 
 
-def test_sandbox_report_binding_prune_and_transfer(tmp_path):
+def test_sandbox_bound_report_validation_prune_and_transfer(tmp_path):
     refs = tmp_path / "references"
     store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
     url = "https://example.test/exact?x=1&y=2"
@@ -57,7 +57,7 @@ def test_sandbox_report_binding_prune_and_transfer(tmp_path):
     def write():
         (refs / "draft.md").write_text("delete")
         (refs / "final.md").write_text(
-            f"[Source](ref:{record_id})\n[Owner](https://owner.test/a)\n")
+            f"[Source](<{url}>)\n[Owner](https://owner.test/a)\n")
 
     runner = ReferencesCleanupRunnable(WritesReport(write), str(refs),
                                        LocalSandboxTransport())
@@ -126,26 +126,24 @@ def test_sandbox_program_uses_absolute_launcher_and_interpreter(tmp_path):
     assert not marker.exists()
 
 
-def test_sandbox_failed_replace_removes_staged_file(tmp_path):
+@pytest.mark.parametrize("kind", ["source", "text"])
+def test_sandbox_raw_report_rejected_without_rewrite_or_prune(tmp_path, kind):
     refs = tmp_path / "references"
     refs.mkdir()
     store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
-    record_id = register_source(store, "https://example.test/exact")
-
-    class FailingTransport(LocalSandboxTransport):
-        def execute_host_command(self, argv):
-            if len(argv) > 4 and argv[4] == "replace":
-                return SimpleNamespace(exit_code=1, output="replacement failed")
-            return super().execute_host_command(argv)
+    record_id = (register_source(store, "https://example.test/exact")
+                 if kind == "source" else store.put_text("EXACT_ID"))
+    original = f"[Source](ref:{record_id})"
 
     def write():
-        (refs / "final.md").write_text(f"[Source](ref:{record_id})")
+        (refs / "final.md").write_text(original)
+        (refs / "draft.md").write_text("keep on failure")
 
-    runner = ReferencesCleanupRunnable(WritesReport(write), str(refs),
-                                       FailingTransport())
-    with pytest.raises(RuntimeError, match="replacement failed"):
+    runner = ReferencesCleanupRunnable(WritesReport(write), str(refs), LocalSandboxTransport())
+    with pytest.raises(ValueError, match="unbound reference"):
         runner.invoke({}, config={"configurable": {"thread_datastore_path": store.path}})
-    assert (refs / "final.md").read_text() == f"[Source](ref:{record_id})"
+    assert (refs / "final.md").read_text() == original
+    assert (refs / "draft.md").exists()
     assert not list(refs.glob(".source-*"))
 
 
@@ -206,8 +204,7 @@ def test_sandbox_rejects_tampered_cleanup_transfer(tmp_path):
     assert victim.read_text() == "outside"
 
 
-@pytest.mark.parametrize("target", ["prune", "replace"])
-def test_sandbox_rejects_fifo_transfer_without_blocking(tmp_path, target):
+def test_sandbox_rejects_fifo_prune_transfer_without_blocking(tmp_path):
     refs = tmp_path / "references"
     refs.mkdir()
     store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
@@ -217,31 +214,30 @@ def test_sandbox_rejects_fifo_transfer_without_blocking(tmp_path, target):
         def upload_files(self, files):
             result = super().upload_files(files)
             path, data = files[0]
-            if (target == "replace" and b"https://source.example/exact" in data
-                    or target == "prune" and b"draft.md" in data):
+            if b"draft.md" in data:
                 Path(path).unlink()
                 os.mkfifo(path)
             return result
 
     def write():
         (refs / "draft.md").write_text("draft")
-        (refs / "final.md").write_text(f"[Source](ref:{record_id})")
+        (refs / "final.md").write_text("[Source](<https://source.example/exact>)")
 
     runner = ReferencesCleanupRunnable(WritesReport(write), str(refs),
                                        FifoTransport())
-    with pytest.raises(RuntimeError, match="research sandbox (replace|prune) failed"):
+    with pytest.raises(RuntimeError, match="research sandbox prune failed"):
         runner.invoke({}, config={"configurable": {"thread_datastore_path": store.path}})
 
 
 @pytest.mark.parametrize("raw_generic", [False, True])
-def test_sandbox_late_binding_is_source_only_and_rejects_raw_generic_drafts(tmp_path, raw_generic):
+def test_sandbox_validation_preserves_bound_sources_and_rejects_raw_drafts(tmp_path, raw_generic):
     refs = tmp_path / "references"
     refs.mkdir()
     store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
     text = store.put_text("EXACT_ID")
     source = register_source(store, "https://source.example/exact")
     literal_url = f"https://owner.example|ref:{text}"
-    original = f"Owner | ID\n--- | ---\n{literal_url}\n[S](ref:{source})\n"
+    original = f"Owner | ID\n--- | ---\n{literal_url}\n[S](<https://source.example/exact>)\n"
     if raw_generic:
         original += f"Value: ref:{text}\n"
 
@@ -252,12 +248,11 @@ def test_sandbox_late_binding_is_source_only_and_rejects_raw_generic_drafts(tmp_
     runner = ReferencesCleanupRunnable(WritesReport(write), str(refs), LocalSandboxTransport())
     config = {"configurable": {"thread_datastore_path": store.path}}
     if raw_generic:
-        with pytest.raises(ValueError, match="unbound generic"):
+        with pytest.raises(ValueError, match="unbound reference"):
             runner.invoke({}, config=config)
         assert (refs / "final.md").read_bytes() == original.encode()
         assert (refs / "draft.md").exists()
     else:
         runner.invoke({}, config=config)
-        assert (refs / "final.md").read_text() == original.replace(
-            f"(ref:{source})", "(<https://source.example/exact>)")
+        assert (refs / "final.md").read_text() == original
         assert not (refs / "draft.md").exists()

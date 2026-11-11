@@ -1983,7 +1983,7 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "get_async_task_result": {"8752493ed656605373caa6e21c68c7f475f4d5229c7fb25f5c6591ce006337c4"},
     "get_async_task_status": {"c33c01ff704822245b71c109bbd185c0d5407d7cc23d2426698177850a7da85e"},
     "get_thread_data": {"cf48da0160665da8de0518a09d717575b50334c69d87878b96455495c1f09be8"},
-    "put_thread_data": {"d1b34aadad030c648a78de8f61f53ceae31aa07a3e5aebb3a3079d99380942bd"},
+    "put_thread_data": {"98abdd08ca8addbc965fdfe78899c4255cd6527fca981ac47e9563296723a506"},
     "create_schedule": {"17ae4733ba78d32789761332c0b782600873027412beecd2a7d2d2b548392f34"},
     "create_subscription": {"72476dc729012cbe0f9d65af14dc1541a7fb2a9e88e5f29730f9b68969fc7974"},
     "delete_schedule": {"ac6a06a26f9df248183a12c5aab9ecaafe637804ac61c2f4d9edca588d15359f"},

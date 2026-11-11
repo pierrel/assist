@@ -268,11 +268,12 @@ keep the existing contract. The natural receiving-note row must demonstrate
 that ordinary edits remain usable. The explicit mechanism probe demonstrates
 reference-bearing edit fragments matching the saved file's exact bytes.
 
-All file-tool writes/edits eagerly expand *generic values only*, leaving
-the existing source-reference draft syntax intact in every role. The selected
-research report's current finalizer still resolves sources. This gives a
-research read/edit the same literal generic-value preimage as main/delegate,
-while preserving the already passing source-draft lifecycle.
+All supported file-tool writes/edits eagerly expand *both source and generic
+references* in every role. Reads and host/sandbox/parent completion validate
+literal bytes without rewriting them. Unsupported raw legacy/shell drafts fail
+before cleanup. An old source-token edit preimage now binds to the canonical
+URL, so older unbound drafts require their actual literal preimage through an
+existing file operation; no migration or repair mechanism is added.
 
 A generic-bearing response uses whole-message buffering to check the same
 full text before emission. Stores without generic records retain incremental
@@ -334,7 +335,7 @@ service, database or cross-repository runtime connection is proposed.
 | C6 agent construction | [[file:../assist/agent.py][Agent factories]], role tools and middleware | Expose one generic operation with its backing in main/delegate/research; preserve role capability gates |
 | C9 durable thread state | [[file:../assist/thread_datastore.py][Immutable thread records]], [[file:../assist/thread_manager.py][thread-owned paths]] | Reuse the existing table; fixed generic kind; bounded inputs; immutable IDs |
 | C6/C9 outward binding | [[file:../assist/thread.py][Stream adapter]] and [[file:../assist/thread_datastore.py::class ReferenceBindingMiddleware][ReferenceBindingMiddleware]] | Generic value insertion, exact stream/history parity and stable repeated binding |
-| C10 file effects | [[file:../assist/research_cleanup.py][Research finalization]] and backend file tools | Preserve exact write/edit preimages and existing source draft behavior; reject ambiguity before effects |
+| C10 file effects | [[file:../assist/research_cleanup.py][Research finalization]] and backend file tools | Bind both reference kinds before effects; validate saved bytes without replacement; reject ambiguous edits |
 | C9 child completion | [[file:../manage/web/threads.py::_complete_child_handoff][Child import]] and [[file:../assist/async_subagents.py::_get_async_task_result][task result]] | Preserve generic kind and immutable identity across durable parent import |
 | C6 authorization | [[file:../assist/middleware/url_provenance.py][URL provenance middleware]] | Generic tool output/expansion grants no navigation authority; source-only artifact collection |
 
@@ -514,20 +515,35 @@ leaks remain disclosed. No WIP bytes were installed. The rollback receipt is
 =/tmp/root-generic-reference-r2-safety-rollback-retry-proof-20261111/live-verification.json=.
 The structural correction below is not yet deployed or published.
 
-Root approved removing redundant generic rebinding of saved files. Supported
-=write_file=/=edit_file= arguments still bind generic values eagerly for main,
-delegate and research agents. Saved-file read projections and host/sandbox/
-parent task-report finalization now bind *source refs only*. Literal raw URL
-spans remain opaque independently of later Markdown context; known raw generic
-drafts outside those spans fail explicitly without file replacement. There is
-no backend read, postimage ownership, tracking, new syntax or dependency.
+The 21:42 source-only late-binding attempt passed its narrower 197-test path
+panel but was rejected before publication: a source-shaped link inside an
+ordinary URL still allowed untouched bytes to change. A strict URL mask also
+swallowed legitimate adjacent citation links. Those counterexamples invalidate
+that attempt's general preservation claim; it was never deployed.
 
-The corrected real-backend proof passed at 21:42:53 UTC: both registered and
-ordinary literal header edits preserve the untouched URL through finalization
-and checker read, while source links still bind. Raw unsupported generic drafts
-fail without rewriting bytes. Inline-code boundaries reuse linear code-run
-pairing; CRLF normalization applies only to lexical views and retains output
-bytes. The affected host/sandbox cleanup and parent task-report success/failure
-panel passed 197 tests in 3.25 s through supported local-ASGI access. The first
-restricted run hit its 45 s cap at the known ASGI boundary and is not a pass.
-No new model panel or successor model-result count is claimed.
+** Current correction: bind both kinds before file effects
+
+Root approved this responsibility change at approximately 22:10 UTC. Supported
+=write_file=/=edit_file= arguments bind BOTH source and generic references before
+effects, for main, delegate and research agents. Saved bytes are literal thereafter:
+checker reads and host/sandbox/parent completion validate without replacing or
+reinterpreting them. The obsolete host/sandbox replacement paths are deleted.
+A raw source/generic draft outside literal URLs fails explicitly without byte
+changes or pruning. There is no automatic migration, backend ownership, postimage
+tracking, new store/cache, syntax or dependency. Source-token old edit arguments
+now resolve to canonical URL bytes; read the current literal preimage first.
+Older unbound drafts are unsupported and require an existing literal file
+operation rather than an automatic repair path.
+
+The first integrated proof passed at 22:23 UTC: 241 affected deterministic tests
+in 3.73 s. Real FilesystemBackend writes both kinds, reads saved bytes and edits
+using either a registered or ordinary literal table header. Subsequent host and
+sandbox validation, parent completion in both modes and checker read preserve
+the untouched pipe/ref URL byte-for-byte. Raw source and generic shell drafts
+fail without rewriting or pruning. Checker metadata always includes an artifact,
+even when empty; matching exact-queries only existing host =kind=source= rows,
+verifies raw/canonical encoding and never registers/promotes generic values.
+Guarded-child search-only authority still excludes file results. Inline-code
+boundaries reuse linear code-run pairing; CRLF normalization changes only lexical
+views, retaining output bytes. No new model panel or model counts are claimed.
+The current live deployment remains the verified temporary safety rollback.

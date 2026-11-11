@@ -67,13 +67,13 @@ try:
         prior = [s.st_mtime_ns, s.st_size, s.st_ino, s.st_mode]
         try:
             if s.st_size > 8 * 1024 * 1024:
-                raise ValueError("final research report exceeds 8 MiB source-binding limit")
+                raise ValueError("final research report exceeds 8 MiB validation limit")
             source = os.fdopen(fd, "rb")
             fd = -1
             with source, open(transfer, "xb") as output:
                 data = source.read(8 * 1024 * 1024 + 1)
                 if len(data) > 8 * 1024 * 1024:
-                    raise ValueError("final research report exceeds 8 MiB source-binding limit")
+                    raise ValueError("final research report exceeds 8 MiB validation limit")
                 output.write(data)
         finally:
             if fd >= 0:
@@ -81,44 +81,6 @@ try:
         if stamp(payload) != prior:
             raise ValueError("research report changed during transfer")
         print(json.dumps(prior))
-    elif op == "replace":
-        name, prior, digest = payload
-        fd, old = regular(name)
-        os.close(fd)
-        if stamp(name) != prior:
-            raise ValueError("research report changed during source binding")
-        source_fd = os.open(transfer, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
-        temporary = None
-        try:
-            source_stat = os.fstat(source_fd)
-            if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_size > 8 * 1024 * 1024:
-                raise ValueError("invalid resolved report transfer")
-            temporary = ".source-" + os.urandom(16).hex()
-            target_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                                old.st_mode & 0o777, dir_fd=root)
-            try:
-                with os.fdopen(source_fd, "rb") as source, os.fdopen(target_fd, "wb") as target:
-                    source_fd = -1
-                    data = source.read(8 * 1024 * 1024 + 1)
-                    if len(data) > 8 * 1024 * 1024:
-                        raise ValueError("invalid resolved report transfer")
-                    if hashlib.sha256(data).hexdigest() != digest:
-                        raise ValueError("resolved report transfer changed")
-                    target.write(data)
-                    target.flush()
-                    os.fchmod(target.fileno(), old.st_mode & 0o777)
-                if stamp(name) != prior:
-                    raise ValueError("research report changed during source binding")
-                os.replace(temporary, name, src_dir_fd=root, dst_dir_fd=root)
-                temporary = None
-            finally:
-                if temporary is not None:
-                    try: os.unlink(temporary, dir_fd=root)
-                    except FileNotFoundError: pass
-        finally:
-            if source_fd >= 0:
-                os.close(source_fd)
-        print("OK")
     elif op == "prune":
         names_fd = os.open(transfer, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
         with os.fdopen(names_fd, "rb") as names_file:

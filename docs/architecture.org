@@ -87,10 +87,14 @@ in both views. An ID shown in only one view keeps that meaning.
   stores LangGraph checkpoints in =threads.db= and owns thread directories.
   [[file:../assist/thread_datastore.py][ThreadDataStore]] keeps immutable source/text records outside the user
   workspace. Main/delegate/research tools register generic values; retrieval
-  registers source URLs. C6 binds inline values and generic file arguments,
+  registers source URLs. C6 binds inline values and both source/generic file arguments before effects,
   while C5 checks generic-bearing streamed messages before emission. Saved-file
-  reads and host/sandbox/parent report finalization bind source refs only;
-  unsupported raw generic drafts fail rather than rebinding saved bytes. Child
+  reads and host/sandbox/parent report completion validate without rewriting
+  bytes; unsupported raw source/generic drafts fail before cleanup. Checker
+  URL metadata exact-queries existing host source records and checks canonical
+  URL encoding; it never registers values or promotes generic records. Empty
+  URL metadata remains explicit, and guarded-child search-only trust still
+  excludes file results. Child
   completion imports source/text rows with their original kinds. Generic
   registration grants neither factual verification nor navigation authority.
   [[file:../manage/web/state.py][state.py]] writes UI status markers. The

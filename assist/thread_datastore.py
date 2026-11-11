@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import html
 import json
 import re
 import secrets
@@ -314,42 +315,18 @@ def source_url(store: ThreadDataStore, record_id: str) -> str | None:
     return row["value"] if row and row["kind"] == "source" else None
 
 
-def resolve_host_report(path: str, store: ThreadDataStore) -> bool:
-    """Atomically bind saved source refs through a no-follow report dir handle."""
-    directory = os.path.dirname(path)
-    basename = os.path.basename(path)
-    root = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+def validate_host_report(path: str) -> None:
+    """Validate literal report bytes through a bounded no-follow directory read."""
+    root = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        fd = os.open(basename, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=root)
+        fd = os.open(os.path.basename(path), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=root)
         with os.fdopen(fd, "rb") as source:
-            old = os.fstat(source.fileno())
-            if not stat.S_ISREG(old.st_mode):
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
                 raise ValueError("research report must be a regular file")
-            data = source.read(8 * 1024 * 1024 + 1)
-        if len(data) > 8 * 1024 * 1024:
-            raise ValueError("final research report exceeds 8 MiB source-binding limit")
-        original = data.decode("utf-8")
-        resolved = resolve_file_references(original, store,
-                                      max_output_bytes=8 * 1024 * 1024)
-        if resolved == original:
-            return False
-        temporary = ".source-" + secrets.token_hex(16)
-        target_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                            old.st_mode & 0o777, dir_fd=root)
-        try:
-            with os.fdopen(target_fd, "wb") as target:
-                target.write(resolved.encode("utf-8"))
-                os.fchmod(target.fileno(), old.st_mode & 0o777)
-            current = os.stat(basename, dir_fd=root, follow_symlinks=False)
-            if (current.st_ino, current.st_mtime_ns, current.st_size) != (
-                    old.st_ino, old.st_mtime_ns, old.st_size):
-                raise ValueError("research report changed during source binding")
-            os.replace(temporary, basename, src_dir_fd=root, dst_dir_fd=root)
-            temporary = None
-        finally:
-            if temporary is not None:
-                os.unlink(temporary, dir_fd=root)
-        return True
+            data = source.read(_MAX_TEXT_OUTPUT + 1)
+        if len(data) > _MAX_TEXT_OUTPUT:
+            raise ValueError("final research report exceeds 8 MiB limit")
+        validate_saved_file(data.decode("utf-8"))
     finally:
         os.close(root)
 
@@ -358,6 +335,13 @@ def _label_close(text: str, start: int = 0) -> int | None:
     """Find an explicit citation label in a bounded slice using the regex engine."""
     match = _LABEL_OPEN.match(text, start, min(len(text), start + 502))
     return match.end() - 1 if match else None
+
+
+def _source_destination(url: str) -> str:
+    """Serialize a source URL without changing its rendered href identity."""
+    return (re.sub(r"&(?=(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]+);)",
+                   "&amp;", url).replace("\\", "&#92;")
+           .replace("`", "&#96;").replace("|", "&#124;"))
 
 
 def _link_at(text: str, start: int, store: ThreadDataStore,
@@ -385,9 +369,7 @@ def _link_at(text: str, start: int, store: ThreadDataStore,
             # Markdown decodes entities and escapes, parses code spans, and
             # splits table cells at pipes inside link targets.
             # Encode outward bound destinations so the rendered href matches the record.
-            target = (re.sub(r"&(?=(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]+);)",
-                             "&amp;", url).replace("\\", "&#92;")
-                     .replace("`", "&#96;").replace("|", "&#124;"))
+            target = _source_destination(url)
             return end + 1, f"[{label}](<{target}>)", url, label_used_text
         return end + 1, f"{label} {_UNBOUND}", None, label_used_text
     return end, f"{label} {_UNBOUND}", None, label_used_text
@@ -410,7 +392,7 @@ def _resolve_once(text: str, store: ThreadDataStore,
             limit = max_output_bytes if max_output_bytes is not None else (
                 _MAX_TEXT_OUTPUT if used_text else None)
             if limit is not None and used > limit:
-                raise ValueError("resolved research report exceeds 8 MiB source-binding limit")
+                raise ValueError("resolved reference text exceeds 8 MiB limit")
         parts.append(piece)
 
     position = 0
@@ -458,48 +440,53 @@ def _resolve_once(text: str, store: ThreadDataStore,
 def resolve_references(text: str, store: ThreadDataStore,
                        max_output_bytes: int | None = None, *,
                        bound_sources: list[str] | None = None,
-                       text_only: bool = False, edit_context: bool = False) -> str:
+                       edit_context: bool = False, file_context: bool = False) -> str:
     """Bind exact inline text and source refs; leave ordinary URLs unchanged.
 
-    File arguments use ``text_only`` to retain source drafts. Generic insertion
-    must already be stable under another full pass. Escapes are retained, not
+    Generic insertion must be stable under another full pass. Escapes are retained, not
     decoded. Only source records contribute to ``bound_sources`` or link targets.
     """
-    available = store.has_text_records()
+    available = file_context or store.has_text_records()
     limit = (max_output_bytes if max_output_bytes is not None else
-             _MAX_TEXT_OUTPUT if available and not text_only else None)
+             _MAX_TEXT_OUTPUT if available else None)
     resolved, used_text = _resolve_once(
         text, store, limit, bound_sources=bound_sources,
-        text_only=text_only, bind_text=available, edit_context=edit_context)
+        bind_text=available, edit_context=edit_context)
     if used_text:
         check_limit = max_output_bytes if max_output_bytes is not None else _MAX_TEXT_OUTPUT
-        complete = (_resolve_once(text, store, check_limit, bind_text=True, edit_context=edit_context)[0]
-                    if text_only else resolved)
-        if (text_only
-                and _resolve_once(resolved, store, check_limit, bind_text=True, edit_context=edit_context)[0] != complete):
-            raise ValueError("text insertion would change source-draft parsing; preserve literal boundaries")
+        complete = resolved
         if _resolve_once(complete, store, check_limit, bind_text=True, edit_context=edit_context)[0] != complete:
             raise ValueError("text insertion would create another reference; preserve literal boundaries")
     return resolved
 
 
-def resolve_file_references(text: str, store: ThreadDataStore,
-                            max_output_bytes: int = _MAX_TEXT_OUTPUT, *,
-                            bound_sources: list[str] | None = None) -> str:
-    """Bind saved-file source refs only; generic values bind at write/edit time.
+def validate_saved_file(text: str) -> None:
+    """Saved bytes are literal; reject raw references outside opaque URL spans."""
+    if len(text.encode("utf-8")) > _MAX_TEXT_OUTPUT:
+        raise ValueError("saved file exceeds 8 MiB limit")
+    for token in _SAVED_FILE_REFS.finditer(text):
+        if (token.group(1) is not None
+                and (token.start() == 0 or text[token.start() - 1] != "\\")):
+            raise ValueError("unbound reference in saved file; bind values with write_file/edit_file before saving")
 
-    Saved URL bytes are opaque regardless of later Markdown context. Known raw
-    generic drafts outside those URLs are unsupported and fail before replacing
-    report bytes or projecting a read result. Explicit escapes remain literal.
-    """
-    if store.has_text_records():
-        for token in _SAVED_FILE_REFS.finditer(text):
-            if (token.group(1) is not None
-                    and (token.start() == 0 or text[token.start() - 1] != "\\")):
-                row = store.get(token.group(1).lower())
-                if row and row["kind"] != "source":
-                    raise ValueError("unbound generic reference in saved file; bind values with write_file/edit_file before saving")
-    return _resolve_once(text, store, max_output_bytes, bound_sources=bound_sources)[0]
+
+def _file_source_records(text: str, store: ThreadDataStore) -> list[dict[str, str]]:
+    """Match literal URLs only to exact pre-existing host source records."""
+    records = {}
+    scanner, position = _text_scanner(text), 0
+    with store._connect() as db:
+        while token := scanner(position):
+            position = token.end()
+            literal = token.group()
+            if not literal.lower().startswith(("http://", "https://")):
+                continue
+            for candidate in dict.fromkeys((literal, html.unescape(literal))):
+                row = db.execute("SELECT id, kind, value, title FROM records WHERE kind = 'source' AND value = ?",
+                                 (candidate,)).fetchone()
+                if row and literal in (row[2], _source_destination(row[2])):
+                    records[row[0]] = dict(zip(("id", "kind", "value", "title"), row))
+                    break
+    return list(records.values())
 
 
 def _display_references(text: str, store: ThreadDataStore) -> str:
@@ -668,10 +655,10 @@ def put_thread_data(value: str, title: str = "") -> str:
     Use for values whose spelling matters across reuse: identifiers, names,
     quotations or exact passages. Copy the returned reference inline in replies
     or file text, including sentences/table cells; do not reconstruct its ID.
-    Save generic references through write_file/edit_file: values bind before
-    effects. Saved-file reads/finalization bind sources only; raw generic drafts
-    outside literal URLs fail instead of expanding. Do not write unbound
-    generic references with execute.
+    Save source and generic references through write_file/edit_file: both bind
+    before effects. Saved-file reads/finalization never rewrite bytes. Raw
+    references outside literal URLs fail instead of expanding; do not write
+    unbound references with execute.
     For edit_file with references, BOTH exact old_string and new_string must
     include their surrounding newline bytes. Read the saved file first.
     For URL/pipe table edits, include the table header/context; an ambiguous
@@ -710,7 +697,7 @@ def get_thread_data(record_id: str) -> str:
 
 
 class ReferenceBindingMiddleware(AgentMiddleware):
-    """Bind generic file text eagerly; capture sources and bind outward refs."""
+    """Bind both file reference kinds before effects; capture sources and bind replies."""
 
     def __init__(self, *, bind_file_refs: bool = False):
         self.bind_file_refs = bind_file_refs
@@ -741,12 +728,13 @@ class ReferenceBindingMiddleware(AgentMiddleware):
             for key in keys:
                 value = args.get(key)
                 if isinstance(value, str):
-                    resolved = resolve_references(value, store, text_only=True, edit_context=name == "edit_file")
+                    resolved = resolve_references(value, store, edit_context=name == "edit_file", file_context=True)
+                    validate_saved_file(resolved)
                     if resolved != value:
                         replacements[key] = resolved
             if name == "edit_file" and replacements:
                 if not all(isinstance(args.get(key), str)
-                           and args[key].startswith("\n") and args[key].endswith("\n")
+                           and args[key].startswith(("\n", "\r\n")) and args[key].endswith("\n")
                            for key in keys):
                     raise ValueError("reference-bearing edits need the exact surrounding newline in BOTH old_string and new_string")
         except ValueError as error:
@@ -786,23 +774,21 @@ class ReferenceBindingMiddleware(AgentMiddleware):
                 return result.model_copy(update={"content":
                                                  f"Source link: [Source](ref:{record_id})\n{result.content}"})
         if self.bind_file_refs and name == "read_file" and isinstance(result.content, str):
-            bound_sources: list[str] = []
             try:
-                resolved = resolve_file_references(result.content, store,
-                                                  bound_sources=bound_sources)
+                validate_saved_file(result.content)
+                records = _file_source_records(result.content, store)
+                urls = tuple(dict.fromkeys(row["value"] for row in records))
+                content = result.content
+                if urls:
+                    content += "\n\nExact source URLs for fact-checking:\n" + "\n".join(urls)
+                if len(content.encode("utf-8")) > _MAX_TEXT_OUTPUT:
+                    raise ValueError("file source metadata exceeds 8 MiB limit")
             except ValueError as error:
                 return result.model_copy(update={"content": f"File reference error: {error}", "status": "error"})
-            if resolved != result.content:
-                from assist.middleware.url_provenance import urls_in_text
-                original_urls = urls_in_text(result.content)
-                artifact = result.artifact if isinstance(result.artifact, dict) else {}
-                artifact = {**artifact, BOUND_FILE_URLS_ARTIFACT: tuple(dict.fromkeys(
-                    (*original_urls, *bound_sources)))}
-                if bound_sources:
-                    resolved += "\n\nExact source URLs for fact-checking:\n" + "\n".join(
-                        dict.fromkeys(bound_sources))
-                return result.model_copy(update={"content": resolved,
-                                                 "artifact": artifact})
+            artifact = result.artifact if isinstance(result.artifact, dict) else {}
+            return result.model_copy(update={"content": content,
+                "artifact": {**artifact, BOUND_FILE_URLS_ARTIFACT: urls}})
+
         return result
 
     def after_model(self, state, runtime):

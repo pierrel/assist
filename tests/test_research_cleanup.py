@@ -78,7 +78,7 @@ class TestReferencesCleanup:
             {}, config={"configurable": {"thread_datastore_path": store.path}})
         assert report.read_bytes() == before
 
-    def test_modified_existing_final_report_resolves_sources(self, tmp_path):
+    def test_modified_existing_final_report_preserves_bound_sources(self, tmp_path):
         store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
         url = "https://source.example/updated"
         record_id = register_source(store, url)
@@ -88,7 +88,7 @@ class TestReferencesCleanup:
         report.write_text("Old report")
 
         def writes(_path):
-            report.write_text(f"New [source](ref:{record_id})")
+            report.write_text(f"New [source](<{url}>)")
 
         inner = _FakeInner(writes, [AIMessage(content="FINAL_REPORT: prior.md")])
         inner.bind_path(str(refs))
@@ -96,29 +96,26 @@ class TestReferencesCleanup:
             {}, config={"configurable": {"thread_datastore_path": store.path}})
         assert report.read_text() == f"New [source](<{url}>)"
 
-    def test_shell_written_final_report_resolves_registered_sources(self, tmp_path):
+    @pytest.mark.parametrize("kind", ["source", "text"])
+    def test_shell_written_raw_report_rejected_without_rewrite_or_prune(self, tmp_path, kind):
         store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
-        url = "https://source.example/exact-page"
-        record_id = register_source(store, url, "Source")
+        record_id = (register_source(store, "https://source.example/exact-page")
+                     if kind == "source" else store.put_text("EXACT_ID"))
         refs = tmp_path / "references"
         refs.mkdir()
+        original = f"[Source](ref:{record_id})\n"
 
         def writes(path):
-            (Path(path) / "report.md").write_text(
-                f"[Source](ref:{record_id})\n[Unknown](ref:r0000000000000000)\n"
-                "[Owner](https://owner.example/home)\n"
-                "`curl https://api.example/v1`\n")
+            (Path(path) / "report.md").write_text(original)
+            (Path(path) / "draft.md").write_text("keep on failure")
 
         inner = _FakeInner(writes, [AIMessage(content="FINAL_REPORT: report.md")])
         inner.bind_path(str(refs))
-        ReferencesCleanupRunnable(inner, str(refs)).invoke(
-            {}, config={"configurable": {"thread_datastore_path": store.path}})
-        report = (refs / "report.md").read_text()
-        assert f"[Source](<{url}>)" in report
-        assert "reference unresolved" in report
-        assert "ref:" not in report
-        assert "[Owner](https://owner.example/home)" in report
-        assert "`curl https://api.example/v1`" in report
+        with pytest.raises(ValueError, match="unbound reference"):
+            ReferencesCleanupRunnable(inner, str(refs)).invoke(
+                {}, config={"configurable": {"thread_datastore_path": store.path}})
+        assert (refs / "report.md").read_text() == original
+        assert (refs / "draft.md").exists()
 
     def test_prunes_drafts_keeps_final_via_tool_call(self):
         def writes(refs):
@@ -541,13 +538,13 @@ class TestResearchAgentWiring:
 
 
 @pytest.mark.parametrize("raw_generic", [False, True])
-def test_host_late_binding_is_source_only_and_rejects_raw_generic_drafts(tmp_path, raw_generic):
+def test_host_validation_preserves_bound_sources_and_rejects_raw_drafts(tmp_path, raw_generic):
     refs = tmp_path / "references"
     refs.mkdir()
     store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
     text = store.put_text("EXACT_ID")
     source = register_source(store, "https://source.example/exact")
-    original = f"Owner | ID\n--- | ---\nhttps://owner.example|ref:{text}\n[S](ref:{source})\n"
+    original = f"Owner | ID\n--- | ---\nhttps://owner.example|ref:{text}\n[S](<https://source.example/exact>)\n"
     if raw_generic:
         original += f"Value: ref:{text}\n"
     inner = _FakeInner(lambda path: (Path(path) / "final.md").write_bytes(original.encode()),
@@ -556,10 +553,9 @@ def test_host_late_binding_is_source_only_and_rejects_raw_generic_drafts(tmp_pat
     runner = ReferencesCleanupRunnable(inner, str(refs))
     config = {"configurable": {"thread_datastore_path": store.path}}
     if raw_generic:
-        with pytest.raises(ValueError, match="unbound generic"):
+        with pytest.raises(ValueError, match="unbound reference"):
             runner.invoke({}, config=config)
         assert (refs / "final.md").read_bytes() == original.encode()
     else:
         runner.invoke({}, config=config)
-        assert (refs / "final.md").read_text() == original.replace(
-            f"(ref:{source})", "(<https://source.example/exact>)")
+        assert (refs / "final.md").read_text() == original

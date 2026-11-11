@@ -75,12 +75,15 @@ where reliability is harder than with frontier APIs.
   and managed main/delegate/research agents can create immutable exact text with
   `put_thread_data`, then get, list, and search their own thread's records.
   Returned references work inline in replies, sentences, table cells and file
-  text. Generic file text is bound before writing; reference-bearing edits keep
-  surrounding newlines in both exact old/new strings. Source drafts retain their
-  existing finalization path. Saved-file reads and finalization bind sources
-  only, so later context edits cannot rebind untouched generic/literal bytes.
-  Raw generic drafts outside literal URLs fail; use supported write/edit tools
-  to bind their values before saving. Unescaped `ref:` is reserved; a preceding backslash
+  text. Source and generic references both bind before supported writes/edits;
+  reference-bearing edits keep surrounding newlines in both exact old/new
+  strings. Read the saved literal file before editing. Saved-file reads and
+  host/sandbox/parent report completion validate without rewriting bytes.
+  Legacy or shell-written raw references outside literal URLs fail explicitly
+  without replacement or pruning; no automatic migration is performed. An old
+  source-token edit preimage now resolves to the canonical saved URL, so use
+  the saved literal preimage when editing older unbound drafts through other
+  existing file operations. Unescaped `ref:` is reserved; a preceding backslash
   preserves a literal token and remains in the saved/output text. Unsafe joins
   and unknown/malformed inline tokens return explicit errors before file effects.
   URL bytes stay literal within their Markdown destination or table cell;

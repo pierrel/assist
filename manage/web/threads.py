@@ -2568,9 +2568,9 @@ def _publish_phone_text(tid: str, work_id: str, text: str) -> None:
         RUN_STREAMS.publish_delta(tid, work_id, text[start:])
 
 
-def _bind_task_report(tid: str, task_message: str | None, working_dir: str,
+def _validate_task_report(tid: str, task_message: str | None, working_dir: str,
                       sandbox=None) -> None:
-    """Resolve only the host-named research report for a completion wake."""
+    """Validate only the host-named literal report for a completion wake."""
     if not task_message:
         return
     if task_message.startswith(_TASK_COMPLETION_RIDER):
@@ -2579,21 +2579,21 @@ def _bind_task_report(tid: str, task_message: str | None, working_dir: str,
     if match is None:
         return
     basename = match.group(1) + ".md"
-    from assist.thread_datastore import ThreadDataStore, resolve_host_report
+    from assist.thread_datastore import ThreadDataStore, validate_host_report
     store = ThreadDataStore(MANAGER.thread_datastore_path(tid))
     if sandbox is not None:
         from assist.research_cleanup import ReferencesCleanupRunnable
-        binder = ReferencesCleanupRunnable(
+        validator = ReferencesCleanupRunnable(
             None, sandbox.work_dir + "/references", sandbox)
-        binder._ensure_dir()
-        if binder._exists(basename):
-            binder._resolve_report_references(basename, store)
+        validator._ensure_dir()
+        if validator._exists(basename):
+            validator._validate_report(basename, store)
         return
     references = os.path.join(working_dir, "references")
     report = os.path.join(references, basename)
     if os.path.islink(references) or os.path.islink(report) or not os.path.isfile(report):
         return
-    resolve_host_report(report, store)
+    validate_host_report(report)
 
 
 def _delegate_configurable(run: Run) -> dict | None:
@@ -3877,7 +3877,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         resp = chat.message(text)
                 if origin == "task-completion":
                     task_message = ((_run.pending_text or _run.text) if _run else None)
-                    _bind_task_report(tid, task_message or pending_text or text,
+                    _validate_task_report(tid, task_message or pending_text or text,
                                       MANAGER.thread_default_working_dir(tid), sandbox)
             finally:
                 # Capture browser state before sandbox teardown. Failed teardown

@@ -19,9 +19,9 @@ runnable so that around each invocation:
 3. After the agent returns, the wrapper extracts the *final report's*
    filename from the agent's response and deletes any **newly-created**
    files in the directory that aren't the final report.
-4. When a thread datastore is configured, source references in a new or
-   modified final report are resolved. Generic values already bind in supported
-   write/edit arguments; unsupported raw generic drafts fail without replacement.
+4. When a thread datastore is configured, a new or modified final report is
+   validated without rewriting bytes. Both reference kinds bind in supported
+   write/edit arguments; unsupported raw drafts fail before pruning.
    An unchanged prior report is untouched.
 5. If the final filename can't be confidently extracted, *nothing* is
    deleted — leaving everything is preferable to deleting the wrong
@@ -41,9 +41,9 @@ On agent error: cleanup is skipped entirely (the partial state may be
 useful for debugging; the next research call's snapshot will protect
 those files).
 
-In sandbox mode, listing, reading, replacement and pruning run as the sandbox
+In sandbox mode, listing, reading and pruning run as the sandbox
 user through a verified directory handle. Only bounded report bytes and file
-metadata cross to the host for reference resolution.
+metadata cross to the host for validation.
 """
 
 import logging
@@ -56,7 +56,7 @@ from typing import Any
 
 from assist.research_sandbox_files import SANDBOX_FILES
 from assist.thread_datastore import (ThreadDataStore, _current_store,
-                                     resolve_host_report)
+                                     validate_host_report)
 
 logger = logging.getLogger(__name__)
 
@@ -65,11 +65,11 @@ _FINAL_REPORT_LINE = re.compile(r"^FINAL_REPORT:\s*(\S+)\s*$", re.MULTILINE)
 
 
 class ReferencesCleanupRunnable:
-    """Bind final-report source refs and prune intermediate files in ``references/``.
+    """Validate literal final reports and prune intermediate files in ``references/``.
 
     Args:
         inner: The wrapped runnable (typically a ``RollbackRunnable`` from
-            ``create_research_agent``), or ``None`` for report-only binding.
+            ``create_research_agent``), or ``None`` for report-only validation.
         references_path: Host path in local mode, container path in sandbox mode.
         sandbox_backend: Parent sandbox used for sandbox-owned file operations.
     """
@@ -112,7 +112,7 @@ class ReferencesCleanupRunnable:
             store = ThreadDataStore(path) if isinstance(path, str) else _current_store()
             after = self._snapshot()
             if keep not in before or before[keep] != after.get(keep):
-                self._resolve_report_references(keep, store)
+                self._validate_report(keep, store)
             self._prune(keep=keep, before=before, after=after)
         else:
             logger.info(
@@ -121,20 +121,16 @@ class ReferencesCleanupRunnable:
                 self._references_path,
             )
 
-    def _resolve_report_references(self, basename: str, store: ThreadDataStore | None) -> None:
-        """Replace source handles, preserving saved generic/literal bytes atomically."""
+    def _validate_report(self, basename: str, store: ThreadDataStore | None) -> None:
+        """Validate saved report bytes without replacing or reinterpreting them."""
         if store is None:
             return
         if self._sandbox is not None:
-            data, stamp = self._sandbox_read(basename)
-            original = data.decode("utf-8")
-            from assist.thread_datastore import resolve_file_references
-            resolved = resolve_file_references(original, store,
-                                          max_output_bytes=8 * 1024 * 1024)
-            if resolved != original:
-                self._sandbox_replace(basename, stamp, resolved.encode("utf-8"))
+            data, _ = self._sandbox_read(basename)
+            from assist.thread_datastore import validate_saved_file
+            validate_saved_file(data.decode("utf-8"))
             return
-        resolve_host_report(os.path.join(self._references_path, basename), store)
+        validate_host_report(os.path.join(self._references_path, basename))
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -238,17 +234,6 @@ class ReferencesCleanupRunnable:
     def _sandbox_read(self, basename: str) -> tuple[bytes, list[int]]:
         data, stamp = self._sandbox_transfer("read", basename)
         return data, json.loads(stamp)
-
-    def _sandbox_replace(self, basename: str, stamp: list[int], data: bytes) -> None:
-        transfer = "/tmp/assist-research-" + secrets.token_hex(16)
-        try:
-            response = self._sandbox.upload_files([(transfer, data)])[0]
-            if response.error:
-                raise RuntimeError("resolved research report upload failed")
-            self._sandbox_op("replace", [basename, stamp,
-                                         hashlib.sha256(data).hexdigest()], transfer)
-        finally:
-            self._sandbox.execute_host_command(["/usr/bin/rm", "-f", "--", transfer])
 
     # --- final-filename extraction ------------------------------------
 
