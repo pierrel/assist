@@ -48,8 +48,26 @@ was honored through 18:27:38 UTC. Runtime implementation began at
 The first implementation is =493fd659=. Its focused parser/stream/real-file
 tests passed 104 tests plus 8 subtests. The expanded mocked preservation,
 factory and durable-child panel passed *244 tests plus 8 subtests in 3.29 s*.
-The first unchanged natural main receiving-note candidate episode is running;
-no natural improvement or complete candidate acceptance is claimed yet.
+The first unchanged natural main receiving-note candidate episode passed in
+*170.71 s*. It created two immutable whole-record values; its file calls used
+literal text, so this is outcome/registration evidence, not file interpolation
+adoption. A separate explicit real-model capability probe passed in *127.69 s*:
+individual =Mîra Vale= and =ZX-0Il1-7F0b= values were interpolated inside a
+sentence/table write, read, and reused in both exact LF-bounded edit fragments.
+This is capability evidence, never part of natural pass counts. The first
+integrated inline milestone completed around 18:44 UTC, within 30 minutes of
+runtime start. Fresh matched N=3 candidate counts will use the frozen successor
+after review corrections; preliminary runtime identities are kept separate.
+
+The first implementation review found two IMPORTANT defects and both were
+verified: quote characters admitted by the source-URL contract could split a
+URL literal span, and a generic-only file projection could hide an adjacent
+source citation from later binding. The fixes preserve the complete URL span
+and compare the actual saved projection with the intended complete binding.
+Self-review also bounded every validation pass, including source expansion
+before the first generic token. Five added regression cases cover these paths.
+Affected checks passed 109 tests plus 8 subtests; the complete focused panel
+then passed *249 tests plus 8 subtests in 3.47 s*. No finding was waived.
 
 | Runtime | Eval condition | Completed evidence | Outcome |
 |-
@@ -110,11 +128,11 @@ An automated test pass alone is not reported as a verification-quality pass.
 Pierre selected *inline references*: individual registered IDs, names and
 quotations must work inside sentences and table cells. Option B below is the
 chosen capability; Option A is retained only to explain the narrower alternative
-that was considered. The product choice is settled. Runtime implementation waits
-for the frozen N=3 baseline, then proceeds on the smallest shared path.
+that was considered. The product choice is settled and runtime implementation
+began after the frozen N=3 baseline completed.
 
 The implementation reuses
-[[file:../assist/thread_datastore.py::class ThreadDataStore][ThreadDataStore]] and its existing immutable =put_text= operation. Add one
+[[file:../assist/thread_datastore.py::class ThreadDataStore][ThreadDataStore]] and its existing immutable =put_text= operation. The
 model-facing =put_thread_data= operation has fixed generic kind plus the
 existing get/list/search tools. Source-row creation stays solely in
 [[file:../assist/thread_datastore.py::def register_source][register_source]] and the current browser ingestion path.
@@ -171,23 +189,26 @@ finalization or checker reads. Validating =old_string= and =new_string= in
 isolation is insufficient. Source refs that were intentionally present before
 the edit must continue to work. Streamed and canonical messages must agree.
 
-The bounded implementation proposal is a full-text, single-pass expansion with
+The bounded implementation uses full-text, single-pass expansion with
 an explicit stability check. Reference-bearing =edit_file= arguments retain
 surrounding newline context in *both* exact old/new strings, enclosing the edited
 sentence or table row. References within that fragment remain inline. Those
-preserved boundaries would prevent joining an inserted value to unseen file
+preserved boundaries prevent joining an inserted value to unseen file
 prefix/suffix syntax without a racy full-file precheck. Ordinary literal edits
 keep the existing contract. The natural receiving-note row must demonstrate
-that this argument shape remains usable and matches the saved file's exact bytes.
+that ordinary edits remain usable. The explicit mechanism probe demonstrates
+reference-bearing edit fragments matching the saved file's exact bytes.
 
-All file-tool writes/edits will eagerly expand *generic values only*, leaving
+All file-tool writes/edits eagerly expand *generic values only*, leaving
 the existing source-reference draft syntax intact in every role. The selected
 research report's current finalizer still resolves sources. This gives a
 research read/edit the same literal generic-value preimage as main/delegate,
 while preserving the already passing source-draft lifecycle.
 
 A generic-bearing response uses whole-message buffering to check the same
-full text before emission. Source-only streaming remains unchanged. Generic
+full text before emission. Stores without generic records retain incremental
+source streaming. Once any generic record exists, *every subsequent response*
+buffers as a whole, including source-only or reference-free responses. Generic
 tokens work in text, table cells, inline code and source labels. Ordinary HTTP
 URLs are literal regions, including a URL that contains a reference-looking
 substring. Source-link destinations still require source-kind records.

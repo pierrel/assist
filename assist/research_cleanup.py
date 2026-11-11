@@ -19,7 +19,7 @@ runnable so that around each invocation:
 3. After the agent returns, the wrapper extracts the *final report's*
    filename from the agent's response and deletes any **newly-created**
    files in the directory that aren't the final report.
-4. When a thread datastore is configured, source references in a new or
+4. When a thread datastore is configured, exact references in a new or
    modified final report are resolved. An unchanged prior report is untouched.
 5. If the final filename can't be confidently extracted, *nothing* is
    deleted — leaving everything is preferable to deleting the wrong
@@ -120,7 +120,7 @@ class ReferencesCleanupRunnable:
             )
 
     def _resolve_report_references(self, basename: str, store: ThreadDataStore | None) -> None:
-        """Replace source handles in the selected final report atomically."""
+        """Replace exact reference handles in the selected final report atomically."""
         if store is None:
             return
         if self._sandbox is not None:

@@ -26,7 +26,7 @@ re-reads from its real-fs offload — never a URL source); and failed
 OFFLOADED content under ``…/large_tool_results/`` (in state, or
 ``/tmp/large_tool_results/…`` for a real-fs offload), whose source channel is lost;
 and async task-management results, whose descriptions and child
-results are model-authored data; and thread datastore lookup results, which
+results are model-authored data; and thread datastore registration/lookup results, which
 expose records without granting navigation authority. Read-url offloads use the narrower
 ``untrusted-page-`` marker: they remain excluded as authority but can supply only
 same-host link evidence. Even framework-generic offloads lack trusted source provenance.
@@ -266,7 +266,7 @@ def _is_untrusted_result(
 ) -> bool:
     """A ToolMessage whose content must NOT provenance URLs — the untrusted channels:
     read_url page content directly, ``execute`` (shell) output, async task-management
-    output, thread datastore lookup, or a delegate's synchronous specialist and file-read output when
+    output, thread datastore registration/lookup, or a delegate's synchronous specialist and file-read output when
     task-result trust is disabled. Other roles also exclude failed
     ``read_file``/``grep`` results and reads of OFFLOADED content (including
     framework-generic datastore offloads). Fails
@@ -343,7 +343,7 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True,
     reads of OFFLOADED content under ``…/large_tool_results/`` — including
     deepagents' generic eviction of datastore records, whose source tool
     provenance the later file read cannot restore; and
-    (6) thread datastore get/list/search results, which expose records without
+    (6) thread datastore put/get/list/search results, which expose records without
     creating read_url authority. So a
     URL appearing only inside fetched-page content — direct or offloaded — never
     becomes trusted authority. A real same-host page link is separately navigable;

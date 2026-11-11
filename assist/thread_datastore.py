@@ -28,7 +28,7 @@ _RECORD_ID = re.compile(r"r[0-9a-f]{32}\Z")
 _UNBOUND = "[source reference unresolved; link reachability was not checked]"
 _MAX_TEXT_OUTPUT = 8 * 1024 * 1024
 _INLINE_REF = re.compile(r"ref:([A-Za-z0-9_-]*)", re.I)
-_TEXT_START = re.compile(r"https?://[^\s<>\"']+|\[|ref:([A-Za-z0-9_-]*)", re.I)
+_TEXT_START = re.compile(r"https?://[^\s<>]+|\[|ref:([A-Za-z0-9_-]*)", re.I)
 BOUND_FILE_URLS_ARTIFACT = "assist_bound_file_urls"
 
 
@@ -223,7 +223,7 @@ def _resolve_once(text: str, store: ThreadDataStore,
                   max_output_bytes: int | None = None, *,
                   bound_sources: list[str] | None = None,
                   text_only: bool = False, bind_text: bool = False) -> tuple[str, bool]:
-    """Substitute original tokens once; inserted values are never reparsed."""
+    """Substitute original tokens without scanning inserted text in this pass."""
     parts = []
     used = 0
     used_text = False
@@ -289,13 +289,19 @@ def resolve_references(text: str, store: ThreadDataStore,
     decoded. Only source records contribute to ``bound_sources`` or link targets.
     """
     available = store.has_text_records()
+    limit = (max_output_bytes if max_output_bytes is not None else
+             _MAX_TEXT_OUTPUT if available and not text_only else None)
     resolved, used_text = _resolve_once(
-        text, store, max_output_bytes, bound_sources=bound_sources,
+        text, store, limit, bound_sources=bound_sources,
         text_only=text_only, bind_text=available)
     if used_text:
-        complete = (_resolve_once(text, store, max_output_bytes, bind_text=True)[0]
+        check_limit = max_output_bytes if max_output_bytes is not None else _MAX_TEXT_OUTPUT
+        complete = (_resolve_once(text, store, check_limit, bind_text=True)[0]
                     if text_only else resolved)
-        if _resolve_once(complete, store, max_output_bytes, bind_text=True)[0] != complete:
+        if (text_only
+                and _resolve_once(resolved, store, check_limit, bind_text=True)[0] != complete):
+            raise ValueError("text insertion would change source-draft parsing; preserve literal boundaries")
+        if _resolve_once(complete, store, check_limit, bind_text=True)[0] != complete:
             raise ValueError("text insertion would create another reference; preserve literal boundaries")
     return resolved
 

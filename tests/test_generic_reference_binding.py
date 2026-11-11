@@ -125,6 +125,55 @@ def test_generic_expansion_is_bounded_without_truncating_exact_values(tmp_path):
         resolve_references((f"ref:{record} " * 65), store)
 
 
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_quote_bearing_source_and_ordinary_urls_remain_literal(tmp_path, quote):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    text = store.put_text("EXACT_ID")
+    url = f"https://source.example/path{quote}ref:{text}"
+    source = register_source(store, url)
+    raw = f"Value: ref:{text}\n[S](ref:{source})\n[Ordinary](<{url}>)"
+    expected = f"Value: EXACT_ID\n[S](<{url}>)\n[Ordinary](<{url}>)"
+    assert resolve_references(raw, store) == expected
+    assert resolve_references(expected, store) == expected
+
+
+def test_generic_only_file_projection_cannot_hide_an_existing_source(tmp_path, monkeypatch):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
+    text = store.put_text("https://user.example/item")
+    source = register_source(store, "https://source.example/article")
+    raw = f"ref:{text}[Source](ref:{source})"
+    with pytest.raises(ValueError, match="source-draft parsing"):
+        resolve_references(raw, store, text_only=True)
+    called = []
+    result = ReferenceBindingMiddleware().wrap_tool_call(
+        _request("write_file", file_path="/note.md", content=raw),
+        lambda request: called.append(request))
+    assert result.status == "error"
+    assert called == []
+
+
+@pytest.mark.parametrize("phase", ["before_text", "dry_pass"])
+def test_full_and_validation_passes_stop_source_amplification_at_the_bound(tmp_path, monkeypatch, phase):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    text = store.put_text("ref" if phase == "dry_pass" else "X")
+    source = register_source(store, "https://source.example/" + "x" * (8192 - 23))
+    original_get = store.get
+    source_reads = []
+
+    def get(record_id):
+        if record_id == source:
+            source_reads.append(record_id)
+        return original_get(record_id)
+
+    monkeypatch.setattr(store, "get", get)
+    raw = ((f"ref:{text}:{source} " * 2000) if phase == "dry_pass" else
+           (f"ref:{source} " * 2000) + f"ref:{text}")
+    with pytest.raises(ValueError):
+        resolve_references(raw, store)
+    assert len(source_reads) <= 1026
+
+
 def test_inline_file_write_read_update_preserves_source_draft_and_final_preimages(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
