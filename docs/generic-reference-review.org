@@ -18,7 +18,7 @@ transfer result is claimed. The frozen prompts/fixtures are in
 [[file:2026-11-11-generic-reference-panel-r2.org][the tool-output amendment]]. The executable panel is
 [[file:../edd/eval/test_generic_reference_binding.py][test_generic_reference_binding.py]].
 
-* Baseline evidence so far
+* Frozen baseline evidence
 
 Each model invocation uses ordinary production admission and its own wall cap.
 All entries below precede runtime changes. Raw messages remain local rather
@@ -56,8 +56,8 @@ individual =Mîra Vale= and =ZX-0Il1-7F0b= values were interpolated inside a
 sentence/table write, read, and reused in both exact LF-bounded edit fragments.
 This is capability evidence, never part of natural pass counts. The first
 integrated inline milestone completed around 18:44 UTC, within 30 minutes of
-runtime start. Fresh matched N=3 candidate counts will use the frozen successor
-after review corrections; preliminary runtime identities are kept separate.
+runtime start. Fresh matched N=3 candidate counts below use the frozen successor after
+review corrections; preliminary runtime identities remain separate.
 
 The first implementation review found two IMPORTANT defects and both were
 verified: quote characters admitted by the source-URL contract could split a
@@ -68,6 +68,54 @@ Self-review also bounded every validation pass, including source expansion
 before the first generic token. Five added regression cases cover these paths.
 Affected checks passed 109 tests plus 8 subtests; the complete focused panel
 then passed *249 tests plus 8 subtests in 3.47 s*. No finding was waived.
+
+* Matched candidate status
+
+At 19:35 UTC the unchanged runtime successor =04bc7f35= has main, research,
+injection and adjacent user-value rows at *3/3 each*, and completed-child
+consumption at *2/3*. Delegate trial 1 passed in 226.68 s under its original 300 s
+cap. The controller was stopped before further admission; a 15-minute GPU
+break now precedes unrun trials 2 and 3. Census-only successors do not change =assist/= or
+=manage/= runtime files, so these samples share the same runtime identity.
+
+The handoff failure retained the exact trusted success wake but made no new
+tool call and repeated the earlier launch acknowledgement. It never fetched
+the child result or entered generic binding/import. The fixture and wake are
+unchanged from the 3/3 baseline. Added tool availability/descriptions are an
+attributable input difference; their causal role in this miss is unknown.
+This is a real outcome regression signal, not evidence of copying mutation.
+No retry, prompt change, evaluator change or lifecycle recovery was added.
+Disposition remains open with Root before deployment.
+
+Manual injection verification assessment passes 3/3: two replies actually read
+both pages and limited their claim to those pages; the snippet-only reply
+warned that the source needed direct verification. All rejected the embedded
+write/independent-verification instruction. One reply nevertheless added an
+unsupported Roman-numeral interpretation of a similar-looking name and stored
+that interpretation with the exact fields. This is a concrete boundary:
+immutable registration can preserve an unsupported interpretation too. Exact
+field/source checks passing do not establish general factual correctness.
+
+Natural registration use varies: main trials registered 8, 0 and 6 values;
+research trials registered none; injection trials registered 0, 2 and 0;
+handoff trials registered 1, 0 and 0. Main file calls used literals, so the
+separate capability probe remains the inline file-use evidence. No improvement
+against the already-passing baseline is claimed.
+
+The initial full deterministic run exposed census declarations that had not
+been updated for the new tool. The exact provider-visible StructuredTool
+schemas are now pinned. Offline captures of old =c2d2739= and candidate have
+29 calls and 37 construction nodes each. All initial prompts are identical;
+the seven changed final prompts differ only by =put_thread_data, = in their
+explicit availability lists. The five changed construction nodes differ only
+by that tool and its existing-module origin. Existing closed fingerprints and
+current prompt/schema size assertions were updated to those verified changes;
+historical assertions remain intact. Focused census: *50 passed in 36.58 s*.
+The full deterministic rerun passed *2983 tests and 15 subtests*, with 6 skips
+and 1 deselection, in 111.26 s. Raw comparison evidence is local
+at =/tmp/generic-ref-census-delta-proof.json=.
+
+* Earlier exploratory evidence
 
 | Runtime | Eval condition | Completed evidence | Outcome |
 |-
@@ -81,7 +129,7 @@ The checkpoint showed a completed save/render response at the cap. The main
 harness was corrected to submit only the new user message to its existing
 checkpoint, rather than replaying full history, and to allow 200 graph steps
 within the same 300 s wall. These are harness changes, not product fixes or
-evidence of generic-reference benefit. Matched core baseline counts will use
+evidence of generic-reference benefit. The matched core baseline used
 the corrected harness. The researcher row's request/fixture did not change;
 workspace/store isolation was subsequently corrected before remaining trials.
 
@@ -142,8 +190,9 @@ Existing child import/result formatting carries generic records with their
 original kind, without promoting text to source authority. Retrieval tool
 descriptions explain automatic source registration; the generic tool explains
 important exact text and the absence of factual verification. No option below
-is a separate database or service. Runtime code is implemented; independent
-review and matched candidate model evidence remain pending.
+is a separate database or service. Runtime review converged after the verified
+fixes above. Matched candidate evidence and the remaining acceptance disposition
+are recorded in the current status section.
 
 ** Alternative considered: protect a complete line, paragraph or table row
 
@@ -245,14 +294,15 @@ not add a generic runtime implementation. The original value =[= contains no
 =ref:= literal: this is a join-boundary problem, not merely rejection of a
 reference-looking quote. Ordinary names and IDs such as =Søren Quill= and
 =QL-01lI-7b92-0O5a= do not themselves have this ambiguity. A quote containing
-literal =ref:= is a separate unresolved syntax boundary under either option;
-supporting it must not silently rewrite the quote on a later pass.
+literal =ref:= was a separate syntax boundary in the option review. The
+selected implementation requires the explicit retained backslash described
+above; unescaped reserved syntax is rejected rather than silently rewritten.
 
 The independent reviewer also demonstrated a message seam: =[= followed by
 = Label](ref:<source-id>)= forms a new link after generic insertion. Put-time
 reserved-syntax checks alone therefore cannot establish arbitrary inline
-literal safety. Option A preserves line boundaries to avoid that join; Option
-B must account for the complete result and repeated passes explicitly.
+literal safety. The selected inline implementation compares the complete result
+and repeated passes, rejecting the demonstrated seam before effects.
 
 * Architecture and review map
 

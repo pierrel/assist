@@ -172,7 +172,8 @@ def test_classified_kernel_matches_each_final_skills_enabled_request(census):
     async_lifecycle = [
         "start_async_task", "get_async_task_status", "get_async_task_result", "update_async_task",
         "cancel_async_task", "list_async_tasks"]
-    thread_data = ["get_thread_data", "list_thread_data", "search_thread_data"]
+    thread_data = ["put_thread_data", "get_thread_data", "list_thread_data",
+                   "search_thread_data"]
     expected = {
         "web-main-core": [*executable, "load_skill", *async_lifecycle,
                           "quiet", "update_thread_description", *thread_data],
@@ -1300,8 +1301,8 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(historical_p0_prompt) == 31_279
     # Current web guidance includes research-before-dispatch, thread description
     # and the thread-data tools. Historical P0-P2b3 rows stay unchanged.
-    assert len(current_prompt) == 27_773
-    assert len(schemas) == 20_255
+    assert len(current_prompt) == 27_790
+    assert len(schemas) == 21_208
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 37
     assert len(census["findings"]) == 20
