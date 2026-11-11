@@ -373,9 +373,9 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True,
         if (isinstance(m, ToolMessage) and m.name == "read_file"
                 and isinstance(artifact, dict)
                 and BOUND_FILE_URLS_ARTIFACT in artifact):
-            # The host binder supplies exact registered destinations plus URLs
-            # from the original file. Its Markdown display can contain encoded
-            # targets or truncated URL prefixes, which cannot grant authority.
+            # The host matcher supplies only exact pre-existing source records,
+            # including an explicit empty artifact. Literal file text and
+            # encoded display targets cannot add navigation authority.
             for url in artifact[BOUND_FILE_URLS_ARTIFACT]:
                 _record_url(seen, url)
             continue

@@ -127,7 +127,7 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertIsNotNone(handler.called_with)
         self.assertEqual(result.content, "FETCHED")
 
-    def test_fact_check_report_ref_provenances_exact_host_url_not_display_target(self):
+    def test_fact_check_literal_report_provenances_only_exact_existing_host_url(self):
         from assist.thread_datastore import (
             BOUND_FILE_URLS_ARTIFACT, ReferenceBindingMiddleware, ThreadDataStore, register_source,
             resolve_references)
@@ -142,20 +142,22 @@ class TestUrlProvenanceMiddleware(TestCase):
                 request = SimpleNamespace(tool_call={
                     "name": "read_file", "args": {"file_path": "final_report.md"}, "id": "file-1"})
                 ordinary = "https://owner.example/ordinary"
-                raw = ToolMessage(content=f"[Source](ref:{record_id})\n{ordinary}",
+                saved = resolve_references(f"[Source](ref:{record_id})\n{ordinary}", store)
+                raw = ToolMessage(content=saved,
                                   name="read_file", tool_call_id="file-1")
                 with patch("assist.thread_datastore._current_store", return_value=store):
                     bound = ReferenceBindingMiddleware(bind_file_refs=True)._bind_result(request, raw)
-                self.assertTrue(bound.content.startswith(resolve_references(raw.content, store)))
+                self.assertTrue(bound.content.startswith(saved))
+                self.assertEqual(raw.content, saved)
                 self.assertIn(f"Exact source URLs for fact-checking:\n{url}", bound.content)
-                self.assertEqual(bound.artifact[BOUND_FILE_URLS_ARTIFACT], (ordinary, url))
+                self.assertEqual(bound.artifact[BOUND_FILE_URLS_ARTIFACT], (url,))
                 msgs = [AIMessage(content="", tool_calls=[request.tool_call]), bound]
                 result, handler = self._call(url, msgs)
                 self.assertEqual(result.content, "FETCHED")
                 self.assertIsNotNone(handler.called_with)
                 original, handler = self._call(ordinary, msgs)
-                self.assertEqual(original.content, "FETCHED")
-                self.assertIsNotNone(handler.called_with)
+                self.assertEqual(original.status, "error")
+                self.assertIsNone(handler.called_with)
                 wrong, handler = self._call(wrong_url, msgs)
                 self.assertEqual(wrong.status, "error")
                 self.assertIsNone(handler.called_with)

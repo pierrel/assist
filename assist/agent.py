@@ -984,9 +984,9 @@ def create_research_agent(model: BaseChatModel,
         "description": "Used to check all references for alignment with claims and statements. You MUST provide the file it should fact-check.",
         "system_prompt": base_prompt_for("deepagents/fact_checker.md.j2"),
         "tools": [read_url, *execution_egress_tools],
-        # The fact-checker's report read resolves host-registered source IDs to
-        # exact URLs. Existing read_file provenance then applies to that result;
-        # merely listing a datastore record does not authorize navigation.
+        # Checker reads preserve literal report bytes and attach only exact
+        # pre-existing host source URLs (including an explicit empty artifact).
+        # Merely listing a record or saving an arbitrary URL grants no authority.
         "middleware": _subagent_safety_mw(bind_file_refs=True) + _read_url_guards(
             trust_human_messages=trust_human_messages)
         + ([_egress_skills_middleware(backend, execution_egress_tools)]

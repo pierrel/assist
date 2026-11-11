@@ -1772,7 +1772,7 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
     "assist/templates/deepagents/fact_checker.md.j2": {
         "c8853dc566ad691ea9406fc2c42dcb01298ba24193fd0f81a3b8677205d0afef",
         "785c3a84e6a66ed8a13b60e29a390eac24e9af85d6d241d280b69aaad6e55c8f",
-        "e0e44ca7769bfb8b2ed2e9f0dd7533269aa31ce52c4c7a916eda2790547f61cf",
+        "5a293a1fd9bf3ff6bc8b0f3c2a6bf358c75be0e4fcb69fff2cddc6933bedbb5e",
     },
     "assist/templates/deepagents/general_instructions.md.j2": {
         "0f5dba480391779b384f36cf38e152fef197871bbc7f52868f29e1c355ac02ab",
