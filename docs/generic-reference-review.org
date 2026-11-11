@@ -1,0 +1,97 @@
+#+title: Generic immutable references: current review packet
+#+options: toc:2
+
+* Requested outcome and scope
+
+Main, delegate and researcher agents need a bounded way to retain important
+exact text from user and tool context in the existing immutable thread store.
+Retrieved source URLs already register automatically. This change must keep
+source citation identity, navigation authorization, invalid-reference behavior,
+ordinary links/code, current file updates and child completion working.
+Registration preserves supplied bytes. It does not establish factual truth,
+required-detail coverage, a correct source association or independent verification.
+
+Baseline runtime is merged =c2d27390044bd4013459fae7ccb2ce818bc221ad=.
+This is distinct from any unmerged live composition. No live-condition
+transfer result is claimed. The frozen prompts/fixtures are in
+[[file:2026-11-11-generic-reference-baseline.org][the initial panel]] and
+[[file:2026-11-11-generic-reference-panel-r2.org][the tool-output amendment]]. The executable panel is
+[[file:../edd/eval/test_generic_reference_binding.py][test_generic_reference_binding.py]].
+
+* Baseline evidence so far
+
+Each model invocation uses ordinary production admission and its own wall cap.
+All entries below precede runtime changes. Raw messages remain local rather
+than published in this packet.
+
+| Runtime | Eval condition | Completed evidence | Outcome |
+|-
+| c2d2739 | Initial user-value receiving control, 40 graph steps, 300 s wall | Exact first reply and saved receiving.md; both statuses Awaiting inspection. Graph cap reached during save/show at 287.08 s; update prompt unrun. | Capped harness outcome; not core tool-output coverage |
+| c2d2739 | Research clean, source links alongside entries | Both names/IDs/eligibility strings and their own exact URLs retained; 25.65 s | 1/1 PASS |
+| c2d2739 | Core main tool-output receiving row, 40 graph steps, 300 s wall | Shipment lookup; exact draft; exact saved receiving.md and render reply at checkpoint. Graph cap reached after 62.48 s; update unrun. | Capped harness outcome retained separately |
+
+The checkpoint showed a completed save/render response at the cap. The main
+harness was corrected to submit only the new user message to its existing
+checkpoint, rather than replaying full history, and to allow 200 graph steps
+within the same 300 s wall. These are harness changes, not product fixes or
+evidence of generic-reference benefit. Matched core baseline counts will use
+the corrected harness. The researcher row's request/fixture did not change;
+workspace/store isolation was subsequently corrected before remaining trials.
+
+The initial deterministic regression run passed 92 tests, then reached its
+120 s cap at the first local ASGI exchange under the network-restricted
+sandbox. The same mocked panel is rerunning through supported local-network
+escalation. No complete-suite pass is claimed yet.
+
+* Proposed smallest implementation
+
+No runtime implementation exists yet. Reuse
+[[file:../assist/thread_datastore.py::class ThreadDataStore][ThreadDataStore]] and its existing immutable =put_text= operation. Add one
+model-facing generic registration operation with fixed generic kind plus the
+existing get/list/search tools. Keep source-row creation solely in
+[[file:../assist/thread_datastore.py::def register_source][register_source]] and the current browser ingestion path.
+
+Bare generic references insert text. Citation-link targets remain restricted
+to trusted source rows. Main/delegate file-tool content and edit preimages
+need the same generic expansion before effects; the research draft/finalization
+boundary remains owned by
+[[file:../assist/research_cleanup.py::class ReferencesCleanupRunnable][ReferencesCleanupRunnable]]. Existing child import and result formatting must
+carry generic records with their original kind, without promoting text to
+source authority. Retrieval tool descriptions explain automatic registration;
+the generic tool describes when to preserve important exact text and its limits.
+
+Repeated-pass literal safety is being settled before implementation. The
+candidate approach rejects reserved =ref:= syntax in registered generic
+values and requires any generic-expanded result to already be stable under a
+second dry resolution. An ambiguous substitution must fail explicitly before
+file effects. Generic-bearing streamed messages may need buffering until the
+whole message is checked; source-only streaming can keep its current behavior.
+These are proposed contracts, not verified behavior.
+
+* Architecture and review map
+
+The [[file:architecture.org][baseline architecture]] already owns these responsibilities. No new
+service, database or cross-repository runtime connection is proposed.
+
+| Component | Existing responsibility | Proposed delta and review focus |
+|-
+| C6 agent construction | [[file:../assist/agent.py][Agent factories]], role tools and middleware | Expose one generic operation with its backing in main/delegate/research; preserve role capability gates |
+| C9 durable thread state | [[file:../assist/thread_datastore.py][Immutable thread records]], [[file:../assist/thread_manager.py][thread-owned paths]] | Reuse the existing table; fixed generic kind; bounded inputs; immutable IDs |
+| C6/C9 outward binding | [[file:../assist/thread.py][Stream adapter]] and [[file:../assist/thread_datastore.py::class ReferenceBindingMiddleware][ReferenceBindingMiddleware]] | Generic value insertion, exact stream/history parity and stable repeated binding |
+| C10 file effects | [[file:../assist/research_cleanup.py][Research finalization]] and backend file tools | Preserve exact write/edit preimages and existing source draft behavior; reject ambiguity before effects |
+| C9 child completion | [[file:../manage/web/threads.py::_complete_child_handoff][Child import]] and [[file:../assist/async_subagents.py::_get_async_task_result][task result]] | Preserve generic kind and immutable identity across durable parent import |
+| C8 authorization | [[file:../assist/middleware/url_provenance.py][URL provenance]] | Generic tool output/expansion grants no navigation authority; source-only artifact collection |
+
+Independent design/eval review found and corrected layout-sensitive response
+assertions, an overbroad injected-claim substring check, and missing main/delegate
+tool-output inputs. It also identified file binding and repeated-pass seams as
+required design work before implementation. Documentation alignment was an
+explicit separate pass. These are design findings, not a converged code review.
+
+* Deferred observations and limits
+
+| Observation | Why outside this objective | Risk if left | Future value |
+|-
+| Exact copying cannot supply omitted required detail | This effort retains values already selected; it does not change research planning/checking | A required format can still be omitted | Evaluate Thorough, Focused and Correct separately; keep Timing separate |
+| Exact source identity does not establish claim support or a fetch | Registration is identity storage | A model can cite the wrong source or overstate verification | Preserve separate source-association and verification assessment |
+| Main write_file then read_file can already launder a literal model-written URL | Existing authorization residual, independent of registration | A model following an injection can turn a saved URL into file-read provenance | Future provenance work if evidence warrants; do not claim this effort closes it |
