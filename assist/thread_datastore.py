@@ -32,6 +32,7 @@ _MAX_TEXT_OUTPUT = 8 * 1024 * 1024
 _INLINE_REF = re.compile(r"ref:([A-Za-z0-9_-]*)", re.I)
 _TEXT_START = re.compile(r"https?://|\[|ref:([A-Za-z0-9_-]*)", re.I)
 _URL_LITERAL = re.compile(r"https?://[^\s<>]+", re.I)
+_LABEL_BOUNDARIES = re.compile(r"\\[^\n]|\[|\]|\n")
 BOUND_FILE_URLS_ARTIFACT = "assist_bound_file_urls"
 
 
@@ -99,15 +100,31 @@ def _table_lines(text: str):
         start = end + 1
 
 
+def _generic_label_ends(text: str) -> dict[int, int]:
+    """Match ordinary link-label brackets once without the source-label cap."""
+    stack, ends = [], {}
+    for token in _LABEL_BOUNDARIES.finditer(text):
+        if token.group() == "\n":
+            stack.clear()
+        elif token.group() == "[":
+            stack.append(token.start())
+        elif token.group() == "]" and stack:
+            start = stack.pop()
+            if text[token.end():token.end() + 1] == "(":
+                ends[start] = token.start()
+    return ends
+
+
 def _text_scanner(text: str, edit_context: bool = False):
     """Keep URLs opaque inside their destination, label or actual table cell."""
     lines = iter(_table_lines(text))
     line_end, pipes = next(lines, (len(text), []))
     pipe_index = 0
     label_end = -1
+    label_ends = None
 
     def scan(position: int):
-        nonlocal line_end, pipes, pipe_index, label_end
+        nonlocal line_end, pipes, pipe_index, label_end, label_ends
         marker = _TEXT_START.search(text, position)
         if marker is None:
             return None
@@ -117,6 +134,10 @@ def _text_scanner(text: str, edit_context: bool = False):
         if not marker.group().lower().startswith(("http://", "https://")):
             if marker.group() == "[":
                 close = _label_close(text, marker.start())
+                if close is None:
+                    if label_ends is None:
+                        label_ends = _generic_label_ends(text)
+                    close = label_ends.get(marker.start())
                 if close is not None and text[close + 1:close + 2] == "(":
                     label_end = max(label_end, close)
             return marker
@@ -131,10 +152,11 @@ def _text_scanner(text: str, edit_context: bool = False):
         if not destination and not pipes and not in_label:
             literal = _URL_LITERAL.match(text, start) or marker
             if edit_context:
-                literal_pipes = _table_pipes(literal.group())
+                literal_value = literal.group()
+                literal_pipes = _table_pipes(literal_value)
                 if literal_pipes and any(token.start() > literal_pipes[0]
-                        and literal.group()[token.start() - 1] != "\\"
-                        for token in _INLINE_REF.finditer(literal.group())):
+                        and literal_value[token.start() - 1] != "\\"
+                        for token in _INLINE_REF.finditer(literal_value)):
                     raise ValueError("ambiguous URL/pipe edit fragment; include table header/context, use literal values, or use a full write")
             return literal
         while pipe_index < len(pipes) and pipes[pipe_index] < start:

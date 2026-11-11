@@ -316,6 +316,32 @@ def test_table_shaped_paragraph_keeps_literal_url_bytes(tmp_path):
     assert resolve_references(raw, store) == raw
 
 
+@pytest.mark.parametrize("length", [532, 8192])
+def test_long_ordinary_url_labels_bind_adjacent_sources_without_changing_url(tmp_path, length):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    text = store.put_text("EXACT_ID")
+    source = register_source(store, "https://source.example/exact")
+    prefix = f"https://owner.example/[a]/ref:{text}/"
+    url = prefix + "x" * (length - len(prefix))
+    raw = f"[{url}]({url})[S](ref:{source})"
+    expected = raw.replace(f"(ref:{source})", "(<https://source.example/exact>)")
+    assert resolve_references(raw, store) == expected
+    assert resolve_references(expected, store) == expected
+    assert resolve_references(raw, store, text_only=True) == raw
+    for split in (0, 1, len(url), len(raw) // 2, len(raw)):
+        stream = ReferenceStream(store)
+        assert stream.push(raw[:split]) == ""
+        assert stream.push(raw[split:]) == ""
+        assert stream.push("", final=True) == expected
+
+
+def test_escaped_reference_heavy_url_edit_stays_literal(tmp_path):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    store.put_text("EXACT_ID")
+    raw = "\nhttps://owner.example/|" + r"\ref:x" * 32000 + "\n"
+    assert resolve_references(raw, store, edit_context=True) == raw
+
+
 def test_generic_only_file_projection_cannot_hide_an_existing_source(tmp_path, monkeypatch):
     store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
     monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)

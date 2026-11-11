@@ -458,3 +458,13 @@ table-shaped continuation paragraphs remain ordinary text. Focused checks now
 pass 96 tests in 1.53 s. Deterministic replay of all 16 actual file calls from
 the six frozen main/delegate episodes leaves every argument byte unchanged.
 No new model result is inferred from that replay.
+
+The final bounded label correction separates ordinary-link bracket matching
+from the unchanged 500-character source-citation-label limit. A shared linear
+lexical pass supplies ordinary label boundaries, including the reproduced
+532-character label and an 8192-character label containing reference-looking
+URL bytes. Adjacent citations bind without altering either URL occurrence.
+The ambiguity guard caches the full URL once rather than copying it for every
+escaped token. Focused checks now pass 99 tests in 1.58 s; no new model run or
+natural-result count is claimed. The frozen successor receives only affected
+boundary/liveness/doc rereview plus the full deterministic suite.
