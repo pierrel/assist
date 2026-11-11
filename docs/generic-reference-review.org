@@ -364,8 +364,23 @@ was waived. The full deterministic suite passed 2983 tests and 15 subtests,
 with 6 skips and 1 deselection. No configured linter was added; mypy is absent
 from the supplied venv. Git whitespace validation passes.
 
-Root owns composition/deployment and any later authorized merge/repin. The
-separate feature PR and Copilot follow-through follow Root deployment; neither
-has occurred at this local handoff. Production research remains paused. No
-live-condition research transfer or broader factual-correctness benefit is
-claimed.
+Root deployed and verified the feature delta from =7b8ed6da= at 20:04 UTC on
+2026-11-11, composed with the retained live browser/research changes as
+=8f96bc4c88816cbe1e204cbd1e7ba5254bbd6874=, tree
+=f5152421faae6c56d2b8403cc907146ae0b92250=. All 246 installed runtime files
+matched. The service PID changed and HTTPS returned 200. Installed registration,
+inline reply/stream, real file write/read/edit/finalize, source-only authority and
+invalid-source feedback smoke checks passed. Combined deterministic tests passed
+3030 tests and 21 subtests, with 7 skips and 1 deselection, in 114.51 s. Root's
+independent composition review found no required correction. The verification
+receipt is retained locally at
+=/tmp/root-generic-reference-live-proof-20261111/live-verification.json=.
+
+The deployment left the 3116 Runs, zero runnable work/backlog and zero enabled
+schedules unchanged; images and proxy configuration were unchanged. Production
+research remains paused. This deployment-note successor changes no runtime or
+eval input from =7b8ed6da=; the generic runtime remains =04bc7f35=. It does not
+represent a new runtime deployment. The separate feature PR and Copilot
+follow-through now proceed. Root owns any required runtime redeploy and later
+explicitly authorized merge/repin; no merge is authorized. No live-condition
+research transfer or broader factual-correctness benefit is claimed.
