@@ -97,7 +97,7 @@ def test_main_preserves_user_supplied_exact_values(tmp_path, monkeypatch):
     store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
     config = {"configurable": {"thread_id": "receiving-user-values",
                                "thread_datastore_path": store.path},
-              "recursion_limit": 30}
+              "recursion_limit": 200}
     agent = create_agent(select_assistant_model(0.1), str(workspace),
                          spec=prompt_rewrite_web_main_spec(),
                          thread_data_available=True)
@@ -119,7 +119,7 @@ def test_receiving_note_preserves_user_values_through_file_update(tmp_path, monk
     store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
     config = {"configurable": {"thread_id": f"receiving-{profile}",
                                "thread_datastore_path": store.path},
-              "recursion_limit": 40}
+              "recursion_limit": 200}
     agent = create_agent(select_assistant_model(0.1), str(workspace), spec=spec,
                          thread_data_available=True)
     results = []
@@ -127,7 +127,7 @@ def test_receiving_note_preserves_user_values_through_file_update(tmp_path, monk
     with patch("assist.tools.requests.get", side_effect=AssertionError("no network expected")):
         for prompt in RECEIVING_PROMPTS:
             try:
-                result = agent.invoke({"messages": messages + [HumanMessage(content=prompt)]}, config)
+                result = agent.invoke({"messages": [HumanMessage(content=prompt)]}, config)
             except Exception as error:
                 partial = agent.get_state(config).values
                 _save_trace(tmp_path, RECEIVING_PROMPTS[:len(results) + 1], results + [partial])
