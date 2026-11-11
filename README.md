@@ -77,7 +77,10 @@ where reliability is harder than with frontier APIs.
   Returned references work inline in replies, sentences, table cells and file
   text. Generic file text is bound before writing; reference-bearing edits keep
   surrounding newlines in both exact old/new strings. Source drafts retain their
-  existing finalization path. Unescaped `ref:` is reserved; a preceding backslash
+  existing finalization path. Saved-file reads and finalization bind sources
+  only, so later context edits cannot rebind untouched generic/literal bytes.
+  Raw generic drafts outside literal URLs fail; use supported write/edit tools
+  to bind their values before saving. Unescaped `ref:` is reserved; a preceding backslash
   preserves a literal token and remains in the saved/output text. Unsafe joins
   and unknown/malformed inline tokens return explicit errors before file effects.
   URL bytes stay literal within their Markdown destination or table cell;

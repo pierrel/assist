@@ -315,7 +315,7 @@ def source_url(store: ThreadDataStore, record_id: str) -> str | None:
 
 
 def resolve_host_report(path: str, store: ThreadDataStore) -> bool:
-    """Atomically bind one local research report through a no-follow dir handle."""
+    """Atomically bind saved source refs through a no-follow report dir handle."""
     directory = os.path.dirname(path)
     basename = os.path.basename(path)
     root = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -668,6 +668,10 @@ def put_thread_data(value: str, title: str = "") -> str:
     Use for values whose spelling matters across reuse: identifiers, names,
     quotations or exact passages. Copy the returned reference inline in replies
     or file text, including sentences/table cells; do not reconstruct its ID.
+    Save generic references through write_file/edit_file: values bind before
+    effects. Saved-file reads/finalization bind sources only; raw generic drafts
+    outside literal URLs fail instead of expanding. Do not write unbound
+    generic references with execute.
     For edit_file with references, BOTH exact old_string and new_string must
     include their surrounding newline bytes. Read the saved file first.
     For URL/pipe table edits, include the table header/context; an ambiguous

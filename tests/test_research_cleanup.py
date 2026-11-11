@@ -538,3 +538,28 @@ class TestResearchAgentWiring:
         assert "permission denied" in msg
         # Container is NOT torn down — that's the parent agent's resource.
         sandbox.container.stop.assert_not_called()
+
+
+@pytest.mark.parametrize("raw_generic", [False, True])
+def test_host_late_binding_is_source_only_and_rejects_raw_generic_drafts(tmp_path, raw_generic):
+    refs = tmp_path / "references"
+    refs.mkdir()
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    text = store.put_text("EXACT_ID")
+    source = register_source(store, "https://source.example/exact")
+    original = f"Owner | ID\n--- | ---\nhttps://owner.example|ref:{text}\n[S](ref:{source})\n"
+    if raw_generic:
+        original += f"Value: ref:{text}\n"
+    inner = _FakeInner(lambda path: (Path(path) / "final.md").write_bytes(original.encode()),
+                       [AIMessage(content="FINAL_REPORT: final.md")])
+    inner.bind_path(str(refs))
+    runner = ReferencesCleanupRunnable(inner, str(refs))
+    config = {"configurable": {"thread_datastore_path": store.path}}
+    if raw_generic:
+        with pytest.raises(ValueError, match="unbound generic"):
+            runner.invoke({}, config=config)
+        assert (refs / "final.md").read_bytes() == original.encode()
+    else:
+        runner.invoke({}, config=config)
+        assert (refs / "final.md").read_text() == original.replace(
+            f"(ref:{source})", "(<https://source.example/exact>)")

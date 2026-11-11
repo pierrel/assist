@@ -1286,3 +1286,30 @@ def test_completion_input_renders_as_agent_task_note(monkeypatch, tmp_path):
     assert "assistant (task)" in page
     assert "Task ID: sub-123 Status: success" in page
     assert '<div class="role">user</div>' not in page
+
+
+@pytest.mark.parametrize("raw_generic", [False, True])
+def test_parent_task_report_late_binding_preserves_literal_url_and_rejects_raw_generic(tmp_path, monkeypatch, raw_generic):
+    from pathlib import Path
+    from assist.thread_datastore import ThreadDataStore, register_source
+    _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    working = Path(threads.MANAGER.thread_default_working_dir("parent"))
+    refs = working / "references"
+    refs.mkdir(parents=True, exist_ok=True)
+    store = ThreadDataStore(threads.MANAGER.thread_datastore_path("parent"))
+    text = store.put_text("EXACT_ID")
+    source = register_source(store, "https://source.example/exact")
+    task_id = "sub-" + "a" * 24
+    report = refs / f"{task_id}.md"
+    original = f"Owner | ID\n--- | ---\nhttps://owner.example|ref:{text}\n[S](ref:{source})\n"
+    if raw_generic:
+        original += f"Value: ref:{text}\n"
+    report.write_bytes(original.encode())
+    if raw_generic:
+        with pytest.raises(ValueError, match="unbound generic"):
+            threads._bind_task_report("parent", f"Task ID: {task_id}\n", str(working))
+        assert report.read_bytes() == original.encode()
+    else:
+        threads._bind_task_report("parent", f"Task ID: {task_id}\n", str(working))
+        assert report.read_text() == original.replace(f"(ref:{source})", "(<https://source.example/exact>)")

@@ -497,3 +497,37 @@ R1 comments and a second bounded Copilot round. The bridge retains two meaningfu
 external comments; none was waived. The 3116 Runs, zero runnable work/backlog and
 zero enabled schedules were unchanged, as were images and proxy configuration.
 Production research remains paused. No merge or repin is authorized.
+
+* R2 safety state and structural file policy
+
+R2 review =5865503976= on =214b4b8a=, submitted 21:26:33 UTC, found three
+verified cases: a header edit let later generic finalization rewrite untouched
+literal URL bytes; inline-code URLs swallowed following citations; CRLF table
+headers were unrecognized. No production-file damage is claimed: reproductions
+used disposable files. The bridge records five meaningful findings across two
+external rounds. Green CI did not cover these cases and was not acceptance.
+
+Root temporarily restored exact prior tree =f5152421= as live =aa511caa= at
+21:41 UTC, with 246 installed file matches, fresh healthy PID/HTTPS200 and an
+installed untouched-URL preservation proof. Known earlier compact/unknown-ref
+leaks remain disclosed. No WIP bytes were installed. The rollback receipt is
+=/tmp/root-generic-reference-r2-safety-rollback-retry-proof-20261111/live-verification.json=.
+The structural correction below is not yet deployed or published.
+
+Root approved removing redundant generic rebinding of saved files. Supported
+=write_file=/=edit_file= arguments still bind generic values eagerly for main,
+delegate and research agents. Saved-file read projections and host/sandbox/
+parent task-report finalization now bind *source refs only*. Literal raw URL
+spans remain opaque independently of later Markdown context; known raw generic
+drafts outside those spans fail explicitly without file replacement. There is
+no backend read, postimage ownership, tracking, new syntax or dependency.
+
+The corrected real-backend proof passed at 21:42:53 UTC: both registered and
+ordinary literal header edits preserve the untouched URL through finalization
+and checker read, while source links still bind. Raw unsupported generic drafts
+fail without rewriting bytes. Inline-code boundaries reuse linear code-run
+pairing; CRLF normalization applies only to lexical views and retains output
+bytes. The affected host/sandbox cleanup and parent task-report success/failure
+panel passed 197 tests in 3.25 s through supported local-ASGI access. The first
+restricted run hit its 45 s cap at the known ASGI boundary and is not a pass.
+No new model panel or successor model-result count is claimed.

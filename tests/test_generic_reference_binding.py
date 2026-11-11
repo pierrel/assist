@@ -8,7 +8,7 @@ from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from assist.thread_datastore import (
-    BOUND_FILE_URLS_ARTIFACT, ReferenceBindingMiddleware, ReferenceStream,
+    ReferenceBindingMiddleware, ReferenceStream,
     ThreadDataStore, put_thread_data, register_source, resolve_host_report,
     resolve_references, source_url,
 )
@@ -140,6 +140,9 @@ def test_quote_bearing_source_and_ordinary_urls_remain_literal(tmp_path, quote):
 
 
 @pytest.mark.parametrize("layout", ["[Owner](https://owner.example)[Source](ref:{source})",
+                                    "`https://owner.example`[Source](ref:{source})",
+                                    "`curl https://owner.example`[Source](ref:{source})",
+                                    "``https://owner.example/a`b``[Source](ref:{source})",
                                     "[https://owner.example](https://owner.example)[Source](ref:{source})",
                                     "[See https://owner.example](https://owner.example)[Source](ref:{source})",
                                     "[Owner](https://owner.example/a_(b))[Source](ref:{source})",
@@ -147,6 +150,7 @@ def test_quote_bearing_source_and_ordinary_urls_remain_literal(tmp_path, quote):
                                     "[Owner](https://owner.example/a\\)b)[Source](ref:{source})",
                                     "|https://owner.example|ref:{text}|",
                                     "Owner | ID\n--- | ---\nhttps://owner.example|ref:{text}\n",
+                                    "Owner | ID\r\n--- | ---\r\nhttps://owner.example|ref:{text}\r\n",
                                     "https://owner.example|ref:{text}\n---|---\nOwner|ID\n",
                                     "http:// ref:{text}", "https://\nref:{text}",
                                     "[Owner](https://) ref:{text}",
@@ -185,9 +189,9 @@ def test_url_literals_stop_at_surrounding_link_and_table_boundaries(tmp_path, mo
     assert result.status == "success" and len(calls) == 1
     projected = raw.replace(f"ref:{text}", "EXACT_ID")
     assert calls[0].tool_call["args"]["content"] == projected
-    assert (workspace / "note.md").read_text() == projected
+    assert (workspace / "note.md").read_bytes().decode() == projected
     resolve_host_report(str(workspace / "note.md"), store)
-    assert (workspace / "note.md").read_text() == expected
+    assert (workspace / "note.md").read_bytes().decode() == expected
 
 
 def test_actual_url_bytes_escaped_literals_and_known_source_drafts_stay_exact(tmp_path, monkeypatch):
@@ -449,6 +453,56 @@ def test_generic_url_never_enters_registration_or_checker_navigation_authority(t
     result = ReferenceBindingMiddleware(bind_file_refs=True)._bind_result(
         _request("read_file", file_path="/report.md"),
         ToolMessage(name="read_file", content=f"Link: ref:{text}", tool_call_id="file-call"))
-    assert value in result.content
-    assert result.artifact[BOUND_FILE_URLS_ARTIFACT] == ()
+    assert result.status == "error" and "unbound generic" in result.content
+    assert value not in result.content
     assert _seen_urls([AIMessage(content="", tool_calls=[call]), result]) == {}
+
+
+@pytest.mark.parametrize("registered", [False, True])
+def test_header_edit_preserves_untouched_url_through_finalization_and_checker_read(tmp_path, monkeypatch, registered):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    backend = FilesystemBackend(root_dir=str(workspace), virtual_mode=True)
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
+    text = store.put_text("EXACT_ID")
+    header = "Owner | ID\n--- | ---"
+    header_id = store.put_text(header)
+    source = register_source(store, "https://source.example/exact")
+    literal_url = f"https://owner.example|ref:{text}"
+    original = f"Lead\n\nOLD\n{literal_url}\n[S](ref:{source})\n"
+    binding = ReferenceBindingMiddleware()
+
+    def effect(request):
+        args = request.tool_call["args"]
+        result = (backend.write(args["file_path"], args["content"])
+                  if request.tool_call["name"] == "write_file" else
+                  backend.edit(args["file_path"], args["old_string"], args["new_string"]))
+        return ToolMessage(content=result.error or "Updated", status="error" if result.error else "success",
+                           name=request.tool_call["name"], tool_call_id="file-call")
+
+    assert binding.wrap_tool_call(_request("write_file", file_path="/note.md", content=original), effect).status == "success"
+    replacement = f"ref:{header_id}" if registered else header
+    assert binding.wrap_tool_call(_request("edit_file", file_path="/note.md", old_string="\nOLD\n",
+        new_string=f"\n{replacement}\n"), effect).status == "success"
+    note = workspace / "note.md"
+    after_edit = original.replace("OLD", header)
+    assert note.read_text() == after_edit
+    checked = ReferenceBindingMiddleware(bind_file_refs=True)._bind_result(
+        _request("read_file", file_path="/note.md"),
+        ToolMessage(name="read_file", content=after_edit, tool_call_id="file-call"))
+    assert checked.status == "success" and literal_url in checked.content
+    assert "EXACT_ID" not in checked.content and "https://source.example/exact" in checked.content
+    assert resolve_host_report(str(note), store)
+    assert note.read_text() == after_edit.replace(f"(ref:{source})", "(<https://source.example/exact>)")
+
+
+def test_raw_generic_report_draft_fails_without_rewriting_bytes(tmp_path):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    text = store.put_text("EXACT_ID")
+    report = tmp_path / "report.md"
+    original = f"Value: ref:{text}\n".encode()
+    report.write_bytes(original)
+    with pytest.raises(ValueError, match="unbound generic"):
+        resolve_host_report(str(report), store)
+    assert report.read_bytes() == original

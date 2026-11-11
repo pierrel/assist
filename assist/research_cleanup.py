@@ -19,8 +19,10 @@ runnable so that around each invocation:
 3. After the agent returns, the wrapper extracts the *final report's*
    filename from the agent's response and deletes any **newly-created**
    files in the directory that aren't the final report.
-4. When a thread datastore is configured, exact references in a new or
-   modified final report are resolved. An unchanged prior report is untouched.
+4. When a thread datastore is configured, source references in a new or
+   modified final report are resolved. Generic values already bind in supported
+   write/edit arguments; unsupported raw generic drafts fail without replacement.
+   An unchanged prior report is untouched.
 5. If the final filename can't be confidently extracted, *nothing* is
    deleted — leaving everything is preferable to deleting the wrong
    file.  We do not fall back to "most recently modified" because the
@@ -63,7 +65,7 @@ _FINAL_REPORT_LINE = re.compile(r"^FINAL_REPORT:\s*(\S+)\s*$", re.MULTILINE)
 
 
 class ReferencesCleanupRunnable:
-    """Bind final-report references and prune intermediate files in ``references/``.
+    """Bind final-report source refs and prune intermediate files in ``references/``.
 
     Args:
         inner: The wrapped runnable (typically a ``RollbackRunnable`` from
@@ -120,7 +122,7 @@ class ReferencesCleanupRunnable:
             )
 
     def _resolve_report_references(self, basename: str, store: ThreadDataStore | None) -> None:
-        """Replace exact reference handles in the selected final report atomically."""
+        """Replace source handles, preserving saved generic/literal bytes atomically."""
         if store is None:
             return
         if self._sandbox is not None:

@@ -231,3 +231,33 @@ def test_sandbox_rejects_fifo_transfer_without_blocking(tmp_path, target):
                                        FifoTransport())
     with pytest.raises(RuntimeError, match="research sandbox (replace|prune) failed"):
         runner.invoke({}, config={"configurable": {"thread_datastore_path": store.path}})
+
+
+@pytest.mark.parametrize("raw_generic", [False, True])
+def test_sandbox_late_binding_is_source_only_and_rejects_raw_generic_drafts(tmp_path, raw_generic):
+    refs = tmp_path / "references"
+    refs.mkdir()
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    text = store.put_text("EXACT_ID")
+    source = register_source(store, "https://source.example/exact")
+    literal_url = f"https://owner.example|ref:{text}"
+    original = f"Owner | ID\n--- | ---\n{literal_url}\n[S](ref:{source})\n"
+    if raw_generic:
+        original += f"Value: ref:{text}\n"
+
+    def write():
+        (refs / "final.md").write_bytes(original.encode())
+        (refs / "draft.md").write_text("keep on failure")
+
+    runner = ReferencesCleanupRunnable(WritesReport(write), str(refs), LocalSandboxTransport())
+    config = {"configurable": {"thread_datastore_path": store.path}}
+    if raw_generic:
+        with pytest.raises(ValueError, match="unbound generic"):
+            runner.invoke({}, config=config)
+        assert (refs / "final.md").read_bytes() == original.encode()
+        assert (refs / "draft.md").exists()
+    else:
+        runner.invoke({}, config=config)
+        assert (refs / "final.md").read_text() == original.replace(
+            f"(ref:{source})", "(<https://source.example/exact>)")
+        assert not (refs / "draft.md").exists()

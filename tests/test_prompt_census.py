@@ -1302,7 +1302,7 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     # Current web guidance includes research-before-dispatch, thread description
     # and the thread-data tools. Historical P0-P2b3 rows stay unchanged.
     assert len(current_prompt) == 27_790
-    assert len(schemas) == 21_357
+    assert len(schemas) == 21_613
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 37
     assert len(census["findings"]) == 20
