@@ -65,10 +65,10 @@ class TestSpecWiring(_CreateAgentHarness):
     """The spec's fields reach create_deep_agent."""
 
     def test_thread_data_tools_follow_availability_flag(self):
-        from assist.thread_datastore import (get_thread_data, list_thread_data,
+        from assist.thread_datastore import (put_thread_data, get_thread_data, list_thread_data,
                                              search_thread_data)
 
-        data_tools = (get_thread_data, list_thread_data, search_thread_data)
+        data_tools = (put_thread_data, get_thread_data, list_thread_data, search_thread_data)
         for spec in (AgentSpec(role="delegate"),
                      AgentSpec(async_subagent_tools=_async_task_tools, web_main=True)):
             absent = self._build(spec=spec)["tools"]
@@ -79,7 +79,7 @@ class TestSpecWiring(_CreateAgentHarness):
     def test_research_record_tools_follow_availability_flag(self):
         from assist.agent import create_research_agent
 
-        data_names = {"get_thread_data", "list_thread_data", "search_thread_data"}
+        data_names = {"put_thread_data", "get_thread_data", "list_thread_data", "search_thread_data"}
 
         def names(tools):
             return {getattr(tool, "name", getattr(tool, "__name__", ""))

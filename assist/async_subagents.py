@@ -111,7 +111,8 @@ def _task_value(thread: dict[str, Any]) -> dict[str, Any]:
 
 
 def _format_task(task: dict[str, Any], *, include_result: bool = True,
-                 sources: list[dict[str, str]] | None = None) -> str:
+                 sources: list[dict[str, str]] | None = None,
+                 data: list[dict[str, str]] | None = None) -> str:
     description = str(task.get("description") or "")
     fields = {
         "task_id": task.get("task_id"),
@@ -129,6 +130,10 @@ def _format_task(task: dict[str, Any], *, include_result: bool = True,
             fields["sources"] = [
                 {**source, "source_link": f"[Source](ref:{source['id']})"}
                 for source in sources
+            ]
+        if data:
+            fields["data"] = [
+                {**row, "reference": f"ref:{row['id']}"} for row in data
             ]
     return json.dumps(fields, ensure_ascii=False)
 
@@ -228,7 +233,8 @@ def _get_async_task_result(
     store = _current_store()
     return _format_task(
         task, sources=store.list_imported(task_id, kind="source", limit=20)
-        if store else None)
+        if store else None,
+        data=store.list_imported(task_id, kind="text", limit=20) if store else None)
 
 
 def _list_async_tasks(runtime: ToolRuntime) -> str:

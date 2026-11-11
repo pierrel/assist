@@ -1,4 +1,4 @@
-"""Host-owned thread records and source-reference binding."""
+"""Host-owned immutable text records and exact reference binding."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.config import get_config
+from assist.middleware.output_sanitization import _sanitize
 
 
 _BARE_REF = re.compile(r"(?<!\S)ref:([A-Za-z0-9_-]*)", re.I)
@@ -25,7 +26,19 @@ _LABEL_OPEN = re.compile(r"\[(?:" + _LABEL_ATOM + r"){1,500}\]")
 _STREAM_PREFIXES = {"r", "re", "ref"}
 _RECORD_ID = re.compile(r"r[0-9a-f]{32}\Z")
 _UNBOUND = "[source reference unresolved; link reachability was not checked]"
+_MAX_TEXT_OUTPUT = 8 * 1024 * 1024
+_INLINE_REF = re.compile(r"ref:([A-Za-z0-9_-]*)", re.I)
+_TEXT_START = re.compile(r"https?://[^\s<>\"']+|\[|ref:([A-Za-z0-9_-]*)", re.I)
 BOUND_FILE_URLS_ARTIFACT = "assist_bound_file_urls"
+
+
+def _check_text_value(value: str) -> None:
+    for token in _TEXT_START.finditer(value):
+        if (token.group(1) is not None
+                and (token.start() == 0 or value[token.start() - 1] != "\\")):
+            raise ValueError("unescaped ref: is reserved; an explicit preceding backslash is retained, never decoded")
+    if _sanitize(value) != value:
+        raise ValueError("terminal control sequences are not supported in exact text")
 
 
 def _source_url(value: object) -> str | None:
@@ -68,6 +81,10 @@ class ThreadDataStore:
         with self._connect() as db:
             row = db.execute("SELECT id, kind, value, title FROM records WHERE id = ?", (record_id,)).fetchone()
             return dict(zip(("id", "kind", "value", "title"), row)) if row else None
+
+    def has_text_records(self) -> bool:
+        with self._connect() as db:
+            return db.execute("SELECT 1 FROM records WHERE kind != 'source' LIMIT 1").fetchone() is not None
 
     def import_from(self, child: "ThreadDataStore", owner: str, kind: str) -> None:
         """Copy one kind of child records and retain their durable import owner."""
@@ -169,19 +186,27 @@ def _label_close(text: str, start: int = 0) -> int | None:
     return match.end() - 1 if match else None
 
 
-def _link_at(text: str, start: int, store: ThreadDataStore) -> tuple[int, str, str | None] | None:
+def _link_at(text: str, start: int, store: ThreadDataStore,
+             bind_text: bool = False) -> tuple[int, str, str | None, bool] | None:
     if _LINK_TARGET.search(text, start + 1, min(len(text), start + 507)) is None:
         return None
     close = _label_close(text, start)
     if close is None or text[close + 1:close + 6].lower() != "(ref:":
         return None
     label = text[start + 1:close]
+    label_used_text = False
+    if bind_text:
+        label, label_used_text = _resolve_once(label, store, text_only=True, bind_text=True)
     target_start = close + 6
     end = target_start
     while end < len(text) and text[end] not in "[)\n":
         end += 1
     if end < len(text) and text[end] == ")":
         url = source_url(store, text[target_start:end].lower())
+        if not url:
+            row = store.get(text[target_start:end].lower())
+            if row and row["kind"] != "source":
+                raise ValueError("generic text cannot be a source-link target; use an automatically registered source")
         if url:
             # Markdown decodes entities and escapes, parses code spans, and
             # splits table cells at pipes inside link targets.
@@ -189,58 +214,101 @@ def _link_at(text: str, start: int, store: ThreadDataStore) -> tuple[int, str, s
             target = (re.sub(r"&(?=(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]+);)",
                              "&amp;", url).replace("\\", "&#92;")
                      .replace("`", "&#96;").replace("|", "&#124;"))
-            return end + 1, f"[{label}](<{target}>)", url
-        return end + 1, f"{label} {_UNBOUND}", None
-    return end, f"{label} {_UNBOUND}", None
+            return end + 1, f"[{label}](<{target}>)", url, label_used_text
+        return end + 1, f"{label} {_UNBOUND}", None, label_used_text
+    return end, f"{label} {_UNBOUND}", None, label_used_text
 
 
-def resolve_references(text: str, store: ThreadDataStore,
-                       max_output_bytes: int | None = None,
-                       *, bound_sources: list[str] | None = None) -> str:
-    """Resolve explicit source refs; preserve ordinary text and URLs.
-
-    ``max_output_bytes`` bounds UTF-8 output and raises on overflow.
-    ``bound_sources`` collects exact host URLs for an internal fact-check read;
-    outward Markdown keeps escaped targets for exact rendered destinations.
-    """
+def _resolve_once(text: str, store: ThreadDataStore,
+                  max_output_bytes: int | None = None, *,
+                  bound_sources: list[str] | None = None,
+                  text_only: bool = False, bind_text: bool = False) -> tuple[str, bool]:
+    """Substitute original tokens once; inserted values are never reparsed."""
     parts = []
     used = 0
+    used_text = False
 
     def append(piece: str) -> None:
         nonlocal used
-        if max_output_bytes is not None:
+        if max_output_bytes is not None or bind_text:
             used += len(piece.encode("utf-8"))
-            if used > max_output_bytes:
+            limit = max_output_bytes if max_output_bytes is not None else (
+                _MAX_TEXT_OUTPUT if used_text else None)
+            if limit is not None and used > limit:
                 raise ValueError("resolved research report exceeds 8 MiB source-binding limit")
         parts.append(piece)
 
     position = 0
-    while marker := _STREAM_START.search(text, position):
+    scanner = _TEXT_START if bind_text else _STREAM_START
+    while marker := scanner.search(text, position):
         append(text[position:marker.start()])
-        if text[marker.start()] == "[":
-            link = _link_at(text, marker.start(), store)
+        if marker.group().lower().startswith(("http://", "https://")):
+            append(marker.group())
+            position = marker.end()
+        elif text[marker.start()] == "[":
+            link = None if text_only else _link_at(text, marker.start(), store, bind_text)
             if link is None:
                 append("[")
                 position = marker.start() + 1
             else:
-                position, replacement, bound_url = link
+                position, replacement, bound_url, label_used_text = link
+                used_text |= label_used_text
                 append(replacement)
                 if bound_sources is not None and bound_url is not None:
                     bound_sources.append(bound_url)
         else:
-            bare = _BARE_REF.match(text, marker.start())
-            assert bare is not None
-            bound_url = source_url(store, bare.group(1).lower())
-            append(bound_url or _UNBOUND)
+            token = _INLINE_REF.match(text, marker.start())
+            assert token is not None
+            row = store.get(token.group(1).lower())
+            escaped = marker.start() > 0 and text[marker.start() - 1] == "\\"
+            bound_url = None
+            if bind_text and row and row["kind"] != "source" and not escaped:
+                _check_text_value(row["value"])
+                used_text = True
+                append(row["value"])
+            elif not text_only and _BARE_REF.match(text, marker.start()):
+                bound_url = row["value"] if row and row["kind"] == "source" else None
+                append(bound_url or _UNBOUND)
+            else:
+                append(token.group())
             if bound_sources is not None and bound_url is not None:
                 bound_sources.append(bound_url)
-            position = bare.end()
+            position = token.end()
     append(text[position:])
-    return "".join(parts)
+    return "".join(parts), used_text
+
+
+def resolve_references(text: str, store: ThreadDataStore,
+                       max_output_bytes: int | None = None, *,
+                       bound_sources: list[str] | None = None,
+                       text_only: bool = False) -> str:
+    """Bind exact inline text and source refs; leave ordinary URLs unchanged.
+
+    File arguments use ``text_only`` to retain source drafts. Generic insertion
+    must already be stable under another full pass. Escapes are retained, not
+    decoded. Only source records contribute to ``bound_sources`` or link targets.
+    """
+    available = store.has_text_records()
+    resolved, used_text = _resolve_once(
+        text, store, max_output_bytes, bound_sources=bound_sources,
+        text_only=text_only, bind_text=available)
+    if used_text:
+        complete = (_resolve_once(text, store, max_output_bytes, bind_text=True)[0]
+                    if text_only else resolved)
+        if _resolve_once(complete, store, max_output_bytes, bind_text=True)[0] != complete:
+            raise ValueError("text insertion would create another reference; preserve literal boundaries")
+    return resolved
+
+
+def _display_references(text: str, store: ThreadDataStore) -> str:
+    try:
+        return resolve_references(text, store)
+    except ValueError as error:
+        return f"[text reference unresolved: {error}]"
 
 
 class ReferenceStream:
-    """Hold incomplete explicit references until their source target is known."""
+    """Stream sources incrementally; check whole messages when text records exist."""
 
     def __init__(self, store: ThreadDataStore):
         self.store = store
@@ -248,8 +316,24 @@ class ReferenceStream:
         self.last_emitted_char = ""
         self.discard_invalid_target = False
         self.discard_bare_id = False
+        self.text_mode = None
+        self.text_parts = []
+        self.text_bytes = 0
 
     def push(self, text: str, *, final: bool = False) -> str:
+        if self.text_mode is None and (text or self.pending):
+            self.text_mode = self.store.has_text_records()
+        if self.text_mode:
+            self.text_bytes += len(text.encode("utf-8"))
+            if self.text_bytes > _MAX_TEXT_OUTPUT:
+                raise ValueError("reference message exceeds 8 MiB")
+            self.text_parts.append(text)
+            if not final:
+                return ""
+            result = _display_references("".join(self.text_parts), self.store)
+            self.text_parts = []
+            self.text_bytes = 0
+            return result
         if self.discard_bare_id:
             boundary = re.search(r"[^A-Za-z0-9_-]", text)
             if boundary is None:
@@ -340,6 +424,9 @@ class ReferenceStream:
         self.last_emitted_char = ""
         self.discard_invalid_target = False
         self.discard_bare_id = False
+        self.text_mode = None
+        self.text_parts = []
+        self.text_bytes = 0
 
 
 def _current_store() -> ThreadDataStore | None:
@@ -373,6 +460,33 @@ def list_thread_data(kind: str | None = None, limit: int = 20) -> str:
     return _read_records(kind, limit)
 
 
+def put_thread_data(value: str, title: str = "") -> str:
+    """Keep important exact text from user/tool context as a new immutable record.
+
+    Use for values whose spelling matters across reuse: identifiers, names,
+    quotations or exact passages. Copy the returned reference inline in replies
+    or file text, including sentences/table cells; do not reconstruct its ID.
+    For edit_file with references, BOTH exact old_string and new_string must
+    include their surrounding newline bytes. Read the saved file first.
+    Source URLs from retrieval already register automatically; use source_link
+    for citations. This tool never verifies facts or creates source authority.
+    Values are at most 65536 characters. Unescaped ref: is reserved; explicit
+    backslashes shield literal tokens and remain in output without decoding.
+    """
+    store = _current_store()
+    if store is None:
+        return "Thread data is unavailable in this conversation."
+    try:
+        if not isinstance(value, str):
+            raise ValueError("value must be text")
+        _check_text_value(value)
+        record_id = store.put_text(value, title=title)
+    except ValueError as error:
+        return f"Invalid exact text: {error}"
+    return json.dumps({"id": record_id, "kind": "text", "title": title,
+                       "reference": f"ref:{record_id}"}, ensure_ascii=False)
+
+
 def search_thread_data(query: str, kind: str | None = None, limit: int = 20) -> str:
     """Find thread text records by literal substring. Get a record for its full value."""
     return _read_records(kind, limit, query)
@@ -388,16 +502,50 @@ def get_thread_data(record_id: str) -> str:
 
 
 class ReferenceBindingMiddleware(AgentMiddleware):
-    """Capture trusted retrieval URLs and resolve explicit model references."""
+    """Bind generic file text eagerly; capture sources and bind outward refs."""
 
     def __init__(self, *, bind_file_refs: bool = False):
         self.bind_file_refs = bind_file_refs
 
     def wrap_tool_call(self, request: ToolCallRequest, handler):
-        return self._bind_result(request, handler(request))
+        prepared = self._bind_arguments(request)
+        if isinstance(prepared, ToolMessage):
+            return prepared
+        return self._bind_result(prepared, handler(prepared))
 
     async def awrap_tool_call(self, request: ToolCallRequest, handler):
-        return self._bind_result(request, await handler(request))
+        prepared = self._bind_arguments(request)
+        if isinstance(prepared, ToolMessage):
+            return prepared
+        return self._bind_result(prepared, await handler(prepared))
+
+    def _bind_arguments(self, request):
+        name = request.tool_call.get("name")
+        if name not in {"write_file", "edit_file"}:
+            return request
+        store = _current_store()
+        if store is None:
+            return request
+        args = request.tool_call.get("args") or {}
+        keys = ("content",) if name == "write_file" else ("old_string", "new_string")
+        replacements = {}
+        try:
+            for key in keys:
+                value = args.get(key)
+                if isinstance(value, str):
+                    resolved = resolve_references(value, store, text_only=True)
+                    if resolved != value:
+                        replacements[key] = resolved
+            if name == "edit_file" and replacements:
+                if not all(isinstance(args.get(key), str)
+                           and args[key].startswith("\n") and args[key].endswith("\n")
+                           for key in keys):
+                    raise ValueError("reference-bearing edits need the exact surrounding newline in BOTH old_string and new_string")
+        except ValueError as error:
+            return ToolMessage(content=f"Text reference error: {error}", status="error",
+                               name=name, tool_call_id=request.tool_call["id"])
+        return (request.override(tool_call={**request.tool_call, "args": {**args, **replacements}})
+                if replacements else request)
 
     def _bind_result(self, request: ToolCallRequest, result):
         store = _current_store()
@@ -454,7 +602,7 @@ class ReferenceBindingMiddleware(AgentMiddleware):
         last = messages[-1]
         if not isinstance(last.content, str):
             return None
-        resolved = resolve_references(last.content, store)
+        resolved = _display_references(last.content, store)
         if resolved == last.content:
             return None
         return {"messages": [last.model_copy(update={"content": resolved})]}

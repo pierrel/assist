@@ -428,10 +428,14 @@ def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
     parent_ref = register_source(parent_data, "https://source.example/parent-search")
     first_ref = register_source(child_data, "https://source.example/first")
     note_id = child_data.put_text("child research notes", "note", "Context")
+    exact_id = child_data.put_text("QL-01lI-7b92-0O5a", title="Shipment ID")
 
     first = threads._complete_child_handoff(child)
     assert source_url(parent_data, first_ref) == "https://source.example/first"
     assert parent_data.get(note_id) is None
+    assert parent_data.get(exact_id)["value"] == "QL-01lI-7b92-0O5a"
+    assert parent_data.get(exact_id)["kind"] == "text"
+    assert source_url(parent_data, exact_id) is None
     second_ref = register_source(child_data, "https://source.example/second")
     second = threads._complete_child_handoff(child)
 
@@ -458,6 +462,8 @@ def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
         retrieved = TOOLS["get_async_task_result"].func(
             child.thread_id, SimpleNamespace(tool_call_id="result"))
     assert first_ref in retrieved and second_ref in retrieved
+    assert f"ref:{exact_id}" in retrieved
+    assert "QL-01lI-7b92-0O5a" in retrieved
     assert note_id not in retrieved
     assert parent_ref not in retrieved and other_ref not in retrieved
 

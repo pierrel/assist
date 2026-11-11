@@ -20,7 +20,8 @@ from assist.web_main_prompt import render_deep_web_main_prompt
 from assist.spec import AgentSpec
 from assist.tools import directions, map_data, read_url, search_internet, travel
 from assist.thread_datastore import (
-    ReferenceBindingMiddleware, get_thread_data, list_thread_data, search_thread_data)
+    ReferenceBindingMiddleware, get_thread_data, list_thread_data, search_thread_data,
+    put_thread_data)
 from assist.backends import (
     DOMAIN_SKILLS_PATH,
     LegacySkillsBackend,
@@ -355,7 +356,7 @@ def create_agent(model: BaseChatModel,
     backend — canonical field semantics live on the spec.  ``spec=None``
     means ``AgentSpec()`` — the defaults.  ``spec.default_backend`` is
     mutually exclusive with ``sandbox_backend``. ``thread_data_available``
-    gates Assist's built-in record lookup tools; Thread sets it from its
+    gates Assist's built-in immutable record tools; Thread sets it from its
     datastore path.
 
     Passing ``agent_dir`` enables local-mode private state at ``/agent`` and
@@ -487,7 +488,7 @@ def create_agent(model: BaseChatModel,
         *list(spec.tools),
         *execution_egress_tools,
         travel, directions, map_data, read_url,
-        *([get_thread_data, list_thread_data, search_thread_data]
+        *([put_thread_data, get_thread_data, list_thread_data, search_thread_data]
           if thread_data_available and (spec.web_main or spec.role == "delegate")
           else []),
         *([search_internet] if web_quick_research else []),
@@ -810,7 +811,7 @@ def create_research_agent(model: BaseChatModel,
     The default research lead delegates searching, critique, and fact-checking.
     ``leaf=True`` instead builds the direct search/read worker used by subagent runs;
     it cannot recursively delegate on the single model slot.
-    ``thread_data_available`` gates record lookup tools in both profiles.
+    ``thread_data_available`` gates immutable record tools in both profiles.
     ``trust_human_messages=False`` carries a delegate's URL trust boundary into
     its synchronous search and fact-check specialists.
 
@@ -959,7 +960,7 @@ def create_research_agent(model: BaseChatModel,
         "description": "Used to research more in depth questions. Only give this researcher one topic at a time. It will return research results.",
         "system_prompt": base_prompt_for("deepagents/sub_research.txt.j2"),
         "tools": [search_internet, read_url,
-                  *([get_thread_data, list_thread_data, search_thread_data]
+                  *([put_thread_data, get_thread_data, list_thread_data, search_thread_data]
                     if thread_data_available else []),
                   *execution_egress_tools],
         "middleware": _subagent_safety_mw() + _read_url_guards(
@@ -1003,7 +1004,7 @@ def create_research_agent(model: BaseChatModel,
     # and enforces clean delegation instead of the orchestrator doing worker work.
     # Execution and egress are one capability: no execution-capable research
     # profile can hit the proxy without also getting its approval workflow.
-    data_tools = ([get_thread_data, list_thread_data, search_thread_data]
+    data_tools = ([put_thread_data, get_thread_data, list_thread_data, search_thread_data]
                   if thread_data_available else [])
     leaf_tools = ([search_internet, read_url, *data_tools, *execution_egress_tools]
                   if leaf else data_tools)

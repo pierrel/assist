@@ -31,6 +31,16 @@ def test_task_source_link_is_built_from_host_source_id():
     assert source["source_link"] == "[Wrong](https://wrong.example)"
 
 
+def test_task_generic_reference_retains_text_kind_and_host_identity():
+    record_id = "r0123456789abcdef0123456789abcdef"
+    row = {"id": record_id, "kind": "text", "value": "QL-01lI-7b92-0O5a",
+           "title": "Shipment ID", "reference": "ref:wrong"}
+    result = json.loads(_format_task({"status": "success", "result": "Done"}, data=[row]))
+    assert result["data"] == [{**row, "reference": f"ref:{record_id}"}]
+    assert "sources" not in result
+    assert row["reference"] == "ref:wrong"
+
+
 def _runtime(call_id="call-1"):
     return SimpleNamespace(tool_call_id=call_id)
 

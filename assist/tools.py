@@ -250,6 +250,10 @@ def _extract_main_content(html: str, base_url: str = "") -> str:
 def read_url(url: str) -> str:
     """Extract the readable content from the given url.
 
+    With thread data available, successful reads automatically register the
+    exact source URL and return a source link. Copy that link for citations;
+    registration preserves identity, not factual verification.
+
     Returns the page's main article text where the page marks one
     (``<article>``/``<main>``) so the char budget holds signal, not nav/footer
     chrome; degrades to a whole-page text strip (scripts/styles removed) when
@@ -299,6 +303,10 @@ def search_internet(
 ) -> str:
     """Search the web via the self-hosted SearXNG metasearch at
     ``ASSIST_SEARCH_URL`` (private, multi-engine, no key).
+
+    With thread data available, returned source URLs register automatically
+    and include source_id/source_link. Copy source_link for citations and use
+    url for navigation. Registration does not mean the page was read or verified.
 
     Queries ONE engine at a time in ``_ROTATION_ENGINES`` order and returns the FIRST
     engine that yields results (deterministic). Returns ``_SEARCH_UNAVAILABLE_MESSAGE``

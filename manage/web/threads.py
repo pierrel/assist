@@ -2912,13 +2912,15 @@ def _complete_child_handoff(run: Run) -> Run | None:
         logging.info("parent of child run %s was deleted", run.id)
         MANAGER.hard_delete(run.thread_id)
         return None
-    # Import host-authored records before the idempotent existing-wake return:
+    # Import immutable child records before the idempotent existing-wake return:
     # recovery can revisit this handoff after creating the wake but before the
-    # parent has read the child's results. Child prose never registers sources.
+    # parent has read the child's results. Generic text retains its kind;
+    # only retrieval registers sources, never child prose or generic writes.
     from assist.thread_datastore import ThreadDataStore
     parent_data = ThreadDataStore(MANAGER.thread_datastore_path(run.parent_thread_id))
     child_data = ThreadDataStore(MANAGER.thread_datastore_path(run.thread_id))
     parent_data.import_from(child_data, owner=run.thread_id, kind="source")
+    parent_data.import_from(child_data, owner=run.thread_id, kind="text")
     dispatch_key = f"task-completion:{run.id}"
     existing = next(
         (candidate for candidate in _runs().list(run.parent_thread_id)

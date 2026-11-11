@@ -106,7 +106,7 @@ _ASYNC_TASK_TOOLS = {
     "cancel_async_task",
     "list_async_tasks",
 }
-_THREAD_DATA_TOOLS = {"get_thread_data", "list_thread_data", "search_thread_data"}
+_THREAD_DATA_TOOLS = {"put_thread_data", "get_thread_data", "list_thread_data", "search_thread_data"}
 # Per-run trusted URL seeds for a delegate. The web composition root freezes the
 # intersection of its brief and already-accepted owner Runs; the model cannot write
 # the durable Run field or RunnableConfig.
