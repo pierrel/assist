@@ -63,21 +63,26 @@ HANDOFF_PROMPT = (
 )
 
 
-def _save_trace(tmp_path, prompts, results):
+def _save_trace(tmp_path, prompts, results, saved_notes=()):
     (tmp_path / "messages.json").write_text(json.dumps({
         "prompts": prompts,
         "turns": [[message.model_dump(mode="json")
                    for message in result["messages"]] for result in results],
+        "saved_notes": saved_notes,
     }, indent=2, ensure_ascii=False))
+
+
+def _entry_spans(text, entries):
+    names = "|".join(re.escape(entry[0]) for entry in entries)
+    starts = list(re.finditer(names, text))
+    return [(match.group(), text[match.start():
+              starts[index + 1].start() if index + 1 < len(starts) else len(text)])
+             for index, match in enumerate(starts)]
 
 
 def _assert_entries(text, entries):
     """Require complete, correctly paired entries in a layout-neutral name span."""
-    names = "|".join(re.escape(entry[0]) for entry in entries)
-    starts = list(re.finditer(names, text))
-    spans = [(match.group(), text[match.start():
-              starts[index + 1].start() if index + 1 < len(starts) else len(text)])
-             for index, match in enumerate(starts)]
+    spans = _entry_spans(text, entries)
     for entry in entries:
         assert any(name == entry[0] and all(value in span for value in entry)
                    for name, span in spans), (entry, text)
@@ -135,6 +140,7 @@ def test_receiving_note_preserves_user_values_through_file_update(tmp_path, monk
                                "thread_datastore_path": store.path},
               "recursion_limit": 200}
     results = []
+    saved_notes = []
     messages = []
     with (patch("assist.tools.requests.get", side_effect=AssertionError("no network expected")),
           patch("assist.agent.create_context_agent", _context_fixture),
@@ -159,19 +165,26 @@ def test_receiving_note_preserves_user_values_through_file_update(tmp_path, monk
                     raise AssertionError("shipment fixture exceeded eight completion wakes")
             except Exception as error:
                 partial = agent.get_state(config).values
-                _save_trace(tmp_path, RECEIVING_PROMPTS[:len(results) + 1], results + [partial])
+                _save_trace(tmp_path, RECEIVING_PROMPTS[:len(results) + 1],
+                            results + [partial], saved_notes)
                 (tmp_path / "error.txt").write_text(repr(error))
                 raise
             results.append(result)
             messages = result["messages"]
-            _save_trace(tmp_path, RECEIVING_PROMPTS[:len(results)], results)
+            note = workspace / "receiving.md"
+            saved_notes.append(note.read_text() if note.exists() else None)
+            _save_trace(tmp_path, RECEIVING_PROMPTS[:len(results)], results, saved_notes)
     _assert_entries(results[0]["messages"][-1].content, SHIPMENTS)
+    initial_save = saved_notes[1]
+    _assert_entries(initial_save, SHIPMENTS)
+    for name, *_rest in SHIPMENTS:
+        assert any(entry_name == name and re.search(r"(?i)awaiting inspection", span)
+                   for entry_name, span in _entry_spans(initial_save, SHIPMENTS))
     saved = (workspace / "receiving.md").read_text()
     _assert_entries(saved, SHIPMENTS)
-    first = saved.find(SHIPMENTS[0][0])
-    second = saved.find(SHIPMENTS[1][0])
-    assert re.search(r"(?i)pass", saved[first:second])
-    assert re.search(r"(?i)pending|awaiting inspection", saved[second:])
+    for index, pattern in ((0, r"(?i)pass"), (1, r"(?i)pending|awaiting inspection")):
+        assert any(name == SHIPMENTS[index][0] and re.search(pattern, span)
+                   for name, span in _entry_spans(saved, SHIPMENTS))
     calls = [call for message in messages if isinstance(message, AIMessage)
              for call in message.tool_calls]
     assert any(call["name"] == "edit_file" for call in calls)

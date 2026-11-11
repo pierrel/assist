@@ -29,6 +29,7 @@ than published in this packet.
 | c2d2739 | Initial user-value receiving control, 40 graph steps, 300 s wall | Exact first reply and saved receiving.md; both statuses Awaiting inspection. Graph cap reached during save/show at 287.08 s; update prompt unrun. | Capped harness outcome; not core tool-output coverage |
 | c2d2739 | Research clean, source links alongside entries | Both names/IDs/eligibility strings and their own exact URLs retained; 25.65 s | 1/1 PASS |
 | c2d2739 | Core main tool-output receiving row, 40 graph steps, 300 s wall | Shipment lookup; exact draft; exact saved receiving.md and render reply at checkpoint. Graph cap reached after 62.48 s; update unrun. | Capped harness outcome retained separately |
+| c2d2739 | Delegate tool-output, deterministic context fixture, 200 steps, 300 s wall | Real shipment lookup; exact reply; saved note read back; both initial statuses preserved; first status changed to Passed inspection while second stayed Awaiting inspection. 102.69 s. | 1/1 PASS |
 
 The checkpoint showed a completed save/render response at the cap. The main
 harness was corrected to submit only the new user message to its existing
@@ -58,10 +59,15 @@ uses the context worker's actual saved-file read.
 
 The initial deterministic regression run passed 92 tests, then reached its
 120 s cap at the first local ASGI exchange under the network-restricted
-sandbox. The same mocked panel is rerunning through supported local-network
-escalation. That run passed *228 tests and 8 subtests in 2.76 s*. It covered
+sandbox. The same mocked panel reran through supported local-network
+escalation and passed *228 tests and 8 subtests in 2.76 s*. It covered
 thread records, URL provenance, async task/result and durable Run handoff,
 factory capabilities, research finalization and sandbox report transfer.
+
+The observed model is =Qwen3.8-27B-UD-Q4_K_XL.gguf=, provider fingerprint
+=b1648-192067b7=. Trials use the repository's =select_assistant_model= settings,
+including its Qwen3.8 sampling/thinking selection, rather than assuming the
+older model named in historical guidance.
 
 * Proposed smallest implementation
 
