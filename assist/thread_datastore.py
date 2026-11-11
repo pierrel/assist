@@ -33,26 +33,37 @@ _INLINE_REF = re.compile(r"ref:([A-Za-z0-9_-]*)", re.I)
 _TEXT_START = re.compile(r"https?://|\[|ref:([A-Za-z0-9_-]*)", re.I)
 _URL_LITERAL = re.compile(r"https?://[^\s<>]+", re.I)
 _LABEL_BOUNDARIES = re.compile(r"\\[^\n]|\[|\]|\n")
+_SAVED_FILE_REFS = re.compile(r"https?://[^\s<>]+|ref:([A-Za-z0-9_-]*)", re.I)
 BOUND_FILE_URLS_ARTIFACT = "assist_bound_file_urls"
+
+
+def _code_spans(text: str) -> list[tuple[int, int, int]]:
+    """Pair lexical code runs linearly, retaining content and closing bounds."""
+    tokens = [token for token in TableProcessor.RE_CODE_PIPES.finditer(text)
+              if token.group(2) or token.group(3)]
+    future, closes = {}, {}
+    for token in reversed(tokens):
+        escaped = bool(token.group(2))
+        size = len(token.group(2) or token.group(3)) - escaped
+        closes[token.start()] = future.get(size - escaped) if size > escaped else None
+        future[size] = (token.start(), token.end())
+    code_end, spans = 0, []
+    for token in tokens:
+        if token.start() < code_end:
+            continue
+        if close := closes[token.start()]:
+            spans.append((token.end(), *close))
+            code_end = close[1]
+    return spans
 
 
 def _table_pipes(row: str) -> list[int]:
     """Find renderer-compatible pipes with linear code-span/escape handling."""
-    tokens = list(TableProcessor.RE_CODE_PIPES.finditer(row))
-    future, closes = {}, {}
-    for token in reversed(tokens):
-        if token.group(2) or token.group(3):
-            escaped = bool(token.group(2))
-            size = len(token.group(2) or token.group(3)) - escaped
-            closes[token.start()] = future.get(size - escaped, 0) if size > escaped else 0
-            future[size] = token.end()
-    code_end, pipes = 0, []
-    for token in tokens:
-        if token.start() < code_end:
-            continue
-        if token.group(2) or token.group(3):
-            code_end = closes[token.start()]
-        elif token.group(5):
+    spans, cursor, pipes = _code_spans(row), 0, []
+    for token in TableProcessor.RE_CODE_PIPES.finditer(row):
+        while cursor < len(spans) and token.start() >= spans[cursor][2]:
+            cursor += 1
+        if token.group(5) and not (cursor < len(spans) and spans[cursor][0] <= token.start()):
             pipes.append(token.start())
     return pipes
 
@@ -73,7 +84,7 @@ def _table_lines(text: str):
         end = text.find("\n", start)
         if end < 0:
             end = len(text)
-        row = text[start:end]
+        row = text[start:end].removesuffix("\r")
         stripped = row.strip(" ")
         marker = re.match(r"(`{3,}|~{3,})", row)
         opening = (not fence and marker and FencedBlockPreprocessor.FENCED_BLOCK_RE.match(
@@ -91,7 +102,7 @@ def _table_lines(text: str):
         else:
             if block_start and end < len(text):
                 following_end = text.find("\n", end + 1)
-                separator = text[end + 1:following_end if following_end >= 0 else len(text)].strip(" ")
+                separator = text[end + 1:following_end if following_end >= 0 else len(text)].removesuffix("\r").strip(" ")
                 if "|" in separator and set(separator) <= set("|:- "):
                     width, border = _table_width(row)
                     table = (width > 1 or border) and _table_width(separator, border)[0] == width
@@ -122,9 +133,10 @@ def _text_scanner(text: str, edit_context: bool = False):
     pipe_index = 0
     label_end = -1
     label_ends = None
+    code_spans, code_index = None, 0
 
     def scan(position: int):
-        nonlocal line_end, pipes, pipe_index, label_end, label_ends
+        nonlocal line_end, pipes, pipe_index, label_end, label_ends, code_spans, code_index
         marker = _TEXT_START.search(text, position)
         if marker is None:
             return None
@@ -142,6 +154,13 @@ def _text_scanner(text: str, edit_context: bool = False):
                     label_end = max(label_end, close)
             return marker
         start, end = marker.span()
+        if code_spans is None:
+            code_spans = _code_spans(text)
+        while code_index < len(code_spans) and start >= code_spans[code_index][2]:
+            code_index += 1
+        if (code_index < len(code_spans)
+                and code_spans[code_index][0] <= start < code_spans[code_index][1]):
+            return _URL_LITERAL.match(text, start, code_spans[code_index][1]) or marker
         if start and text[start - 1] == "<":
             return _URL_LITERAL.match(text, start) or marker
         prefix = start
@@ -310,7 +329,7 @@ def resolve_host_report(path: str, store: ThreadDataStore) -> bool:
         if len(data) > 8 * 1024 * 1024:
             raise ValueError("final research report exceeds 8 MiB source-binding limit")
         original = data.decode("utf-8")
-        resolved = resolve_references(original, store,
+        resolved = resolve_file_references(original, store,
                                       max_output_bytes=8 * 1024 * 1024)
         if resolved == original:
             return False
@@ -462,6 +481,25 @@ def resolve_references(text: str, store: ThreadDataStore,
         if _resolve_once(complete, store, check_limit, bind_text=True, edit_context=edit_context)[0] != complete:
             raise ValueError("text insertion would create another reference; preserve literal boundaries")
     return resolved
+
+
+def resolve_file_references(text: str, store: ThreadDataStore,
+                            max_output_bytes: int = _MAX_TEXT_OUTPUT, *,
+                            bound_sources: list[str] | None = None) -> str:
+    """Bind saved-file source refs only; generic values bind at write/edit time.
+
+    Saved URL bytes are opaque regardless of later Markdown context. Known raw
+    generic drafts outside those URLs are unsupported and fail before replacing
+    report bytes or projecting a read result. Explicit escapes remain literal.
+    """
+    if store.has_text_records():
+        for token in _SAVED_FILE_REFS.finditer(text):
+            if (token.group(1) is not None
+                    and (token.start() == 0 or text[token.start() - 1] != "\\")):
+                row = store.get(token.group(1).lower())
+                if row and row["kind"] != "source":
+                    raise ValueError("unbound generic reference in saved file; bind values with write_file/edit_file before saving")
+    return _resolve_once(text, store, max_output_bytes, bound_sources=bound_sources)[0]
 
 
 def _display_references(text: str, store: ThreadDataStore) -> str:
@@ -745,8 +783,11 @@ class ReferenceBindingMiddleware(AgentMiddleware):
                                                  f"Source link: [Source](ref:{record_id})\n{result.content}"})
         if self.bind_file_refs and name == "read_file" and isinstance(result.content, str):
             bound_sources: list[str] = []
-            resolved = resolve_references(result.content, store,
-                                          bound_sources=bound_sources)
+            try:
+                resolved = resolve_file_references(result.content, store,
+                                                  bound_sources=bound_sources)
+            except ValueError as error:
+                return result.model_copy(update={"content": f"File reference error: {error}", "status": "error"})
             if resolved != result.content:
                 from assist.middleware.url_provenance import urls_in_text
                 original_urls = urls_in_text(result.content)

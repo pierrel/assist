@@ -126,8 +126,8 @@ class ReferencesCleanupRunnable:
         if self._sandbox is not None:
             data, stamp = self._sandbox_read(basename)
             original = data.decode("utf-8")
-            from assist.thread_datastore import resolve_references
-            resolved = resolve_references(original, store,
+            from assist.thread_datastore import resolve_file_references
+            resolved = resolve_file_references(original, store,
                                           max_output_bytes=8 * 1024 * 1024)
             if resolved != original:
                 self._sandbox_replace(basename, stamp, resolved.encode("utf-8"))
