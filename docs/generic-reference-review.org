@@ -78,7 +78,13 @@ statement that verification did not occur passes. A keyword regex cannot
 reliably distinguish those statements, so it is not a verification oracle.
 An automated test pass alone is not reported as a verification-quality pass.
 
-* Capability choice before runtime implementation
+* Selected inline capability
+
+Pierre selected *inline references*: individual registered IDs, names and
+quotations must work inside sentences and table cells. Option B below is the
+chosen capability; Option A is retained only to explain the narrower alternative
+that was considered. The product choice is settled. Runtime implementation waits
+for the frozen N=3 baseline, then proceeds on the smallest shared path.
 
 No runtime implementation exists yet. Reuse
 [[file:../assist/thread_datastore.py::class ThreadDataStore][ThreadDataStore]] and its existing immutable =put_text= operation. Add one
@@ -93,7 +99,7 @@ descriptions explain automatic source registration; the generic tool explains
 important exact text and the absence of factual verification. No option below
 is implemented or being presented as reviewed runtime behavior.
 
-** Option A: protect a complete line, paragraph or table row
+** Alternative considered: protect a complete line, paragraph or table row
 
 The agent registers the complete exact block it wants preserved. Its generic
 token occupies a line by itself in a reply or =write_file= content, or in a
@@ -123,7 +129,7 @@ Reserved case-insensitive =ref:= text inside a generic value remains unsupported
 and must be rejected explicitly. Invalid generic placement must be rejected
 before source-link parsing, including a generic token hidden in a link label.
 
-** Option B: interpolate exact values inside sentences, rows and edits
+** Chosen: interpolate exact values inside sentences, rows and edits
 
 The agent can store =QL-01lI-7b92-0O5a= alone and place its generic token after
 =Shipment ID:= or inside a Markdown table cell. It can reuse a generic token
@@ -137,12 +143,23 @@ finalization or checker reads. Validating =old_string= and =new_string= in
 isolation is insufficient. Source refs that were intentionally present before
 the edit must continue to work. Streamed and canonical messages must agree.
 
-The minimum safe implementation is not settled. A complete-postimage check
-would also need to bind its check to the actual write under the existing
-concurrency/ownership contract. Durable escaping or binding metadata is another
-possible approach, with additional representation and lifecycle work. A
-whole-message buffer could check inline response output, but does not by itself
-solve file edit seams. No new machinery is authorized by this option description.
+The bounded implementation proposal is a full-text, single-pass expansion with
+an explicit stability check. Reference-bearing =edit_file= arguments retain
+surrounding newline context in *both* exact old/new strings, enclosing the edited
+sentence or table row. References within that fragment remain inline. Those
+preserved boundaries would prevent joining an inserted value to unseen file
+prefix/suffix syntax without a racy full-file precheck. Ordinary literal edits
+keep the existing contract. The natural receiving-note row must demonstrate
+that this argument shape remains usable and matches the saved file's exact bytes.
+
+A generic-bearing response may need whole-message buffering to check the same
+full text before emission. Source-only streaming remains unchanged. Reserved
+reference-looking literal text needs an explicit stable rule or rejection;
+it must never be silently reinterpreted. These details remain design obligations,
+not implemented claims. A complete-postimage check with write ownership or
+durable escaping metadata would be a larger alternative if the bounded approach
+fails a concrete ordinary-value case. No tracking framework is being added
+preemptively.
 
 ** Actual minimal edit-boundary counterexample
 

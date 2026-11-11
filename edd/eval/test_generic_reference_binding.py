@@ -251,7 +251,7 @@ def test_main_consumes_exact_values_from_completed_child(tmp_path, monkeypatch):
     store = ThreadDataStore(str(tmp_path / "thread-data.sqlite"))
     config = {"configurable": {"thread_id": "award-parent",
                                "thread_datastore_path": store.path},
-              "recursion_limit": 30}
+              "recursion_limit": 200}
     agent = create_agent(select_assistant_model(0.1), str(workspace),
                          spec=prompt_rewrite_web_main_spec(),
                          thread_data_available=True)
