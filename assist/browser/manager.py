@@ -212,11 +212,13 @@ class BrowserSession:
                  threads_root: str, user_request: BrowserUserRequest | None,
                  *, work_id: str | None = None,
                  sandbox_generation: str | None = None,
+                 sandbox_backend=None,
                  run_service: RunService | None = None):
         self.thread_id = thread_id
         self.run_id = run_id
         self.work_dir = work_dir
         self.sandbox_generation = sandbox_generation
+        self.sandbox_backend = sandbox_backend
         self.threads_root = threads_root
         self.user_request = user_request
         self.work_id = work_id
@@ -228,6 +230,7 @@ class BrowserSession:
         self.identity: _ContainerIdentity | None = None
         self.startup_uncertain = False
         self.closed = False
+        self.paused = False
         self._lock = threading.RLock()
 
     def _start(self):
@@ -309,6 +312,10 @@ class BrowserSession:
 
     def _latest_direct_sequence(self) -> int:
         runs = self.run_service.list(self.thread_id)
+        if self.work_id is not None and any(
+                run.work_id == self.work_id and run.status == "cancelled"
+                for run in runs):
+            raise BrowserUnavailable("browser work was cancelled")
         if any(run.status == "revocation_pending" for run in runs):
             raise BrowserUnavailable("newer user message revoked browser startup")
         return max((run.admission_sequence for run in runs
@@ -340,7 +347,7 @@ class BrowserSession:
                 self._stop()
 
     def _capture_storage(self):
-        if self.identity is None:
+        if self.identity is None or self.paused:
             return
         from assist.browser import storage
         try:
@@ -393,10 +400,19 @@ class BrowserSession:
                 raise BrowserUnavailable("browser session cannot adopt this request")
             self.user_request = request
 
+    def pause(self):
+        """Freeze the exact container before releasing the model slot."""
+        with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
+            _bounded_cli(["docker", "pause", self.sandbox_generation],
+                         limit=4096, timeout=10)
+            self.paused = True
+
     def command(self, operation: str, **args):
         with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
             if self.closed:
-                raise BrowserUnavailable("browser Run has ended")
+                raise BrowserUnavailable("browser turn has ended")
+            if self.paused:
+                raise BrowserUnavailable("browser work is paused by the scheduler")
             if self.startup_uncertain:
                 raise BrowserUnavailable(
                     "browser startup outcome is unconfirmed for this Run")
@@ -506,6 +522,32 @@ class BrowserManager:
     def current_session(cls, thread_id: str) -> BrowserSession | None:
         with cls._lock:
             return cls._sessions.get(thread_id)
+
+    @classmethod
+    def resume_session(cls, thread_id: str, work_id: str,
+                       request: BrowserUserRequest | None) -> BrowserSession | None:
+        """Reuse a live worker only for the same admitted logical user turn."""
+        with cls.bounded_thread_gate(thread_id):
+            session = cls.current_session(thread_id)
+            if session is None:
+                return None
+            with session._lock:
+                if (session.closed or session.identity is None
+                        or session.sandbox_backend is None
+                        or session.work_id != work_id or request is None
+                        or session.user_request != request):
+                    cls.cleanup(thread_id, session)
+                    return None
+                session._fence_command()
+                container = SandboxManager.current_container(session.work_dir)
+                if container is None or container.id != session.sandbox_generation:
+                    raise BrowserUnavailable("paused browser sandbox generation changed")
+                if not session.paused:
+                    raise BrowserUnavailable("browser sandbox was not paused")
+                _bounded_cli(["docker", "unpause", session.sandbox_generation],
+                             limit=4096, timeout=10)
+                session.paused = False
+                return session
 
     @classmethod
     def confirm_generation_stopped(cls, generation: str) -> None:

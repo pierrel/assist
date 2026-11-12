@@ -1146,7 +1146,11 @@ def _cancel_logical_run_fenced(tid: str, run_id: str) -> tuple[int, dict[str, An
                 # This one write cancels the newest pending or held slice, retires its
                 # interrupted same-work predecessors, and leaves the accepted
                 # handle with a retry receipt.
-                runs = service.cancel_logical(tid, run_id)
+                session = threads.BrowserManager.current_session(tid)
+                browser_owner = (session.run_id if session is not None
+                                 and session.work_id == projection["work_id"] else None)
+                runs = service.cancel_logical(
+                    tid, run_id, browser_owner_run_id=browser_owner)
             else:
                 if projection["cancel_cleanup"] is None:
                     return 409, {"detail": "Run is already terminal", "outcome": "cancelled",

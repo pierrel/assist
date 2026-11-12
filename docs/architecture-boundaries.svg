@@ -41,9 +41,9 @@
 <!-- C8&#45;&gt;C10 -->
 <g id="edge5" class="edge">
 <title>C8&#45;&gt;C10</title>
-<path fill="none" stroke="#49647d" d="M722.88,-472.98C686.1,-459.74 649.02,-446.4 649.02,-446.4 649.02,-446.4 624.65,-429.68 600.86,-413.36"/>
-<polygon fill="#49647d" stroke="#49647d" points="602.26,-411.35 595.1,-409.41 599.49,-415.39 602.26,-411.35"/>
-<text xml:space="preserve" text-anchor="middle" x="704.52" y="-435.95" font-family="DejaVu Sans" font-size="11.00">create / retire container</text>
+<path fill="none" stroke="#49647d" d="M704.45,-472.91C658.5,-459.69 612.27,-446.4 612.27,-446.4 612.27,-446.4 598.4,-430.67 584.44,-414.83"/>
+<polygon fill="#49647d" stroke="#49647d" points="586.37,-413.32 579.9,-409.69 582.7,-416.56 586.37,-413.32"/>
+<text xml:space="preserve" text-anchor="middle" x="686.15" y="-435.95" font-family="DejaVu Sans" font-size="11.00">create / freeze / resume / retire</text>
 </g>
 <!-- C8&#45;&gt;C11 -->
 <g id="edge6" class="edge">

@@ -53,6 +53,13 @@ where reliability is harder than with frontier APIs.
   including an approval or clarification pause.
   The [browser compatibility review guide](docs/browser-site-compatibility.org)
   maps its control and network boundaries.
+  During a fair-scheduler yield to another workspace, its exact container freezes
+  until the same admitted logical user turn resumes, preserving live pages and
+  form inputs.
+  Background shell work freezes too. A newer user event or cancellation still
+  revokes the old browser before later work can proceed.
+  The [architecture view](docs/architecture.org) records the unresolved
+  same-parent child lifetime boundary; this candidate is not ready for deployment.
   A separate browser UID can reach only its attributed listener on the
   existing egress proxy. The host seals new browser-debugging connections
   before any page command; agent tools cannot use that control channel.

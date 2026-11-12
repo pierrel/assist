@@ -35,7 +35,7 @@ digraph Assist {
   C5 -> C6 [label="construct + invoke graph"];
   C6 -> C7 [label="start task / read result"];
   C7 -> C3 [label="child + follow-up Runs", constraint=false];
-  C4 -> C8 [label="per-run Git / sandbox / browser control"];
+  C4 -> C8 [label="Git / sandbox / browser slice control"];
   C6 -> C8 [label="browser tool calls", constraint=false];
   C3 -> C9 [label="Run records", style=dashed];
   C5 -> C9 [label="checkpoints + files", style=dashed];
