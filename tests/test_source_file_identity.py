@@ -65,7 +65,7 @@ def test_each_colliding_source_saves_renders_and_checks_to_its_own_record(tmp_pa
         assert _file_source_records(before.decode(), store) == [store.get(ids[url])]
         checked = ReferenceBindingMiddleware(bind_file_refs=True)._bind_result(
             request("read_file", file_path=path),
-            ToolMessage(name="read_file", content=before.decode(), tool_call_id="call"))
+            ToolMessage(name="read_file", content=backend.read(path), tool_call_id="call"))
         assert checked.status == "success"
         assert checked.artifact[BOUND_FILE_URLS_ARTIFACT] == (url,)
         validate_host_report(str(saved))
@@ -135,3 +135,36 @@ def test_unsupported_encoded_link_context_fails_without_selecting_another_record
     assert not checked.artifact or not checked.artifact.get(BOUND_FILE_URLS_ARTIFACT)
     assert report.read_bytes() == original.encode()
     assert len(store.list(kind="source")) == 2
+
+
+@pytest.mark.parametrize("text", [
+    "paragraph\n    [S](<{}>)", "- item\n    [S](<{}>)", "1. item\n    [S](<{}>)",
+    "> paragraph\n    [S](<{}>)", "- item\n\n    [S](<{}>)", r"\[S](<{}>)",
+    "`[S](<{}>)`", "    [S](<{}>)",
+])
+def test_uncertain_link_shaped_indentation_or_escaping_never_chooses_literal_collision(tmp_path, text):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    a, b = PAIRS[0]
+    register_source(store, a)
+    register_source(store, b)
+    original = text.format(b)
+    with pytest.raises(ValueError, match="ambiguous"):
+        _file_source_records(original, store)
+
+
+def test_escaped_producer_link_reports_verification_failure_without_byte_changes(tmp_path, monkeypatch):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    a, b = PAIRS[0]
+    aid = register_source(store, a)
+    register_source(store, b)
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
+    from assist.thread_datastore import resolve_references
+    saved = resolve_references(r"\[S](ref:" + aid + ")", store, file_context=True)
+    file = tmp_path / "report.md"
+    file.write_text(saved)
+    before = file.read_bytes()
+    checked = ReferenceBindingMiddleware(bind_file_refs=True)._bind_result(
+        request("read_file", file_path="/report.md"),
+        ToolMessage(name="read_file", content="     1\t" + saved, tool_call_id="call"))
+    assert checked.status == "error" and "ambiguous" in checked.content
+    assert file.read_bytes() == before

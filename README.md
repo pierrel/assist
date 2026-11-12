@@ -108,8 +108,10 @@ where reliability is harder than with frontier APIs.
   preserves URL identity, not page availability or support for a claim. Generic
   registration verifies no fact and grants no URL-fetch authority.
   File-source verification uses the exact canonical encoder inverse for supported
-  link destinations and raw identity for bare URIs. Encoded links in unsupported
-  nested/HTML contexts fail verification without changing saved bytes. Unknown
+  link destinations and raw identity for bare URIs. Encoded links with ambiguous
+  escapes/code/container/HTML context fail verification without choosing a URI or
+  changing saved bytes. Checker analysis removes only host-owned line numbering;
+  returned file content stays literal. Unknown
   source IDs produce an unresolved-reference message that does not claim the
   link was checked.
 

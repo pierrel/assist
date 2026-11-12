@@ -99,8 +99,9 @@ in both views. An ID shown in only one view keeps that meaning.
   before cleanup. Checker
   URL metadata exact-queries existing host source records: supported canonical
   link destinations use the encoder's exact one-pass inverse; bare/standalone
-  angle URIs stay literal. Ambiguous encoded links in unsupported container/HTML
-  contexts fail verification without byte changes or source selection. Metadata
+  angle URIs stay literal. Ambiguous encoded link-shaped code, escaped labels or
+  unsupported container/HTML contexts fail without byte changes/source selection.
+  Host line numbering is removed only from the checker's analysis view. Metadata
   never registers values or promotes generic records. Empty
   URL metadata remains explicit, and guarded-child search-only trust still
   excludes file results. Child

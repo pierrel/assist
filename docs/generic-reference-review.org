@@ -741,3 +741,19 @@ reported separately. No model or prompt/fixture change is used to force success.
 The first affected panel passed *385 tests plus 8 subtests in 4.09 s*. Current-main
 integration and retained affected review follow before the final external round.
 No new store, migration, cache, late rewrite or generic merge is authorized.
+
+
+Affected review of the first main-synced R6 candidate found that escaped source
+labels and encoded link-shaped strings in indented/inline-code continuations
+could bypass canonical classification and select the raw colliding URL. Those
+link-shaped cases now fail explicitly whenever code, escape or container context
+is uncertain; they never fall back to selecting B. Standalone literal code URIs
+remain separate and raw. Regression cases retain the exact producer-accepted
+escaped-link, inline-code and continuation examples. The identity matrix now
+feeds actual FilesystemBackend.read output into the checker. Host-owned line
+number framing is removed only from the analysis view; returned content and
+saved bytes remain unchanged. The refined identity panel passed221 tests plus8
+subtests, including all9 new context controls. The earlier main-synced broad run
+passed3143 tests plus15 subtests before these affected corrections; its identity
+edge cases are not relabeled as a final-candidate pass. A final broad check and
+retained affected rereview cover the corrected successor.

@@ -512,19 +512,18 @@ def _file_source_records(text: str, store: ThreadDataStore) -> list[dict[str, st
                 code_index += 1
             in_code = code_line or (code_index < len(spans)
                 and spans[code_index][0] <= token.start() < spans[code_index][1])
-            angle = (not in_code and token.start() >= 3 and text[token.start() - 3:token.start()] == "](<"
+            angle = (token.start() >= 3 and text[token.start() - 3:token.start()] == "](<"
                      and text[token.end():token.end() + 2] == ">)")
-            if angle:
-                if label_closes is None:
-                    label_closes = set(_generic_label_ends(text).values())
-                angle = token.start() - 3 in label_closes
             candidate = _decode_source_destination(literal) if angle else literal
             if angle and _source_destination(candidate) != literal:
                 raise ValueError("noncanonical source URL encoding; use an automatically registered source link")
-            if angle and candidate != literal and (html_context or re.match(
-                    r" {0,3}(?:>|[-+*]\s|[0-9])", text[line_start:line_start + 16])):
-                # The bounded lexer does not establish nested container semantics.
-                raise ValueError("ambiguous encoded source URL context; use a top-level source link for verification")
+            if angle and candidate != literal:
+                if label_closes is None:
+                    label_closes = set(_generic_label_ends(text).values())
+                if (in_code or token.start() - 3 not in label_closes or html_context
+                        or re.match(r" {0,3}(?:>|[-+*]\s|[0-9])", text[line_start:line_start + 16])):
+                    # The bounded lexer does not establish these container/escape semantics.
+                    raise ValueError("ambiguous encoded source URL context; use an unescaped top-level source link for verification")
             row = db.execute("SELECT id, kind, value, title FROM records WHERE kind = 'source' AND value = ?",
                              (candidate,)).fetchone()
             if row:
@@ -818,8 +817,11 @@ class ReferenceBindingMiddleware(AgentMiddleware):
                                                  f"Source link: [Source](ref:{record_id})\n{result.content}"})
         if self.bind_file_refs and name == "read_file" and isinstance(result.content, str):
             try:
-                validate_saved_file(result.content)
-                records = _file_source_records(result.content, store)
+                # Deep Agents read_file adds host-owned line numbers; analyze file text,
+                # preserving both the returned content and the saved bytes.
+                file_text = re.sub(r"(?m)^ {0,5}[0-9]+\t", "", result.content)
+                validate_saved_file(file_text)
+                records = _file_source_records(file_text, store)
                 urls = tuple(dict.fromkeys(row["value"] for row in records))
                 content = result.content
                 if urls:
