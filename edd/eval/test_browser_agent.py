@@ -54,7 +54,7 @@ class _OfflineBackend(FilesystemBackend, SandboxBackendProtocol):
 
 
 class _TurnBackend(_OfflineBackend):
-    """Expose the web main's private /agent mount in continuity journeys."""
+    """Expose private parent file state in offline continuity journeys."""
     native_agent_dir = True
 
 
@@ -435,6 +435,80 @@ class TestBrowserAgent(TestCase):
         self.assertTrue(any(op == "open" for op, _ in turns[0]), turns)
         self.assertIn("October Reliability Review", answers[0])
         self.assertFalse(agent_tool_calls(agent, "task"), agent.all_messages())
+
+    def test_v1_form_continues_after_fair_yield(self):
+        """A natural draft request continues on its filled page after a queue yield."""
+        from threading import Event, Thread as WorkerThread
+        from assist.thread_queue import ThreadAffinityQueue, ThreadPauseRequested
+
+        with tempfile.TemporaryDirectory(prefix="browser_fair_eval_") as root:
+            create_filesystem(root, {"README.org": "Personal workspace.", "agent": {}})
+            site = _BrowserSite("v1-form", root)
+            queue = ThreadAffinityQueue(quantum_s=0.01, hold_timeout_s=180)
+            queued, competed = Event(), Event()
+
+            def compete():
+                with queue.acquire("other-browser-eval", on_state_change=lambda stage:
+                                   queued.set() if stage == "queued" else None):
+                    competed.set()
+
+            competitor = WorkerThread(target=compete, daemon=True)
+            command = site.command
+            launched = False
+
+            def command_with_waiter(operation, **args):
+                nonlocal launched
+                result = command(operation, **args)
+                if (not launched and operation == "act" and args.get("action") == "fill"
+                        and site.form_values.get("destination") == "Portland"):
+                    launched = True
+                    competitor.start()
+                    self.assertTrue(queued.wait(2), "competitor did not queue")
+                return result
+
+            site.command = command_with_waiter
+            spec = replace(
+                prompt_rewrite_web_main_spec(tools=tuple(browser_tools(site))),
+                web_main=True, main_guidance_skills=True,
+                skill_sources=web_main_skill_sources(browser=True))
+            with mock.patch("assist.tools.requests.get", return_value=_StaticShell("v1-form")), \
+                 stub_research_subagent():
+                agent = AgentHarness(create_agent(
+                    self.model, root, sandbox_backend=_TurnBackend(root), spec=spec))
+                config = {"configurable": {"thread_id": agent.thread_id}, "recursion_limit": 120}
+                previous = signal.signal(signal.SIGALRM, lambda *_args: (_ for _ in ()).throw(
+                    TimeoutError("browser fairness eval exceeded 150 seconds")))
+                signal.alarm(150)
+                try:
+                    with queue.acquire(str(agent.thread_id)):
+                        with self.assertRaises(ThreadPauseRequested):
+                            invoke_with_rollback(agent.agent, {"messages": [{"role": "user", "content":
+                                "Use https://v1-form.fern.example/ to draft a trip to Portland. "
+                                "Review the draft, but do not submit it."}]}, config)
+                    self.assertTrue(competed.wait(2), "competing slice did not run")
+                    self.assertEqual(site.form_values.get("destination"), "Portland")
+                    before_resume = len(site.calls)
+                    with queue.acquire(str(agent.thread_id)):
+                        result = invoke_with_rollback(agent.agent, None, config)
+                finally:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, previous)
+                    if launched:
+                        competitor.join(2)
+            resumed = site.calls[before_resume:]
+            self.assertFalse(any(op == "open" for op, _ in resumed), resumed)
+            clicks = [(index, args.get("target") or {})
+                      for index, (op, args) in enumerate(site.calls)
+                      if op == "act" and args.get("action") == "click"]
+            self.assertEqual(len(clicks), 1, site.calls)
+            index, target = clicks[0]
+            self.assertGreaterEqual(index, before_resume, site.calls)
+            resolved = target.get("ref") or {
+                ("button", "Review"): "review"}.get((target.get("role"), target.get("name")))
+            self.assertEqual(resolved, "review", site.calls)
+            self.assertEqual(sum(op == "open" for op, _ in site.calls), 1, site.calls)
+            self.assertEqual(site.form_values.get("destination"), "Portland")
+            self.assertIn("Portland", str(result["messages"][-1].content))
 
     def test_v1_partial_form_reconstructs_with_semantic_note(self):
         _, site, answers, turns, note = self._v1_turns("v1-form", [
