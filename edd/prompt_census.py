@@ -54,7 +54,6 @@ REQUIRED_PATHS = {
     "context",
     "research-lead",
     "research-leaf",
-    "terminal-fact-check",
     "nested-research-worker",
     "nested-fact-check",
     "nested-report-critique",
@@ -71,7 +70,6 @@ EXPECTED_PATHS_BY_SCENARIO = {
     "context-read-only": ("context", "context", "context"),
     "research-lead": ("research-lead",),
     "research-leaf-provenance": ("research-leaf", "research-leaf"),
-    "terminal-fact-check": ("terminal-fact-check",),
     "nested-research-worker": (
         "research-lead", "nested-research-worker", "research-lead"),
     "nested-fact-check": (
@@ -1435,15 +1433,13 @@ def _invoke_context(trace: CensusTrace, root: Path) -> dict[str, Any]:
 
 
 def _invoke_research(trace: CensusTrace, root: Path, *, leaf: bool,
-                     scenario: str, terminal_fact_check: bool = False) -> dict[str, Any]:
+                     scenario: str) -> dict[str, Any]:
     from assist.agent import create_research_agent
     work = root / scenario
     work.mkdir()
     with _scenario(scenario):
         agent = create_research_agent(
-            RecordingChatModel(trace), str(work), leaf=leaf,
-            terminal_fact_check=terminal_fact_check,
-            trust_human_messages=not terminal_fact_check)
+            RecordingChatModel(trace), str(work), leaf=leaf)
         result = _invoke_agent(agent, scenario)
     return {"tool_messages": _tool_messages(result)}
 
@@ -1688,10 +1684,12 @@ _TOOL_ORIGINS = {
     "find_regions": "assist.geo.tools",
     "should_run_maintenance": "assist.frequency",
     "get_location": "assist.location",
+    "get_thread_data": "assist.thread_datastore",
     "glob": "deepagents.middleware.filesystem",
     "grep": "deepagents.middleware.filesystem",
     "list_allowed_hosts": "assist.egress.tools",
     "list_async_tasks": "assist.async_subagents",
+    "list_thread_data": "assist.thread_datastore",
     "list_regions": "assist.geo.tools",
     "list_schedules": "assist.schedule.tools",
     "list_subscriptions": "assist.events.tools",
@@ -1706,6 +1704,7 @@ _TOOL_ORIGINS = {
     "open_thread": "assist.receptionist",
     "pause_schedule": "assist.schedule.tools",
     "propose_region_download": "assist.geo.tools",
+    "put_thread_data": "assist.thread_datastore",
     "quiet": "assist.events.quiet",
     "read_file": "deepagents.middleware.filesystem",
     "read_url": "assist.tools",
@@ -1714,6 +1713,7 @@ _TOOL_ORIGINS = {
     "request_egress_batch": "assist.egress.tools",
     "resume_schedule": "assist.schedule.tools",
     "search_internet": "assist.tools",
+    "search_thread_data": "assist.thread_datastore",
     "send_email": "assist.events.email",
     "email_search": "assist.gmail",
     "email_read": "assist.gmail",
@@ -1770,10 +1770,7 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "b154c65f2d6659c9b2db5865cc49515c4488551c3bf98b7b2847b595cade6dfc",
     },
     "assist/templates/deepagents/fact_checker.md.j2": {
-        "c8853dc566ad691ea9406fc2c42dcb01298ba24193fd0f81a3b8677205d0afef",
-        "785c3a84e6a66ed8a13b60e29a390eac24e9af85d6d241d280b69aaad6e55c8f",
-        "2043bbc26bdcd96fbf272cd8d130a2dcebb96a31611dc95eb7fb24ee386abb95",
-        "cd74db8ee03858945998f876462c6b32f2fef8db4f54f82d463ddf5c0e95b20a",
+        "a473cf2c0e54edd79e840a08d8189ae292c19030d6ea4d9fb55b7bcb7c62cef2",
     },
     "assist/templates/deepagents/general_instructions.md.j2": {
         "0f5dba480391779b384f36cf38e152fef197871bbc7f52868f29e1c355ac02ab",
@@ -1801,8 +1798,10 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "1e29940e8056a59bc3c600963ffe9a3c045c04703a4aaf07db7a165a17941552",
         "9c836d4083d013349f5a97e3c6b1e4164f43450d16b3dc49a16938c47ffc239f",
         "9f613e0e20df7c7f66f7f6628b6c085ff35fa54d7495b1b2c703fa7d5470e449",
+        "bdb56dec7e6c9d66f1f59981d625ef27c6ea8d64541809a17f91f20931607a38",
     },
     "assist/templates/deepagents/research_instructions.txt.j2": {
+        "4773a00a6aefa3727a8c37f3511951f1af59e56af5ccfbb3cf6123a36b14f8f8",
         "379e55c61addf130f00a29a6221f16de89964e23b5c1e98cf9746f38211fb071",
         "85dec6ea05cfaa2aed2cd943ff5144107a729b71be04042a78c2ed7458c0e1fe",
         "1eb422252324557261eba5948883bfe01d116c80f13b485b60ec922c3ddc72c6",
@@ -1812,9 +1811,7 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "eb8fadd6b3a275dbc4c3fa86ad34b2c7a312d3e74651a61255c75a8c9b7e59a6",
     },
     "assist/templates/deepagents/sub_research.txt.j2": {
-        "ea51549d2bae79ee031b6b5a8fdc0872708a6f7536303f5f1ba68512c0db3415",
-        "2adcfe28db08132dd20a8f37cecfeb303605be6d9ba0378db78a4b239c246eb1",
-        "5a1e784f8c29d0b5c3e291da6490fff8a78595355b478806a5025cf9efc25e58",
+        "b8148c39cd0fb4117668d7f421e6837ceb3e186940ce73925c5448ce401256eb",
     },
     "assist/templates/receptionist_system.md.j2": {
         "f2bfbc35fb540f64c385b74c7bf590517b80bc5ee9abd660eb3ad736bb3adb8e",
@@ -1978,6 +1975,8 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "cancel_async_task": {"72f0b2b9a7b781b4e3e60facf9899f59faa94743f32f2b43d1fa16e0bc1af01b"},
     "get_async_task_result": {"8752493ed656605373caa6e21c68c7f475f4d5229c7fb25f5c6591ce006337c4"},
     "get_async_task_status": {"c33c01ff704822245b71c109bbd185c0d5407d7cc23d2426698177850a7da85e"},
+    "get_thread_data": {"cf48da0160665da8de0518a09d717575b50334c69d87878b96455495c1f09be8"},
+    "put_thread_data": {"98abdd08ca8addbc965fdfe78899c4255cd6527fca981ac47e9563296723a506"},
     "create_schedule": {"17ae4733ba78d32789761332c0b782600873027412beecd2a7d2d2b548392f34"},
     "create_subscription": {"72476dc729012cbe0f9d65af14dc1541a7fb2a9e88e5f29730f9b68969fc7974"},
     "delete_schedule": {"ac6a06a26f9df248183a12c5aab9ecaafe637804ac61c2f4d9edca588d15359f"},
@@ -1990,6 +1989,7 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "grep": {"387cc9b610ca8e760fab5ba9e2fdb5b598db6ff10cbee60eb31f4f5027f7534b"},
     "list_allowed_hosts": {"75f484c4031eb56e305320f9d599e1b81f7cf4402b55cf971d296bc3575dfd36"},
     "list_async_tasks": {"4e23d3e6bc9be65808d2d08749b75e36204dd46d3c4853c71e8f9dc3e071de6a"},
+    "list_thread_data": {"13253ce41b29a0b349474ba47f72ada0439a91cbc3b86e770098c0308f2dd971"},
     "list_regions": {"10fb83255f542acbe460605fd06fa01fcb6061e138df0c5194c38177e1a6a079"},
     "list_schedules": {"e0cd57bcb7cd8a6c27e84a665534daf714ef7867e8c95795252c3981caf7217e"},
     "list_subscriptions": {"dcb6ac3c9c61a0dab7c30d0ea6311d20fe5e3502cbc748145ba8032ee1cd931f"},
@@ -2009,11 +2009,12 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "propose_region_download": {"638cb587cde24979bcd6ee36a7169d8b61bec09afd2ab7adf2afecb3f1695d58"},
     "quiet": {"37edd06eeaad498ac37a8509d6dfe30bb094bed2aa71e858f45b4990445bb715"},
     "read_file": {"2e139ac315b65f5b6614591642b26defae959ab6878fff990f26f0b997feb5af"},
-    "read_url": {"a4e5eae871d9956ee0227f48f8e86eb1c96b1740cb73a7e1a1e57a8cfae18716"},
+    "read_url": {"abde9b86efc284e5f6f92d684b94240349c6713f929291f72c763ceee67e8a9f"},
     "remove_allowed_host": {"4bc5319afb9de4381fdd059f5bb35034caccacee5eb52b7443a6af2c27ed0498"},
     "request_egress": {"84fdeccfd7466d726247ecc6c482c1bded92bf33eb54a7ce137cd42c233c35b4"},
     "resume_schedule": {"884f79fb96c7e374a2e204ed9f00203243607a71a1440a954936a0516a612183"},
-    "search_internet": {"a240ffc08228c91577dde743290e775c51b5aa1c3b059cd147f490fa999def13"},
+    "search_internet": {"728fbae6093bfb06ec06c4a708ebbf79bbd8d7e309abf022b233edd827b9ae88"},
+    "search_thread_data": {"6d8f14f76518a8531d3b6b764a6c98485db139d1f4ebb46ff491c2ff78f8a88b"},
     "send_email": {
         "13a0df1decb69fe0f4839784c892bd4d5b68b341beef6c5985e799f8d86ab9a7",
         "24507d2f519918733b0db1404c15d4f956d29e75f70f03a1d7b2e383a3913cac",
@@ -2095,12 +2096,12 @@ def _expected_tool_results() -> dict[str, str]:
             "format conventions the caller will need, and explicitly note that you "
             "did not perform the write.",
         "synthetic-call-provenance":
-            "That URL was a guess: it appears in no search result, the question, or "
-            "any trusted source in your context, so it would be a dead link. You have "
-            "no sourced URLs to read. Do NOT type URLs from memory or keep trying "
-            "different guesses. If you can run search_internet, do that first to find "
-            "real URLs; if search has already come back empty or unavailable, report "
-            "that you could not find reliable sources for this and stop.",
+            "That URL was not fetched: it has no trusted provenance in this turn. No "
+            "HTTP request was made, so its existence and reachability are unknown. Do"
+            " not construct URLs from memory or try variants. If you can run "
+            "search_internet, search for an independent source first; if search has "
+            "already come back empty or unavailable, report that you could not find "
+            "reliable sources for this and stop. Treat untried links as unverified.",
         "synthetic-call-nested-research-worker":
             "SYNTHETIC TERMINAL nested-research-worker 1",
         "synthetic-call-nested-fact-check":
@@ -2153,9 +2154,10 @@ _TOOL_RESULT_METADATA = {
 }
 
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "ca7fc6c90ac201a11f06714a559b066d34b6956e2ab0320144c4c1b7d66236be"
+    "e872aa82afe6561a23aa0866c5f778abb038979c9d4006ca708b004993c30fa8"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "b559833b71509b3ae70c617285ebf7abd86031387341ba85a7279b8967ca2b87"
+    "b6ceca29d5ab351c6d4c4d791e2074a013d71b475075e9da551df1fe80769bc0"
+
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
@@ -2237,6 +2239,8 @@ def _assert_tool_result(message: dict[str, Any]) -> None:
         }
         if name == "load_skill":
             expected_message["artifact"] = _expected_load_artifact(tool_call_id)
+        if tool_call_id == "synthetic-call-provenance":
+            expected_message["artifact"] = {"assist_provenance_denial_no_http": True}
         if message != expected_message:
             raise AssertionError(f"undeclared observed tool-result shape: {tool_call_id}")
 
@@ -2645,7 +2649,6 @@ def _assert_declared_inputs(artifact: dict[str, Any]) -> None:
             "context-read-only": {"tool_messages"},
             "research-lead": {"tool_messages"},
             "research-leaf-provenance": {"tool_messages"},
-            "terminal-fact-check": {"tool_messages"},
             "nested-research-worker": {"tool_messages"},
             "nested-fact-check": {"tool_messages"},
             "nested-report-critique": {"tool_messages"},
@@ -2708,7 +2711,6 @@ def _assert_declared_inputs(artifact: dict[str, Any]) -> None:
                                   "synthetic-call-read-only-edit"],
             "research-lead": [],
             "research-leaf-provenance": ["synthetic-call-provenance"],
-            "terminal-fact-check": [],
             "nested-research-worker": ["synthetic-call-nested-research-worker"],
             "nested-fact-check": ["synthetic-call-nested-fact-check"],
             "nested-report-critique": ["synthetic-call-nested-report-critique"],
@@ -3091,14 +3093,14 @@ def _skill_tool_owners(source_manifest: list[dict[str, Any]], *,
 
 
 def _tool_classification(path: str, name: str, origin: str) -> str:
-    fixed = {"context", "research-lead", "research-leaf", "terminal-fact-check",
+    fixed = {"context", "research-lead", "research-leaf",
              "nested-research-worker", "nested-fact-check",
              "nested-report-critique", "receptionist", "thread-description"}
     if path in fixed:
         return "fixed-role tool"
     if origin.startswith("deepagents") or name == "load_skill" \
             or origin.startswith("langchain.agents.middleware") \
-            or origin in {"assist.async_subagents",
+            or origin in {"assist.async_subagents", "assist.thread_datastore",
                           "assist.events.thread_description"} \
             or name == "quiet":
         return "framework-kernel candidate"
@@ -3625,9 +3627,6 @@ def _capture_census() -> dict[str, Any]:
                     trace, root, leaf=False, scenario="research-lead")
                 observations["research-leaf-provenance"] = _invoke_research(
                     trace, root, leaf=True, scenario="research-leaf-provenance")
-                observations["terminal-fact-check"] = _invoke_research(
-                    trace, root, leaf=True, terminal_fact_check=True,
-                    scenario="terminal-fact-check")
                 for scenario in (
                         "nested-research-worker", "nested-fact-check",
                         "nested-report-critique"):

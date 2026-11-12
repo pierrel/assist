@@ -1,0 +1,52 @@
+digraph BrowserCompatibility {
+  graph [label="Assist · browser site compatibility", labelloc=t,
+         fontname="DejaVu Sans", fontsize=22, bgcolor="white",
+         compound=true, rankdir=TB, pad=0.25, nodesep=0.6, ranksep=0.7,
+         splines=polyline, outputorder=edgesfirst];
+  node [shape=box, style="rounded,filled", color="#60717d",
+        fillcolor="#f2f4f6", fontname="DejaVu Sans", fontsize=14,
+        margin="0.18,0.14"];
+  edge [fontname="DejaVu Sans", fontsize=11, color="#60717d",
+        arrowsize=0.7];
+
+  C8 [label="C8  Host authorities
+BrowserSession · turn_runtime · SandboxManager",
+      fillcolor="#fff0df", color="#a46b36",
+      URL="../assist/browser/turn_runtime.py", target="_top"];
+  subgraph cluster_turn {
+    label="C10  Existing turn sandbox
+exact generation · shared network and mounts";
+    fontname="DejaVu Sans"; fontsize=13; labeljust=l; color="#a8b5bf";
+    style="rounded"; margin=20;
+    C10 [label="C10  File / shell tools
+workspace-owner UID",
+         URL="../assist/sandbox_manager.py", target="_top"];
+    C11 [label="C11  Browser worker · UID 10001
+inner PID 1 + native Chromium descendants
+Playwright ↔ private established CDP 9222
+software rendering · no X server",
+         fillcolor="#fff0df", color="#a46b36",
+         URL="../assist/browser/runner.py", target="_top"];
+  }
+  C13 [label="C13  Existing egress proxy
+attribution + allowlist / exact grants
+shared host backoff · browser burst 8",
+       fillcolor="#fff0df", color="#a46b36",
+       URL="../dockerfiles/egress-proxy.py", target="_top"];
+  C15 [label="C15  Allowed website destinations",
+       URL="architecture.org", target="_top"];
+
+  C8 -> C10 [label="existing create / stop generation", lhead=cluster_turn];
+  C8 -> C11 [label="launch / ready / seal 9222
+then page + storage commands",
+             color="#a46b36", penwidth=2];
+  C8 -> C13 [label="existing grants + attribution
+v11 code refresh",
+             style=dashed, color="#a46b36"];
+  C10 -> C13 [label="shell:8888
+existing rate"];
+  C11 -> C13 [label="browser:8889
+bounded burst 8",
+              color="#a46b36", penwidth=2];
+  C13 -> C15 [label="existing authorized forwarding"];
+}

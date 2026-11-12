@@ -2568,6 +2568,34 @@ def _publish_phone_text(tid: str, work_id: str, text: str) -> None:
         RUN_STREAMS.publish_delta(tid, work_id, text[start:])
 
 
+def _validate_task_report(tid: str, task_message: str | None, working_dir: str,
+                      sandbox=None) -> None:
+    """Validate only the host-named literal report for a completion wake."""
+    if not task_message:
+        return
+    if task_message.startswith(_TASK_COMPLETION_RIDER):
+        task_message = task_message[len(_TASK_COMPLETION_RIDER):]
+    match = re.match(r"Task ID: (sub-[0-9a-f]{24})\n", task_message)
+    if match is None:
+        return
+    basename = match.group(1) + ".md"
+    from assist.thread_datastore import ThreadDataStore, validate_host_report
+    store = ThreadDataStore(MANAGER.thread_datastore_path(tid))
+    if sandbox is not None:
+        from assist.research_cleanup import ReferencesCleanupRunnable
+        validator = ReferencesCleanupRunnable(
+            None, sandbox.work_dir + "/references", sandbox)
+        validator._ensure_dir()
+        if validator._exists(basename):
+            validator._validate_report(basename, store)
+        return
+    references = os.path.join(working_dir, "references")
+    report = os.path.join(references, basename)
+    if os.path.islink(references) or os.path.islink(report) or not os.path.isfile(report):
+        return
+    validate_host_report(report)
+
+
 def _child_url_configurable(run: Run) -> dict | None:
     """Expose immutable owner URL seeds to model-authored child briefs."""
     if run.assistant_id not in {"delegate-agent", "research-agent"}:
@@ -2902,6 +2930,15 @@ def _complete_child_handoff(run: Run) -> Run | None:
         logging.info("parent of child run %s was deleted", run.id)
         MANAGER.hard_delete(run.thread_id)
         return None
+    # Import immutable child records before the idempotent existing-wake return:
+    # recovery can revisit this handoff after creating the wake but before the
+    # parent has read the child's results. Generic text retains its kind;
+    # only retrieval registers sources, never child prose or generic writes.
+    from assist.thread_datastore import ThreadDataStore
+    parent_data = ThreadDataStore(MANAGER.thread_datastore_path(run.parent_thread_id))
+    child_data = ThreadDataStore(MANAGER.thread_datastore_path(run.thread_id))
+    parent_data.import_from(child_data, owner=run.thread_id, kind="source")
+    parent_data.import_from(child_data, owner=run.thread_id, kind="text")
     dispatch_key = f"task-completion:{run.id}"
     existing = next(
         (candidate for candidate in _runs().list(run.parent_thread_id)
@@ -3856,6 +3893,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                             lambda _attempt: RUN_STREAMS.reset_attempt(tid, _run.work_id))
                     else:
                         resp = chat.message(text)
+                if origin == "task-completion":
+                    task_message = ((_run.pending_text or _run.text) if _run else None)
+                    _validate_task_report(tid, task_message or pending_text or text,
+                                      MANAGER.thread_default_working_dir(tid), sandbox)
             finally:
                 # Capture browser state before sandbox teardown. Failed teardown
                 # retains tracked generations for shutdown proof and leaves
@@ -5955,6 +5996,12 @@ class _PriorityRunQueue:
         with self._cond:
             return not self._user and not self._background
 
+    def waiting_for_other(self, tid: str) -> tuple[dict, ...]:
+        """Snapshot queued wakes for other threads, excluding reservations."""
+        with self._cond:
+            return tuple(item.copy() for item in (*self._user, *self._background)
+                         if item["tid"] != tid)
+
     def promote(self, tid: str) -> None:
         with self._cond:
             for item in self._reserved.values():
@@ -6050,9 +6097,11 @@ class _ResumeScheduler:
     and BackgroundTasks all draw from ONE shared anyio threadpool (40 tokens), so N paused
     turns parking N workers — under the exact contention that triggers a pause — would
     starve the pool and stall request handling (a 2026-06-10-class outage). This thread
-    owns the parking instead, consuming ZERO pool tokens. Serial is correct: the LLM slot
-    is ``--parallel 1``, so only one resume can run at a time anyway. A resume that pauses
-    again simply re-submits itself here (round-robin, back of the queue).
+    owns the parking instead, consuming ZERO pool tokens. Eligible queued
+    notifications for other threads count as fairness waiters while its worker is
+    occupied. After a pause, user-priority and FIFO ordering select the next
+    notification, including the paused Run's requeued successor.
+    The LLM slot remains ``--parallel 1``.
 
     Startup queues abandoned heads before their followers. The queue is notification
     only; ``runs.json`` and ``status.json`` remain the recoverable authority."""
@@ -6064,6 +6113,7 @@ class _ResumeScheduler:
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
+        THREAD_QUEUE.set_dispatch_waiter_probe(self._dispatch_waiter_count)
         self._thread = threading.Thread(
             target=self._loop, name="resume-scheduler", daemon=True)
         self._thread.start()
@@ -6084,6 +6134,47 @@ class _ResumeScheduler:
     def promote(self, tid: str) -> None:
         """Promote work that must run before this user's pending message."""
         self._q.promote(tid)
+
+    def _dispatch_waiter_count(self, holder_tid: str) -> int:
+        """Count wakes passing fairness checks without queue locks during disk I/O."""
+        count = 0
+        for item in self._q.waiting_for_other(holder_tid):
+            tid, run_id = item["tid"], item["run_id"]
+            try:
+                runs = _runs().list(tid)
+                run = next((candidate for candidate in runs if candidate.id == run_id), None)
+                if run is None:
+                    continue
+                if run.approval_id is not None:
+                    approval = _runs().approval(tid, run.approval_id)
+                    if (approval is None or approval.blocked_reason
+                            or approval.execution_run_id != run.id):
+                        continue
+                elif (run.mode != "child" and run.status in {"pending", "running", "interrupted"}
+                      and (_runs().pending_approval(tid) is not None
+                           or _runs().unfinished_approval_continuation(tid) is not None)):
+                    continue
+                if run.status == "pending":
+                    if run not in _runs_before_browser_reset(runs):
+                        continue
+                elif run.status == "interrupted":
+                    position = next(index for index, candidate in enumerate(runs)
+                                    if candidate.id == run.id)
+                    successor = next((candidate for candidate in reversed(runs[position + 1:])
+                                      if candidate.work_id == run.work_id
+                                      and (candidate.resume or candidate.resume_decision is not None)), None)
+                    if successor is not None and successor.status not in {"pending", "running"}:
+                        continue
+                    if (successor is not None and successor.status == "pending"
+                            and successor not in _runs_before_browser_reset(runs)):
+                        continue
+                elif run.status not in {"running", "interrupted"} and not (
+                        run.mode == "child" and run.status in {"success", "error", "timeout"}):
+                    continue
+            except (OSError, RunStoreUnavailable):
+                continue
+            count += 1
+        return count
 
     def submit_resume(self, tid: str, rider, sender, accumulated_active_ms: float,
                       pending_text: str | None,

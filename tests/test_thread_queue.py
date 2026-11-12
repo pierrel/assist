@@ -574,3 +574,26 @@ def test_request_pause_only_marks_matching_active_holder():
         assert q.request_pause("child")
         assert handle.pause_requested
     assert not q.request_pause("child")
+
+
+def test_active_cap_fires_while_dispatch_probe_is_blocked():
+    q = ThreadAffinityQueue(quantum_s=0.01, hold_timeout_s=0.06)
+    probing = threading.Event()
+    release_probe = threading.Event()
+
+    def blocked_probe(_tid):
+        probing.set()
+        release_probe.wait(0.3)
+        return 0
+
+    q.set_dispatch_waiter_probe(blocked_probe)
+    try:
+        with q.acquire("holder") as handle:
+            assert probing.wait(0.2)
+            deadline = time.monotonic() + 0.2
+            while time.monotonic() < deadline and not handle.expired:
+                threading.Event().wait(0.005)
+            assert handle.expired
+            assert q.current_handle() is None
+    finally:
+        release_probe.set()

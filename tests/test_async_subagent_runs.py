@@ -2,8 +2,8 @@ import asyncio
 import json
 import os
 import threading
-from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from unittest.mock import MagicMock
 
 import pytest
@@ -417,6 +417,7 @@ def test_research_task_acceptance_and_completion_create_durable_parent_wake(
 
 def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
         monkeypatch, tmp_path):
+    from assist.thread_datastore import ThreadDataStore, register_source, source_url
     submitted, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
     threads._runs().claim("parent", parent.id)
     threads._runs().transition("parent", parent.id, "success", result="started task")
@@ -426,8 +427,26 @@ def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
     child = threads._runs().transition(
         child.thread_id, child.id, "success", result="child result")
 
+    child_data = ThreadDataStore(threads.MANAGER.thread_datastore_path(child.thread_id))
+    parent_data = ThreadDataStore(threads.MANAGER.thread_datastore_path("parent"))
+    parent_ref = register_source(parent_data, "https://source.example/parent-search")
+    first_ref = register_source(child_data, "https://source.example/first")
+    note_id = child_data.put_text("child research notes", "note", "Context")
+    exact_id = child_data.put_text("QL-01lI-7b92-0O5a", title="Shipment ID")
+
     first = threads._complete_child_handoff(child)
+    assert source_url(parent_data, first_ref) == "https://source.example/first"
+    assert parent_data.get(note_id) is None
+    assert parent_data.get(exact_id)["value"] == "QL-01lI-7b92-0O5a"
+    assert parent_data.get(exact_id)["kind"] == "text"
+    assert source_url(parent_data, exact_id) is None
+    second_ref = register_source(child_data, "https://source.example/second")
     second = threads._complete_child_handoff(child)
+
+    assert source_url(parent_data, second_ref) == "https://source.example/second"
+    unrelated_child = ThreadDataStore(str(tmp_path / "unrelated.sqlite"))
+    other_ref = register_source(unrelated_child, "https://source.example/other-child")
+    parent_data.import_from(unrelated_child, owner="sub-other", kind="source")
 
     assert second.id == first.id
     wakes = [run for run in threads._runs().list("parent")
@@ -441,6 +460,16 @@ def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
     assert task["status"] == "success"
     assert task["result"] == "child result"
     assert (wakes[0].id, "parent", {"user_priority": False}) in submitted
+    configure_async_subagent_app(web._agent_app)
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: parent_data)
+    with async_task_context(AsyncTaskContext("parent", parent.id, parent.work_id)):
+        retrieved = TOOLS["get_async_task_result"].func(
+            child.thread_id, SimpleNamespace(tool_call_id="result"))
+    assert first_ref in retrieved and second_ref in retrieved
+    assert f"ref:{exact_id}" in retrieved
+    assert "QL-01lI-7b92-0O5a" in retrieved
+    assert note_id not in retrieved
+    assert parent_ref not in retrieved and other_ref not in retrieved
 
 
 def test_terminal_task_recovery_reuses_a_legacy_completion_wake(
@@ -1403,3 +1432,30 @@ def test_completion_input_renders_as_agent_task_note(monkeypatch, tmp_path):
     assert "assistant (task)" in page
     assert "Task ID: sub-123 Status: success" in page
     assert '<div class="role">user</div>' not in page
+
+
+@pytest.mark.parametrize("raw_generic", [False, True])
+def test_parent_task_report_validation_preserves_literal_url_and_rejects_raw_generic(tmp_path, monkeypatch, raw_generic):
+    from pathlib import Path
+    from assist.thread_datastore import ThreadDataStore, register_source
+    _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    working = Path(threads.MANAGER.thread_default_working_dir("parent"))
+    refs = working / "references"
+    refs.mkdir(parents=True, exist_ok=True)
+    store = ThreadDataStore(threads.MANAGER.thread_datastore_path("parent"))
+    text = store.put_text("EXACT_ID")
+    source = register_source(store, "https://source.example/exact")
+    task_id = "sub-" + "a" * 24
+    report = refs / f"{task_id}.md"
+    original = f"Owner | ID\n--- | ---\nhttps://owner.example|ref:{text}\n[S](<https://source.example/exact>)\n"
+    if raw_generic:
+        original += f"Value: ref:{text}\n"
+    report.write_bytes(original.encode())
+    if raw_generic:
+        with pytest.raises(ValueError, match="unbound reference"):
+            threads._validate_task_report("parent", f"Task ID: {task_id}\n", str(working))
+        assert report.read_bytes() == original.encode()
+    else:
+        threads._validate_task_report("parent", f"Task ID: {task_id}\n", str(working))
+        assert report.read_text() == original

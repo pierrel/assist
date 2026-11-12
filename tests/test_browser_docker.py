@@ -471,3 +471,59 @@ def test_turn_sandbox_restores_private_storage_in_new_generation(tmp_path, monke
                 network.remove()
             except docker.errors.NotFound:
                 pass
+
+
+@pytest.mark.skipif(not os.getenv("ASSIST_BROWSER_TEST_STANDALONE_IMAGE"),
+                    reason="requires an explicit isolated standalone browser image")
+def test_standalone_entrypoint_starts_with_private_runtime_environment():
+    """Use the image defaults, read-only root, and real native browser entrypoint."""
+    import docker
+    import json
+
+    client = docker.from_env(timeout=5)
+    container = None
+    try:
+        container = client.containers.run(
+            os.environ["ASSIST_BROWSER_TEST_STANDALONE_IMAGE"],
+            name=f"assist-browser-standalone-test-{uuid4().hex[:10]}",
+            detach=True, network_mode="none", read_only=True, cap_drop=["ALL"],
+            security_opt=["no-new-privileges:true", "seccomp=" + (
+                Path(__file__).parents[1] / "dockerfiles/browser-seccomp.json").read_text()],
+            tmpfs={
+                "/run": "rw,nosuid,nodev,mode=0700,uid=10001,gid=10001,size=134217728",
+                "/downloads": "rw,nosuid,nodev,mode=0700,uid=10001,gid=10001,size=33554432"},
+            pids_limit=192, mem_limit="768m",
+            environment={"BROWSER_SESSION_TOKEN": "isolated-startup-canary"})
+        deadline = time.monotonic() + 12
+        while True:
+            container.reload()
+            assert container.status == "running", container.logs(tail=20).decode()
+            if container.exec_run(["test", "-S", "/run/browser.sock"]).exit_code == 0:
+                break
+            assert time.monotonic() < deadline, container.logs(tail=20).decode()
+            time.sleep(0.05)
+        # No HOME/TMPDIR override or launcher is supplied by this test.
+        env = container.exec_run([
+            "python", "-c", "import os,json;print(json.dumps([os.environ['HOME'],os.environ['TMPDIR']]))"])
+        assert env.exit_code == 0
+        assert json.loads(env.output) == ["/run", "/run"]
+        reply = container.exec_run(["python", "-c", """
+import json,os,socket
+with socket.socket(socket.AF_UNIX) as channel:
+    channel.settimeout(5)
+    channel.connect('/run/browser.sock')
+    channel.sendall(json.dumps({'session':os.environ['BROWSER_SESSION_TOKEN'],
+                                'operation':'ready'}).encode())
+    channel.shutdown(socket.SHUT_WR)
+    print(channel.recv(65536).decode())
+"""])
+        assert reply.exit_code == 0, reply.output
+        ready = json.loads(reply.output)["result"]
+        assert ready["pid"] == 1
+        assert ready["uid"] == ["10001"] * 4
+        assert ready["caps"] == ["0000000000000000"] * 5
+        assert ready["no_new_privs"] == "1" and ready["seccomp"] == "2"
+    finally:
+        if container is not None:
+            container.remove(force=True)
+        client.close()

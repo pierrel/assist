@@ -9,8 +9,8 @@ Assist is an extensible, local-focused, LLM-based assistant. The principles guid
 It is not just a coding assistant, but should be able to help with any project or goal.
 
 See [README.org](README.org) for detailed concepts and architecture.
-See [the current architecture map](docs/architecture.org) for the merged
-component diagram and code owners.
+See [the current architecture map](docs/architecture.org) for the component
+diagram and code owners.
 
 ## Current Capabilities
 
@@ -47,10 +47,18 @@ where reliability is harder than with frontier APIs.
   isolation remains planned rather than shipped.
 
 - **Website browser.** Ordinary web main-agent turns can render and interact
-  with JavaScript pages. Chromium starts lazily inside that turn's sandbox and
-  stops when the sandbox ends, including an approval or clarification pause.
+  with JavaScript pages. Full Chromium with software rendering starts on first
+  browser-tool use inside that turn's sandbox, without an external display
+  server. Its page context opens only when needed. Chromium stops when the sandbox ends,
+  including an approval or clarification pause.
+  The [browser compatibility review guide](docs/browser-site-compatibility.org)
+  maps its control and network boundaries.
   A separate browser UID can reach only its attributed listener on the
-  existing egress proxy. Browser and shell destinations follow the same
+  existing egress proxy. The host seals new browser-debugging connections
+  before any page command; agent tools cannot use that control channel.
+  Approved browser resources can make up to eight parallel connections per
+  shared host backoff window; ordinary shell connections retain their limit.
+  Browser and shell destinations follow the same
   operator allowlist (any port) and exact thread/host/port grants; page content
   cannot approve access. A policy-only browser preflight checks a top-level
   origin without contacting it and can annotate origins observed from an open
@@ -69,6 +77,17 @@ where reliability is harder than with frontier APIs.
   restart, the sandbox's common three-hour PID 1 expiry bounds their lifetime.
   On restart, a new managed generation waits for confirmed cleanup. Browser
   and shell share the sandbox's network and mounts.
+
+- **Thread data and source links.** Managed threads keep host-owned text records
+  in a SQLite datastore beside their description, outside the workspace. Host code
+  writes non-source text records; the agent can get, list, and search records in
+  its own thread. Search results, successful URL reads, and observed browser
+  pages capture exact source URLs as one kind of record and return opaque IDs.
+  Explicit Markdown links using those IDs resolve in replies, streams, and
+  saved research reports. Ordinary URLs pass through unchanged. Source binding
+  preserves URL identity, not page availability or support for a claim. Unknown
+  source IDs produce an unresolved-reference message that does not claim the
+  link was checked.
 
 - **Specialized agents and skills out of the box.**
   - **Research agent** for focused web findings with internet search

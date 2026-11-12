@@ -63,10 +63,9 @@ logger = logging.getLogger(__name__)
 _DEFAULT_FLOOR_CHARS = 4000   # below this, return inline — grepping a tiny file is worse
 _PREVIEW_CHARS = 600
 _OFFLOAD_DIR = "large_tool_results"   # deepagents' offload prefix (its grep guidance names it)
-# An UNTRUSTED offload (read_url, execute, or child output)
-# is written under this exact path fragment, so a later read_file/grep of it is recognizable
-# to UrlProvenanceMiddleware, which imports THIS constant and never provenances a URL from such
-# a read. Single source of truth so the writer and the guard can't drift.
+# Untrusted read_url, execute, and child output use this path fragment.
+# UrlProvenanceMiddleware imports _OFFLOAD_DIR to exclude all offloaded reads
+# from URL provenance, including framework-generated offloads.
 UNTRUSTED_OFFLOAD_MARK = f"{_OFFLOAD_DIR}/untrusted-data-"
 # Read-url content remains page-link evidence for same-host navigation. Keep it
 # distinguishable from arbitrary child/shell output under the shared untrusted prefix.
@@ -120,10 +119,11 @@ class ToolResultToFileMiddleware(AgentMiddleware):
     (proven), ``head_tail`` for execute (log tails hold the salient line).  ``untrusted``
     is per-instantiation too: when True the offload path uses the
     ``.../large_tool_results/untrusted-`` family
-    (see ``UNTRUSTED_OFFLOAD_MARK``) so ``UrlProvenanceMiddleware`` won't provenance a URL read
-    back from it; the default writes ``.../large_tool_results/<id>``.
-    ``page_navigation=True`` gives a successful read_url offload a narrower page
-    marker and records its actual path in ToolMessage metadata so its links can
+    (see ``UNTRUSTED_OFFLOAD_MARK``); the default writes
+    ``.../large_tool_results/<id>``. ``UrlProvenanceMiddleware`` excludes rereads
+    of either path from URL provenance.
+    ``page_navigation=True`` gives a successful read_url offload a narrower page marker
+    and records its actual path in ToolMessage metadata so its links can
     support same-host navigation without granting that property to a
     model-written file, shell output, or child output. Fetch-error text becomes
     an error ToolMessage even below the offload threshold and gets no page-path
@@ -155,10 +155,9 @@ class ToolResultToFileMiddleware(AgentMiddleware):
         # /large_tool_results/… StateBackend path.  A "/tmp/…" offload deliberately
         # matches no STATEFUL_PATHS prefix, so it lands on the sandbox fs, not state.
         self._offload_root = offload_root.rstrip("/")
-        # When True, offloads from this instance are written under the untrusted prefix
-        # (see UNTRUSTED_OFFLOAD_MARK) so UrlProvenanceMiddleware recognizes a later read/grep of
-        # them and won't provenance their URLs — page, shell, and child output
-        # remain untrusted even after offload.
+        # When True, use the untrusted prefix (see UNTRUSTED_OFFLOAD_MARK) to
+        # distinguish page, shell, and child output. UrlProvenanceMiddleware
+        # excludes reads of every offload path from URL provenance.
         self._untrusted = untrusted
         self._page_navigation = page_navigation
 
@@ -173,10 +172,9 @@ class ToolResultToFileMiddleware(AgentMiddleware):
         # ANSI/control bytes (the BadRequest-outage class) from the offloaded file.
         content = _sanitize(content)
         fname = sanitize_tool_call_id(result.tool_call_id)
-        # Untrusted offloads land in the disjoint untrusted-data/page namespaces
-        # (under /large_tool_results, or /tmp/large_tool_results
-        # for the "/tmp" root) so a later read_file/grep of them is recognizable to the
-        # provenance guard (no mixing of trusted and untrusted large results in one namespace).
+        # Separate data and page markers retain their origin after offload.
+        # The provenance guard excludes either from URL authority, while the
+        # page marker still permits same-host link evidence.
         if self._untrusted:
             marker = (UNTRUSTED_PAGE_OFFLOAD_MARK if self._page_navigation
                       else UNTRUSTED_OFFLOAD_MARK)

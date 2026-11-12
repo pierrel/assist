@@ -45,7 +45,10 @@ User-approved grants (docs/2026-07-21-egress-approval-hitl.org):
 Host throttling:
   Every allowed remote hostname receives new connections on a fixed 2s, 4s,
   8s, 16s, then 60s backoff across all sandbox turns. Excess requests receive
-  a local HTTP 429 before reaching the host. The local model bridge
+  a local HTTP 429 before reaching the host. The browser listener allows up
+  to eight connections per such window so approved parallel scripts can load;
+  that allowance is shared per hostname across turns, not per page or tool.
+  The local model bridge
   ``host.docker.internal`` is excluded: it is not remote egress and normal
   model execution opens many connections through that name.  CONNECT remains
   opaque TLS forwarding, so this controls new connections rather than claiming
@@ -75,7 +78,8 @@ APPROVALS_MAX_BYTES = 65536
 REVOKED_ONLY = "revoked-only"
 # Repeated connections to one host start quickly, then reach the one-minute
 # ceiling on the fifth request.  This is a fixed proxy boundary, not a
-# per-tool/model knob, so concurrent sandbox clients cannot evade it.
+# per-tool/model knob. The browser listener has a bounded eight-connection
+# allowance in each shared window; ordinary clients retain one.
 HOST_BACKOFF_INTERVALS_S = (2.0, 4.0, 8.0, 16.0, 60.0)
 HOST_IDLE_RESET_S = 5 * 60.0
 _THROTTLE_PRUNE_THRESHOLD = 256
@@ -123,29 +127,31 @@ def log(msg: str) -> None:
 
 
 class HostThrottle:
-    """Admit one remote-host connection with bounded exponential backoff."""
+    """Admit a bounded host window; browser callers may share a small burst."""
 
     def __init__(self, intervals_s=HOST_BACKOFF_INTERVALS_S,
                  clock=time.monotonic) -> None:
         self._intervals_s = intervals_s
         self._clock = clock
         self._lock = threading.Lock()
-        self._states: dict[str, tuple[float, float, int]] = {}
+        self._states: dict[str, tuple[float, float, int, int]] = {}
 
-    def admit(self, host: str) -> None:
+    def admit(self, host: str, *, burst: int = 1) -> None:
         """Reserve one connection or raise without creating a waiting thread."""
         now = self._clock()
         with self._lock:
-            next_allowed, last_request, count = self._states.get(
-                host, (now, float("-inf"), 0))
+            next_allowed, last_request, count, used = self._states.get(
+                host, (now, float("-inf"), 0, 0))
             if now - last_request >= HOST_IDLE_RESET_S:
                 next_allowed, count = now, 0
             retry_after = max(1, math.ceil(next_allowed - now))
-            if next_allowed > now:
-                self._states[host] = (next_allowed, now, count)
+            if next_allowed > now and used >= burst:
+                self._states[host] = (next_allowed, now, count, used)
                 raise HostThrottleBusy(retry_after)
-            interval_s = self._intervals_s[min(count, len(self._intervals_s) - 1)]
-            self._states[host] = (now + interval_s, now, count + 1)
+            if next_allowed <= now:
+                interval_s = self._intervals_s[min(count, len(self._intervals_s) - 1)]
+                next_allowed, count, used = now + interval_s, count + 1, 0
+            self._states[host] = (next_allowed, now, count, used + 1)
             self._prune(now)
 
     def _prune(self, now: float) -> None:
@@ -167,17 +173,21 @@ class HostThrottleBusy(Exception):
 HOST_THROTTLE = HostThrottle()
 
 
-def admit_host(host: str) -> None:
+def admit_host(host: str, *, browser_listener: bool = False) -> None:
     """Apply the shared remote-host admission boundary before connect."""
     if host in _UNTHROTTLED_HOSTS:
         return
-    HOST_THROTTLE.admit(host)
+    if browser_listener:
+        HOST_THROTTLE.admit(host, burst=8)
+    else:
+        HOST_THROTTLE.admit(host)
 
 
 def connect_upstream(host: str, port: int,
-                     approved_ip: str | None) -> socket.socket:
+                     approved_ip: str | None, *,
+                     browser_listener: bool = False) -> socket.socket:
     """Admit then open one vetted upstream connection."""
-    admit_host(host)
+    admit_host(host, browser_listener=browser_listener)
     return socket.create_connection((approved_ip or host, port), timeout=10)
 
 
@@ -451,7 +461,8 @@ def handle(client: socket.socket, addr, browser_listener: bool = False) -> None:
                 deny(client, host, rejection)
                 return
             try:
-                upstream = connect_upstream(host, port, approved_ip)
+                upstream = connect_upstream(host, port, approved_ip,
+                                            browser_listener=browser_listener)
             except HostThrottleBusy as e:
                 throttle(client, addr[0], host, e.retry_after_s, correlation)
                 return
@@ -511,7 +522,8 @@ def handle(client: socket.socket, addr, browser_listener: bool = False) -> None:
             new_request += h + "\r\n"
         new_request += "\r\n"
         try:
-            upstream = connect_upstream(host, port, approved_ip)
+            upstream = connect_upstream(host, port, approved_ip,
+                                            browser_listener=browser_listener)
         except HostThrottleBusy as e:
             throttle(client, addr[0], host, e.retry_after_s, correlation)
             return

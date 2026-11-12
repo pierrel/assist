@@ -33,7 +33,16 @@ def install(proxy_ip, attached_ips):
         attached.append(str(ip))
     if proxy_ip not in attached or len(attached) != len(set(attached)):
         raise ValueError("incomplete proxy attachment set")
+    # Exclude every untrusted UID before Chromium can bind its control port.
+    run(deadline, "/usr/bin/iptables", "-w", "3", "-I", "OUTPUT", "1",
+        "-d", "127.0.0.1", "-p", "tcp", "--dport", "9222",
+        "-m", "owner", "!", "--uid-owner", BROWSER_UID, "-j", "REJECT")
     run(deadline, "/usr/bin/iptables", "-w", "3", "-N", CHAIN)
+    run(deadline, "/usr/bin/iptables", "-w", "3", "-A", CHAIN,
+        "-d", "127.0.0.1", "-p", "tcp", "--dport", "9222", "-j", "RETURN")
+    run(deadline, "/usr/bin/iptables", "-w", "3", "-A", CHAIN,
+        "-d", "127.0.0.1", "-p", "tcp", "--sport", "9222",
+        "-m", "conntrack", "--ctstate", "ESTABLISHED", "-j", "RETURN")
     run(deadline, "/usr/bin/iptables", "-w", "3", "-A", CHAIN, "-d", proxy_ip,
         "-p", "tcp", "--dport", BROWSER_PROXY_PORT, "-j", "RETURN")
     run(deadline, "/usr/bin/iptables", "-w", "3", "-A", CHAIN, "-j", "REJECT")
@@ -55,7 +64,17 @@ def install(proxy_ip, attached_ips):
         "--uid-owner", BROWSER_UID, "-j", "REJECT")
 
 
+def seal_control():
+    """Keep the trusted established channel; deny every new CDP connection."""
+    run(time.monotonic() + 5, "/usr/bin/iptables", "-w", "3", "-I", "OUTPUT", "1",
+        "-d", "127.0.0.1", "-p", "tcp", "--dport", "9222",
+        "-m", "conntrack", "!", "--ctstate", "ESTABLISHED", "-j", "REJECT")
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["seal-control"]:
+        seal_control()
+        raise SystemExit(0)
     if len(sys.argv) < 3:
         raise SystemExit(2)
     install(sys.argv[1], sys.argv[2:])

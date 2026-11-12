@@ -107,14 +107,14 @@ def _triage_skill_sources() -> dict:
 # the eval agents (which build their own agents) must NOT get a tool that never fires.
 _web_tools: tuple = ()
 # A message-triage turn (inbound SMS) runs on UNTRUSTED input, so it gets a SEPARATE,
-# reduced tool set: only the reply tool (HITL-gated) — NOT the schedule/subscription tools,
+# reduced tool set: HITL-gated reply and a reasoned phone alert, not schedule/subscription tools,
 # which are host-effect and NOT sandbox-contained (an injected text must not be able to
 # plant/delete a subscription or schedule). See docs/2026-07-01-inbound-sms-interception.org.
 _web_triage_tools: tuple = ()
 # HITL gating for the normal web AgentSpec (e.g. {"send_email": {...}}); the eval agents
 # build their own agents and must NOT inherit it.
 _web_interrupt_on: dict | None = None
-# Triage has a distinct gate because its untrusted tool profile is reply-only.
+# Triage has a distinct gate: reply needs approval; the bounded phone alert does not.
 _web_triage_interrupt_on: dict | None = None
 
 
@@ -371,12 +371,13 @@ class ThreadManager:
             specialized = create_research_agent(
                 self.model, working_dir, self.checkpointer,
                 sandbox_backend=sandbox_backend, leaf=True,
-                trust_human_messages=False)
+                thread_data_available=True, trust_human_messages=False)
         elif assistant_id == "fact-check-agent":
             specialized = create_research_agent(
                 self.model, working_dir, self.checkpointer,
                 sandbox_backend=sandbox_backend, leaf=True,
-                terminal_fact_check=True, trust_human_messages=False)
+                terminal_fact_check=True, thread_data_available=True,
+                trust_human_messages=False)
         elif assistant_id not in {"general-agent", "delegate-agent"}:
             raise ValueError(f"unknown assistant: {assistant_id}")
         async_tools = (async_task_tools if assistant_id == "general-agent"
@@ -387,6 +388,7 @@ class ThreadManager:
                       model=self.model,
                       sandbox_backend=sandbox_backend,
                       on_queue_state=on_queue_state,
+                      thread_datastore_path=self.thread_datastore_path(thread_id),
                       configurable=configurable)
         if specialized is not None:
             return Thread(working_dir, agent=specialized, **thread_kwargs)
@@ -540,6 +542,10 @@ class ThreadManager:
         if tid in ("", ".", "..") or "/" in tid or "\\" in tid or "\0" in tid:
             raise InvalidThreadId(f"invalid thread id: {tid!r}")
         return os.path.join(self.root_dir, tid)
+
+    def thread_datastore_path(self, tid: str) -> str:
+        """Host-only durable records, alongside thread metadata outside agent mounts."""
+        return os.path.join(self.thread_dir(tid), "thread-data.sqlite")
 
     def thread_default_working_dir(self, tid: str) -> str:
         return os.path.join(self.thread_dir(tid),

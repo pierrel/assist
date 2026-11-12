@@ -641,7 +641,7 @@ def test_proxy_connect_throttles_before_opening_upstream(proxy_mod, monkeypatch)
     calls = []
     upstream = object()
     monkeypatch.setattr(
-        proxy_mod, "admit_host", lambda host: calls.append(("admit", host)))
+        proxy_mod, "admit_host", lambda host, **_kwargs: calls.append(("admit", host)))
     monkeypatch.setattr(
         proxy_mod.socket, "create_connection",
         lambda target, timeout: calls.append(("connect", target, timeout)) or upstream)
@@ -876,3 +876,25 @@ def test_from_dict_strict_dispatched_and_state():
     assert EgressRequest.from_dict({**base, "dispatched": 1}).dispatched is False
     assert EgressRequest.from_dict({**base, "dispatched": True}).dispatched is True
     assert EgressRequest.from_dict({**base, "state": "granted"}) is None
+
+
+def test_browser_script_connections_share_a_bounded_parallel_window(proxy_mod):
+    import concurrent.futures
+    now = [100.0]
+    throttle = proxy_mod.HostThrottle(clock=lambda: now[0])
+    def attempt(_):
+        try:
+            throttle.admit("scripts.example", burst=8)
+            return True
+        except proxy_mod.HostThrottleBusy:
+            return False
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        assert sum(pool.map(attempt, range(16))) == 8
+    with pytest.raises(proxy_mod.HostThrottleBusy):
+        throttle.admit("scripts.example")
+    now[0] += 2
+    for _ in range(8):
+        throttle.admit("scripts.example", burst=8)
+    with pytest.raises(proxy_mod.HostThrottleBusy) as error:
+        throttle.admit("scripts.example", burst=8)
+    assert error.value.retry_after_s == 4

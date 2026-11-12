@@ -80,17 +80,6 @@ def test_reaches_every_required_real_path(census):
                 if call["scenario"] == scenario] == [
                     "research-lead", scenario, "research-lead"]
 
-    terminal = _call(census, "terminal-fact-check")
-    legacy = _call(census, "nested-fact-check", 1)
-    assert terminal["path"] == "terminal-fact-check"
-    assert "caller names the report file" in _system_prompt(terminal)
-    assert "A provenance refusal makes no HTTP request" in _system_prompt(terminal)
-    assert "final_report.md" not in _system_prompt(terminal)
-    assert "final_report.md" in _system_prompt(legacy)
-    assert "search_internet" in terminal["visible_tools"]
-    assert "read_url" in terminal["visible_tools"]
-    assert "task" not in terminal["visible_tools"]
-
 
 def test_final_provider_tools_are_the_visible_tools(census):
     for call in census["calls"]:
@@ -183,12 +172,14 @@ def test_classified_kernel_matches_each_final_skills_enabled_request(census):
     async_lifecycle = [
         "start_async_task", "get_async_task_status", "get_async_task_result", "update_async_task",
         "cancel_async_task", "list_async_tasks"]
+    thread_data = ["put_thread_data", "get_thread_data", "list_thread_data",
+                   "search_thread_data"]
     expected = {
         "web-main-core": [*executable, "load_skill", *async_lifecycle,
-                          "quiet", "update_thread_description"],
+                              "quiet", "update_thread_description", *thread_data],
         "web-main-full": [*executable, "load_skill", *async_lifecycle,
-                          "quiet", "update_thread_description"],
-        "web-delegate": [*executable, "task", "load_skill"],
+                              "quiet", "update_thread_description", *thread_data],
+        "web-delegate": [*executable, "task", "load_skill", *thread_data],
         "legacy-main": [*filesystem, "task", "load_skill"],
         "skill-precedence-built-in": [
             *filesystem, "load_skill", *async_lifecycle],
@@ -532,7 +523,7 @@ def test_research_worker_prompt_uses_markdown_reports():
 
     assert "bare Markdown filename" in prompt
     assert "`<topic>.md`" in prompt
-    assert "Markdown links (`[Title](URL)`)" in prompt
+    assert "exact `source_id` returned by retrieval" in prompt
     assert ".org" not in prompt
     assert "org format" not in prompt.lower()
 
@@ -611,7 +602,8 @@ def test_enforcement_is_exercised_not_inferred(census):
 
     leaf = census["observations"]["research-leaf-provenance"]
     assert leaf["tool_messages"][0]["status"] == "error"
-    assert "URL was a guess" in leaf["tool_messages"][0]["content"]
+    assert "URL was not fetched" in leaf["tool_messages"][0]["content"]
+    assert "reachability are unknown" in leaf["tool_messages"][0]["content"]
 
 
 def test_fixed_role_delegate_input_boundaries(census):
@@ -1308,15 +1300,14 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
         separators=(",", ":"),
     )
     assert len(historical_p0_prompt) == 31_279
-    # The current prompt requires research before dispatch and lists the
-    # thread-description tool; the schema includes the terminal fact checker,
-    # update_async_task accepts subagent task IDs, and notify describes
-    # phone-only attention.
+    # Current capture retains SMS, thread description, reasoned notify and
+    # immutable thread-data tools and the terminal fact-checker role.
+    # update_async_task continues to accept subagent task IDs.
     # Historical P0-P2b3 rows stay unchanged.
-    assert len(current_prompt) == 27_718
-    assert len(schemas) == 19_512
-    assert len(census["calls"]) == 30
-    assert len(census["tool_nodes"]) == 38
+    assert len(current_prompt) == 27_790
+    assert len(schemas) == 21_759
+    assert len(census["calls"]) == 29
+    assert len(census["tool_nodes"]) == 37
     assert len(census["findings"]) == 20
     # M3 records this checkout's exact source commit in each engine profile, so
     # both artifact size and fingerprint deliberately vary with capture source

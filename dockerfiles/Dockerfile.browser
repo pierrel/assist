@@ -1,11 +1,15 @@
 FROM python:3.13-slim-bookworm
 
+# Native crashpad and Playwright artifacts stay on the private runtime tmpfs.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
-    HOME=/home/browser
+    HOME=/run \
+    TMPDIR=/run
 
 RUN pip install --no-cache-dir playwright==1.58.0 \
     && python -m playwright install --with-deps --only-shell chromium \
+    && apt-get update && apt-get install -y --no-install-recommends chromium \
+    && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 10001 --create-home browser
 
 COPY assist/browser/runner.py /opt/assist/browser_runner.py

@@ -50,6 +50,9 @@ def test_turn_start_fences_before_map_publication_and_worker(monkeypatch):
     events = []
     from assist.browser import manager
     def fence(argv, **_kwargs):
+        if argv[-1] == "seal-control":
+            events.append("seal")
+            return b""
         assert argv[-5:] == ["/opt/assist/install-browser-fence.py",
                              "172.20.0.3", "172.17.0.3",
                              "172.20.0.3", "172.21.0.3"]
@@ -75,7 +78,7 @@ def test_turn_start_fences_before_map_publication_and_worker(monkeypatch):
     sandbox.exec_run.side_effect = execute
     assert turn_runtime.launch(request) == {
         "generation": "generation", "ip": "172.20.0.8", "map_dir": "/tmp/map"}
-    assert events == ["fence", "publish", "start", "ready"]
+    assert events == ["fence", "publish", "start", "ready", "seal"]
     assert sandbox.exec_run.call_args_list[0].kwargs["user"] == "0:0"
     assert sandbox.exec_run.call_args_list[0].kwargs["privileged"] is True
     assert sandbox.exec_run.call_args_list[0].args[0] == [
