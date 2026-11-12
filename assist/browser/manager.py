@@ -359,6 +359,8 @@ class BrowserSession:
             response = json.loads(_docker_exec(
                 self.identity.generation, command,
                 timeout=5, in_sandbox=True))
+            if "error" in response:
+                raise BrowserUnavailable("browser auth state capture failed")
             if "result" in response and response["result"] is not None:
                 storage.save(self.threads_root, self.thread_id, self.run_id,
                              self.identity.generation, response["result"])
