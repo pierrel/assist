@@ -128,6 +128,8 @@ in both views. An ID shown in only one view keeps that meaning.
   Entering an approval wait, terminal and error boundaries close the browser;
   new-user and cancellation
   resets prove the frozen generation stopped before releasing held work.
+  Checkpoint-verified approval repair may replace a cancelled physical slice;
+  explicit cancellation receipts keep the entire logical work revoked.
   The existing three-hour container expiry includes frozen queue time.
   An eligible child borrows the same backend after its durable parent work and
   user event match the owner. Child execution refreezes it before releasing the

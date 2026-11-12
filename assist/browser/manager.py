@@ -312,10 +312,13 @@ class BrowserSession:
 
     def _latest_direct_sequence(self) -> int:
         runs = self.run_service.list(self.thread_id)
-        if self.work_id is not None and any(
-                run.work_id == self.work_id and run.status == "cancelled"
-                for run in runs):
-            raise BrowserUnavailable("browser work was cancelled")
+        if self.work_id is not None:
+            work = [run for run in runs if run.work_id == self.work_id]
+            # Checkpoint repair can replace a cancelled slice; explicit user
+            # cancellation receipts permanently revoke the logical work.
+            if work and (work[-1].status == "cancelled"
+                         or any(run.cancel_cleanup is not None for run in work)):
+                raise BrowserUnavailable("browser work was cancelled")
         if any(run.status == "revocation_pending" for run in runs):
             raise BrowserUnavailable("newer user message revoked browser startup")
         return max((run.admission_sequence for run in runs
