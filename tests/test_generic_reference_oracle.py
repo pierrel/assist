@@ -84,3 +84,16 @@ def test_capability_requires_both_structures_in_first_saved_file(before):
     with pytest.raises(AssertionError):
         _assert_inline_file_update(before, before.replace("Pending", "Ready"),
                                    "Mîra Vale", "ZX-0Il1-7F0b")
+
+
+@pytest.mark.parametrize("original,changed", [("Mîra Vale", "mîra vale"),
+                                               ("ZX-0Il1-7F0b", "zx-0il1-7f0b")])
+def test_capability_requires_exact_table_data_case(original, changed):
+    from edd.eval.test_generic_reference_binding import _assert_inline_file_update
+    # Correct paragraph values cannot hide a mutated table cell.
+    before = INLINE_BEFORE.replace("This note refers to Mîra Vale.",
+                                 "This note refers to Mîra Vale and ZX-0Il1-7F0b.")
+    before = before.replace(f"| {original} |", f"| {changed} |")
+    with pytest.raises(AssertionError):
+        _assert_inline_file_update(before, before.replace("| Pending |", "| Ready |"),
+                                   "Mîra Vale", "ZX-0Il1-7F0b")

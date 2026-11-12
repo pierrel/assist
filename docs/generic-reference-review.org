@@ -647,10 +647,17 @@ existing trace. A pure helper requires the initial inline paragraph and valid
 Pending table row, then compares the final file with the exact original plus
 that one Ready-cell substitution. Bytes are decoded directly without newline
 normalization. Deletion, missing initial structure, sentence/header changes and
-status words outside the actual cell cannot pass. All *28 pure oracle controls*
+status words outside the actual cell cannot pass. All *30 pure oracle controls*
 passed, including the previous 18 current-shipment controls, and the strengthened
 helper also accepts the original capability artifact. The full prompt sequence,
 fixtures and production code remain unchanged. No new harness, model invocation
 or repeated broad runtime checks are needed; affected retained oracle/doc review
 covers this narrow successor. Deployment still belongs to Root and no merge is
 authorized.
+
+
+Affected retained review found one oracle-only normalization defect before
+publication: lowercasing table cells also accepted a mutated ID/name. Data cells
+now compare exact supplied values; only header/status recognition ignores case.
+Wrong-case negative controls reject that path. The original artifact still
+passes, and production bytes remain identical to =132dae8f=.

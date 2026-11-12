@@ -331,14 +331,14 @@ def _assert_inline_file_update(before, after, name, identifier):
                for line in lines), "missing inline paragraph"
 
     def cells(line):
-        return [cell.strip(" \t\r\n`*_").casefold()
+        return [cell.strip(" \t\r\n`*_")
                 for cell in line.strip().strip("|").split("|")]
 
     rows = []
     for index in range(len(lines) - 2):
         header, separator = cells(lines[index]), cells(lines[index + 1])
         columns = [number for number, value in enumerate(header)
-                   if value in {"status", "current status"}]
+                   if value.casefold() in {"status", "current status"}]
         if (len(columns) != 1 or len(header) != len(separator)
                 or not all(re.fullmatch(r":?-+:?", value) for value in separator)):
             continue
@@ -346,9 +346,9 @@ def _assert_inline_file_update(before, after, name, identifier):
             if "|" not in lines[row_index]:
                 break
             values = cells(lines[row_index])
-            if name.casefold() in values and identifier.casefold() in values:
+            if name in values and identifier in values:
                 column = columns[0]
-                assert len(values) == len(header) and values[column] == "pending"
+                assert len(values) == len(header) and values[column].casefold() == "pending"
                 rows.append((row_index, column))
     assert len(rows) == 1, "missing or ambiguous original Pending table row"
     row_index, column = rows[0]
