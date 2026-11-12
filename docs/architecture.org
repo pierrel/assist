@@ -1,7 +1,8 @@
 #+title: Assist architecture
 
-This is the architecture of merged Assist =main= at
-=df4bb845df34289427ec85992ae5d1120906f5e2=. It shows the ordinary Deep
+This view began with merged Assist =main= at
+=df4bb845df34289427ec85992ae5d1120906f5e2= and includes the later
+terminal-research and bounded-evidence candidate described below. It shows the ordinary Deep
 Agents web path and the interfaces other clients use. A Pi preview thread,
 voice call, inbound SMS, scheduled prompt, or child task enters through a
 different admission route, then uses the same durable Run service where that
@@ -48,7 +49,9 @@ in both views. An ID shown in only one view keeps that meaning.
   identities and transitions. [[file:../manage/web/threads.py][=_create_run=,
   =_accept_message_run= and =queue_recovery_runs=]] admit work before dispatch
   and reconstruct pending work after restart. The legacy backlog is migration
-  input, not new-work authority.
+  input, not new-work authority. A completed research child may carry bounded
+  host-projected =output_evidence= alongside its result; absent evidence on an
+  older Run means unknown, not that a source was unavailable.
 - *C4 Dispatch + affinity.* [[file:../manage/web/threads.py][=_PriorityRunQueue=
   and =_ResumeScheduler=]] carry wake notifications and execute Run IDs.
   [[file:../assist/thread_queue.py][ThreadAffinityQueue]] serializes model
@@ -75,12 +78,18 @@ in both views. An ID shown in only one view keeps that meaning.
   the public app; [[file:../manage/web/protocol_service.py][WebAgentProtocolService]]
   maps child calls to C3's durable Runs. [[file:../manage/web/threads.py][=_execute_child_run= and
   =_complete_child_handoff=]] execute its durable Run and create an ordinary
-  parent follow-up Run after completion.
+  parent follow-up Run after completion. At a research-completion wake,
+  [[file:../assist/async_subagents.py][checker admission]] may append bounded
+  paired source observations from the completed child Run to the terminal
+  checker's brief; source text stays untrusted and does not grant URL authority.
 - *C9 Durable thread state.* [[file:../assist/run_service.py][RunService]]
   writes Run JSON under the thread root. [[file:../assist/thread_manager.py][ThreadManager]]
   stores LangGraph checkpoints in =threads.db= and owns thread directories.
   [[file:../manage/web/state.py][state.py]] writes UI status markers. The
-  workspace can be a per-thread Git checkout or ordinary files.
+  workspace can be a per-thread Git checkout or ordinary files. Research
+  observations come from paired graph ToolMessages, while a no-HTTP access
+  outcome comes only from the host URL guard's typed tool artifact. Both have
+  explicit bounds and omission counts; neither replaces independent checking.
 
 ** Authority and external effects
 

@@ -81,7 +81,7 @@ class WebAgentProtocolService:
             "")
         status = ("awaiting_approval" if latest.status == "awaiting_approval"
                   else "running" if active else latest.status)
-        return {
+        task = {
             "task_id": thread_id,
             "agent_name": latest.assistant_id,
             "description": description,
@@ -94,6 +94,9 @@ class WebAgentProtocolService:
             "created_at": first.created_at,
             "updated_at": latest.updated_at,
         }
+        if latest.status == "success" and latest.output_evidence is not None:
+            task["output_evidence"] = latest.output_evidence
+        return task
 
     @_while_admitted
     def create_thread(self, thread_id: str | None = None,

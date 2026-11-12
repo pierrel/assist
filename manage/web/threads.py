@@ -2643,6 +2643,15 @@ def _git_result_notice(branch: str | None) -> str | None:
             "it into the thread branch locally, resolve conflicts, and push.")
 
 
+def _completed_research_evidence(chat: Thread) -> dict:
+    """Project actual completed tool messages, never the child's final prose."""
+    from assist.middleware.research_observations import project_research_observations
+
+    state = chat.agent.get_state(chat.runconfig)
+    return json.loads(project_research_observations(
+        (state.values or {}).get("messages", [])))
+
+
 def _execute_child_run(run: Run, *, resume: bool = False) -> None:
     """Execute one hidden task slice and wake its parent at terminal state."""
     parent_working_dir = None
@@ -2714,11 +2723,15 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                               else chat.resume() if (resume or run.resume)
                               else chat.message(run.text or ""))
                     waits_for_egress = _child_waits_for_egress(run)
+                    output_evidence = None
+                    if run.assistant_id == "research-agent" and not waits_for_egress:
+                        output_evidence = _completed_research_evidence(chat)
                     with _RUN_ADMISSION_LOCK:
                         run = _runs().transition(
                             run.thread_id, run.id,
                             "awaiting_approval" if waits_for_egress
-                            else "running" if git_lifecycle.bound else "success", result=result)
+                            else "running" if git_lifecycle.bound else "success",
+                            result=result, output_evidence=output_evidence)
                     if git_lifecycle.bound and not waits_for_egress:
                         git_lifecycle.cleanup_model(sandbox_generation)
                         sandbox_generation = None
@@ -2825,6 +2838,7 @@ def _recover_child_run(run: Run) -> None:
     parent_working_dir = MANAGER.thread_default_working_dir(run.parent_thread_id)
     try:
         result = run.result
+        output_evidence = run.output_evidence
         if result is None:
             chat = MANAGER.get(
                 run.thread_id, working_dir=parent_working_dir, sandbox_backend=None,
@@ -2838,9 +2852,12 @@ def _recover_child_run(run: Run) -> None:
             result = next((message.content for message in reversed(raw)
                            if getattr(message, "type", None) == "ai"
                            and isinstance(message.content, str) and message.content), None)
+            if result is not None and run.assistant_id == "research-agent":
+                output_evidence = _completed_research_evidence(chat)
         if result is not None:
             with _RUN_ADMISSION_LOCK:
-                _runs().transition(run.thread_id, run.id, "running", result=result)
+                _runs().transition(run.thread_id, run.id, "running", result=result,
+                                   output_evidence=output_evidence)
             with THREAD_QUEUE.acquire(run.thread_id), GitLifecycle.acquire(
                     MANAGER.thread_dir(run.parent_thread_id), parent_working_dir,
                     run.work_id,
@@ -2849,7 +2866,8 @@ def _recover_child_run(run: Run) -> None:
                 git_lifecycle.recover_child(
                     str(result), MANAGER.thread_dir(run.thread_id))
                 with _RUN_ADMISSION_LOCK:
-                    _runs().transition(run.thread_id, run.id, "success", result=result)
+                    _runs().transition(run.thread_id, run.id, "success", result=result,
+                                       output_evidence=output_evidence)
                 git_lifecycle.child_terminal()
         else:
             _execute_child_run(run)

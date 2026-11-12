@@ -578,4 +578,5 @@ class UrlProvenanceMiddleware(AgentMiddleware):
             tool_call_id=tool_call.get("id", ""),
             name=_READ_TOOL,
             status="error",
+            artifact={"assist_provenance_denial_no_http": True},
         )

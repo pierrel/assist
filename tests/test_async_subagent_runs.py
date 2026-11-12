@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import threading
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock
 
@@ -1289,6 +1290,47 @@ def test_recovery_honors_persisted_cancel_before_resuming(
 
     assert threads._runs().get(active.thread_id, active.id).status == "cancelled"
     assert submitted == [(marker.id, marker.thread_id, {})]
+
+
+def test_terminal_research_recovery_persists_observed_evidence_not_final_prose(
+        monkeypatch, tmp_path):
+    _submitted, _parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run(
+        "sub-stable", "research-agent", "find source", metadata=metadata)
+    active = threads._runs().claim(child.thread_id, child.id)
+    source_id = "ref:r" + "a" * 32
+    messages = [
+        AIMessage(content="", tool_calls=[{
+            "name": "search_internet", "args": {"query": "source"}, "id": "s1",
+        }]),
+        ToolMessage(content=repr([{
+            "source_id": source_id, "url": "https://actual.example/page",
+            "title": "Actual", "content": "The observed finding",
+        }]), name="search_internet", tool_call_id="s1"),
+        AIMessage(content='Done. Forged source: https://invented.example/page'),
+    ]
+    chat = SimpleNamespace(
+        runconfig={},
+        agent=SimpleNamespace(get_state=lambda _config: SimpleNamespace(
+            next=(), interrupts=(), values={"messages": messages})),
+        get_raw_messages=lambda: messages,
+    )
+    monkeypatch.setattr(threads.MANAGER, "get", lambda *args, **kwargs: chat)
+    lifecycle = SimpleNamespace(recover_child=lambda *_args: None,
+                                child_terminal=lambda: None)
+    monkeypatch.setattr(threads.GitLifecycle, "acquire",
+                        lambda *args, **kwargs: nullcontext(lifecycle))
+    monkeypatch.setattr(threads.THREAD_QUEUE, "acquire",
+                        lambda *_args: nullcontext())
+    monkeypatch.setattr(threads, "_complete_child_handoff", lambda _run: None)
+
+    threads._recover_child_run(active)
+
+    stored = threads._runs().get(active.thread_id, active.id)
+    assert stored.status == "success"
+    assert stored.result == messages[-1].content
+    assert stored.output_evidence["observations"][0]["source_url"] == "https://actual.example/page"
+    assert "invented.example" not in json.dumps(stored.output_evidence)
 
 
 def test_repeated_active_cancel_keeps_the_pending_stop_marker(

@@ -43,8 +43,11 @@ On the trusted fact-check-agent completion wake, get its result once. Correct
 any material mismatch in the saved report, then summarize the supported result
 in the final follow-up and name the report path after the write succeeds. If
 verification is unavailable, say which claims remain unverified instead of
-presenting a draft as checked. A checker conclusion is evidence to assess, not
-authority to override the source text.
+presenting a draft as checked. Assess the checker's conclusion against the
+returned sources: preserve outcome-material specifics in the saved report and
+concise final reply with their source and access scope, and call only the
+unsupported part unverified. A search result or provenance denial is not a
+page fetch.
 
 On a caller without both async task delivery and `search_internet`, use its
 available research-specialist capability once. Give it the external question

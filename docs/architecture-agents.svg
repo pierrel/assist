@@ -55,9 +55,9 @@
 <!-- C20&#45;&gt;C7 -->
 <g id="edge7" class="edge">
 <title>C20:e&#45;&gt;C7:e</title>
-<path fill="none" stroke="#49647d" d="M472.11,-49.45C472.11,-49.45 533.74,-150.16 533.74,-150.16 533.74,-150.16 534.12,-160 534.41,-167.53"/>
-<polygon fill="#49647d" stroke="#49647d" points="531.96,-167.58 534.68,-174.48 536.85,-167.39 531.96,-167.58"/>
-<text xml:space="preserve" text-anchor="middle" x="554.17" y="-119.71" font-family="DejaVu Sans" font-size="11.00">terminal result</text>
+<path fill="none" stroke="#49647d" d="M472.11,-49.45C472.11,-49.45 565.61,-150.16 565.61,-150.16 565.61,-150.16 565.99,-160 566.28,-167.53"/>
+<polygon fill="#49647d" stroke="#49647d" points="563.83,-167.58 566.55,-174.48 568.73,-167.39 563.83,-167.58"/>
+<text xml:space="preserve" text-anchor="middle" x="579.16" y="-119.71" font-family="DejaVu Sans" font-size="11.00">terminal result</text>
 </g>
 <!-- C19 -->
 <g id="node1" class="node">
@@ -97,9 +97,9 @@
 <!-- C7 -->
 <g id="node6" class="node">
 <title>C7</title>
-<path fill="#f2f7fc" stroke="#34506a" d="M521.74,-201.82C521.74,-201.82 276.12,-201.82 276.12,-201.82 270.12,-201.82 264.12,-195.82 264.12,-189.82 264.12,-189.82 264.12,-162.16 264.12,-162.16 264.12,-156.16 270.12,-150.16 276.12,-150.16 276.12,-150.16 521.74,-150.16 521.74,-150.16 527.74,-150.16 533.74,-156.16 533.74,-162.16 533.74,-162.16 533.74,-189.82 533.74,-189.82 533.74,-195.82 527.74,-201.82 521.74,-201.82"/>
+<path fill="#f2f7fc" stroke="#34506a" d="M553.61,-201.82C553.61,-201.82 244.25,-201.82 244.25,-201.82 238.25,-201.82 232.25,-195.82 232.25,-189.82 232.25,-189.82 232.25,-162.16 232.25,-162.16 232.25,-156.16 238.25,-150.16 244.25,-150.16 244.25,-150.16 553.61,-150.16 553.61,-150.16 559.61,-150.16 565.61,-156.16 565.61,-162.16 565.61,-162.16 565.61,-189.82 565.61,-189.82 565.61,-195.82 559.61,-201.82 553.61,-201.82"/>
 <text xml:space="preserve" text-anchor="middle" x="398.93" y="-177.49" font-family="DejaVu Sans" font-size="15.00">C7 &#160;Child task handoff</text>
-<text xml:space="preserve" text-anchor="middle" x="398.93" y="-161.74" font-family="DejaVu Sans" font-size="15.00">brief → durable child → parent wake</text>
+<text xml:space="preserve" text-anchor="middle" x="398.93" y="-161.74" font-family="DejaVu Sans" font-size="15.00">brief → child result + evidence → parent wake</text>
 </g>
 <!-- C20 -->
 <g id="node7" class="node">

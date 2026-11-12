@@ -176,6 +176,9 @@ class Run:
     # A cancelled held phone Run still owes exact browser teardown before
     # cancellation cleanup may dispatch a follower.
     browser_cancel_reset: bool = False
+    # Host-projected research-tool evidence. Older Runs have no stored projection;
+    # that alone says nothing about whether a source was observed.
+    output_evidence: dict | None = None
     quiet_requested: bool = False
     approval_id: str | None = None
     approvals: tuple[Approval, ...] = ()
@@ -218,6 +221,19 @@ class Run:
         return dict(value)
 
     @staticmethod
+    def _output_evidence(value: object) -> dict | None:
+        if value is None:
+            return None
+        if (not isinstance(value, dict)
+                or not isinstance(value.get("observations"), list)
+                or not isinstance(value.get("access_outcomes"), list)
+                or len(value["observations"]) > 16
+                or len(value["access_outcomes"]) > 16
+                or len(json.dumps(value).encode()) > 128 * 1024):
+            raise ValueError("invalid output evidence")
+        return dict(value)
+
+    @staticmethod
     def _validated_review_snapshot(value: object) -> dict:
         """Reject a corrupt review identity instead of silently losing its fence."""
         if (not isinstance(value, dict)
@@ -250,6 +266,8 @@ class Run:
             value.pop("browser_reset_run_id")
         if not self.browser_cancel_reset:
             value.pop("browser_cancel_reset")
+        if self.output_evidence is None:
+            value.pop("output_evidence")
         if not self.quiet_requested:
             value.pop("quiet_requested")
         if self.approval_id is None:
@@ -335,6 +353,7 @@ class Run:
             browser_reset_run_id=Run._optional_opaque_id(
                 value.get("browser_reset_run_id"), "browser reset run id"),
             browser_cancel_reset=browser_cancel_reset,
+            output_evidence=Run._output_evidence(value.get("output_evidence")),
             quiet_requested=quiet_requested,
             approval_id=Run._optional_opaque_id(value.get("approval_id"), "approval id"),
             approvals=tuple(Approval.from_dict(item) for item in value.get("approvals", ())),
@@ -945,6 +964,7 @@ class RunService(PerThreadJsonStore[Run]):
         error: str | None = None,
         rider: dict | None = None,
         result: str | None = None,
+        output_evidence: dict | None = None,
         revocation_retry_at: str | None = None,
         browser_reset_notice: bool = False,
         browser_reset_run_id: str | None = None,
@@ -965,6 +985,8 @@ class RunService(PerThreadJsonStore[Run]):
                     error=current.error if error is None else error,
                     rider=current.rider if rider is None else dict(rider),
                     result=current.result if result is None else result,
+                    output_evidence=(current.output_evidence if output_evidence is None
+                                     else Run._output_evidence(output_evidence)),
                     revocation_retry_at=(current.revocation_retry_at
                                          if revocation_retry_at is None else revocation_retry_at),
                     browser_reset_notice=current.browser_reset_notice or browser_reset_notice,
@@ -994,6 +1016,8 @@ class RunService(PerThreadJsonStore[Run]):
                 error=error,
                 rider=current.rider if rider is None else dict(rider),
                 result=current.result if result is None else result,
+                output_evidence=(current.output_evidence if output_evidence is None
+                                 else Run._output_evidence(output_evidence)),
                 revocation_retry_at=revocation_retry_at,
                 browser_reset_notice=current.browser_reset_notice or browser_reset_notice,
                 browser_reset_run_id=(current.browser_reset_run_id

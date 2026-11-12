@@ -14,13 +14,13 @@ digraph Assist {
   C1b [label="C1b  Local embedders\nCLI · EmacsOS via AgentSpec",
        fillcolor="#e5edf5"];
   C2 [label="C2  Web/API boundary\nFastAPI routes · status/stream projection"];
-  C3 [label="C3  Durable Runs\nadmission · transitions · recovery"];
+  C3 [label="C3  Durable Runs\nadmission · transitions · optional evidence"];
   C4 [label="C4  Dispatch + affinity\nworker wakes · one active model turn"];
   C5 [label="C5  Thread runtime\nmanager · checkpointed Thread"];
   C6 [label="C6  Agent assembly\nDeep Agents · tools · skills · middleware"];
-  C7 [label="C7  Child task handoff\nprivate ASGI · child → follow-up Run"];
+  C7 [label="C7  Child task handoff\nprivate ASGI · result + bounded evidence"];
   C8 [label="C8  Host authorities\nGit · sandbox · browser · egress"];
-  C9 [label="C9  Durable thread state\nRun JSON · checkpoints · status · files",
+  C9 [label="C9  Durable thread state\nRun JSON incl. evidence · checkpoints · files",
       fillcolor="#fff4d7"];
   C10 [label="C10  Execution sandbox\nfile and shell tools", fillcolor="#fff0df",
        color="#a46b36"];

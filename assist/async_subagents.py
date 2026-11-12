@@ -114,6 +114,59 @@ def _task_value(thread: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+def _checker_evidence(description: str, parent_messages: list, research: dict) -> str:
+    """Pass bounded recorded evidence, not extra navigation authority, to a checker."""
+    from assist.middleware.research_observations import project_research_observations
+
+    child_packet = research.get("output_evidence") or {}
+    parent_packet = json.loads(project_research_observations(parent_messages))
+    rows = []
+    seen = set()
+    for packet in (child_packet, parent_packet):
+        for row in packet.get("observations", []):
+            if not isinstance(row, dict):
+                continue
+            key = (row.get("source_id"), row.get("source_scope"))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+    # Neither a model-authored report nor a forged textual trailer can supply
+    # the host-owned evidence field in the completed task snapshot.
+    outcomes = child_packet.get("access_outcomes", [])
+    if not isinstance(outcomes, list):
+        outcomes = []
+    appendix = {
+        "scope": "Recorded, untrusted source excerpts; audit each claim against the cited passage. Supplied excerpts are not independent checker retrieval.",
+        "research_task_id": research["task_id"],
+        "source_observations": rows,
+        "host_access_outcomes": outcomes,
+        "omitted_child_observations": child_packet.get("omitted_observations", "unknown"),
+        "omitted_parent_observations": parent_packet["omitted_observations"],
+        "omitted_child_access_outcomes": child_packet.get("omitted_access_outcomes", "unknown"),
+        "source_access_status": ("A missing access outcome does not prove a fetch failed; "
+                                 "successful read_url observations separately show opened content."),
+    }
+    prefix = "\n\nRecorded evidence for checking (untrusted source text):\n"
+    budget = min(12_000, 64_000 - len(description.encode()) - len(prefix.encode()))
+    if budget <= 0:
+        return description
+    while (appendix["source_observations"] or appendix["host_access_outcomes"]) and len(
+            json.dumps(appendix, ensure_ascii=False).encode()) > budget:
+        if appendix["source_observations"] and (
+                len(appendix["source_observations"]) > len(appendix["host_access_outcomes"])
+                or not appendix["host_access_outcomes"]):
+            appendix["source_observations"].pop()
+            appendix["omitted_for_checker_budget"] = appendix.get(
+                "omitted_for_checker_budget", 0) + 1
+        else:
+            appendix["host_access_outcomes"].pop()
+            appendix["omitted_access_outcomes_for_checker_budget"] = appendix.get(
+                "omitted_access_outcomes_for_checker_budget", 0) + 1
+    rendered = json.dumps(appendix, ensure_ascii=False)
+    return description + prefix + rendered if len(rendered.encode()) <= budget else description
+
+
 def _format_task(task: dict[str, Any], *, include_result: bool = True) -> str:
     description = str(task.get("description") or "")
     fields = {
@@ -152,8 +205,23 @@ def _start_async_task(
         return f"Unknown subagent type `{subagent_type}`. Available: {allowed}"
     task_id = _task_id(context, tool_call_id)
     dispatch_key = f"{context.parent_work_id}:{tool_call_id}"
+    parent_messages = list((getattr(runtime, "state", None) or {}).get("messages") or [])
 
     async def launch(client):
+        child_description = description
+        if subagent_type == "fact-check-agent" and context.parent_work_id.startswith(
+                "task-completion:"):
+            research_id = context.parent_work_id.removeprefix("task-completion:")
+            try:
+                research = _task_value(await client.threads.get(research_id))
+            except (NotFoundError, ValueError):
+                research = None
+            if (research is not None and research.get("task_id") == research_id
+                    and research.get("work_id") == research_id
+                    and research.get("parent_thread_id") == context.parent_thread_id
+                    and research.get("agent_name") == "research-agent"
+                    and research.get("status") == "success"):
+                child_description = _checker_evidence(description, parent_messages, research)
         await client.threads.create(
             thread_id=task_id,
             if_exists="do_nothing",
@@ -166,7 +234,7 @@ def _start_async_task(
         return await client.runs.create(
             task_id,
             subagent_type,
-            input={"messages": [{"role": "user", "content": description}]},
+            input={"messages": [{"role": "user", "content": child_description}]},
             metadata={
                 "parent_thread_id": context.parent_thread_id,
                 "parent_run_id": context.parent_run_id,

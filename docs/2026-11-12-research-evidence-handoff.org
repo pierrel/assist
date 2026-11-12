@@ -1,0 +1,43 @@
+#+title: Bounded research observations at the terminal checker handoff
+#+date: 2026-11-12
+
+* Contract
+
+The web research leaf still returns its own sourced findings. At successful
+completion, the host projects paired =search_internet= and =read_url= tool
+results from its completed graph. The Run stores at most 16 observations and
+16 typed access outcomes in optional =output_evidence=. Older Runs without
+that field have unknown observation and access status. The projection does
+not infer facts or source availability from the child's final prose.
+
+Only an actual URL-provenance refusal with a host ToolMessage artifact records
+=provenance_denied_no_http=. A model-written result, source page or JSON trailer
+cannot create that host outcome. An ordinary HTTP error remains distinct, as
+does a missing observation. Search snippets and bounded opened-page text
+carry separate source scopes; offloaded pages contribute a preview rather
+than an invented complete page. Omitted observations, skipped results and
+unpaired recorded calls have separate counts; unmatched ToolMessages are
+ignored.
+
+At the existing research-completion wake, checker admission verifies the
+completed research task's parent/work/task identity and appends a bounded
+evidence appendix to the terminal checker's description. The appendix is
+untrusted source text for the checker to audit. It grants no new =read_url=
+authority, does not assert that a snippet was fetched, and does not count as
+independent retrieval. The checker may search and fetch for itself under its
+existing strict URL guard. The parent still owns report and note correction
+after the checker returns.
+
+The Run field is limited to 128 KiB encoded JSON; the projector targets
+120 KiB and drops rows with omission counts if necessary. Checker admission
+targets 12,000 UTF-8 bytes for its appendix and 64,000 bytes for the complete
+description. Its current selection can omit relevant source rows under load;
+the omission marker must remain visible, and the checker must not infer that
+an omitted page lacked a fact. This is a bounded evidence view, not a
+complete source archive or a factual validator.
+
+* Historical supersessions
+
+None. [[file:2026-11-10-terminal-research-verification.org][Terminal research
+verification]] remains the earlier one-level checker design; this document
+adds optional source observations to its existing admission and Run boundary.
