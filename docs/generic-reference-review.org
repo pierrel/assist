@@ -51,10 +51,13 @@ factory and durable-child panel passed *244 tests plus 8 subtests in 3.29 s*.
 The first unchanged natural main receiving-note candidate episode passed in
 *170.71 s*. It created two immutable whole-record values; its file calls used
 literal text, so this is outcome/registration evidence, not file interpolation
-adoption. A separate explicit real-model capability probe passed in *127.69 s*:
-individual =Mîra Vale= and =ZX-0Il1-7F0b= values were interpolated inside a
-sentence/table write, read, and reused in both exact LF-bounded edit fragments.
-This is capability evidence, never part of natural pass counts. The first
+adoption. A separate explicit real-model capability probe was originally reported as a
+pass in *127.69 s* under weaker checks. The corrected original-trace assessment
+is *PARTIAL/FAIL for reference-bearing edit*: the successful write uses the name
+reference in a paragraph and both name/ID references in its table. The attempted
+reference-bearing edit lacked required LF boundaries and failed; a literal edit
+then changed the status correctly. Deterministic valid reference-edit coverage
+is separate. This probe is never part of natural pass counts. The first
 integrated inline milestone completed around 18:44 UTC, within 30 minutes of
 runtime start. Fresh matched N=3 candidate counts below use the frozen successor after
 review corrections; preliminary runtime identities remain separate.
@@ -661,3 +664,40 @@ publication: lowercasing table cells also accepted a mutated ID/name. Data cells
 now compare exact supplied values; only header/status recognition ignores case.
 Wrong-case negative controls reject that path. The original artifact still
 passes, and production bytes remain identical to =132dae8f=.
+
+
+** Round 5: genuine structure, successful calls and corrected model evidence
+
+Review =5867079058= on =80854b54=, submitted at 00:14:09 UTC on 2026-11-12,
+again reports no open runtime issue but requests human assessment of prospective
+capability-oracle gaps. The old helper accepts a file containing only fenced
+code even though the existing renderer produces no paragraph/table. Root
+accepted the bounded eval-only correction. This is a tenth meaningful coverage
+observation across five submitted reviews; no production behavior is changed.
+
+The existing Markdown renderer with its tables/fenced-code extensions now
+establishes actual paragraph and table structures. The successful raw initial
+write must contain the NAME reference in a paragraph and both references in a
+Pending table row, without retyping either value. There is no claim that the
+original model placed the ID reference in the paragraph. Successful write/edit
+assertions also attribute calls only to the requested inline.md target; a failed
+ref call or an edit to another file cannot prove the mechanism. Existing exact
+whole-file status-cell-only preservation remains required. Synthetic controls
+reject fenced/indented code, missing/raw-retyped references and wrong targets.
+The *44 pure controls* passed without a model or broad runtime rerun.
+
+Retained review exposed a critical correction to the old evidence: the ONLY
+successful original edit used literal names/ID. Its earlier ref-bearing attempt
+returned an error because old_string/new_string lacked surrounding LF bytes.
+The new successful-call assertion correctly makes the complete explicit probe
+*PARTIAL/FAIL for reference-bearing EDIT*. Successful reference-bearing WRITE,
+genuine NameRef paragraph/bothRefs table and exact literal status-update recovery
+are separate positive results. Original edit IDs/statuses/arguments are retained
+in =/tmp/generic-r5-original-edit-outcome.json=. Prior paragraph/table and
+whole-file preservation regrades remain true but do not establish ref-edit use.
+Root accepted this explicit limitation for the experimental runtime. Natural
+*18/18 baseline versus 17/18 candidate* counts remain unchanged; no new model
+episode, prompt/fixture change or runtime guidance tuning is used to force green.
+Valid deterministic reference-bearing edits still have their separate real-file
+mechanism coverage. Production bytes remain identical to =132dae8f= and the
+verified live =80854b54= feature. No generic rebase or merge is authorized.

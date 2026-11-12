@@ -97,3 +97,47 @@ def test_capability_requires_exact_table_data_case(original, changed):
     with pytest.raises(AssertionError):
         _assert_inline_file_update(before, before.replace("| Pending |", "| Ready |"),
                                    "Mîra Vale", "ZX-0Il1-7F0b")
+
+
+@pytest.mark.parametrize("before", ["```\n" + INLINE_BEFORE + "```\n",
+                                    "\n".join("    " + line for line in INLINE_BEFORE.split("\n")),
+                                    INLINE_BEFORE.replace("| Name |", "```\n| Name |") + "```\n"])
+def test_code_blocks_are_not_capability_paragraphs_or_tables(before):
+    from edd.eval.test_generic_reference_binding import _assert_inline_file_update
+    with pytest.raises(AssertionError):
+        _assert_inline_file_update(before, before.replace("| Pending |", "| Ready |"),
+                                   "Mîra Vale", "ZX-0Il1-7F0b")
+
+
+NAME_REF = "ref:r" + "1" * 32
+ID_REF = "ref:r" + "2" * 32
+RAW_INLINE = INLINE_BEFORE.replace("Mîra Vale", NAME_REF).replace("ZX-0Il1-7F0b", ID_REF)
+
+
+def test_raw_write_binds_name_reference_in_paragraph_and_both_references_in_table():
+    from edd.eval.test_generic_reference_binding import _assert_inline_reference_write
+    _assert_inline_reference_write(RAW_INLINE, "Mîra Vale", "ZX-0Il1-7F0b", NAME_REF, ID_REF)
+
+
+@pytest.mark.parametrize("raw", [
+    RAW_INLINE.replace(f"This note refers to {NAME_REF}.", "This note refers to Mîra Vale."),
+    RAW_INLINE.replace(f"This note refers to {NAME_REF}.", "A note without an inline reference."),
+    RAW_INLINE.replace(f"| {ID_REF} |", "| ref:unknown |"),
+    "```\n" + RAW_INLINE + "```\n",
+])
+def test_raw_write_cannot_retype_or_omit_required_structural_references(raw):
+    from edd.eval.test_generic_reference_binding import _assert_inline_reference_write
+    with pytest.raises(AssertionError):
+        _assert_inline_reference_write(raw, "Mîra Vale", "ZX-0Il1-7F0b", NAME_REF, ID_REF)
+
+
+@pytest.mark.parametrize("path", ["/user/inline.md", "/inline.md", "inline.md"])
+def test_capability_tool_attribution_accepts_only_target_aliases(path):
+    from edd.eval.test_generic_reference_binding import _inline_file_call
+    assert _inline_file_call({"name": "edit_file", "args": {"file_path": path}}, "edit_file")
+
+
+@pytest.mark.parametrize("path", ["/user/other.md", "/user/other/inline.md", "/references/inline.md"])
+def test_ref_edit_of_another_file_cannot_prove_the_capability_target(path):
+    from edd.eval.test_generic_reference_binding import _inline_file_call
+    assert not _inline_file_call({"name": "edit_file", "args": {"file_path": path}}, "edit_file")

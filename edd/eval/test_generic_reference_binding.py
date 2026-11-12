@@ -8,6 +8,9 @@ import re
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
+from xml.etree import ElementTree
+
+from markdown import markdown
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -323,12 +326,40 @@ def test_main_consumes_exact_values_from_completed_child(tmp_path, monkeypatch):
     assert sum(call["name"] == "get_async_task_result" for call in calls) == 1
 
 
+def _assert_inline_layout(text, name, identifier):
+    """Check actual rendered paragraphs/tables, excluding fenced/indented code."""
+    try:
+        root = ElementTree.fromstring("<div>" + markdown(text, extensions=["tables", "fenced_code"]) + "</div>")
+    except ElementTree.ParseError as error:
+        raise AssertionError("invalid rendered Markdown") from error
+    node_text = lambda node: "".join(node.itertext()).strip()
+    assert any(name in node_text(node) and node_text(node) != name
+               for node in root.findall("./p")), "missing genuine inline paragraph"
+    matches = []
+    for table in root.findall("./table"):
+        headers = [node_text(cell).casefold() for cell in table.findall("./thead/tr/th")]
+        columns = [index for index, value in enumerate(headers)
+                   if value in {"status", "current status"}]
+        if len(columns) != 1:
+            continue
+        for row in table.findall("./tbody/tr"):
+            values = [node_text(cell) for cell in row.findall("./td")]
+            if name in values and identifier in values:
+                assert len(values) == len(headers) and values[columns[0]].casefold() == "pending"
+                matches.append(row)
+    assert len(matches) == 1, "missing or ambiguous genuine Pending table row"
+
+
+def _assert_inline_reference_write(raw, name, identifier, name_ref, identifier_ref):
+    """The raw successful write must bind refs in the paragraph and table."""
+    assert name not in raw and identifier not in raw, "exact values were retyped"
+    _assert_inline_layout(raw, name_ref, identifier_ref)
+
+
 def _assert_inline_file_update(before, after, name, identifier):
     """Keep the original inline paragraph/table; change only its status cell."""
     lines = before.splitlines(keepends=True)
-    assert any(name in line and line.strip() != name
-               and "|" not in line and not line.lstrip().startswith("#")
-               for line in lines), "missing inline paragraph"
+    _assert_inline_layout(before, name, identifier)
 
     def cells(line):
         return [cell.strip(" \t\r\n`*_")
@@ -358,6 +389,12 @@ def _assert_inline_file_update(before, after, name, identifier):
     raw_cells[raw_column] = re.sub(r"\bPending\b", "Ready", raw_cells[raw_column], count=1, flags=re.I)
     lines[row_index] = "|".join(raw_cells)
     assert after == "".join(lines), "content changed beyond the original table status cell"
+
+
+def _inline_file_call(call, name):
+    """Attribute capability writes/edits to the requested file only."""
+    path = str((call.get("args") or {}).get("file_path", "")).lstrip("/")
+    return call["name"] == name and path in {"user/inline.md", "inline.md"}
 
 
 def test_inline_reference_file_update_capability(tmp_path, monkeypatch):
@@ -396,11 +433,21 @@ def test_inline_reference_file_update_capability(tmp_path, monkeypatch):
              for call in message.tool_calls]
     rows = store.list(kind="text")
     assert {row["value"] for row in rows} == {"Mîra Vale", "ZX-0Il1-7F0b"}
-    references = {f"ref:{row['id']}" for row in rows}
-    assert any(call["name"] == "write_file"
+    by_value = {row["value"]: f"ref:{row['id']}" for row in rows}
+    references = set(by_value.values())
+    successful = {message.tool_call_id for message in results[-1]["messages"]
+                  if isinstance(message, ToolMessage) and message.status == "success"}
+    calls = [call for call in calls if call["id"] in successful]
+    first_writes = [call for message in results[0]["messages"] if isinstance(message, AIMessage)
+                    for call in message.tool_calls if call["id"] in successful
+                    and _inline_file_call(call, "write_file")]
+    assert first_writes, "missing successful reference-bearing initial write"
+    _assert_inline_reference_write(first_writes[0]["args"]["content"], "Mîra Vale", "ZX-0Il1-7F0b",
+                                   by_value["Mîra Vale"], by_value["ZX-0Il1-7F0b"])
+    assert any(_inline_file_call(call, "write_file")
                and all(ref in call["args"].get("content", "") for ref in references)
                for call in calls)
-    assert any(call["name"] == "edit_file"
+    assert any(_inline_file_call(call, "edit_file")
                and all(ref in call["args"].get("old_string", "")
                        and ref in call["args"].get("new_string", "") for ref in references)
                for call in calls)
