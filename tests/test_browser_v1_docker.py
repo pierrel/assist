@@ -245,15 +245,19 @@ for pid in os.listdir('/proc'):
         info = json.loads(browser._docker_exec(sandbox.id, info_cmd.encode(), in_sandbox=True))["result"]
         assert info["path"].startswith("/run/assist-browser/downloads/")
         assert browser._docker_download(sandbox.id, info["path"], in_sandbox=True) == b'isolated-download-canary'
+        def native_processes(rows):
+            return [row for row in rows if not row[1].startswith("Z")
+                    and any(name in row[-1].lower()
+                            for name in ("chrome", "chromium", "crashpad"))]
+
         processes = sandbox.top(ps_args="-eo pid,stat,comm")["Processes"]
-        assert any("chrome" in row[-1].lower() and not row[1].startswith("Z")
-                   for row in processes)
+        assert native_processes(processes)
         revoked = json.dumps({"session": token, "operation": "revoke", "args": {}})
         assert json.loads(browser._docker_exec(sandbox.id, revoked.encode(), in_sandbox=True))["result"] == {"revoked": True}
         deadline = time.monotonic() + 3
         while True:
             remaining = sandbox.top(ps_args="-eo pid,stat,comm")["Processes"]
-            if not any("chromium" in row[-1].lower() and not row[1].startswith("Z") for row in remaining):
+            if not native_processes(remaining):
                 break
             assert time.monotonic() < deadline, remaining
             time.sleep(0.05)
