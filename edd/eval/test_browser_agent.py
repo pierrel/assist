@@ -76,7 +76,8 @@ class _BrowserSite:
 
     def _form_page(self, snapshot):
         return self._page(
-            snapshot,
+            snapshot + " Destination: " + self.form_values.get("destination", "blank")
+            + ". Travel date: " + self.form_values.get("travel-date", "blank") + ".",
             [{"ref": "destination", "role": "textbox", "name": "Destination"},
              {"ref": "travel-date", "role": "textbox", "name": "Travel date"},
              {"ref": "review", "role": "button", "name": "Review"}],
@@ -86,12 +87,15 @@ class _BrowserSite:
               page_id="page-1", network_errors=()):
         url = ("http://host.docker.internal:5050/" if self.scenario == "internal-status"
                else f"https://{self.scenario}.fern.example/")
-        return {"result": {"page_id": page_id, "snapshot_id": snapshot_id,
+        response = {"result": {"page_id": page_id, "snapshot_id": snapshot_id,
                 "url": url,
                 "snapshot": snapshot, "targets": list(targets),
                 "pages": [{"page_id": page_id, "url": url}],
                 "downloads": list(downloads),
                 "network_errors": list(network_errors)}}
+        if self.scenario == "v1-form":
+            self.form_page = response
+        return response
 
     def command(self, operation, **args):
         self.calls.append((operation, args))
@@ -99,7 +103,7 @@ class _BrowserSite:
             if self.scenario == "v1-form":
                 self.session_open = True
                 return self._form_page(
-                    "Trip draft. Destination and travel date are blank; review does not submit.")
+                    "Trip draft. Review does not submit.")
             if self.scenario == "v1-stale":
                 self.session_open = True
                 return self._page(
@@ -246,6 +250,10 @@ class _BrowserSite:
             return self._page("Next shuttle arrival: 9:40 a.m. Pacific.",
                               snapshot_id="second")
         if operation == "observe":
+            if self.scenario == "v1-form":
+                if not self.session_open or args.get("page_id") != f"page-{self.turn}":
+                    return {"error": "old page is closed"}
+                return self.form_page
             if self.scenario == "delayed":
                 return self._page("Next shuttle arrival: 9:40 a.m. Pacific.",
                                   snapshot_id="second")
