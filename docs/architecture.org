@@ -16,9 +16,10 @@ connections. Other separately deployed feature branches are outside this view.
 
 The source is [[file:architecture.dot][architecture.dot]]. Regenerate the SVG
 locally with =dot -Tsvg docs/architecture.dot -o docs/architecture.svg=.
-Solid arrows carry requests, control, or work. Dashed arrows write or read
-durable state. Arrow labels say what crosses each boundary. The numbered IDs
-are stable component names for discussing later changes.
+Solid arrows carry requests, control, work, or reads through a service API.
+Dashed arrows connect components to stored data. Arrow labels say what crosses
+each boundary. The numbered IDs are stable component names for discussing
+later changes.
 
 * Component key
 
@@ -51,12 +52,18 @@ in both views. An ID shown in only one view keeps that meaning.
 - *C3 Durable Runs.* [[file:../assist/run_service.py][RunService]] persists Run
   identities and transitions. [[file:../manage/web/threads.py][=_create_run=,
   =_accept_message_run= and =queue_recovery_runs=]] admit work before dispatch
-  and reconstruct pending work after restart. The legacy backlog is migration
-  input, not new-work authority.
+  and reconstruct pending work after restart. C4 reads current Run, approval,
+  browser-reset and recovery-successor state here before counting a queued wake
+  as a fairness waiter. The legacy backlog is migration input, not new-work
+  authority.
 - *C4 Dispatch + affinity.* [[file:../manage/web/threads.py][=_PriorityRunQueue=
-  and =_ResumeScheduler=]] carry wake notifications and execute Run IDs.
+  and =_ResumeScheduler=]] carry queued Run ID notifications in user-priority
+  and background FIFO tiers; reservations are invisible until committed.
   [[file:../assist/thread_queue.py][ThreadAffinityQueue]] serializes model
-  turns with thread affinity. An ordinary first web turn runs in a FastAPI
+  turns with thread affinity. Its fairness tick also counts eligible queued
+  notifications for other threads, then requests a cooperative pause after the
+  quantum. A separate timer enforces the cumulative active-time cap even if
+  the eligibility read stalls. An ordinary first web turn runs in a FastAPI
   =BackgroundTask=; the resume scheduler handles resumptions and recoveries.
   The web worker [[file:../manage/web/threads.py][=_process_message=]] owns the
   per-run Git, sandbox and browser control before it constructs C5. In-memory
@@ -131,9 +138,9 @@ in both views. An ID shown in only one view keeps that meaning.
 
 ** Agent and guidance view
 
-This view follows the ordinary Deep Agents web main on merged =main= at
-=df4bb845=. It uses the same C6/C7 IDs as the overview. The four named child
-types are product Assist agents, not development roles.
+This view follows the ordinary Deep Agents web main. It uses the same C6/C7
+IDs as the overview. The four named child types are product Assist agents,
+not development roles.
 
 [[file:architecture-agents.svg]]
 
@@ -221,8 +228,11 @@ a worker; it acquires the affinity slot, then claims the Run before C5 invokes
 C6. The agent can call
 C10 tools, start a C7 child, or send a model request to C12. C5 checkpoints its
 graph in C9; C3 persists the Run outcome. C2 projects status and stream events
-for the browser. Restart recovery scans C3 and requeues unfinished IDs; queue
-membership itself is not durable.
+for the browser. While one Run holds the model slot, C4's timer checks its
+queued notifications against C3's current state. After the quantum, an eligible
+other-thread wake requests a pause at the next model boundary; C3 records the
+same-work successor before C4 runs it. Restart recovery scans C3 and requeues
+unfinished IDs; queue membership itself is not durable.
 
 C8 remains host-side authority for Git publication, sandbox lifetime, browser
 leases and sandbox/browser network grants. Page content and workspace files in
@@ -231,6 +241,26 @@ access. A child
 result returns through C7's private in-process adapter and a new parent Run,
 so the parent can receive it even
 after the original user turn has ended.
+
+* Review the dispatch boundary
+
+- Start with [[file:../assist/run_service.py][RunService]] and
+  [[file:../manage/web/threads.py][=_recover_run=]] for durable Run and
+  successor ownership. The in-memory queue carries notifications, not work
+  authority.
+- Follow [[file:../manage/web/threads.py][=_PriorityRunQueue.waiting_for_other=
+  and =_ResumeScheduler._dispatch_waiter_count=]] into
+  [[file:../assist/thread_queue.py][=ThreadAffinityQueue._on_tick= and
+  =_on_cap=]]. The probe snapshots queued wakes before disk reads, excludes
+  same-thread, browser-reset-held, approval-blocked and canceled wakes, plus
+  interrupted predecessors whose newest resume/decision successor is no longer
+  pending or running, or whose pending successor is held behind a browser-reset
+  fence. The active-time cap remains independent of those reads.
+- [[file:../tests/test_fair_scheduling_integration.py][The integrated fairness
+  regression]], [[file:../tests/test_event_late_replay.py][late replay test]]
+  and [[file:../tests/test_thread_queue.py][cap test]] cover the handoff. C8
+  still owns Git, sandbox and browser effects; this change adds no model slot
+  and makes no C5/C6/C7 implementation change.
 
 * Conditional paths and limits of this view
 

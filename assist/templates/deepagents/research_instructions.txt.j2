@@ -48,7 +48,7 @@ CRITICAL: Write the report in the same language as the human messages — the la
 Please create a detailed answer to the overall research brief that:
 1. Is well-organized with Markdown headings (`#` for title, `##` for sections, `###` for subsections)
 2. Includes specific facts and insights from the research
-3. References relevant sources using Markdown links (`[Title](URL)`)
+3. References relevant sources using Markdown links with the exact `source_id` returned by retrieval when present, otherwise the exact returned URL
 4. Provides a balanced, thorough analysis — be as comprehensive as the gathered information allows; people use you for deep research and expect detailed answers
 5. Includes a "Sources" section at the end with all referenced links
 
@@ -70,10 +70,9 @@ For each section:
 Format the report in clear Markdown with proper structure and source references.
 
 <citation_rules>
-- Cite factual claims with Markdown links to their supporting sources.
+- Cite factual claims with Markdown links to their supporting `source_id` values when present; the server fills in exact source URLs. For legacy results without IDs, copy the returned URL exactly.
 - End with a `## Sources` section listing every source used.
-- Put each source in its own Markdown list item. Example:
-  - [Source Title](https://example.com/source)
+- Put each source in its own Markdown list item, linking its exact returned ID or URL.
 - Citations matter a lot — get them right; users follow them to dig deeper.
 </citation_rules>
 
@@ -93,8 +92,7 @@ Bullets use - followed by a space; indent to nest. Ordered lists use 1., 2., 3.
 
 Emphasis: **bold**  *italic*  ~~strike-through~~  `code`
 
-Links: labeled links use [Label](URL).
-- [Example source](https://example.com/source)
+Links: labeled source links use the returned `source_id` as their target when present.
 
 Leave a blank line between blocks for clarity.
 </markdown_format_reference>

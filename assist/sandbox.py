@@ -309,6 +309,26 @@ class DockerSandboxBackend(BaseSandbox):
         with self._execute_lock:
             return self._execute_locked(command)
 
+    def execute_host_command(self, argv: list[str]) -> ExecuteResponse:
+        """Run a host-authored sandbox operation without PATH or shell lookup."""
+        command = ["/usr/bin/timeout", "--kill-after=5s", "30s", *argv]
+        with self._execute_lock:
+            try:
+                exit_code, output_bytes = self.container.exec_run(
+                    command, demux=False, workdir=self.work_dir)
+            except DockerNotFound as error:
+                raise SandboxContainerLostError(
+                    f"Sandbox container {self.container.id[:12]} disappeared "
+                    "mid-thread — please retry.") from error
+            except Exception as error:
+                logger.error("Trusted sandbox command failed: %s", error)
+                return ExecuteResponse(output=f"Error executing command: {error}",
+                                       exit_code=1)
+        output = output_bytes.decode("utf-8", errors="replace") if output_bytes else ""
+        if len(output) > MAX_OUTPUT_CHARS:
+            output = output[:MAX_OUTPUT_CHARS] + "\n... [output truncated]"
+        return ExecuteResponse(output=output, exit_code=exit_code)
+
     def _execute_locked(self, command: str) -> ExecuteResponse:
         """Run one command while its proxy-log attribution is exclusive."""
         bounded = (
@@ -491,8 +511,9 @@ class DockerSandboxBackend(BaseSandbox):
                 responses.append(FileUploadResponse(path=path, error="permission_denied"))
         return responses
 
-    def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
-        """Download files from the container via tar archive."""
+    def download_files(self, paths: list[str], *,
+                       max_bytes: int | None = None) -> list[FileDownloadResponse]:
+        """Download files via tar; optionally cap buffered archive bytes."""
         import io
         import tarfile
 
@@ -503,10 +524,15 @@ class DockerSandboxBackend(BaseSandbox):
                 bits, _ = self.container.get_archive(resolved)
                 tar_stream = io.BytesIO()
                 for chunk in bits:
+                    if max_bytes is not None and tar_stream.tell() + len(chunk) > max_bytes:
+                        raise ValueError("sandbox download exceeds archive byte limit")
                     tar_stream.write(chunk)
                 tar_stream.seek(0)
                 with tarfile.open(fileobj=tar_stream, mode="r") as tar:
                     member = tar.getmembers()[0]
+                    if max_bytes is not None and (not member.isfile()
+                                                  or member.size > max_bytes):
+                        raise ValueError("sandbox download is not a bounded regular file")
                     f = tar.extractfile(member)
                     if f is None:
                         responses.append(FileDownloadResponse(

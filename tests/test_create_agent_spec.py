@@ -64,6 +64,41 @@ class _CreateAgentHarness:
 class TestSpecWiring(_CreateAgentHarness):
     """The spec's fields reach create_deep_agent."""
 
+    def test_thread_data_tools_follow_availability_flag(self):
+        from assist.thread_datastore import (get_thread_data, list_thread_data,
+                                             search_thread_data)
+
+        data_tools = (get_thread_data, list_thread_data, search_thread_data)
+        for spec in (AgentSpec(role="delegate"),
+                     AgentSpec(async_subagent_tools=_async_task_tools, web_main=True)):
+            absent = self._build(spec=spec)["tools"]
+            present = self._build(spec=spec, thread_data_available=True)["tools"]
+            assert all(tool not in absent for tool in data_tools)
+            assert all(tool in present for tool in data_tools)
+
+    def test_research_record_tools_follow_availability_flag(self):
+        from assist.agent import create_research_agent
+
+        data_names = {"get_thread_data", "list_thread_data", "search_thread_data"}
+
+        def names(tools):
+            return {getattr(tool, "name", getattr(tool, "__name__", ""))
+                    for tool in tools}
+
+        for leaf in (False, True):
+            for available in (False, True):
+                with patch("assist.agent.create_deep_agent") as fake:
+                    fake.return_value = MagicMock()
+                    create_research_agent(MagicMock(), "/tmp/x", leaf=leaf,
+                                          thread_data_available=available)
+                built = fake.call_args.kwargs
+                tool_groups = [built["tools"]]
+                if not leaf:
+                    tool_groups.append(next(item["tools"] for item in built["subagents"]
+                                            if item["name"] == "research-agent"))
+                for tools in tool_groups:
+                    assert data_names.issubset(names(tools)) == available
+
     def test_default_spec_has_only_builtin_tools(self):
         # travel/directions/map_data (real-world lookups) + read_url
         # (site navigation → download; guarded by the reread-breaker) are the
@@ -615,6 +650,12 @@ class _ThreadHarness:
 
 
 class TestThreadSpecForwarding(_ThreadHarness):
+    def test_thread_data_tools_follow_datastore_path(self):
+        _, absent = self._build()
+        _, present = self._build(thread_datastore_path="/host/thread/data.sqlite")
+        assert absent["thread_data_available"] is False
+        assert present["thread_data_available"] is True
+
     def test_agent_dir_forwarded(self):
         _, ca_kwargs = self._build(agent_dir="/host/thread/agent")
         assert ca_kwargs["agent_dir"] == "/host/thread/agent"
