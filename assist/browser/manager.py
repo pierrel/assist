@@ -404,8 +404,9 @@ class BrowserSession:
             self.user_request = request
 
     def pause(self):
-        """Freeze the exact container before releasing the model slot."""
+        """Attempt private storage capture, then freeze the exact container."""
         with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
+            self._capture_storage()
             _bounded_cli(["docker", "pause", self.sandbox_generation],
                          limit=4096, timeout=10)
             self.paused = True

@@ -463,10 +463,13 @@ class TestBrowserAgent(TestCase):
             competitor = WorkerThread(target=compete, daemon=True)
             command = site.command
             launched = False
+            click_results = []
 
             def command_with_waiter(operation, **args):
                 nonlocal launched
                 result = command(operation, **args)
+                if operation == "act" and args.get("action") == "click":
+                    click_results.append(result)
                 if (not launched and operation == "act" and args.get("action") == "fill"
                         and site.form_values.get("destination") == "Portland"):
                     launched = True
@@ -514,6 +517,11 @@ class TestBrowserAgent(TestCase):
             resolved = target.get("ref") or {
                 ("button", "Review"): "review"}.get((target.get("role"), target.get("name")))
             self.assertEqual(resolved, "review", site.calls)
+            self.assertNotIn("error", click_results[0], click_results)
+            reviewed = click_results[0].get("result", {})
+            self.assertEqual(reviewed.get("snapshot_id"), f"review-{site.turn}", click_results)
+            self.assertIn("Review only", reviewed.get("snapshot", ""), click_results)
+            self.assertIn("Portland", reviewed.get("snapshot", ""), click_results)
             self.assertEqual(sum(op == "open" for op, _ in site.calls), 1, site.calls)
             self.assertEqual(site.form_values.get("destination"), "Portland")
             self.assertIn("Portland", str(result["messages"][-1].content))

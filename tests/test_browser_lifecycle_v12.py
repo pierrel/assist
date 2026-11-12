@@ -1,4 +1,5 @@
 """Direct-message admission and crash recovery use durable browser proofs."""
+import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
@@ -191,8 +192,10 @@ def test_held_message_disarms_active_browser_without_killing_shell(
 
 
 @pytest.mark.parametrize("boundary", ["new_user", "cancel"])
+@pytest.mark.parametrize("cleared", [False, True])
 def test_paused_browser_reset_proves_stop_before_releasing_work(
-        monkeypatch, admitted, boundary):
+        monkeypatch, admitted, boundary, cleared):
+    from assist.browser import storage
     root, runs = admitted
     source = runs.create("t", "general-agent", "Find a composer", user_origin=True)
     runs.claim("t", source.id)
@@ -210,12 +213,32 @@ def test_paused_browser_reset_proves_stop_before_releasing_work(
         work_id=source.work_id, sandbox_generation=container.id,
         sandbox_backend=SimpleNamespace(container=container), run_service=runs)
     session.identity = browser._ContainerIdentity(str(root), "172.20.0.2", container.id)
-    session.paused = True
     monkeypatch.setattr(browser.BrowserManager, "_sessions", {"t": session})
     with authority.fence(str(root), "t") as state:
         state.begin(source.id, source.admission_sequence)
         state.add_generation(source.id, container.id)
-    monkeypatch.setattr(browser, "_bounded_cli", lambda *_a, **_k: b"")
+    old = {"cookies": [{"name": "session", "value": "old-auth"}], "origins": []}
+    fresh = ({"cookies": [], "origins": []} if cleared else
+             {"cookies": [{"name": "session", "value": "new-auth"}],
+              "origins": [{"origin": "https://fixture.example", "localStorage": [
+                  {"name": "draft", "value": "current"}]}]})
+    storage.save(str(root), "t", source.id, container.id, old)
+    captures = []
+    controls = []
+    def transport(_generation, payload, **_kwargs):
+        if json.loads(payload)["operation"] == "storage_state":
+            captures.append(True)
+            return json.dumps({"result": fresh}).encode()
+        return b'{"result":{}}'
+    def freeze(argv, **_kwargs):
+        controls.append(argv[1])
+        if argv[1] == "pause":
+            assert storage.load(str(root), "t") == fresh
+        return b""
+    monkeypatch.setattr(browser, "_docker_exec", transport)
+    monkeypatch.setattr(browser, "_bounded_cli", freeze)
+    session.pause()
+    assert captures == [True]
     monkeypatch.setattr(browser, "disarm_sandbox_browser", lambda *_a: None)
     monkeypatch.setattr(browser, "forget_client", lambda *_a: None)
     monkeypatch.setattr(threads, "_schedule_browser_revocation_retry", lambda _t: None)
@@ -262,6 +285,8 @@ def test_paused_browser_reset_proves_stop_before_releasing_work(
             else receipt.cancel_cleanup == "complete")
     assert browser.BrowserManager.current_session("t") is None
     assert browser.SandboxManager.current_container(work_dir) is None
+    assert storage.load(str(root), "t") == fresh
+    assert "unpause" not in controls
     with authority.fence(str(root), "t") as state:
         assert state.lease is None
 

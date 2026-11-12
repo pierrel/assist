@@ -424,12 +424,15 @@ def test_turn_sandbox_restores_private_storage_in_new_generation(tmp_path, monke
                 assert "Login fixture" in result["result"]["snapshot"]
                 assert backend.execute("test ! -r /run/assist-browser/browser.sock").exit_code == 0
                 session.pause()
+                saved = storage.load(str(tmp_path / "threads"), "t")
+                assert saved and saved["cookies"] and saved["origins"]
                 assert browser.BrowserManager.ready_for_browser(
                     str(tmp_path / "threads"), "t", run.id, container.id)
                 resumed = browser.BrowserManager.resume_session("t", run.work_id, session.user_request)
                 assert resumed is session and resumed.sandbox_backend is backend
                 observed = resumed.command("observe", page_id=old_page_id)["result"]
                 assert observed["page_id"] == old_page_id
+                session.pause()
                 browser.BrowserManager.cleanup("t", session)
                 SandboxManager.cleanup(str(work_dir), container)
                 state_file = tmp_path / "threads" / "t" / storage.FILE
