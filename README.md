@@ -109,8 +109,12 @@ where reliability is harder than with frontier APIs.
   registration verifies no fact and grants no URL-fetch authority.
   File-source verification uses the exact canonical encoder inverse for supported
   link destinations and raw identity for bare URIs. Encoded links with ambiguous
-  escapes/code/container/HTML context fail verification without choosing a URI or
-  changing saved bytes. Checker analysis removes only host-owned line numbering;
+  escapes/code/container context fail verification without choosing a URI or
+  changing saved bytes. An HTML-like marker anywhere in the analyzed file, even
+  in code or unrelated text, rejects canonical links requiring inverse decoding;
+  this rejects the entire checker projection. Documents containing only raw
+  URI matches or links requiring no decoding are unaffected by this guard.
+  Checker analysis removes only host-owned line numbering;
   returned file content stays literal. Unknown
   source IDs produce an unresolved-reference message that does not claim the
   link was checked.

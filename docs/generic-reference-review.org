@@ -723,9 +723,14 @@ Twelve URL controls prove both encoder/inverse and rendered href roundtrips,
 including literal entities, raw ampersands and unterminated entity-like text.
 Only supported canonical source-link destinations use that inverse. Bare and
 standalone angle URI values stay raw. Known inline/fenced/indented code uses
-literal URI identity. Encoded links in unsupported nested/HTML contexts return
+literal URI identity. Encoded links in unsupported nested contexts return
 an explicit verification error rather than guess A/B; they leave files and
-source rows unchanged and grant no navigation. This is a declared bounded
+source rows unchanged and grant no navigation. The HTML-like-marker guard is
+global to the analyzed file: any marker, including one in code or unrelated
+text, rejects canonical links requiring inverse decoding even when the link
+is elsewhere, failing the entire checker projection. Documents containing only
+raw URI matches or links requiring no decoding are unaffected by this guard.
+This is a declared bounded
 verification limitation, not a new container grammar or file-ownership scheme.
 The exact nested link-shaped-code counterexample is retained as a failure control.
 

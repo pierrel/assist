@@ -100,7 +100,11 @@ in both views. An ID shown in only one view keeps that meaning.
   URL metadata exact-queries existing host source records: supported canonical
   link destinations use the encoder's exact one-pass inverse; bare/standalone
   angle URIs stay literal. Ambiguous encoded link-shaped code, escaped labels or
-  unsupported container/HTML contexts fail without byte changes/source selection.
+  unsupported container contexts fail without byte changes/source selection.
+  The HTML-like-marker guard is global to the analyzed file, including code or
+  unrelated text: any such marker rejects canonical links requiring inverse
+  decoding and fails the entire checker projection. Documents containing only
+  raw URI matches or links requiring no decoding are unaffected by this guard.
   Host line numbering is removed only from the checker's analysis view. Metadata
   never registers values or promotes generic records. Empty
   URL metadata remains explicit, and guarded-child search-only trust still
