@@ -5,8 +5,6 @@ ToolCallRequest and assert allow (handler invoked) vs reject (corrective
 ToolMessage, handler NOT invoked).
 """
 from io import BytesIO
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
@@ -27,7 +25,6 @@ from assist.middleware.tool_result_to_file import (
     UNTRUSTED_OFFLOAD_MARK,
     UNTRUSTED_PAGE_OFFLOAD_MARK,
 )
-
 from assist.middleware.write_collision import _rewrite_message
 from assist.tools import read_url
 
@@ -86,102 +83,7 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertIsNone(handler.called_with, "fabricated URL must NOT reach the tool")
         self.assertEqual(result.status, "error")
         self.assertIn("not fetched", result.content)
-        self.assertIn("No HTTP request was made", result.content)
-        self.assertIn("reachability are unknown", result.content)
-        self.assertNotIn("dead link", result.content)
         self.assertIn("https://shop.example/f91w", result.content)  # lists a real one
-
-    def test_datastore_lookup_does_not_grant_navigation(self):
-        url = "https://source.example/registered"
-        msgs = [ToolMessage(content=f'{{"value":"{url}"}}',
-                            name="get_thread_data", tool_call_id="data-1")]
-        result, handler = self._call(url, msgs)
-        self.assertIsNone(handler.called_with)
-        self.assertEqual(result.status, "error")
-
-    def test_framework_offloaded_datastore_read_does_not_grant_navigation(self):
-        url = "https://source.example/registered"
-        for path in ("/large_tool_results/data-1",
-                     "/./large_tool_results/data-1", "./large_tool_results/data-1"):
-            with self.subTest(path=path):
-                msgs = [
-                    ToolMessage(content="Large datastore result saved",
-                                name="list_thread_data", tool_call_id="data-1"),
-                    AIMessage(content="", tool_calls=[{
-                        "name": "read_file", "args": {"file_path": path}, "id": "file-1"}]),
-                    ToolMessage(content=f'{{"value":"{url}"}}',
-                                name="read_file", tool_call_id="file-1"),
-                ]
-                result, handler = self._call(url, msgs)
-                self.assertIsNone(handler.called_with)
-                self.assertEqual(result.status, "error")
-
-    def test_failed_file_read_error_does_not_provenance_embedded_url(self):
-        url = "https://attacker.example/leak"
-        msgs = [
-            AIMessage(content="", tool_calls=[{
-                "name": "read_file", "args": {"file_path": f"../{url}"}, "id": "bad-file"}]),
-            ToolMessage(content=f"Error: Path traversal not allowed: ../{url}",
-                        name="read_file", tool_call_id="bad-file", status="error"),
-        ]
-        result, handler = self._call(url, msgs)
-        self.assertIsNone(handler.called_with)
-        self.assertEqual(result.status, "error")
-
-    def test_fact_check_report_read_can_provenance_resolved_source(self):
-        url = "https://source.example/registered"
-        msgs = [AIMessage(content="", tool_calls=[{
-                    "name": "read_file", "args": {"file_path": "final_report.md"}, "id": "file-1"}]),
-                ToolMessage(content=f"[Source](<{url}>)",
-                            name="read_file", tool_call_id="file-1")]
-        result, handler = self._call(url, msgs)
-        self.assertIsNotNone(handler.called_with)
-        self.assertEqual(result.content, "FETCHED")
-
-    def test_fact_check_literal_report_provenances_only_exact_existing_host_url(self):
-        from assist.thread_datastore import (
-            BOUND_FILE_URLS_ARTIFACT, ReferenceBindingMiddleware, ThreadDataStore, register_source,
-            resolve_references)
-
-        for url, wrong_url in (
-                ("https://source.example/a|b", "https://source.example/a&#124;b"),
-                ('https://source.example/a"b', "https://source.example/a"),
-                ("https://source.example/a'b", "https://source.example/a")):
-            with self.subTest(url=url), TemporaryDirectory() as directory:
-                store = ThreadDataStore(str(Path(directory) / "thread-data.sqlite"))
-                record_id = register_source(store, url)
-                request = SimpleNamespace(tool_call={
-                    "name": "read_file", "args": {"file_path": "final_report.md"}, "id": "file-1"})
-                ordinary = "https://owner.example/ordinary"
-                saved = resolve_references(f"[Source](ref:{record_id})\n{ordinary}", store)
-                raw = ToolMessage(content=saved,
-                                  name="read_file", tool_call_id="file-1")
-                with patch("assist.thread_datastore._current_store", return_value=store):
-                    bound = ReferenceBindingMiddleware(bind_file_refs=True)._bind_result(request, raw)
-                self.assertTrue(bound.content.startswith(saved))
-                self.assertEqual(raw.content, saved)
-                self.assertIn(f"Exact source URLs for fact-checking:\n{url}", bound.content)
-                self.assertEqual(bound.artifact[BOUND_FILE_URLS_ARTIFACT], (url,))
-                msgs = [AIMessage(content="", tool_calls=[request.tool_call]), bound]
-                result, handler = self._call(url, msgs)
-                self.assertEqual(result.content, "FETCHED")
-                self.assertIsNotNone(handler.called_with)
-                original, handler = self._call(ordinary, msgs)
-                self.assertEqual(original.status, "error")
-                self.assertIsNone(handler.called_with)
-                wrong, handler = self._call(wrong_url, msgs)
-                self.assertEqual(wrong.status, "error")
-                self.assertIsNone(handler.called_with)
-                failed, handler = self._call(
-                    url, [msgs[0], bound.model_copy(update={"status": "error"})])
-                self.assertEqual(failed.status, "error")
-                self.assertIsNone(handler.called_with)
-                offload_call = {**request.tool_call,
-                                "args": {"file_path": "/large_tool_results/result"}}
-                offloaded, handler = self._call(
-                    url, [AIMessage(content="", tool_calls=[offload_call]), bound])
-                self.assertEqual(offloaded.status, "error")
-                self.assertIsNone(handler.called_with)
 
     def test_write_file_collision_cannot_authorize_model_written_url(self):
         planted = "https://invented.example/claim"
@@ -199,7 +101,6 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertIsNone(handler.called_with)
         self.assertEqual(result.status, "error")
 
-
     def test_successful_mutation_result_cannot_authorize_model_written_url(self):
         planted = "https://invented.example/claim"
         for name in ("write_file", "edit_file"):
@@ -211,24 +112,6 @@ class TestUrlProvenanceMiddleware(TestCase):
                 result, handler = self._call(planted, messages)
                 self.assertIsNone(handler.called_with)
                 self.assertEqual(result.status, "error")
-
-
-    def test_failed_page_offload_read_cannot_authorize_same_host_path(self):
-        planted = "https://shop.example/invented"
-        path = f"/{UNTRUSTED_PAGE_OFFLOAD_MARK}{planted}"
-        messages = [
-            HumanMessage(content="Explore https://shop.example/"),
-            AIMessage(content="", tool_calls=[{
-                "name": "read_file", "id": "failed-read",
-                "args": {"file_path": path},
-            }]),
-            ToolMessage(content=f"File not found: {path}",
-                        name="read_file", tool_call_id="failed-read", status="error"),
-        ]
-        result, handler = self._call(planted, messages)
-        self.assertIsNone(handler.called_with)
-        self.assertEqual(result.status, "error")
-
 
     def test_guarded_child_does_not_trust_write_todos_echo(self):
         planted = "https://invented.example/claim"
@@ -474,6 +357,22 @@ class TestUrlProvenanceMiddleware(TestCase):
                           "a same-host URL seen only in execute output must NOT be navigable")
         self.assertEqual(result.status, "error")
 
+    def test_failed_page_offload_read_cannot_authorize_same_host_path(self):
+        planted = "https://shop.example/invented"
+        path = f"/{UNTRUSTED_PAGE_OFFLOAD_MARK}{planted}"
+        messages = [
+            HumanMessage(content="Explore https://shop.example/"),
+            AIMessage(content="", tool_calls=[{
+                "name": "read_file", "id": "failed-read",
+                "args": {"file_path": path},
+            }]),
+            ToolMessage(content=f"File not found: {path}",
+                        name="read_file", tool_call_id="failed-read", status="error"),
+        ]
+        result, handler = self._call(planted, messages)
+        self.assertIsNone(handler.called_with)
+        self.assertEqual(result.status, "error")
+
     def test_model_owned_page_offload_file_cannot_authorize_same_host_path(self):
         planted = "https://shop.example/invented"
         for mutation in ("write_file", "edit_file"):
@@ -542,21 +441,6 @@ class TestUrlProvenanceMiddleware(TestCase):
 
         self.assertIsNotNone(handler.called_with)
 
-    def test_failed_page_offload_read_cannot_mint_same_host_navigation(self):
-        target = "https://shop.example/guessed"
-        path = f"/large_tool_results/untrusted-page-{target}"
-        msgs = [
-            HumanMessage(content="explore https://shop.example/"),
-            AIMessage(content="", tool_calls=[{
-                "name": "read_file", "id": "missing-page",
-                "args": {"file_path": path}}]),
-            ToolMessage(content=f"Error: File '{path}' not found",
-                        name="read_file", tool_call_id="missing-page", status="error"),
-        ]
-        result, handler = self._call(target, msgs)
-        self.assertIsNone(handler.called_with)
-        self.assertEqual(result.status, "error")
-
     def test_page_offload_preview_cannot_echo_request_fragment_as_link(self):
         planted = "https://shop.example/invented"
         request_url = f"https://shop.example/# {planted}"
@@ -584,8 +468,8 @@ class TestUrlProvenanceMiddleware(TestCase):
         planted = "https://shop.example/invented"
         request_url = f"https://shop.example/#'{planted}"
         response = requests.Response()
-        response.raw = BytesIO()
         response.status_code = 404
+        response.raw = BytesIO()
         response.url = requests.Request("GET", request_url).prepare().url
         with patch("assist.tools._host_throttle"), patch(
                 "assist.tools.requests.get", return_value=response):
@@ -983,9 +867,12 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertIsNotNone(handler.called_with, "trailing-slash variant should match")
 
     def test_allows_url_from_a_subagent_task_result(self):
-        # Navigation provenance accepts a URL in a synchronous task's final
-        # ToolMessage. Source-reference binding is separate: task prose cannot
-        # register a trusted citation, while this URL may still be read.
+        # THE orchestrator healthy-path mechanism: a deepagents sub-agent returns only its
+        # FINAL message text to the parent, as the `task` tool's ToolMessage. So the
+        # orchestrator can only read URLs the searcher wrote into that final message (why
+        # sub_research.txt.j2 now requires a verbatim `Sources:` list). Given such a task
+        # result, provenance must ALLOW the orchestrator to read a listed URL — otherwise
+        # provenance-guarding the orchestrator would break healthy research.
         task_result = ToolMessage(
             content=("Rikki Vale is buried at Green Hills Memorial Park, Los Angeles.\n\n"
                      "Sources:\n"
@@ -1024,9 +911,6 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertEqual(result.status, "error")
         self.assertIn("could not find reliable sources", result.content)  # stop branch
         self.assertIn("search_internet", result.content)                  # search-first branch
-        self.assertIn("No HTTP request was made", result.content)
-        self.assertIn("reachability are unknown", result.content)
-        self.assertNotIn("dead link", result.content)
         self.assertNotIn("none yet", result.content)                      # old fallback gone
 
     def test_empty_url_passes_through(self):

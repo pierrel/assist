@@ -2568,9 +2568,9 @@ def _publish_phone_text(tid: str, work_id: str, text: str) -> None:
         RUN_STREAMS.publish_delta(tid, work_id, text[start:])
 
 
-def _validate_task_report(tid: str, task_message: str | None, working_dir: str,
+def _bind_task_report(tid: str, task_message: str | None, working_dir: str,
                       sandbox=None) -> None:
-    """Validate only the host-named literal report for a completion wake."""
+    """Resolve only the host-named research report for a completion wake."""
     if not task_message:
         return
     if task_message.startswith(_TASK_COMPLETION_RIDER):
@@ -2579,33 +2579,33 @@ def _validate_task_report(tid: str, task_message: str | None, working_dir: str,
     if match is None:
         return
     basename = match.group(1) + ".md"
-    from assist.thread_datastore import ThreadDataStore, validate_host_report
+    from assist.thread_datastore import ThreadDataStore, resolve_host_report
     store = ThreadDataStore(MANAGER.thread_datastore_path(tid))
     if sandbox is not None:
         from assist.research_cleanup import ReferencesCleanupRunnable
-        validator = ReferencesCleanupRunnable(
+        binder = ReferencesCleanupRunnable(
             None, sandbox.work_dir + "/references", sandbox)
-        validator._ensure_dir()
-        if validator._exists(basename):
-            validator._validate_report(basename, store)
+        binder._ensure_dir()
+        if binder._exists(basename):
+            binder._resolve_report_references(basename, store)
         return
     references = os.path.join(working_dir, "references")
     report = os.path.join(references, basename)
     if os.path.islink(references) or os.path.islink(report) or not os.path.isfile(report):
         return
-    validate_host_report(report)
+    resolve_host_report(report, store)
 
 
-def _child_url_configurable(run: Run) -> dict | None:
-    """Expose immutable owner URL seeds to model-authored child briefs."""
-    if run.assistant_id not in {"delegate-agent", "research-agent"}:
+def _delegate_configurable(run: Run) -> dict | None:
+    """Expose immutable brief-form URLs admitted by canonical owner match."""
+    if run.assistant_id != "delegate-agent":
         return None
     return {DELEGATE_USER_URLS_KEY: run.delegate_user_urls}
 
 
 def _child_configurable(run: Run) -> dict | None:
-    """Inject admitted owner URLs and executor-owned child egress identity."""
-    configurable = _child_url_configurable(run) or {}
+    """Inject executor-owned identity for a child egress wait, if applicable."""
+    configurable = _delegate_configurable(run) or {}
     if run.parent_thread_id is not None:
         configurable.update({
             EGRESS_ORIGIN_THREAD_ID: run.parent_thread_id,
@@ -2930,15 +2930,13 @@ def _complete_child_handoff(run: Run) -> Run | None:
         logging.info("parent of child run %s was deleted", run.id)
         MANAGER.hard_delete(run.thread_id)
         return None
-    # Import immutable child records before the idempotent existing-wake return:
+    # Import host-authored records before the idempotent existing-wake return:
     # recovery can revisit this handoff after creating the wake but before the
-    # parent has read the child's results. Generic text retains its kind;
-    # only retrieval registers sources, never child prose or generic writes.
+    # parent has read the child's results. Child prose never registers sources.
     from assist.thread_datastore import ThreadDataStore
     parent_data = ThreadDataStore(MANAGER.thread_datastore_path(run.parent_thread_id))
     child_data = ThreadDataStore(MANAGER.thread_datastore_path(run.thread_id))
     parent_data.import_from(child_data, owner=run.thread_id, kind="source")
-    parent_data.import_from(child_data, owner=run.thread_id, kind="text")
     dispatch_key = f"task-completion:{run.id}"
     existing = next(
         (candidate for candidate in _runs().list(run.parent_thread_id)
@@ -3895,7 +3893,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         resp = chat.message(text)
                 if origin == "task-completion":
                     task_message = ((_run.pending_text or _run.text) if _run else None)
-                    _validate_task_report(tid, task_message or pending_text or text,
+                    _bind_task_report(tid, task_message or pending_text or text,
                                       MANAGER.thread_default_working_dir(tid), sandbox)
             finally:
                 # Capture browser state before sandbox teardown. Failed teardown

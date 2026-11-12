@@ -2,16 +2,14 @@ import asyncio
 import json
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
-from unittest.mock import MagicMock
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from types import SimpleNamespace
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langchain.tools.tool_node import ToolCallRequest
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph_sdk.errors import InternalServerError
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -29,8 +27,7 @@ from assist.async_subagents import (
     AsyncTaskContext, async_task_context, async_task_tools,
     configure_async_subagent_app,
 )
-from assist.middleware import url_provenance
-from assist.middleware.url_provenance import DELEGATE_USER_URLS_KEY, UrlProvenanceMiddleware
+from assist.middleware.url_provenance import DELEGATE_USER_URLS_KEY
 from assist.egress.store import EgressRequest, EgressStore, EgressWaiter, request_key
 from manage.web.protocol_service import SERVICE
 
@@ -432,14 +429,10 @@ def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
     parent_ref = register_source(parent_data, "https://source.example/parent-search")
     first_ref = register_source(child_data, "https://source.example/first")
     note_id = child_data.put_text("child research notes", "note", "Context")
-    exact_id = child_data.put_text("QL-01lI-7b92-0O5a", title="Shipment ID")
 
     first = threads._complete_child_handoff(child)
     assert source_url(parent_data, first_ref) == "https://source.example/first"
     assert parent_data.get(note_id) is None
-    assert parent_data.get(exact_id)["value"] == "QL-01lI-7b92-0O5a"
-    assert parent_data.get(exact_id)["kind"] == "text"
-    assert source_url(parent_data, exact_id) is None
     second_ref = register_source(child_data, "https://source.example/second")
     second = threads._complete_child_handoff(child)
 
@@ -466,8 +459,6 @@ def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
         retrieved = TOOLS["get_async_task_result"].func(
             child.thread_id, SimpleNamespace(tool_call_id="result"))
     assert first_ref in retrieved and second_ref in retrieved
-    assert f"ref:{exact_id}" in retrieved
-    assert "QL-01lI-7b92-0O5a" in retrieved
     assert note_id not in retrieved
     assert parent_ref not in retrieved and other_ref not in retrieved
 
@@ -1056,9 +1047,8 @@ def test_task_description_survives_fair_resume_generation(monkeypatch, tmp_path)
     assert task["description"] == "updated intent"
 
 
-@pytest.mark.parametrize("assistant_id", ["delegate-agent", "research-agent"])
-def test_child_user_url_seeds_are_frozen_per_instruction_slice(
-        monkeypatch, tmp_path, assistant_id):
+def test_delegate_user_url_seeds_are_frozen_per_instruction_slice(
+        monkeypatch, tmp_path):
     _root(monkeypatch, tmp_path)
     threads.MANAGER.reserve("parent")
     first_user = threads._create_run(
@@ -1071,135 +1061,35 @@ def test_child_user_url_seeds_are_frozen_per_instruction_slice(
     }
     SERVICE.create_thread("sub-delegate", metadata)
     original = SERVICE.create_run(
-        "sub-delegate", assistant_id,
+        "sub-delegate", "delegate-agent",
         "The model brief repeats https://owner.example/first", metadata=metadata)
     later_user = threads._create_run(
         "parent", "Later use https://owner.example/later too")
 
-    original_cfg = threads._child_url_configurable(original)
+    original_cfg = threads._delegate_configurable(original)
     assert original_cfg[DELEGATE_USER_URLS_KEY] == (
         "https://owner.example/first",)
 
     resume = threads._create_run(
-        original.thread_id, None, assistant_id=assistant_id, mode="child",
+        original.thread_id, None, assistant_id="delegate-agent", mode="child",
         parent_thread_id="parent", parent_run_id=original.parent_run_id,
         dispatch_key="resume", work_id=original.work_id, resume=True,
         delegate_user_urls=original.delegate_user_urls)
-    resume_cfg = threads._child_url_configurable(resume)
+    resume_cfg = threads._delegate_configurable(resume)
     assert resume_cfg[DELEGATE_USER_URLS_KEY] == (
         "https://owner.example/first",)
 
     update = SERVICE.create_run(
-        original.thread_id, assistant_id,
+        original.thread_id, "delegate-agent",
         "Updated model brief uses https://owner.example/later",
         multitask_strategy="interrupt", metadata={
             "parent_thread_id": "parent",
             "parent_run_id": later_user.id,
             "dispatch_key": "update",
         })
-    update_cfg = threads._child_url_configurable(update)
+    update_cfg = threads._delegate_configurable(update)
     assert update_cfg[DELEGATE_USER_URLS_KEY] == (
         "https://owner.example/later",)
-
-
-def test_research_child_admission_and_read_url_guard(monkeypatch, tmp_path):
-    _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    owner = threads._create_run(
-        "parent", "Read https://owner.example/article")
-    metadata = {
-        "parent_thread_id": "parent", "parent_run_id": owner.id,
-        "dispatch_key": f"{owner.work_id}:research",
-    }
-    SERVICE.create_thread("sub-research", metadata)
-    child = SERVICE.create_run(
-        "sub-research", "research-agent",
-        "Read https://owner.example/article and https://invented.example/claim",
-        metadata=metadata)
-    assert child.delegate_user_urls == ("https://owner.example/article",)
-    monkeypatch.setattr(url_provenance, "get_config", lambda: {
-        "configurable": threads._child_configurable(child)})
-    from assist.agent import create_research_agent
-    monkeypatch.setattr("assist.agent.create_deep_agent", lambda **kwargs: (
-        captured.update(kwargs) or MagicMock()))
-    captured = {}
-    create_research_agent(
-        MagicMock(), working_dir=str(tmp_path), leaf=True,
-        trust_human_messages=False)
-    guard = next(middleware for middleware in captured["middleware"]
-                 if isinstance(middleware, UrlProvenanceMiddleware))
-
-    def fetch(url, messages):
-        called = []
-        request = ToolCallRequest(
-            tool_call={"name": "read_url", "args": {"url": url}, "id": "read"},
-            tool=None, state={"messages": messages}, runtime=None)
-        result = guard.wrap_tool_call(
-            request, lambda _: called.append(url) or ToolMessage(
-                content="fetched", name="read_url", tool_call_id="read"))
-        return result, called
-
-    brief = [HumanMessage(content=child.text)]
-    assert fetch("https://owner.example/article", brief)[1]
-    denied, called = fetch("https://invented.example/claim", brief)
-    assert not called and denied.status == "error"
-    model_file = [
-        AIMessage(content="", tool_calls=[
-            {"name": "write_file", "id": "write", "args": {
-                "file_path": "/candidate.txt",
-                "content": "https://invented.example/claim"}},
-            {"name": "read_file", "id": "file", "args": {
-                "file_path": "/candidate.txt"}},
-        ]),
-        ToolMessage(content="https://invented.example/claim",
-                    name="read_file", tool_call_id="file"),
-    ]
-    denied, called = fetch("https://invented.example/claim", brief + model_file)
-    assert not called and denied.status == "error"
-    search = ToolMessage(
-        content="[{'url': 'https://found.example/page'}]",
-        name="search_internet", tool_call_id="search")
-    assert fetch("https://found.example/page", brief + [search])[1]
-
-
-def test_web_research_child_distrusts_brief_human_urls(monkeypatch, tmp_path):
-    _parent_and_metadata(monkeypatch, tmp_path)
-    monkeypatch.setattr(threads.MANAGER, "_model", object())
-    captured = {}
-    monkeypatch.setattr(
-        "assist.thread_manager.create_research_agent",
-        lambda *args, **kwargs: captured.update(kwargs) or object())
-    monkeypatch.setattr("assist.thread_manager.Thread", lambda *args, **kwargs: object())
-
-    threads.MANAGER.get(
-        "sub-stable", working_dir=str(tmp_path), assistant_id="research-agent")
-
-    assert captured["leaf"] is True
-    assert captured["trust_human_messages"] is False
-
-
-def test_research_child_cannot_borrow_another_parents_urls(monkeypatch, tmp_path):
-    _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("owner")
-    threads.MANAGER.reserve("other")
-    owner = threads._create_run("owner", "Inspect a document")
-    other = threads._create_run("other", "Read https://other.example/private")
-    metadata = {
-        "parent_thread_id": "owner", "parent_run_id": owner.id,
-        "dispatch_key": f"{owner.work_id}:research",
-    }
-    SERVICE.create_thread("sub-research", metadata)
-    forged = {**metadata, "parent_thread_id": "other", "parent_run_id": other.id}
-
-    with pytest.raises(HTTPException, match="Task metadata conflict") as error:
-        SERVICE.create_run(
-            "sub-research", "research-agent",
-            "Read https://other.example/private", metadata=forged)
-    assert error.value.status_code == 409
-    with pytest.raises(HTTPException, match="Task metadata conflict"):
-        SERVICE.create_run(
-            "sub-research", "research-agent", "Read the owner task",
-            metadata={**metadata, "parent_run_id": "missing"})
 
 
 def test_delegate_admission_includes_owner_interjection_already_accepted(
@@ -1432,30 +1322,3 @@ def test_completion_input_renders_as_agent_task_note(monkeypatch, tmp_path):
     assert "assistant (task)" in page
     assert "Task ID: sub-123 Status: success" in page
     assert '<div class="role">user</div>' not in page
-
-
-@pytest.mark.parametrize("raw_generic", [False, True])
-def test_parent_task_report_validation_preserves_literal_url_and_rejects_raw_generic(tmp_path, monkeypatch, raw_generic):
-    from pathlib import Path
-    from assist.thread_datastore import ThreadDataStore, register_source
-    _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    working = Path(threads.MANAGER.thread_default_working_dir("parent"))
-    refs = working / "references"
-    refs.mkdir(parents=True, exist_ok=True)
-    store = ThreadDataStore(threads.MANAGER.thread_datastore_path("parent"))
-    text = store.put_text("EXACT_ID")
-    source = register_source(store, "https://source.example/exact")
-    task_id = "sub-" + "a" * 24
-    report = refs / f"{task_id}.md"
-    original = f"Owner | ID\n--- | ---\nhttps://owner.example|ref:{text}\n[S](<https://source.example/exact>)\n"
-    if raw_generic:
-        original += f"Value: ref:{text}\n"
-    report.write_bytes(original.encode())
-    if raw_generic:
-        with pytest.raises(ValueError, match="unbound reference"):
-            threads._validate_task_report("parent", f"Task ID: {task_id}\n", str(working))
-        assert report.read_bytes() == original.encode()
-    else:
-        threads._validate_task_report("parent", f"Task ID: {task_id}\n", str(working))
-        assert report.read_text() == original
