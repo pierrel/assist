@@ -1,8 +1,7 @@
 #+title: Assist architecture
 
-The overview uses merged Assist runtime =df4bb845df34289427ec85992ae5d1120906f5e2=
-(the architecture baseline merged in =ecb665c6=). It shows the ordinary Deep
-Agents web path and the interfaces other clients use. A Pi preview thread,
+This map follows the source in this branch. It shows the ordinary Deep Agents
+web path and the interfaces other clients use. A Pi preview thread,
 voice call, inbound SMS, scheduled prompt, or child task enters through a
 different admission route, then uses the same durable Run service where that
 route creates a Run. The diagrams show ownership and major data

@@ -9,10 +9,8 @@ Assist is an extensible, local-focused, LLM-based assistant. The principles guid
 It is not just a coding assistant, but should be able to help with any project or goal.
 
 See [README.org](README.org) for detailed concepts and architecture.
-See [the current architecture map](docs/architecture.org) for the merged
-component diagram and code owners, and the
-[browser compatibility review guide](docs/browser-site-compatibility.org) for
-this branch's control and network changes.
+See [the current architecture map](docs/architecture.org) for the component
+diagram and code owners.
 
 ## Current Capabilities
 
@@ -53,6 +51,8 @@ where reliability is harder than with frontier APIs.
   browser-tool use inside that turn's sandbox, without an external display
   server. Its page context opens only when needed. Chromium stops when the sandbox ends,
   including an approval or clarification pause.
+  The [browser compatibility review guide](docs/browser-site-compatibility.org)
+  maps its control and network boundaries.
   A separate browser UID can reach only its attributed listener on the
   existing egress proxy. The host seals new browser-debugging connections
   before any page command; agent tools cannot use that control channel.
