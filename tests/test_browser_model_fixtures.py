@@ -1,6 +1,48 @@
-"""Offline browser observations must expose the retained form's real state."""
+"""Offline browser observations expose current pages and turn boundaries."""
 from edd.eval.test_browser_agent import _BrowserSite
 import pytest
+
+
+def test_private_report_observation_keeps_current_page_and_turn_boundary(tmp_path):
+    site = _BrowserSite("v1-auth", str(tmp_path))
+    site.auth_cookie = True
+    opened = site.command("open", url="https://v1-auth.fern.example/")
+    assert site.command("observe", page_id="page-1") == opened
+    assert "October Reliability Review" in opened["result"]["snapshot"]
+    assert "error" in site.command("observe", page_id="missing-page")
+    site.end_turn()
+    assert "error" in site.command("observe", page_id="page-1")
+    reopened = site.command("open", url="https://v1-auth.fern.example/")
+    assert site.command("observe", page_id="page-2") == reopened
+    assert "error" in site.command("observe", page_id="page-1")
+
+
+def test_approval_observation_keeps_current_report_and_turn_boundary(tmp_path):
+    site = _BrowserSite("approval", str(tmp_path))
+    first = site.command("open", url="https://approval.fern.example/")
+    page_id = first["result"]["page_id"]
+    assert site.command("observe", page_id=page_id) == first
+    site.end_turn()
+    assert "error" in site.command("observe", page_id=page_id)
+    assert "error" in site.command("act", page_id=page_id, snapshot_id="first",
+                                   action="click", target={"ref": "partner-report"})
+    site.approved = True
+    report_url = "https://partner.fern.example/report"
+    report = site.command("open", url=report_url)
+    assert report["result"]["page_id"] != page_id
+    assert report["result"]["url"] == report_url
+    assert "October Reliability Review" in report["result"]["snapshot"]
+    assert site.command("observe", page_id=report["result"]["page_id"]) == report
+    assert "error" in site.command("observe", page_id=page_id)
+    assert "error" in site.command("act", page_id=page_id, snapshot_id="approved",
+                                   action="click", target={"ref": "partner-report"})
+    home = site.command("open", url="https://approval.fern.example/")
+    clicked = site.command("act", page_id=home["result"]["page_id"],
+                           snapshot_id=home["result"]["snapshot_id"],
+                           action="click", target={"ref": "partner-report"})
+    assert clicked["result"]["url"] == report_url
+    assert "October Reliability Review" in clicked["result"]["snapshot"]
+    assert site.command("observe", page_id=clicked["result"]["page_id"]) == clicked
 
 
 def test_form_observation_keeps_values_targets_and_page_boundary(tmp_path):
@@ -15,7 +57,7 @@ def test_form_observation_keeps_values_targets_and_page_boundary(tmp_path):
     failed = site.command("act", page_id="missing-page", snapshot_id="form-1",
                           action="click", target={"ref": "review"})
     assert "error" in failed
-    assert site.form_page["result"]["snapshot_id"] == "form-1"
+    assert site.current_page["result"]["snapshot_id"] == "form-1"
     reviewed = site.command("act", page_id="page-1", snapshot_id="form-1",
                             action="click", target={"ref": "review"})
     assert site.command("observe", page_id="page-1") == reviewed

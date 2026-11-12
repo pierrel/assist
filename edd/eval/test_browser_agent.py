@@ -59,6 +59,7 @@ class _TurnBackend(_OfflineBackend):
 
 
 class _BrowserSite:
+    """Selected stateful scenarios retain one current page for observations."""
     def __init__(self, scenario, root):
         self.scenario = scenario
         self.root = Path(root)
@@ -87,14 +88,17 @@ class _BrowserSite:
               page_id="page-1", network_errors=()):
         url = ("http://host.docker.internal:5050/" if self.scenario == "internal-status"
                else f"https://{self.scenario}.fern.example/")
+        if self.scenario == "approval":
+            url = self.approval_url
+            page_id = f"page-{self.turn}"
         response = {"result": {"page_id": page_id, "snapshot_id": snapshot_id,
                 "url": url,
                 "snapshot": snapshot, "targets": list(targets),
                 "pages": [{"page_id": page_id, "url": url}],
                 "downloads": list(downloads),
                 "network_errors": list(network_errors)}}
-        if self.scenario == "v1-form":
-            self.form_page = response
+        if self.scenario in {"v1-form", "approval", "v1-auth"}:
+            self.current_page = response
         return response
 
     def command(self, operation, **args):
@@ -126,6 +130,7 @@ class _BrowserSite:
                     snapshot_id=f"auth-{self.turn}", page_id=f"page-{self.turn}")
             if self.scenario == "approval":
                 self.session_open = True
+                self.approval_url = args["url"]
                 if not self.auth_cookie:
                     return self._page("Sign in required.")
                 if args.get("url", "").startswith("https://partner.fern.example/"):
@@ -211,15 +216,18 @@ class _BrowserSite:
             if self.scenario == "v1-secret":
                 return {"error": "secret fields are unsupported"}
             if self.scenario == "approval":
-                if not self.session_open:
+                if (not self.session_open
+                        or args.get("page_id") != f"page-{self.turn}"):
                     return {"error": "browser state expired; reopen the page"}
                 if (target.get("ref") == "partner-report" or
                         target.get("href") == "https://partner.fern.example/report"):
                     if self.approved and args.get("snapshot_id") == "approved":
+                        self.approval_url = "https://partner.fern.example/report"
                         return self._page("Latest report: October Reliability Review.",
                                           snapshot_id="report")
                     if self.approved:
                         return {"error": "stale target; re-observe the page"}
+                    self.approval_url = "https://partner.fern.example/report"
                     return self._page("The partner report did not load.",
                                       snapshot_id="denied", network_errors=[{
                                           "host": "partner.fern.example:443",
@@ -250,10 +258,10 @@ class _BrowserSite:
             return self._page("Next shuttle arrival: 9:40 a.m. Pacific.",
                               snapshot_id="second")
         if operation == "observe":
-            if self.scenario == "v1-form":
+            if self.scenario in {"v1-form", "approval", "v1-auth"}:
                 if not self.session_open or args.get("page_id") != f"page-{self.turn}":
                     return {"error": "old page is closed"}
-                return self.form_page
+                return self.current_page
             if self.scenario == "delayed":
                 return self._page("Next shuttle arrival: 9:40 a.m. Pacific.",
                                   snapshot_id="second")
@@ -708,7 +716,7 @@ class TestBrowserAgent(TestCase):
                 # events, not instructions embedded in either user prompt.
                 store.resolve(key, "hour")
                 site.approved = True
-                site.session_open = False
+                site.end_turn()
                 assert site.auth_cookie
                 second = turn("I approved that site. What is the report called?")
 
