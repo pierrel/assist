@@ -1,6 +1,6 @@
 """Direct-message admission and crash recovery use durable browser proofs."""
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from threading import Event
 from unittest.mock import MagicMock
@@ -264,6 +264,50 @@ def test_paused_browser_reset_proves_stop_before_releasing_work(
     assert browser.SandboxManager.current_container(work_dir) is None
     with authority.fence(str(root), "t") as state:
         assert state.lease is None
+
+
+def test_new_user_admitted_before_unpause_validation_revokes_the_borrow(monkeypatch, admitted):
+    import threading
+    root, runs = admitted
+    owner = runs.create("t", "general-agent", "Current task", user_origin=True)
+    work_dir = str(root / "t" / "domain")
+    container = SimpleNamespace(id="shared-generation")
+    session = browser.BrowserSession(
+        "t", owner.id, work_dir, str(root),
+        browser.BrowserUserRequest(owner.id, owner.work_id, owner.text, owner.admission_sequence),
+        work_id=owner.work_id, sandbox_generation=container.id,
+        sandbox_backend=SimpleNamespace(container=container), run_service=runs)
+    session.paused = True
+    session.identity = browser._ContainerIdentity(str(root), "172.20.0.2", container.id)
+    monkeypatch.setattr(browser.BrowserManager, "_sessions", {"t": session})
+    monkeypatch.setattr(browser.SandboxManager, "_containers", {work_dir: container})
+    with authority.fence(str(root), "t") as state:
+        state.begin(owner.id, owner.admission_sequence)
+        state.add_generation(owner.id, container.id)
+    controls = []
+    monkeypatch.setattr(browser, "_bounded_cli", lambda argv, **_k: controls.append(argv) or b"")
+    fence = authority.fence
+    arrived, release = Event(), Event()
+
+    @contextmanager
+    def before_validation(*args, **kwargs):
+        if threading.current_thread().name.startswith("borrow-validation"):
+            arrived.set()
+            assert release.wait(3)
+        with fence(*args, **kwargs) as state:
+            yield state
+
+    monkeypatch.setattr(authority, "fence", before_validation)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="borrow-validation") as pool:
+        borrowing = pool.submit(browser.BrowserManager.resume_session,
+                                "t", owner.work_id, session.user_request)
+        assert arrived.wait(3)
+        held, _busy = threads._accept_message_run("t", "A newer request")
+        assert held.status == "revocation_pending"
+        release.set()
+        with pytest.raises(browser.BrowserUnavailable, match="newer user"):
+            borrowing.result(timeout=3)
+    assert session.paused and controls == []
 
 
 def test_map_disabled_failed_owner_scan_keeps_held_event(monkeypatch, admitted):

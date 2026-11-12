@@ -925,6 +925,17 @@ class TestSandboxManager(TestCase):
         mock_backend_cls.assert_called_once_with(
             mock_container, native_agent_dir=True)
 
+    def test_managed_shared_execution_omits_parent_mount_and_environment(self):
+        with patch.object(SandboxManager, "_get_sandbox_backend") as create:
+            SandboxManager.get_sandbox_backend(
+                "/fixture/thread/domain", agent_dir="/private-parent-agent",
+                browser_capable=True, thread_scope=("/fixture", "thread"), owner_run_id="owner")
+        args, kwargs = create.call_args
+        self.assertIsNone(args[2])
+        self.assertFalse(kwargs["include_assist_env"])
+        self.assertTrue(kwargs["include_egress_approvals"])
+        self.assertTrue(kwargs["browser_capable"])
+
     @patch('assist.sandbox.DockerSandboxBackend')
     def test_get_sandbox_backend_does_not_forward_host_only_configuration(self, mock_backend_cls):
         test_path = os.path.join(self.temp_dir, "domain")

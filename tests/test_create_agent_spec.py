@@ -531,6 +531,22 @@ class TestSpecWiring(_CreateAgentHarness):
                       if isinstance(m, SmallModelMemoryMiddleware))
         assert memory.sources == ["/workspace/AGENTS.md", "/agent/memory.md"]
 
+    def test_shared_sandbox_parent_memory_is_host_routed_and_not_inherited(self):
+        from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
+        backend = MagicMock(native_agent_dir=False, work_dir="/workspace")
+        with tempfile.TemporaryDirectory() as agent_dir:
+            parent = self._build(
+                agent_dir=agent_dir, sandbox_backend=backend,
+                spec=AgentSpec(async_subagent_tools=()))
+            memory = next(m for m in parent["middleware"]
+                          if isinstance(m, SmallModelMemoryMiddleware))
+            assert memory.sources == ["/workspace/AGENTS.md", "/agent/memory.md"]
+            assert parent["backend"].write("/agent/memory.md", "private-parent-canary").error is None
+            assert "private-parent-canary" in parent["backend"].read(
+                "/agent/memory.md").file_data["content"]
+            child = self._build(sandbox_backend=backend, spec=AgentSpec(role="delegate"))
+            assert "/agent/" not in child["backend"].routes
+
     def test_local_agent_route_writes_outside_repository(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             agent_dir = os.path.join(temp_dir, "missing", "agent")

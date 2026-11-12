@@ -192,20 +192,27 @@ def test_dispatch_waiter_runs_before_paused_holder_resumes(wired, monkeypatch):
     assert threads._runs().get(second_tid, second.id).status == "success"
 
 
-@pytest.mark.parametrize("real_browser,handoff_failure", [
-    (False, None), (False, "reserve"), (False, "commit"), pytest.param(
-    True, None, marks=pytest.mark.skipif(not os.getenv("ASSIST_BROWSER_FAIRNESS_TEST_IMAGE"),
+@pytest.mark.parametrize("real_browser,handoff_failure,same_parent_child", [
+    (False, None, False), (False, "reserve", False), (False, "commit", False),
+    (False, None, True), pytest.param(
+    True, None, False, marks=pytest.mark.skipif(not os.getenv("ASSIST_BROWSER_FAIRNESS_TEST_IMAGE"),
+                                   reason="requires explicit isolated Docker image")), pytest.param(
+    True, None, True, marks=pytest.mark.skipif(not os.getenv("ASSIST_BROWSER_FAIRNESS_TEST_IMAGE"),
                                    reason="requires explicit isolated Docker image"))])
 def test_browser_form_survives_competing_thread_yield(
-        wired, monkeypatch, real_browser, handoff_failure):
+        wired, monkeypatch, real_browser, handoff_failure, same_parent_child):
     """Real Run/affinity queues retain the exact page and filled input on resume."""
     import json
     from types import SimpleNamespace
     from assist.browser import authority, manager as browser
     first_tid, _ = wired
-    second_tid = "t-browser-competitor"
+    second_tid = "sub-browser-child" if same_parent_child else "t-browser-competitor"
     root = Path(web.MANAGER.root_dir)
     (root / second_tid).mkdir()
+    if same_parent_child:
+        (root / second_tid / ".subagent").write_text("{}")
+        monkeypatch.setattr(threads, "EGRESS_STORE", None)
+        monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *_a: None)
     mark_new_thread(str(root), second_tid)
     queue = ThreadAffinityQueue(quantum_s=0.03, hold_timeout_s=3)
     scheduler = threads._ResumeScheduler()
@@ -266,6 +273,11 @@ def test_browser_form_survives_competing_thread_yield(
                            if item.user_event_id == item.id)
             state.begin(run.id, sequence)
             state.add_generation(run.id, generation)
+        if real_browser:
+            from assist.sandbox import DockerSandboxBackend
+            result = DockerSandboxBackend(container)
+            monkeypatch.setattr(result, "_proxy_logs_since", lambda *_a: None)
+            return result
         return SimpleNamespace(container=container)
 
     def cleanup(work_dir, expected=None):
@@ -324,8 +336,9 @@ def test_browser_form_survives_competing_thread_yield(
         agent = None
         on_queue_state = None
 
-        def __init__(self, tid, tools):
+        def __init__(self, tid, tools, sandbox):
             self.thread_id, self.tools = tid, {tool.__name__: tool for tool in tools}
+            self.sandbox = sandbox
 
         def invoke(self, name, **kwargs):
             response = self.tools[name](**kwargs)
@@ -341,12 +354,26 @@ def test_browser_form_survives_competing_thread_yield(
                     return "short answer"
                 session = browser.BrowserManager.current_session(first_tid)
                 frozen.append(session is not None and session.paused)
+                if same_parent_child:
+                    assert self.sandbox is session.sandbox_backend
+                    assert not self.tools
                 if real_browser:
                     counter = root / first_tid / "counter"
                     before = counter.read_text()
                     threading.Event().wait(0.1)
-                    assert counter.read_text() == before
-                return "short answer"
+                    if same_parent_child:
+                        assert counter.read_text() != before
+                        read = self.sandbox.execute("cat /workspace/allowed-input.txt")
+                        assert read.exit_code == 0 and "allowed child input" in read.output
+                        assert self.sandbox.write("/workspace/child-result.txt", "child findings").error is None
+                        readback = self.sandbox.read("/workspace/child-result.txt")
+                        assert readback.error is None and "child findings" in str(readback.file_data)
+                        private = self.sandbox.execute("test ! -e /agent/memory.md")
+                        assert private.exit_code == 0
+                        assert "PARENT_PRIVATE_CANARY" not in str(self.sandbox.read("/agent/memory.md"))
+                    else:
+                        assert counter.read_text() == before
+                return "child findings" if same_parent_child else "short answer"
             calls.append("open/fill")
             observation.update(self.invoke("browser_open", url=(
                 "http://127.0.0.1:8000/" if real_browser else "https://example.com/form")))
@@ -381,9 +408,18 @@ def test_browser_form_survives_competing_thread_yield(
         get_raw_messages = get_messages
 
     monkeypatch.setattr(web.MANAGER, "get", lambda tid, **kwargs:
-                        Chat(tid, kwargs.get("browser_tools", ())))
+                        Chat(tid, kwargs.get("browser_tools", ()), kwargs.get("sandbox_backend")))
     first = threads._create_run(first_tid, "Find the composer", user_origin=True)
-    second = threads._create_run(second_tid, "Quick question", user_origin=True)
+    if same_parent_child:
+        second = threads._runs().create(
+            second_tid, "delegate-agent", "Read the input and write findings", mode="child",
+            parent_thread_id=first_tid, parent_run_id=first.id, dispatch_key="synthetic-child")
+        (root / first_tid / "allowed-input.txt").write_text("allowed child input")
+        private_dir = root / "private-agent"
+        private_dir.mkdir()
+        (private_dir / "memory.md").write_text("PARENT_PRIVATE_CANARY")
+    else:
+        second = threads._create_run(second_tid, "Quick question", user_origin=True)
     original_execute = threads._execute_run
     first_done, second_done, resume_done = threading.Event(), threading.Event(), threading.Event()
 
@@ -418,16 +454,28 @@ def test_browser_form_survives_competing_thread_yield(
         while browser.BrowserManager.current_session(first_tid) and time.monotonic() < deadline:
             threading.Event().wait(0.005)
         assert calls == ["open/fill", "competitor", "resume/submit"]
-        assert frozen == [True]
+        assert frozen == [not same_parent_child]
+        if same_parent_child:
+            child = threads._runs().get(second_tid, second.id)
+            assert child.status == "success" and child.result == "child findings"
+            assert any(run.origin == "task-completion" for run in threads._runs().list(first_tid))
         if real_browser:
             assert (root / first_tid / "submissions").read_text().splitlines() == ["synthetic composer"]
+            if same_parent_child:
+                print({"shared_container": created[0].id,
+                       "page_id": observation["page_id"], "child_run": second.id,
+                       "child_status": child.status, "submissions": 1,
+                       "private_state_readable": False})
         else:
             assert sum(worker["submitted"] for worker in workers.values()) == 1
-        assert len(workers) == 2  # one generation per logical turn
+        assert len(workers) == (1 if same_parent_child else 2)
         expected_generation = created[0].id if real_browser else "generation-0"
-        assert [argv for argv in controls if argv[1] in {"pause", "unpause"}] == [
+        expected = [
             ["docker", "pause", expected_generation],
             ["docker", "unpause", expected_generation]]
+        if same_parent_child:
+            expected *= 2
+        assert [argv for argv in controls if argv[1] in {"pause", "unpause"}] == expected
         assert browser.BrowserManager.current_session(first_tid) is None
         assert containers == {}
     finally:

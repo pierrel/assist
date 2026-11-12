@@ -105,7 +105,11 @@ in both views. An ID shown in only one view keeps that meaning.
   lifetime and leases. [[file:../assist/egress/store.py][EgressStore]] owns
   exact host/port grants.
 - *C10 Execution sandbox.* [[file:../assist/sandbox.py][DockerSandboxBackend]]
-  sends file and shell tools to a per-turn container with a bound workspace.
+  sends file and shell tools to one restricted container shared by a logical
+  parent turn and its eligible children, with a bound workspace and scratch.
+  It has no private =/agent= mount or generic application environment. Visible
+  parent file tools reach private state through C6's host-side composite route;
+  child file and shell tools receive neither that route nor browser tools.
   [[file:../assist/sandbox_manager.py][SandboxManager]] creates and cleans it.
   Non-Git web work can fall back to a host backend when Docker is unavailable;
   Git-bound turns fail closed. The CLI is host-backed.
@@ -122,11 +126,13 @@ in both views. An ID shown in only one view keeps that meaning.
   terminal and error boundaries close the browser; new-user and cancellation
   resets prove the frozen generation stopped before releasing held work.
   The existing three-hour container expiry includes frozen queue time.
-  A same-parent child still replaces this writable sandbox before its model/Git
-  work, destroying the retained browser. Full logical-turn continuity through
-  that boundary is unresolved, so this candidate is not deployable. Separating
-  browser lifetime from writable workspace authority remains a pending design
-  decision; no such architecture is implemented here.
+  An eligible child borrows the same backend after its durable parent work and
+  user event match the owner. Child execution refreezes it before releasing the
+  model/checkout scopes. Parent background processes and page JavaScript run
+  during that shared slice; unrelated work keeps them frozen. Child Git
+  publication is deferred until the parent stops the writable generation.
+  [[file:2026-11-12-browser-shared-execution.org][The shared-execution design]]
+  records the accepted boundary and cancellation/error preservation behavior.
   [[file:../assist/browser/storage.py][storage.py]] holds a limited later-turn
   storage snapshot, not live tabs.
 - *C12 Model endpoint.* [[file:../assist/model_manager.py][model_manager.py]]
@@ -185,7 +191,7 @@ agent retrieves the result with =get_async_task_result=.
   domain or web-supplied sources. The catalog is not the full set of skill bodies.
 - *C18 Context.* [[file:../assist/middleware/memory_middleware.py][Memory
   middleware]] reloads repository =AGENTS.md= and, when private thread state
-  exists, =/agent/memory.md= each turn. [[file:../assist/middleware/context_rider_middleware.py][The
+  exists, host-routed =/agent/memory.md= each turn. [[file:../assist/middleware/context_rider_middleware.py][The
   context rider]] adds current time context for the model call when supplied;
   it is not checkpointed as conversation history. Conversation messages and
   graph checkpoints belong to C5/C9.
@@ -271,16 +277,22 @@ after the original user turn has ended.
 - [[file:../tests/test_fair_scheduling_integration.py][The integrated fairness
   regression]], [[file:../tests/test_event_late_replay.py][late replay test]]
   and [[file:../tests/test_thread_queue.py][cap test]] cover the handoff. C8
-  still owns Git, sandbox and browser effects; this change adds no model slot
-  and makes no C5/C6/C7 implementation change.
+  still owns Git, sandbox and browser effects; execution shares that one model
+  slot. C6 routes parent-private state outside shared execution, and C7 borrows
+  the active parent's restricted generation without child publication.
 - For browser continuity, follow [[file:../assist/browser/manager.py][=pause=
   and =resume_session=]] and [[file:../manage/web/threads.py][=_process_message=
   and =_drain_held_browser_events=]]. The integrated fairness test exercises
   open, fill, a competing-thread quantum yield, resume and exactly one submit.
   Its opt-in Docker variant uses network-isolated Chromium with a synthetic
-  HTTP form and proves a background writer remains frozen while the competitor
-  runs. It replaces production worker startup; the browser Docker containment
-  suite covers that separate boundary. [[file:../tests/test_browser_lifecycle_v12.py][The lifecycle tests]]
+  HTTP form and proves a background writer stays frozen for another workspace
+  but runs during same-parent child execution. It replaces worker startup; the
+  [[file:../tests/test_browser_docker.py][production bootstrap/UID/proxy test]]
+  separately checks private-state denial and armed-worker pause/resume.
+  [[file:../tests/test_thread_git_simple.py][Real temporary Git tests]] prove
+  publication waits for writer stop, errors preserve a recoverable commit and
+  cancellation preserves local effects behind the clean preflight.
+  [[file:../tests/test_browser_lifecycle_v12.py][The lifecycle tests]]
   prove newer-user/cancellation reset receipts survive failed stop attempts.
 
 * Conditional paths and limits of this view

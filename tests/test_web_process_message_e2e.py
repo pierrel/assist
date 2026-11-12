@@ -269,7 +269,14 @@ def test_browser_binding_uses_full_sandbox_generation(
     response = client.post(f"/thread/{tid}/message", data={"text": "Use the browser"},
                            follow_redirects=False)
     assert response.status_code == 303
-    assert _wait_for_terminal_status(tid).get("stage") == "ready"
+    terminal = _wait_for_terminal_status(tid)
+    if not matching_generation:
+        assert terminal["stage"] == "error"
+        assert "generation changed" in terminal["error"]
+        assert "spec" not in captured
+        assert not browser.BrowserManager._sessions
+        return
+    assert terminal.get("stage") == "ready"
     assert sandbox.id == generation[:12]
     tool_names = {getattr(tool, "name", getattr(tool, "__name__", ""))
                   for tool in captured["spec"].tools}

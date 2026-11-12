@@ -9,9 +9,8 @@ allowed-tools: browser_open browser_close browser_observe browser_act browser_wa
 Start with `read_url` for a simple static page. If it omits the needed content
 or controls, use this turn's browser tools yourself. Do not delegate browser
 navigation to a child agent. Live pages and targets survive fair-scheduler
-yields to another workspace within this logical user turn. A same-parent child
-task still ends this browser. Reopen a page after a later turn, child task or
-approval pause.
+yields within this logical user turn, including eligible child work in its
+shared execution container. Reopen a page after a later turn or approval pause.
 The browser process and its live pages end with this turn's sandbox. Before
 yielding for an approval or clarification, write a short `/agent/browser-recovery.md`
 with the user's goal, the safe site origin, the completed step, and the next

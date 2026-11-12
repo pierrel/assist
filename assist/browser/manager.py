@@ -330,8 +330,8 @@ class BrowserSession:
             state.begin(self.run_id, sequence)
 
     def _fence_command(self) -> None:
-        sequence = self._latest_direct_sequence()
         with authority.fence(self.threads_root, self.thread_id) as state:
+            sequence = self._latest_direct_sequence()
             lease = state.lease
             if (lease is None or lease["owner_run_id"] != self.run_id
                     or lease["sequence"] != sequence
@@ -526,15 +526,15 @@ class BrowserManager:
     @classmethod
     def resume_session(cls, thread_id: str, work_id: str,
                        request: BrowserUserRequest | None) -> BrowserSession | None:
-        """Reuse a live worker only for the same admitted logical user turn."""
+        """Reuse a retained session/backend for the same admitted logical turn."""
         with cls.bounded_thread_gate(thread_id):
             session = cls.current_session(thread_id)
             if session is None:
                 return None
             with session._lock:
-                if (session.closed or session.identity is None
+                if (session.closed
                         or session.sandbox_backend is None
-                        or session.work_id != work_id or request is None
+                        or session.work_id != work_id
                         or session.user_request != request):
                     cls.cleanup(thread_id, session)
                     return None
@@ -607,8 +607,11 @@ class BrowserManager:
                             lease is not None
                             and lease["owner_run_id"] == owner_run_id
                             and generation in lease["generations"])
-                return (state.covered and admitted
-                        and not browser_records(map_dir, thread_id))
+                records = browser_records(map_dir, thread_id)
+                own_worker = owner_run_id is not None and all(
+                    record.kind == "sandbox" and record.generation == generation
+                    for record in records.values())
+                return state.covered and admitted and (not records or own_worker)
         except (OSError, RuntimeError, ValueError, TimeoutError):
             return False
 
@@ -714,10 +717,9 @@ class BrowserManager:
         with cls.bounded_thread_gate(session.thread_id):
             if not os.path.isdir(os.path.join(session.threads_root, session.thread_id)):
                 raise BrowserUnavailable("browser thread no longer exists")
-            if not cls.ready_for_browser(
-                    session.threads_root, session.thread_id,
-                    session.run_id, session.sandbox_generation):
+            if os.path.realpath(session.threads_root) not in cls._reconciled_roots:
                 raise BrowserUnavailable("browser startup reconciliation is incomplete")
+            session._fence_command()
             with cls._lock:
                 if session.thread_id in cls._sessions:
                     raise BrowserUnavailable("thread already has a browser Run")

@@ -53,13 +53,14 @@ where reliability is harder than with frontier APIs.
   including an approval or clarification pause.
   The [browser compatibility review guide](docs/browser-site-compatibility.org)
   maps its control and network boundaries.
-  During a fair-scheduler yield to another workspace, its exact container freezes
-  until the same admitted logical user turn resumes, preserving live pages and
-  form inputs.
-  Background shell work freezes too. A newer user event or cancellation still
-  revokes the old browser before later work can proceed.
-  The [architecture view](docs/architecture.org) records the unresolved
-  same-parent child lifetime boundary; this candidate is not ready for deployment.
+  A logical parent turn and its eligible child work share one restricted
+  execution container, preserving live pages and filled inputs across fairness
+  slices. The whole container freezes for unrelated work; a child of the same
+  logical work unpauses it and shares its background processes and page activity.
+  Parent-private state stays outside that container. A newer user event or
+  cancellation revokes the old browser before later work can proceed.
+  See the [shared-execution design](docs/2026-11-12-browser-shared-execution.org)
+  and [current architecture](docs/architecture.org).
   A separate browser UID can reach only its attributed listener on the
   existing egress proxy. The host seals new browser-debugging connections
   before any page command; agent tools cannot use that control channel.
@@ -1101,7 +1102,8 @@ Visible Assist threads have two sources:
   Other `/agent/*` files can hold supporting material. The main agent manages the
   directory proactively; it survives turns and is deleted with the thread. Spawned
   child agents receive a self-contained brief instead of the private `/agent`
-  route/mount or its prompt.
+  route or its prompt. Parent file tools route it on the host; shared shell
+  execution has no private mount.
 - `/user` is the user-owned alias for `/workspace`; use either path for user
   deliverables while existing `/workspace` references remain compatible.
 - `/tmp` persists for the thread and is for disposable conversions, generated
@@ -1288,7 +1290,18 @@ re-anchoring, even when a later turn replaces the error banner.
 
 ## Docker Sandbox
 
-On the web path, the agent executes shell commands inside a Docker container rather than on the host. Each turn gets a fresh container with the domain repository bind-mounted at `/workspace`, also exposed as `/user`; persistent thread scratch at `/tmp`; and, for ordinary visible Deep main-agent turns, private state at `/agent`. Ordinary Deep sandboxes inherit the configured `ASSIST_*` environment, so that profile is not yet a credential-free boundary. Pi and Git preparation/commit profiles omit the generic application environment and private agent mount. The CLI path remains host-backed.
+On the web path, shell commands run in a restricted Docker container with the
+domain repository at `/workspace` (also `/user`) and persistent scratch at `/tmp`.
+A logical parent and its eligible child work share that execution generation.
+It has no private `/agent` mount and inherits no generic `ASSIST_*` application
+environment. Only the parent's file tools route private state on the host.
+Children keep their own tools and provenance; they do not inherit browser tools.
+Git-bound shared children return findings and local file effects with publication
+pending. The parent stops the shared writer before ordinary commit/publication.
+Error recovery preserves working files; cancellation retains local effects, and
+the next clean preflight holds an uncommitted checkout for reconciliation rather
+than replaying work. Pi and Git preparation/commit keep their restricted profiles.
+The CLI path remains host-backed.
 
 The sandbox and browser images are built automatically by `make web` (and `make deploy`). To build them manually:
 ```bash

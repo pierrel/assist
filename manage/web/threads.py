@@ -2676,13 +2676,24 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
     parent_working_dir = None
     sandbox = None
     sandbox_generation = None
+    shared_session = None
     duplicate = False
     git_scope = ExitStack()
     git_lifecycle = None
     queue_handle = None
 
+    def refreeze_shared_execution() -> None:
+        try:
+            shared_session.pause()
+        except Exception:
+            try:
+                BrowserManager.cleanup(run.parent_thread_id, shared_session)
+            finally:
+                SandboxManager.cleanup(parent_working_dir, sandbox_generation)
+            raise
+
     def cleanup_child_sandbox() -> None:
-        if parent_working_dir is not None:
+        if parent_working_dir is not None and shared_session is None:
             try:
                 if git_lifecycle is not None:
                     git_lifecycle.cleanup_model(sandbox_generation)
@@ -2714,18 +2725,34 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                         run.work_id,
                         thread_scope=(MANAGER.root_dir, run.parent_thread_id),
                         owner_run_id=run.id))
-                    # The child shares its active parent's checkout. A phone
-                    # push during that parent turn must not change this base.
-                    git_lifecycle.resume()
-                    child_scope.enter_context(git_lifecycle.preserve_on_error(None))
-                    if git_lifecycle.bound:
-                        child_scope.callback(cleanup_child_sandbox)
+                    session = BrowserManager.current_session(run.parent_thread_id)
+                    if session is not None:
+                        # Child work remains scoped by its own durable Run and
+                        # tools. Borrow execution, never the parent's memory or
+                        # browser tools. The browser lease still names its owner.
+                        parent = _runs().get(run.parent_thread_id, run.parent_run_id)
+                        event_id = (session.user_request.event_id
+                                    if session.user_request is not None else None)
+                        if (parent.work_id != session.work_id
+                                or parent.user_event_id != event_id):
+                            raise BrowserUnavailable(
+                                "child belongs to an earlier execution lifetime")
+                        shared_session = BrowserManager.resume_session(
+                            run.parent_thread_id, session.work_id, session.user_request)
+                    if shared_session is not None:
+                        # Refreeze before releasing the checkout and model slot.
+                        child_scope.callback(refreeze_shared_execution)
+                    else:
+                        git_lifecycle.resume()
+                        child_scope.enter_context(git_lifecycle.preserve_on_error(None))
+                        if git_lifecycle.bound:
+                            child_scope.callback(cleanup_child_sandbox)
                     try:
-                        sandbox = _get_sandbox_backend(
-                            run.parent_thread_id, include_agent=False,
+                        sandbox = (shared_session.sandbox_backend if shared_session else _get_sandbox_backend(
+                            run.parent_thread_id,
                             owner_run_id=run.id,
                             **({"before_start": git_lifecycle.model_starting}
-                               if git_lifecycle.bound else {}))
+                               if git_lifecycle.bound else {})))
 
                         sandbox_generation = sandbox.container if sandbox else None
                         git_lifecycle.require_sandbox(sandbox)
@@ -2741,13 +2768,17 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                               if run.resume_decision is not None
                               else chat.resume() if (resume or run.resume)
                               else chat.message(run.text or ""))
+                    if shared_session is not None and git_lifecycle.bound:
+                        result = (str(result or "") + "\n\n"
+                                  "Workspace file effects are local. Git publication is pending; "
+                                  "this child does not publish separately.")
                     waits_for_egress = _child_waits_for_egress(run)
                     with _RUN_ADMISSION_LOCK:
                         run = _runs().transition(
                             run.thread_id, run.id,
                             "awaiting_approval" if waits_for_egress
-                            else "running" if git_lifecycle.bound else "success", result=result)
-                    if git_lifecycle.bound and not waits_for_egress:
+                            else "running" if git_lifecycle.bound and shared_session is None else "success", result=result)
+                    if git_lifecycle.bound and shared_session is None and not waits_for_egress:
                         git_lifecycle.cleanup_model(sandbox_generation)
                         sandbox_generation = None
                         result_branch = git_lifecycle.finish_child(
@@ -2759,7 +2790,6 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                                 run.thread_id, run.id, "success",
                                 **({"result": str(result or "") + "\n\n" + notice}
                                    if notice else {}))
-                        git_lifecycle.child_terminal()
                     if waits_for_egress and run.parent_thread_id is not None:
                         _resume_egress_waiters(run.parent_thread_id)
     except ThreadPauseRequested:
@@ -2878,7 +2908,6 @@ def _recover_child_run(run: Run) -> None:
                     str(result), MANAGER.thread_dir(run.thread_id))
                 with _RUN_ADMISSION_LOCK:
                     _runs().transition(run.thread_id, run.id, "success", result=result)
-                git_lifecycle.child_terminal()
         else:
             _execute_child_run(run)
             return
@@ -3711,7 +3740,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     _run is not None and not sender
                     and assistant_id == "general-agent"
                     and BrowserManager.reconcile_startup(MANAGER.root_dir)
-                    and BrowserManager.ready_for_browser(MANAGER.root_dir, tid))
+                    and BrowserManager.ready_for_browser(
+                        MANAGER.root_dir, tid,
+                        browser_session.run_id if browser_session else None,
+                        browser_session.sandbox_generation if browser_session else None))
                 # Capture the registered generation even if creation raises
                 # before returning a backend; finally tears down that exact
                 # generation without replacing a newer workspace registration.
@@ -3736,11 +3768,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     # Bind the browser to this logical work's direct user event; ordinary
                     # egress policy and grants decide which origins are reachable.
                     extra_browser_tools = ()
-                    if browser_session is not None:
-                        extra_browser_tools = tuple(browser_tools(browser_session))
-                    elif (sandbox is not None and browser_capable
-                            and BrowserManager.ready_for_browser(
-                                MANAGER.root_dir, tid, _run.id, sandbox_generation.id)):
+                    if (browser_session is None and sandbox is not None
+                            and _run is not None and not sender
+                            and assistant_id == "general-agent"):
                         browser_session = BrowserSession(
                             tid, _run.id if _run is not None else event_id or "legacy",
                             MANAGER.thread_default_working_dir(tid), MANAGER.root_dir,
@@ -3749,6 +3779,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                             sandbox_backend=sandbox,
                             run_service=_runs())
                         BrowserManager.register(browser_session)
+                    if browser_session is not None and browser_capable:
                         extra_browser_tools = tuple(browser_tools(browser_session))
                     # on_queue_state=None: the outer acquire above already
                     # owns the callback; the inner acquire is the reentrant
@@ -3898,9 +3929,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     _bind_task_report(tid, task_message or pending_text or text,
                                       MANAGER.thread_default_working_dir(tid), sandbox)
             except ThreadPauseRequested:
-                keep_browser = (browser_session is not None
-                                and browser_session.identity is not None
-                                and not browser_session.closed)
+                keep_browser = browser_session is not None and not browser_session.closed
                 if keep_browser:
                     try:
                         browser_session.pause()
