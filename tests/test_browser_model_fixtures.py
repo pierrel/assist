@@ -3,6 +3,65 @@ from edd.eval.test_browser_agent import _BrowserSite
 import pytest
 
 
+@pytest.mark.parametrize("journey", ["auth", "approval_before", "approval_after"])
+def test_selected_journey_completes_legal_context_work(monkeypatch, journey):
+    import hashlib
+    import json
+    from langchain_core.messages import AIMessage
+    from tests.middleware.test_skills_kernel import _RecordingModel
+    from edd.eval.test_browser_agent import TestBrowserAgent
+    from edd.eval.test_async_subagents import reset_task_fixture
+    from edd.eval import test_async_subagents as tasks
+
+    reset_task_fixture()
+    task_results = []
+    original_result = tasks._RESULT.func
+    def result(task_id):
+        response = original_result(task_id)
+        task_results.append(json.loads(response))
+        return response
+    monkeypatch.setattr(tasks._RESULT, "func", result)
+    def call(name, args, index):
+        return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": str(index)}])
+    description = "Inspect the local workspace for relevant context."
+    task_id = "task-eval-" + hashlib.sha256(
+        f"1\0context-agent\0{description}".encode()).hexdigest()[:12]
+    context = [call("start_async_task", {"description": description,
+                                        "subagent_type": "context-agent"}, 101),
+               AIMessage(content="I started the context task."),
+               call("get_async_task_result", {"task_id": task_id}, 102)]
+    if journey == "auth":
+        responses = context + [
+            call("load_skill", {"name": "browse-website"}, 1),
+            call("browser_open", {"url": "https://v1-auth.fern.example/"}, 2),
+            call("browser_close", {"page_id": "page-1"}, 3),
+            AIMessage(content="October Reliability Review")]
+        method = "test_v1_one_turn_completion"
+    else:
+        first = [
+            call("load_skill", {"name": "browse-website"}, 1),
+            call("browser_open", {"url": "https://approval.fern.example/"}, 2),
+            call("browser_preflight", {"url": "https://partner.fern.example/report",
+                                       "page_id": "page-1"}, 3),
+            call("load_skill", {"name": "egress"}, 4),
+            call("request_egress", {"host": "partner.fern.example", "port": 443,
+                                    "task": "Read the latest partner report."}, 5),
+            AIMessage(content="Approval is needed for the partner report.")]
+        second = [
+            call("load_skill", {"name": "browse-website"}, 10),
+            call("browser_open", {"url": "https://partner.fern.example/report"}, 11),
+            call("browser_close", {"page_id": "page-2"}, 12),
+            AIMessage(content="October Reliability Review")]
+        responses = (context + first + second if journey == "approval_before"
+                     else first + context + second)
+        method = "test_v1_approval_pause_destroys_pages_then_reopens_with_state"
+    monkeypatch.setattr(TestBrowserAgent, "model", _RecordingModel(responses=responses), raising=False)
+    case = TestBrowserAgent(method)
+    getattr(case, method)()
+    assert task_results and all("README.org" in item["result"] for item in task_results)
+    assert not tasks._TASK_STATUSES
+
+
 @pytest.mark.parametrize("scenario,role,name", [
     ("v1-form", "button", "Review"), ("approval", "link", "Latest report")])
 def test_selected_wait_returns_current_visible_control(tmp_path, scenario, role, name):

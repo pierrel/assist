@@ -11,6 +11,7 @@ import os
 import signal
 import tempfile
 from dataclasses import replace
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import TestCase, mock
 
@@ -57,6 +58,28 @@ class _OfflineBackend(FilesystemBackend, SandboxBackendProtocol):
 class _TurnBackend(_OfflineBackend):
     """Expose private parent file state in offline continuity journeys."""
     native_agent_dir = True
+
+
+@contextmanager
+def _browser_task_fixture():
+    """Scope deterministic task state and context to these empty workspaces."""
+    from . import test_async_subagents as tasks
+
+    tasks.reset_task_fixture()
+    original = tasks._RESULT.func
+    def result(task_id):
+        if (tasks._TASK_TYPES.get(task_id) == "context-agent"
+                and tasks._TASK_STATUSES.get(task_id) == "success"
+                and task_id not in tasks._TASK_RESULTS):
+            tasks._TASK_RESULTS[task_id] = (
+                "No relevant local notes or preferences were found. "
+                "README.org contains no task-specific details.")
+        return original(task_id)
+    try:
+        with mock.patch.object(tasks._RESULT, "func", result):
+            yield
+    finally:
+        tasks.reset_task_fixture()
 
 
 class _BrowserSite:
@@ -403,7 +426,7 @@ class TestBrowserAgent(TestCase):
                 prompt_rewrite_web_main_spec(tools=tuple(browser_tools(site))),
                 web_main=True, main_guidance_skills=True,
                 skill_sources=web_main_skill_sources(browser=True))
-            with mock.patch("assist.tools.requests.get",
+            with _browser_task_fixture(), mock.patch("assist.tools.requests.get",
                             return_value=_StaticShell(scenario)), \
                  stub_research_subagent():
                 agent = AgentHarness(create_agent(
@@ -417,15 +440,17 @@ class TestBrowserAgent(TestCase):
                             TimeoutError("browser V1 eval turn exceeded 150 seconds")))
                     signal.alarm(150)
                     try:
-                        result = invoke_with_rollback(
+                        invoke_with_rollback(
                             agent.agent,
                             {"messages": [{"role": "user", "content": prompt}]},
                             {"configurable": {"thread_id": agent.thread_id},
                              "recursion_limit": 120})
+                        complete_web_main_tasks(agent)
+                        answer = str(agent.all_messages()[-1].content)
                     finally:
                         signal.alarm(0)
                         signal.signal(signal.SIGALRM, previous)
-                    answers.append(str(result["messages"][-1].content))
+                    answers.append(answer)
                     calls_by_turn.append(site.calls[before:])
                     if index + 1 < len(prompts):
                         site.end_turn()
@@ -490,9 +515,7 @@ class TestBrowserAgent(TestCase):
         """A natural draft request continues on its filled page after a queue yield."""
         from threading import Event, Thread as WorkerThread
         from assist.thread_queue import ThreadAffinityQueue, ThreadPauseRequested
-        from .test_async_subagents import reset_task_fixture
 
-        reset_task_fixture()
         with tempfile.TemporaryDirectory(prefix="browser_fair_eval_") as root:
             create_filesystem(root, {"README.org": "Personal workspace.", "agent": {}})
             site = _BrowserSite("v1-form", root)
@@ -526,10 +549,8 @@ class TestBrowserAgent(TestCase):
                 prompt_rewrite_web_main_spec(tools=tuple(browser_tools(site))),
                 web_main=True, main_guidance_skills=True,
                 skill_sources=web_main_skill_sources(browser=True))
-            with mock.patch("assist.tools.requests.get", return_value=_StaticShell("v1-form")), \
-                 mock.patch("edd.eval.test_async_subagents._TRIP_CONTEXT_RESULT",
-                            "No relevant trip notes or preferences were found. "
-                            "README.org contains no trip details."), \
+            with _browser_task_fixture(), \
+                 mock.patch("assist.tools.requests.get", return_value=_StaticShell("v1-form")), \
                  stub_research_subagent():
                 agent = AgentHarness(create_agent(
                     self.model, root, sandbox_backend=_TurnBackend(root), spec=spec))
@@ -557,7 +578,6 @@ class TestBrowserAgent(TestCase):
                     signal.signal(signal.SIGALRM, previous)
                     if launched:
                         competitor.join(2)
-                    reset_task_fixture()
             resumed = site.calls[before_resume:]
             self.assertFalse(any(op == "open" for op, _ in resumed), resumed)
             clicks = [(index, args.get("target") or {})
@@ -706,7 +726,8 @@ class TestBrowserAgent(TestCase):
                     tools=tuple(browser_tools(site))),
                 web_main=True, main_guidance_skills=True,
                 skill_sources=web_main_skill_sources(browser=True))
-            with mock.patch("assist.agent._execution_egress_tools", tuple(tools)), \
+            with _browser_task_fixture(), \
+                 mock.patch("assist.agent._execution_egress_tools", tuple(tools)), \
                  mock.patch.object(egress_tools_module, "_thread_id", lambda: tid), \
                  mock.patch("assist.tools.requests.get",
                             return_value=_StaticShell("approval")), \
@@ -721,11 +742,12 @@ class TestBrowserAgent(TestCase):
                             TimeoutError("browser approval eval turn exceeded 150 seconds")))
                     signal.alarm(150)
                     try:
-                        result = invoke_with_rollback(
+                        invoke_with_rollback(
                             agent.agent, {"messages": [{"role": "user", "content": prompt}]},
                             {"configurable": {"thread_id": agent.thread_id},
                              "recursion_limit": 500})
-                        return str(result["messages"][-1].content)
+                        complete_web_main_tasks(agent)
+                        return str(agent.all_messages()[-1].content)
                     except Exception as error:
                         recent = [(type(message).__name__,
                                    str(message.content)[:250],
