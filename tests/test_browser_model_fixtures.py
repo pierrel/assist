@@ -3,6 +3,69 @@ from edd.eval.test_browser_agent import _BrowserSite
 import pytest
 
 
+@pytest.mark.parametrize("scenario,role,name", [
+    ("v1-form", "button", "Review"), ("approval", "link", "Latest report")])
+def test_selected_wait_returns_current_visible_control(tmp_path, scenario, role, name):
+    site = _BrowserSite(scenario, str(tmp_path))
+    opened = site.command("open", url=f"https://{scenario}.fern.example/")
+    page_id = opened["result"]["page_id"]
+    assert site.command("wait", page_id=page_id, role=role, name=name) == opened
+    assert "error" in site.command("wait", page_id=page_id, role=role, name="Missing")
+    site.command("close", page_id=page_id)
+    assert "error" in site.command("wait", page_id=page_id, role=role, name=name)
+
+
+def test_approval_allowed_preflight_requires_current_page_but_denial_does_not(tmp_path):
+    site = _BrowserSite("approval", str(tmp_path))
+    partner = "https://partner.fern.example/report"
+    denied = site.command("preflight", url=partner, page_id="missing-page")
+    assert not denied["result"]["top_level"]["allowed"]
+    site.approved = True
+    assert "error" in site.command("preflight", url=partner, page_id="missing-page")
+    assert site.command("preflight", url=partner)["result"]["top_level"]["allowed"]
+    opened = site.command("open", url=partner)
+    page_id = opened["result"]["page_id"]
+    assert site.command("preflight", url=partner, page_id=page_id)["result"]["top_level"]["allowed"]
+    site.command("close", page_id=page_id)
+    assert "error" in site.command("preflight", url=partner, page_id=page_id)
+
+
+@pytest.mark.parametrize("scenario", ["v1-form", "approval", "v1-auth"])
+def test_selected_close_closes_only_current_page_and_preserves_auth(tmp_path, scenario):
+    site = _BrowserSite(scenario, str(tmp_path))
+    site.auth_cookie = True
+    url = f"https://{scenario}.fern.example/"
+    opened = site.command("open", url=url)
+    page_id = opened["result"]["page_id"]
+    if scenario == "v1-form":
+        opened = site.command("act", page_id=page_id, snapshot_id="form-1",
+                              action="fill", target={"ref": "destination", "text": "Portland"})
+    assert "error" in site.command("close", page_id="missing-page")
+    assert site.command("observe", page_id=page_id) == opened
+    turn = site.turn
+    closed = site.command("close", page_id=page_id)
+    assert closed == {"result": {"closed_page_id": page_id, "pages": [],
+                                 "active_page_id": None}}
+    assert site.turn == turn and site.auth_cookie
+    assert "error" in site.command("observe", page_id=page_id)
+    assert "error" in site.command("preflight", url=url, page_id=page_id)
+    assert "error" in site.command("act", page_id=page_id, snapshot_id="form-1",
+                                   action="click", target={"ref": "review"})
+    assert "error" in site.command("close", page_id=page_id)
+    assert "error" in site.command("open", url=url, reuse_page_id=page_id)
+    reopened = site.command("open", url=url)
+    assert reopened["result"]["page_id"] != page_id
+    assert "error" in site.command("observe", page_id=page_id)
+    if scenario == "v1-form":
+        assert "Destination: blank" in reopened["result"]["snapshot"]
+        site.command("act", page_id=reopened["result"]["page_id"], snapshot_id="form-1",
+                     action="fill", target={"ref": "destination", "text": "Portland"})
+    reused = site.command("open", url=url, reuse_page_id=reopened["result"]["page_id"])
+    assert reused["result"]["page_id"] == reopened["result"]["page_id"]
+    if scenario == "v1-form":
+        assert "Destination: blank" in reused["result"]["snapshot"]
+
+
 def test_private_report_observation_keeps_current_page_and_turn_boundary(tmp_path):
     site = _BrowserSite("v1-auth", str(tmp_path))
     site.auth_cookie = True
@@ -65,8 +128,9 @@ def test_form_observation_keeps_values_targets_and_page_boundary(tmp_path):
     assert "error" in site.command("observe", page_id="page-1")
 
 
-@pytest.mark.parametrize("page_id", ["page-1", "missing-page"])
-def test_continuity_eval_requires_a_successful_review(monkeypatch, page_id):
+@pytest.mark.parametrize("page_id,close_after_review", [
+    ("page-1", False), ("missing-page", False), ("page-1", True)])
+def test_continuity_eval_requires_a_successful_review(monkeypatch, page_id, close_after_review):
     import time
     from threading import Event
     from langchain_core.messages import AIMessage
@@ -76,14 +140,17 @@ def test_continuity_eval_requires_a_successful_review(monkeypatch, page_id):
 
     def call(name, args, index):
         return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": str(index)}])
-    model = _RecordingModel(responses=[
+    responses = [
         call("load_skill", {"name": "browse-website"}, 1),
         call("browser_open", {"url": "https://v1-form.fern.example/"}, 2),
         call("browser_act", {"page_id": "page-1", "snapshot_id": "form-1", "action": "fill",
                              "target": {"ref": "destination", "text": "Portland"}}, 3),
         call("browser_act", {"page_id": page_id, "snapshot_id": "form-1", "action": "click",
-                             "target": {"ref": "review"}}, 4),
-        AIMessage(content="Portland draft reviewed.")])
+                             "target": {"ref": "review"}}, 4)]
+    if close_after_review:
+        responses.append(call("browser_close", {"page_id": page_id}, 5))
+    responses.append(AIMessage(content="Portland draft reviewed."))
+    model = _RecordingModel(responses=responses)
     original = _RecordingModel._generate
     calls = 0
     def generate(self, *args, **kwargs):

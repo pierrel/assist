@@ -67,6 +67,7 @@ class _BrowserSite:
         self.approved = False
         self.session_open = False
         self.turn = 1
+        self.page_sequence = 0
         self.form_values = {}
         self.auth_cookie = scenario == "approval"
 
@@ -88,9 +89,10 @@ class _BrowserSite:
               page_id="page-1", network_errors=()):
         url = ("http://host.docker.internal:5050/" if self.scenario == "internal-status"
                else f"https://{self.scenario}.fern.example/")
-        if self.scenario == "approval":
-            url = self.approval_url
-            page_id = f"page-{self.turn}"
+        if self.scenario in {"v1-form", "approval", "v1-auth"}:
+            page_id = self.current_page_id
+            if self.scenario == "approval":
+                url = self.approval_url
         response = {"result": {"page_id": page_id, "snapshot_id": snapshot_id,
                 "url": url,
                 "snapshot": snapshot, "targets": list(targets),
@@ -103,6 +105,32 @@ class _BrowserSite:
 
     def command(self, operation, **args):
         self.calls.append((operation, args))
+        selected = self.scenario in {"v1-form", "approval", "v1-auth"}
+        if operation == "open" and selected:
+            reuse = args.get("reuse_page_id")
+            if reuse is not None:
+                if not self.session_open or reuse != self.current_page_id:
+                    return {"error": "old page is closed"}
+            else:
+                self.page_sequence += 1
+                self.current_page_id = f"page-{self.page_sequence}"
+            if self.scenario == "v1-form":
+                self.form_values = {}
+        if operation == "close" and selected:
+            if not self.session_open or args.get("page_id") != self.current_page_id:
+                return {"error": "old page is closed"}
+            self.session_open = False
+            self.form_values = {}
+            return {"result": {"closed_page_id": self.current_page_id,
+                               "pages": [], "active_page_id": None}}
+        if operation == "wait" and selected:
+            if not self.session_open or args.get("page_id") != self.current_page_id:
+                return {"error": "old page is closed"}
+            if any(target.get("role") == args.get("role")
+                   and target.get("name") == args.get("name")
+                   for target in self.current_page["result"]["targets"]):
+                return self.current_page
+            return {"error": "named control is not visible"}
         if operation == "open":
             if self.scenario == "v1-form":
                 self.session_open = True
@@ -186,7 +214,7 @@ class _BrowserSite:
         if operation == "act":
             target = args.get("target") or {}
             if self.scenario == "v1-form":
-                if not self.session_open or args.get("page_id") != f"page-{self.turn}":
+                if not self.session_open or args.get("page_id") != self.current_page_id:
                     return {"error": "old page is closed"}
                 ref = target.get("ref") or {
                     ("textbox", "Destination"): "destination",
@@ -217,7 +245,7 @@ class _BrowserSite:
                 return {"error": "secret fields are unsupported"}
             if self.scenario == "approval":
                 if (not self.session_open
-                        or args.get("page_id") != f"page-{self.turn}"):
+                        or args.get("page_id") != self.current_page_id):
                     return {"error": "browser state expired; reopen the page"}
                 if (target.get("ref") == "partner-report" or
                         target.get("href") == "https://partner.fern.example/report"):
@@ -259,7 +287,7 @@ class _BrowserSite:
                               snapshot_id="second")
         if operation == "observe":
             if self.scenario in {"v1-form", "approval", "v1-auth"}:
-                if not self.session_open or args.get("page_id") != f"page-{self.turn}":
+                if not self.session_open or args.get("page_id") != self.current_page_id:
                     return {"error": "old page is closed"}
                 return self.current_page
             if self.scenario == "delayed":
@@ -268,6 +296,11 @@ class _BrowserSite:
             return self._page("This page requires interaction.")
         if operation == "preflight":
             url = args.get("url", "")
+            partner_denied = (self.scenario == "approval" and not self.approved
+                              and url.startswith("https://partner.fern.example/"))
+            if selected and args.get("page_id") and not partner_denied:
+                if not self.session_open or args["page_id"] != self.current_page_id:
+                    return {"error": "old page is closed"}
             if self.scenario == "multi-origin" and args.get("page_id"):
                 return {"result": {
                     "top_level": {"origin": "https://multi-origin.fern.example:443",
@@ -531,7 +564,6 @@ class TestBrowserAgent(TestCase):
             self.assertIn("Review only", reviewed.get("snapshot", ""), click_results)
             self.assertIn("Portland", reviewed.get("snapshot", ""), click_results)
             self.assertEqual(sum(op == "open" for op, _ in site.calls), 1, site.calls)
-            self.assertEqual(site.form_values.get("destination"), "Portland")
             self.assertIn("Portland", str(result["messages"][-1].content))
 
     def test_v1_partial_form_reconstructs_with_semantic_note(self):
