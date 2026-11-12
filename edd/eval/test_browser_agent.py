@@ -3,7 +3,8 @@
 The browser site, static requests.get response, shell network, and research
 specialist are stubbed; the approval journey uses a real local EgressStore.
 The real main graph chooses whether to load skills, try static navigation,
-and use stateful browser tools. Set
+and use stateful browser tools. The fairness journey also delivers deterministic
+context-task completion wakes on the same checkpoint when needed. Set
 ASSIST_BROWSER_EVAL_BASELINE=1 to remove browser tools for a comparison.
 """
 import os
@@ -25,7 +26,7 @@ from assist.egress.tools import egress_tools
 from assist.model_manager import select_assistant_model
 from assist.thread_manager import web_main_skill_sources
 
-from .utils import (agent_tool_calls, create_filesystem,
+from .utils import (agent_tool_calls, complete_web_main_tasks, create_filesystem,
                     prompt_rewrite_web_main_spec, stub_research_subagent)
 
 
@@ -489,7 +490,9 @@ class TestBrowserAgent(TestCase):
         """A natural draft request continues on its filled page after a queue yield."""
         from threading import Event, Thread as WorkerThread
         from assist.thread_queue import ThreadAffinityQueue, ThreadPauseRequested
+        from .test_async_subagents import reset_task_fixture
 
+        reset_task_fixture()
         with tempfile.TemporaryDirectory(prefix="browser_fair_eval_") as root:
             create_filesystem(root, {"README.org": "Personal workspace.", "agent": {}})
             site = _BrowserSite("v1-form", root)
@@ -524,6 +527,9 @@ class TestBrowserAgent(TestCase):
                 web_main=True, main_guidance_skills=True,
                 skill_sources=web_main_skill_sources(browser=True))
             with mock.patch("assist.tools.requests.get", return_value=_StaticShell("v1-form")), \
+                 mock.patch("edd.eval.test_async_subagents._TRIP_CONTEXT_RESULT",
+                            "No relevant trip notes or preferences were found. "
+                            "README.org contains no trip details."), \
                  stub_research_subagent():
                 agent = AgentHarness(create_agent(
                     self.model, root, sandbox_backend=_TurnBackend(root), spec=spec))
@@ -532,21 +538,26 @@ class TestBrowserAgent(TestCase):
                     TimeoutError("browser fairness eval exceeded 150 seconds")))
                 signal.alarm(150)
                 try:
-                    with queue.acquire(str(agent.thread_id)):
-                        with self.assertRaises(ThreadPauseRequested):
+                    with self.assertRaises(ThreadPauseRequested):
+                        with queue.acquire(str(agent.thread_id)):
                             invoke_with_rollback(agent.agent, {"messages": [{"role": "user", "content":
                                 "Use https://v1-form.fern.example/ to draft a trip to Portland. "
                                 "Review the draft, but do not submit it."}]}, config)
+                        with queue.acquire(str(agent.thread_id)):
+                            complete_web_main_tasks(agent)
                     self.assertTrue(competed.wait(2), "competing slice did not run")
                     self.assertEqual(site.form_values.get("destination"), "Portland")
                     before_resume = len(site.calls)
                     with queue.acquire(str(agent.thread_id)):
-                        result = invoke_with_rollback(agent.agent, None, config)
+                        invoke_with_rollback(agent.agent, None, config)
+                    with queue.acquire(str(agent.thread_id)):
+                        complete_web_main_tasks(agent)
                 finally:
                     signal.alarm(0)
                     signal.signal(signal.SIGALRM, previous)
                     if launched:
                         competitor.join(2)
+                    reset_task_fixture()
             resumed = site.calls[before_resume:]
             self.assertFalse(any(op == "open" for op, _ in resumed), resumed)
             clicks = [(index, args.get("target") or {})
@@ -564,7 +575,7 @@ class TestBrowserAgent(TestCase):
             self.assertIn("Review only", reviewed.get("snapshot", ""), click_results)
             self.assertIn("Portland", reviewed.get("snapshot", ""), click_results)
             self.assertEqual(sum(op == "open" for op, _ in site.calls), 1, site.calls)
-            self.assertIn("Portland", str(result["messages"][-1].content))
+            self.assertIn("Portland", str(agent.all_messages()[-1].content))
 
     def test_v1_partial_form_reconstructs_with_semantic_note(self):
         _, site, answers, turns, note = self._v1_turns("v1-form", [
