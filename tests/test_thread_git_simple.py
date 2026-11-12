@@ -522,3 +522,121 @@ def test_merge_holds_when_published_thread_advances_during_import(
     with pytest.raises(GitExpectedRefChangedError, match="changed"):
         owner.publish_merge(plan)
     assert git("rev-parse", "refs/heads/main", cwd=source) == original_main
+
+
+@pytest.mark.parametrize("ending", ["success", "error", "cancel"])
+def test_shared_child_publishes_files_only_after_parent_writer_stops(
+        bound_thread, tmp_path, monkeypatch, ending):
+    from types import SimpleNamespace
+    from assist.browser import authority, manager as browser
+    from assist.run_service import RunService
+    from assist.sandbox_manager import SandboxManager
+    from assist.thread_queue import ThreadAffinityQueue
+    from manage.web import threads, phone_api
+    owner, source, server, _phone = bound_thread
+    monkeypatch.setenv("ASSIST_DOMAINS", str(source))
+    service = RunService(str(tmp_path))
+    authority.mark_new_thread(str(tmp_path), "thread")
+    parent = service.create("thread", "general-agent", "Complete the task", user_origin=True)
+    service.claim("thread", parent.id)
+    service.transition("thread", parent.id, "interrupted")
+    service.create("thread", "general-agent", None, work_id=parent.work_id,
+                   resume=True, user_event_id=parent.id)
+    child = service.create("sub-shared", "delegate-agent", "Write findings", mode="child",
+                           parent_thread_id="thread", parent_run_id=parent.id, dispatch_key="shared")
+    container = SimpleNamespace(id="shared-writer")
+    backend = SimpleNamespace(container=container)
+    session = browser.BrowserSession(
+        "thread", parent.id, str(server), str(tmp_path),
+        browser.BrowserUserRequest(parent.id, parent.work_id, parent.text, parent.admission_sequence),
+        work_id=parent.work_id, sandbox_backend=backend,
+        sandbox_generation=container.id, run_service=service)
+    session.paused = True
+    session.identity = browser._ContainerIdentity(str(tmp_path), "172.20.0.2", container.id)
+    with authority.fence(str(tmp_path), "thread") as state:
+        state.begin(parent.id, parent.admission_sequence)
+        state.add_generation(parent.id, container.id)
+    containers = {str(server): container}
+    monkeypatch.setattr(SandboxManager, "_containers", containers)
+    monkeypatch.setattr(SandboxManager, "_generation_owners",
+                        {container.id: (str(tmp_path), "thread", parent.id)})
+    monkeypatch.setattr(SandboxManager, "_egress_client_ips", {})
+    monkeypatch.setattr(browser.BrowserManager, "_sessions", {"thread": session})
+    monkeypatch.setattr(browser, "_bounded_cli", lambda *_a, **_k: b"")
+    monkeypatch.setattr(browser, "_sandbox_generations", lambda *_a: set())
+    monkeypatch.setattr(browser, "_kill_container_confirmed", lambda _g: None)
+    monkeypatch.setattr(browser, "forget_client", lambda *_a: None)
+    monkeypatch.setattr(browser, "disarm_sandbox_browser", lambda *_a: None)
+    monkeypatch.setattr("assist.sandbox_manager.confirm_generation_stopped", lambda _g: None)
+    monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
+    monkeypatch.setattr(threads.MANAGER, "thread_dir", lambda tid: str(tmp_path / tid))
+    monkeypatch.setattr(threads.MANAGER, "thread_default_working_dir", lambda _t: str(server))
+    monkeypatch.setattr(threads, "_runs", lambda: service)
+    monkeypatch.setattr(threads, "THREAD_QUEUE", ThreadAffinityQueue())
+    monkeypatch.setattr(threads, "EGRESS_STORE", None)
+    monkeypatch.setattr(threads, "_complete_child_handoff", lambda _r: None)
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *_a: None)
+    monkeypatch.setattr(threads, "_get_sandbox_backend", lambda *_a, **_k:
+                        pytest.fail("child must borrow, not replace execution"))
+    host_git = LocalGit.git
+    publications = []
+
+    def checked_host_git(host, *args, **kwargs):
+        assert not containers, "credentialed Git reached a live shared writer"
+        if args[0] == "push":
+            publications.append(args)
+        return host_git(host, *args, **kwargs)
+
+    monkeypatch.setattr(LocalGit, "git", checked_host_git)
+
+    def message(_text):
+        assert not session.paused
+        (server / "child-findings.txt").write_text("child file effect\n")
+        return "findings complete; publication belongs to parent boundary"
+
+    monkeypatch.setattr(threads.MANAGER, "get", lambda *_a, **_k: SimpleNamespace(message=message))
+    original = git("rev-parse", "refs/heads/assist/thread", cwd=source)
+    threads._execute_child_run(child)
+    assert service.get(child.thread_id, child.id).status == "success"
+    assert "Git publication is pending" in service.get(child.thread_id, child.id).result
+    assert publications == []
+    assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == original
+    assert session.paused and containers
+    if ending == "cancel":
+        monkeypatch.setattr(threads, "_queue_browser_revocation", lambda *_a: None)
+        monkeypatch.setattr(threads, "_set_status", lambda *_a, **_k: None)
+        monkeypatch.setattr(phone_api.state, "_get_status", lambda _t: {"stage": "paused"})
+        monkeypatch.setattr(phone_api, "_thread_dir", lambda _t: str(tmp_path / "thread"))
+        monkeypatch.setattr(phone_api.RUN_STREAMS, "finish", lambda *_a: None)
+        code, _result = phone_api._cancel_logical_run("thread", parent.id)
+        assert code == 202
+        assert threads._drain_held_browser_events("thread")
+        assert not containers
+        assert service.get("thread", parent.id).cancel_cleanup == "complete"
+        assert (server / "child-findings.txt").read_text() == "child file effect\n"
+        from assist.git_sync import GitDirtyWorktreeError, require_clean
+        with pytest.raises(GitDirtyWorktreeError):
+            require_clean(LocalSandbox())
+        assert publications == []
+        assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == original
+        return
+    browser.BrowserManager.cleanup("thread", session)
+    SandboxManager.cleanup(str(server), container)
+    assert not containers
+    monkeypatch.setattr(ThreadGitLifecycle, "_backend", lambda *_a: LocalSandbox())
+    monkeypatch.setattr(ThreadGitLifecycle, "_cleanup", lambda *_a: None)
+    monkeypatch.setattr(ThreadGitLifecycle, "_verify_clean", lambda *_a: None)
+    lifecycle = ThreadGitLifecycle(owner, str(server), (str(tmp_path), "thread"), parent.id)
+    if ending == "error":
+        with pytest.raises(RuntimeError, match="synthetic parent failure"):
+            with lifecycle.preserve_on_error(None):
+                raise RuntimeError("synthetic parent failure")
+        assert publications == []
+        assert git("show", "HEAD:child-findings.txt", cwd=server) == "child file effect"
+        # Existing next-turn preparation republishes the saved commit without
+        # re-executing either the child or the browser submission.
+        owner.plan_prepare()
+    else:
+        assert lifecycle.finish_visible("Complete shared parent and child files", None) is None
+    assert publications
+    assert git("show", "refs/heads/assist/thread:child-findings.txt", cwd=source) == "child file effect"

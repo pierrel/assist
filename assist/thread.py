@@ -190,7 +190,8 @@ class Thread:
 
         Passing ``agent_dir`` enables per-thread private working state. Passing
         ``scratch_dir`` maps persistent private scratch to ``/tmp`` when this
-        local Thread has no Docker sandbox. Both are per-instance wiring, not
+        local Thread has no Docker sandbox. ``agent_dir`` stays host-routed with
+        managed Docker execution too. Both are per-instance wiring, not
         part of the reusable ``AgentSpec`` declaration; the web composition
         passes them only to visible main agents.
 

@@ -13,7 +13,7 @@ digraph Boundaries {
   C8 [label="C8  Host authorities\ncontainer, browser, Git, grants"];
   C9 [label="C9  Durable thread state\nthread files + Git checkout",
       fillcolor="#fff4d7"];
-  C10 [label="C10  Execution sandbox\nper-turn container · file/shell tools",
+  C10 [label="C10  Shared execution\nparent + eligible child · file/shell tools",
        fillcolor="#fff0df", color="#a46b36"];
   C11 [label="C11  Browser worker\nChromium · untrusted page content",
        fillcolor="#fff0df", color="#a46b36"];

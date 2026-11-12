@@ -607,10 +607,10 @@ class SandboxManager:
                                 owner_run_id: str | None = None):
         """Create one per-turn sandbox from a named authority profile.
 
-        ``include_assist_env`` is the line between ordinary Deep Agents work and
-        Pi preview work. A Pi sandbox retains Docker's workspace and egress
-        containment but receives no generic application environment or private
-        agent mount. Scoped authority records ownership before Docker create;
+        Managed web execution and Pi preview omit generic application
+        environment and private agent mounts. Ordinary web execution retains
+        its egress approvals; Pi uses its separate no-grant profile. Scoped
+        authority records ownership before Docker create;
         an optional legacy ``before_start`` callback runs there too. A prior
         managed generation is reconciled before replacement.
         Read-only Git verification omits persistent scratch/private mounts, so
@@ -839,9 +839,10 @@ class SandboxManager:
                             before_start=None, browser_capable: bool = False,
                             thread_scope: tuple[str, str] | None = None,
                             owner_run_id: str | None = None):
-        """Return the ordinary sandbox; managed callers bind its thread authority."""
+        """Return execution with ordinary egress, restricted for managed web work."""
         return cls._get_sandbox_backend(
-            work_dir, tz, agent_dir, include_assist_env=True,
+            work_dir, tz, None if thread_scope is not None else agent_dir,
+            include_assist_env=thread_scope is None,
             include_egress_approvals=True, before_start=before_start,
             browser_capable=browser_capable,
             thread_scope=thread_scope, owner_run_id=owner_run_id)

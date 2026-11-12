@@ -358,11 +358,11 @@ def create_agent(model: BaseChatModel,
     gates Assist's built-in record lookup tools; Thread sets it from its
     datastore path.
 
-    Passing ``agent_dir`` enables local-mode private state at ``/agent`` and
+    Passing ``agent_dir`` enables host-routed private state at ``/agent`` and
     auto-loads ``/agent/memory.md``. ``scratch_dir`` maps persistent local-mode
-    scratch to ``/tmp``. A sandbox provides both through its native mounts. The
-    web composition supplies either only to visible main agents and omits them
-    for delegates and specialists.
+    scratch to ``/tmp``. Managed web execution shares its restricted sandbox
+    with children; only visible parent file tools receive the private host
+    route. Unmanaged native mounts remain an embedder capability.
 
     **Domain skills are auto-discovered** from
     ``<working_dir>/.claude/skills/`` (the agent-agnostic agentskills.io
@@ -398,9 +398,8 @@ def create_agent(model: BaseChatModel,
     async_main = not delegate and bool(spec.async_subagent_tools)
     web_quick_research = spec.web_main and spec.main_guidance_skills
     caller_research_skill = delegate
-    thread_memory_enabled = bool(
-        getattr(sandbox_backend, "native_agent_dir", False) is True
-        if sandbox_backend is not None else agent_dir is not None)
+    thread_memory_enabled = (agent_dir is not None or
+                             getattr(sandbox_backend, "native_agent_dir", False) is True)
     mw, (retry_middle, json_validation_mw, tool_name_mw) = _hardening_middleware()
     logging_mw = ModelLoggingMiddleware(
         "delegate-agent" if delegate else "general-agent")
@@ -426,7 +425,7 @@ def create_agent(model: BaseChatModel,
     if async_main:
         extra_routes.setdefault(
             MAIN_SKILLS_ROUTE, create_skills_backend(MAIN_SKILLS_DIR))
-    if agent_dir is not None and sandbox_backend is None:
+    if agent_dir is not None:
         extra_routes["/agent/"] = _EmptyFileRecoveryFilesystemBackend(
             root_dir=agent_dir, virtual_mode=True)
     if scratch_dir is not None and sandbox_backend is None:

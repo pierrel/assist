@@ -332,6 +332,11 @@ def test_turn_sandbox_restores_private_storage_in_new_generation(tmp_path, monke
     assert configured_directory() == str(tmp_path / "map")
     authority.mark_new_thread(str(tmp_path / "threads"), "t")
     runs = RunService(str(tmp_path / "threads"))
+    monkeypatch.setattr(browser.BrowserManager, "_sessions", {})
+    private_agent = tmp_path / "threads" / "t" / "agent"
+    private_agent.mkdir()
+    (private_agent / "memory.md").write_text("PARENT_PRIVATE_CANARY")
+    monkeypatch.setenv("ASSIST_PRIVATE_PROFILE_CANARY", "PARENT_ENV_CANARY")
     original_cli = browser._bounded_cli
 
     def isolated_cli(argv, **kwargs):
@@ -391,16 +396,24 @@ def test_turn_sandbox_restores_private_storage_in_new_generation(tmp_path, monke
         for turn in (1, 2):
             run = runs.create("t", "general-agent", "Visit the fixture", user_origin=True)
             backend = SandboxManager.get_sandbox_backend(
-                str(work_dir), browser_capable=True,
+                str(work_dir), browser_capable=True, agent_dir=str(private_agent),
                 thread_scope=(str(tmp_path / "threads"), "t"), owner_run_id=run.id)
             assert backend is not None
             container = SandboxManager.current_container(str(work_dir))
             assert container is not None
+            assert backend.native_agent_dir is False
+            assert all(mount.get("Destination") != "/agent" for mount in container.attrs["Mounts"])
+            assert not any(value.startswith("ASSIST_") for value in container.attrs["Config"]["Env"])
+            monkeypatch.setattr(backend, "_proxy_logs_since", lambda *_a: None)
+            assert backend.execute("test ! -e /agent/memory.md").exit_code == 0
+            assert "PARENT_PRIVATE_CANARY" not in str(backend.read("/agent/memory.md"))
             session = browser.BrowserSession(
                 "t", run.id, str(work_dir), str(tmp_path / "threads"),
                 browser.BrowserUserRequest(
                     run.id, run.work_id, run.text, run.admission_sequence),
-                work_id=run.work_id, sandbox_generation=container.id, run_service=runs)
+                work_id=run.work_id, sandbox_generation=container.id,
+                sandbox_backend=backend, run_service=runs)
+            browser.BrowserManager.register(session)
             sessions.append(session)
             path = "/login" if turn == 1 else "/account"
             result = session.command("open", url=f"http://{origin_ip}:8000{path}")
@@ -409,7 +422,15 @@ def test_turn_sandbox_restores_private_storage_in_new_generation(tmp_path, monke
                 old_generation = container.id
                 old_page_id = result["result"]["page_id"]
                 assert "Login fixture" in result["result"]["snapshot"]
-                session.close()
+                assert backend.execute("test ! -r /run/assist-browser/browser.sock").exit_code == 0
+                session.pause()
+                assert browser.BrowserManager.ready_for_browser(
+                    str(tmp_path / "threads"), "t", run.id, container.id)
+                resumed = browser.BrowserManager.resume_session("t", run.work_id, session.user_request)
+                assert resumed is session and resumed.sandbox_backend is backend
+                observed = resumed.command("observe", page_id=old_page_id)["result"]
+                assert observed["page_id"] == old_page_id
+                browser.BrowserManager.cleanup("t", session)
                 SandboxManager.cleanup(str(work_dir), container)
                 state_file = tmp_path / "threads" / "t" / storage.FILE
                 assert state_file.stat().st_mode & 0o777 == 0o600
@@ -448,7 +469,7 @@ def test_turn_sandbox_restores_private_storage_in_new_generation(tmp_path, monke
                      "'http://127.0.0.1:8000/events').read().decode())"])[1].decode()
                 assert history.count("post-auth=") >= 2
                 assert "popup-get-auth=True" in history
-                session.close()
+                browser.BrowserManager.cleanup("t", session)
                 SandboxManager.cleanup(str(work_dir), container)
     finally:
         for session in sessions:

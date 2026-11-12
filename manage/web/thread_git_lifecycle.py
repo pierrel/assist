@@ -231,9 +231,6 @@ class ThreadGitLifecycle:
         if self.bound:
             raise GitSyncError("Child Git publication after restart needs verification")
 
-    def child_terminal(self) -> None:
-        pass
-
     def validate_merge_candidate(self) -> None:
         if not self.bound:
             raise GitSyncError("Thread merge source is unavailable")
