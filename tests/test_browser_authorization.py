@@ -15,6 +15,34 @@ from manage.web import threads
 from manage.web.threads import _browser_user_request
 
 
+@pytest.mark.parametrize("boundary", ["cancel_pending", "cancel_complete", "latest_cancel", "new_user"])
+def test_later_same_work_slice_cannot_revive_explicit_cancellation_or_old_sequence(tmp_path, boundary):
+    tid = "t"
+    (tmp_path / tid).mkdir()
+    authority.mark_new_thread(str(tmp_path), tid)
+    runs = RunService(str(tmp_path))
+    owner = runs.create(tid, "general-agent", "Do this", user_origin=True)
+    if boundary.startswith("cancel_"):
+        runs.cancel_logical(tid, owner.id)
+        if boundary == "cancel_complete":
+            runs.complete_cancel_cleanup(tid, owner.id)
+    successor = runs.create(tid, "general-agent", None, work_id=owner.work_id,
+                            user_event_id=owner.id, resume=True)
+    if boundary == "latest_cancel":
+        runs.cancel(tid, successor.id)
+    elif boundary == "new_user":
+        runs.create(tid, "general-agent", "New instruction", user_origin=True)
+    session = browser.BrowserSession(tid, owner.id, str(tmp_path / tid), str(tmp_path),
+        _browser_user_request(owner, runs.list(tid)), work_id=owner.work_id,
+        sandbox_generation="generation", run_service=runs)
+    with authority.fence(str(tmp_path), tid) as state:
+        state.begin(owner.id, owner.admission_sequence)
+        state.add_generation(owner.id, "generation")
+    with pytest.raises(browser.BrowserUnavailable,
+                       match="generation changed" if boundary == "new_user" else "cancelled"):
+        session._fence_command()
+
+
 @pytest.mark.parametrize("sequence,valid", [(True, False), (False, False), (1, True)])
 def test_persisted_browser_lease_requires_numeric_sequence(tmp_path, sequence, valid):
     (tmp_path / "t").mkdir()
