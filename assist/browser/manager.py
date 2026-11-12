@@ -547,8 +547,16 @@ class BrowserManager:
                     raise BrowserUnavailable("paused browser sandbox generation changed")
                 if not session.paused:
                     raise BrowserUnavailable("browser sandbox was not paused")
-                _bounded_cli(["docker", "unpause", session.sandbox_generation],
-                             limit=4096, timeout=10)
+                try:
+                    _bounded_cli(["docker", "unpause", session.sandbox_generation],
+                                 limit=4096, timeout=10)
+                except Exception:
+                    # Unpause may have taken effect before its acknowledgment.
+                    try:
+                        cls.cleanup(thread_id, session)
+                    finally:
+                        SandboxManager.cleanup(session.work_dir, container)
+                    raise
                 session.paused = False
                 return session
 
