@@ -701,3 +701,43 @@ episode, prompt/fixture change or runtime guidance tuning is used to force green
 Valid deterministic reference-bearing edits still have their separate real-file
 mechanism coverage. Production bytes remain identical to =132dae8f= and the
 verified live =80854b54= feature. No generic rebase or merge is authorized.
+
+
+** Round 6: exact URL identity and scoped canonical inversion
+
+Review =5867298618= on exact =8180e0e1=, submitted at 00:43:31 UTC, reports no
+open inline issue but requires assessment of URL identity and eval coverage.
+The URL counterexample is a verified IMPORTANT runtime defect: when source A is
+=https://source.example/a|b= and source B is the literal
+=https://source.example/a&#124;b=, a supported A citation saves its canonical
+angle destination but the old raw-first matcher selects B. Both records were
+already sources, so this neither rewrites saved bytes nor creates new fetch
+authority, but it associates the wrong exact URI. Root's read-only live inventory
+found zero such collisions across 457 stores/14978 distinct source rows; that
+limits observed exposure, not the defect or historical correctness claim.
+
+The fix keeps the existing encoder, which escapes ampersands that introduce
+entities *before* its backslash/backtick/pipe substitutions. Its exact inverse
+decodes only those four emitted escapes once, never generalized HTML entities.
+Twelve URL controls prove both encoder/inverse and rendered href roundtrips,
+including literal entities, raw ampersands and unterminated entity-like text.
+Only supported canonical source-link destinations use that inverse. Bare and
+standalone angle URI values stay raw. Known inline/fenced/indented code uses
+literal URI identity. Encoded links in unsupported nested/HTML contexts return
+an explicit verification error rather than guess A/B; they leave files and
+source rows unchanged and grant no navigation. This is a declared bounded
+verification limitation, not a new container grammar or file-ownership scheme.
+The exact nested link-shaped-code counterexample is retained as a failure control.
+
+The real-file matrix registers both members of pipe, backslash, backtick and
+amp/entity pairs, writes each through the supported reference boundary, verifies
+the rendered href and exact record/URL artifact, validates without replacement
+and checks unchanged bytes and source counts. Literal bare/code URIs, generic
+non-authority and noncanonical/ambiguous failure controls are separate. Mixed-case
+reference-leak controls also close the case-sensitive fixture check. Required
+reference-edit use remains enforced through successful target-specific calls;
+the original explicit model ref-edit remains PARTIAL/FAIL, with literal recovery
+reported separately. No model or prompt/fixture change is used to force success.
+The first affected panel passed *385 tests plus 8 subtests in 4.09 s*. Current-main
+integration and retained affected review follow before the final external round.
+No new store, migration, cache, late rewrite or generic merge is authorized.

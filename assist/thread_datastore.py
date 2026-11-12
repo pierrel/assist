@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import html
 import json
 import re
 import secrets
@@ -78,7 +77,7 @@ def _table_width(row: str, border: bool | None = None) -> tuple[int, bool]:
 
 
 def _table_lines(text: str):
-    """Recognize header/separator blocks and explicit rows with linear lookahead."""
+    """Recognize table cells and fenced/indented code with linear lookahead."""
     start, table, fence, block_start = 0, False, None, True
     while start < len(text):
         end = text.find("\n", start)
@@ -89,6 +88,7 @@ def _table_lines(text: str):
         marker = re.match(r"(`{3,}|~{3,})", row)
         opening = (not fence and marker and FencedBlockPreprocessor.FENCED_BLOCK_RE.match(
             row + "\n\n" + marker[1] + "\n"))
+        code_line = bool(fence or opening or (not table and row.startswith(("    ", "\t"))))
         if fence or opening:
             if fence and marker and marker[1] == fence and not row[marker.end():].strip(" "):
                 fence = None
@@ -107,7 +107,7 @@ def _table_lines(text: str):
                     width, border = _table_width(row)
                     table = (width > 1 or border) and _table_width(separator, border)[0] == width
             current, block_start = table or stripped.startswith("|"), False
-        yield end, [start + pipe for pipe in _table_pipes(row)] if current else []
+        yield end, [start + pipe for pipe in _table_pipes(row)] if current else [], code_line
         start = end + 1
 
 
@@ -129,7 +129,7 @@ def _generic_label_ends(text: str) -> dict[int, int]:
 def _text_scanner(text: str, edit_context: bool = False, *, table_cells: bool = True):
     """Bound URLs by link/code delimiters; optionally split actual table cells."""
     lines = iter(_table_lines(text)) if table_cells else iter(())
-    line_end, pipes = next(lines, (len(text), []))
+    line_end, pipes, _ = next(lines, (len(text), [], False))
     pipe_index = 0
     label_end = -1
     label_ends = None
@@ -141,7 +141,7 @@ def _text_scanner(text: str, edit_context: bool = False, *, table_cells: bool = 
         if marker is None:
             return None
         while marker.start() > line_end:
-            line_end, pipes = next(lines, (len(text), []))
+            line_end, pipes, _ = next(lines, (len(text), [], False))
             pipe_index = 0
         if not marker.group().lower().startswith(("http://", "https://")):
             if marker.group() == "[":
@@ -480,22 +480,55 @@ def validate_saved_file(text: str) -> None:
             raise ValueError("unbound reference in saved file; bind values with write_file/edit_file before saving")
 
 
+def _decode_source_destination(value: str) -> str:
+    """Invert only the encoder's four escapes once, never arbitrary HTML entities."""
+    escapes = {"&amp;": "&", "&#92;": "\\", "&#96;": "`", "&#124;": "|"}
+    return re.sub(r"&(?:amp|#92|#96|#124);", lambda token: escapes[token[0]], value)
+
+
 def _file_source_records(text: str, store: ThreadDataStore) -> list[dict[str, str]]:
-    """Match literal URLs only to exact pre-existing host source records."""
+    """Match canonical source-link destinations or literal URLs to existing sources.
+
+    Unsupported encoded-link container contexts fail without guessing an identity.
+    """
     records = {}
     scanner, position = _text_scanner(text), 0
+    lines = iter(_table_lines(text))
+    line_start = 0
+    line_end, _, code_line = next(lines, (len(text), [], False))
+    spans, code_index = _code_spans(text), 0
+    label_closes = None
+    html_context = bool(re.search(r"<[!?]|</?[A-Za-z][A-Za-z0-9-]*(?:\s|/?>)", text))
     with store._connect() as db:
         while token := scanner(position):
             position = token.end()
             literal = token.group()
             if not literal.lower().startswith(("http://", "https://")):
                 continue
-            for candidate in dict.fromkeys((literal, html.unescape(literal))):
-                row = db.execute("SELECT id, kind, value, title FROM records WHERE kind = 'source' AND value = ?",
-                                 (candidate,)).fetchone()
-                if row and literal in (row[2], _source_destination(row[2])):
-                    records[row[0]] = dict(zip(("id", "kind", "value", "title"), row))
-                    break
+            while token.start() > line_end:
+                line_start = line_end + 1
+                line_end, _, code_line = next(lines, (len(text), [], False))
+            while code_index < len(spans) and token.start() >= spans[code_index][2]:
+                code_index += 1
+            in_code = code_line or (code_index < len(spans)
+                and spans[code_index][0] <= token.start() < spans[code_index][1])
+            angle = (not in_code and token.start() >= 3 and text[token.start() - 3:token.start()] == "](<"
+                     and text[token.end():token.end() + 2] == ">)")
+            if angle:
+                if label_closes is None:
+                    label_closes = set(_generic_label_ends(text).values())
+                angle = token.start() - 3 in label_closes
+            candidate = _decode_source_destination(literal) if angle else literal
+            if angle and _source_destination(candidate) != literal:
+                raise ValueError("noncanonical source URL encoding; use an automatically registered source link")
+            if angle and candidate != literal and (html_context or re.match(
+                    r" {0,3}(?:>|[-+*]\s|[0-9])", text[line_start:line_start + 16])):
+                # The bounded lexer does not establish nested container semantics.
+                raise ValueError("ambiguous encoded source URL context; use a top-level source link for verification")
+            row = db.execute("SELECT id, kind, value, title FROM records WHERE kind = 'source' AND value = ?",
+                             (candidate,)).fetchone()
+            if row:
+                records[row[0]] = dict(zip(("id", "kind", "value", "title"), row))
     return list(records.values())
 
 

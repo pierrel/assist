@@ -141,3 +141,11 @@ def test_capability_tool_attribution_accepts_only_target_aliases(path):
 def test_ref_edit_of_another_file_cannot_prove_the_capability_target(path):
     from edd.eval.test_generic_reference_binding import _inline_file_call
     assert not _inline_file_call({"name": "edit_file", "args": {"file_path": path}}, "edit_file")
+
+
+@pytest.mark.parametrize("prefix", ["ref:", "REF:", "ReF:"])
+def test_mixed_case_reference_tokens_cannot_leak_from_natural_result(prefix):
+    from edd.eval.test_generic_reference_binding import _assert_entries
+    note = "\n".join(" ".join(entry) for entry in SHIPMENTS) + "\n" + prefix + "r" + "1" * 32
+    with pytest.raises(AssertionError):
+        _assert_entries(note, SHIPMENTS)

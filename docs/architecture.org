@@ -92,8 +92,11 @@ in both views. An ID shown in only one view keeps that meaning.
   reads remain literal; checker reads and host/sandbox/parent report completion
   validate without rewriting bytes; unsupported raw source/generic drafts fail
   before cleanup. Checker
-  URL metadata exact-queries existing host source records and checks canonical
-  URL encoding; it never registers values or promotes generic records. Empty
+  URL metadata exact-queries existing host source records: supported canonical
+  link destinations use the encoder's exact one-pass inverse; bare/standalone
+  angle URIs stay literal. Ambiguous encoded links in unsupported container/HTML
+  contexts fail verification without byte changes or source selection. Metadata
+  never registers values or promotes generic records. Empty
   URL metadata remains explicit, and guarded-child search-only trust still
   excludes file results. Child
   completion imports source/text rows with their original kinds. Generic

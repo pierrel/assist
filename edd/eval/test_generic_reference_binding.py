@@ -89,7 +89,7 @@ def _assert_entries(text, entries):
     for entry in entries:
         assert any(name == entry[0] and all(value in span for value in entry)
                    for name, span in spans), (entry, text)
-    assert "ref:" not in text
+    assert "ref:" not in text.casefold()
 
 
 def _assert_current_status(text, entry_name, allowed_values):
@@ -453,4 +453,4 @@ def test_inline_reference_file_update_capability(tmp_path, monkeypatch):
                for call in calls)
     content = (workspace / "inline.md").read_bytes().decode("utf-8")
     _assert_inline_file_update(saved_files[0], content, "Mîra Vale", "ZX-0Il1-7F0b")
-    assert "ref:" not in content
+    assert "ref:" not in content.casefold()

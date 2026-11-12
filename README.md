@@ -98,7 +98,10 @@ where reliability is harder than with frontier APIs.
   Explicit Markdown links using those IDs resolve in replies, streams, and
   saved research reports. Ordinary URLs pass through unchanged. Source binding
   preserves URL identity, not page availability or support for a claim. Generic
-  registration verifies no fact and grants no URL-fetch authority. Unknown
+  registration verifies no fact and grants no URL-fetch authority.
+  File-source verification uses the exact canonical encoder inverse for supported
+  link destinations and raw identity for bare URIs. Encoded links in unsupported
+  nested/HTML contexts fail verification without changing saved bytes. Unknown
   source IDs produce an unresolved-reference message that does not claim the
   link was checked.
 
