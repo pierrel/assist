@@ -124,6 +124,9 @@ in both views. An ID shown in only one view keeps that meaning.
   user event and generation after checking the current admission sequence.
   An unconfirmed unpause closes the session and attempts exact-generation
   teardown before releasing the slot; failed stop proof remains tracked.
+  Before freezing it attempts a private storage snapshot, including cleared login
+  state. Successful captures survive paused reset without thawing; a failed
+  capture discards the owned snapshot rather than restoring stale login state.
   The original lease owner remains stable across physical Run slices, including
   accepted-approval execution and task-completion continuations. A retained
   completion slice skips the initial Git handoff rather than stopping its writer.

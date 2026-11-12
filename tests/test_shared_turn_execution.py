@@ -158,6 +158,7 @@ def test_child_after_fair_resume_borrows_only_its_own_logical_work(tmp_path, mon
         state.begin(owner.id, owner.admission_sequence)
         state.add_generation(owner.id, backend.container.id)
     controls, executed, stopped = [], [], []
+    monkeypatch.setattr(browser.BrowserSession, "_capture_storage", lambda _self: None)
     running = False
     original_cli = browser._bounded_cli
     monkeypatch.setattr(browser.BrowserManager, "_sessions", {parent_tid: session})
