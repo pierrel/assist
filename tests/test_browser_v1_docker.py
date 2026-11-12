@@ -19,7 +19,26 @@ ORIGIN = """
 from http.server import BaseHTTPRequestHandler, HTTPServer
 class Page(BaseHTTPRequestHandler):
     def do_GET(self):
-        body = b'<html><body><h1>Sandbox lifetime fixture</h1></body></html>'
+        if self.path == '/download':
+            body = b'isolated-download-canary'
+            self.send_response(200)
+            self.send_header('Content-Disposition', 'attachment; filename="fixture.txt"')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        body = (b'<html><body><h1>Sandbox lifetime fixture</h1>'
+                b'<a href="/download">Download fixture</a>'
+                b'<button id="control-result">Control pending</button></body></html>')
+        from pathlib import Path
+        import json
+        endpoint = Path('/tmp/test-cdp-endpoint')
+        if endpoint.exists():
+            script = ('<script>let result=document.getElementById("control-result");'
+                      'let ws=new WebSocket(' + json.dumps(endpoint.read_text()) + ');'
+                      'ws.onopen=()=>{result.textContent="CONTROL EXPOSED"};'
+                      'ws.onerror=()=>{result.textContent="Control access denied"};</script>')
+            body = body.replace(b'</body>', script.encode() + b'</body>')
         self.send_response(200)
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
@@ -120,7 +139,35 @@ def test_uid_fence_and_outer_pid1_expiry(tmp_path, monkeypatch):
                    "ip": sandbox_ip, "thread_id": "thread",
                    "threads_root": str(tmp_path), "work_dir": str(work_dir),
                    "run_id": "run", "token": token}
+        original_cli = browser._bounded_cli
+        observed_preseal = []
+        def observe_control_boundary(argv, **kwargs):
+            if argv[-1] == "seal-control":
+                def connect_as(user):
+                    return sandbox.exec_run([
+                        "python", "-c", "import socket;socket.create_connection(('127.0.0.1',9222),1).close()"], user=user).exit_code
+                assert connect_as("10001:10001") == 0  # real listener, before seal
+                assert connect_as(f"{os.getuid()}:{os.getgid()}") != 0
+                observed_preseal.append(True)
+            return original_cli(argv, **kwargs)
+        monkeypatch.setattr(browser, "_bounded_cli", observe_control_boundary)
+        # Software rendering must not contact an agent-controlled X endpoint.
+        hostile_x = r"""
+import os,socket,select
+os.makedirs('/tmp/.X11-unix',exist_ok=True)
+sockets=[]
+for path in ('/tmp/.X11-unix/X99','\0/tmp/.X11-unix/X99'):
+ s=socket.socket(socket.AF_UNIX);s.bind(path);s.listen();sockets.append(s)
+print('HOSTILE-X-READY',flush=True)
+while True:
+ for s in select.select(sockets,[],[],1)[0]:
+  c,_=s.accept();open('/workspace/x-impersonation-hit','w').write('connected');c.close()
+"""
+        hostile = sandbox.exec_run(["python", "-u", "-c", hostile_x],
+                                  user=f"{os.getuid()}:{os.getgid()}", stream=True)
+        assert b"HOSTILE-X-READY" in next(hostile.output)
         assert turn_runtime.launch(request)["generation"] == sandbox.id
+        assert observed_preseal == [True]
 
         def socket_attempt(user, host, port):
             result = sandbox.exec_run([
@@ -128,6 +175,13 @@ def test_uid_fence_and_outer_pid1_expiry(tmp_path, monkeypatch):
                 f"socket.create_connection(({host!r},{port}),2).close()"], user=user)
             return result.exit_code
 
+        for user in ("10001:10001", f"{os.getuid()}:{os.getgid()}"):
+            for address in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+                assert socket_attempt(user, address, 9222) != 0
+        assert sandbox.exec_run(["sh", "-c", "test ! -x /run/assist-browser"],
+                                user=f"{os.getuid()}:{os.getgid()}").exit_code == 0
+        assert sandbox.exec_run(["mount", "--bind", "/workspace", "/tmp"],
+                                user=f"{os.getuid()}:{os.getgid()}").exit_code != 0
         assert socket_attempt("10001:10001", ordinary_proxy_ip, 8889) == 0
         for proxy_ip in proxy_ips:
             assert socket_attempt(f"{os.getuid()}:{os.getgid()}", proxy_ip, 8889) != 0
@@ -147,13 +201,68 @@ def test_uid_fence_and_outer_pid1_expiry(tmp_path, monkeypatch):
         assert udp.exit_code != 0
         assert socket_attempt(f"{os.getuid()}:{os.getgid()}", ordinary_proxy_ip, 8888) == 0
 
+        # Give the hostile fixture the real ephemeral endpoint as a worst case.
+        # Direct same-UID socket probes above establish the kernel boundary;
+        # the page attempt also retains Chromium's independent Origin checks.
+        find_endpoint = r"""
+import os,re
+for pid in os.listdir('/proc'):
+ if not pid.isdigit():continue
+ try:
+  args=open('/proc/'+pid+'/cmdline','rb').read().split(b'\0')
+  if b'--remote-debugging-port=9222' not in args:continue
+  log=open('/proc/'+pid+'/fd/2','rb').read(32768)
+  match=re.search(rb'DevTools listening on (ws://[^\s]+)',log)
+  if match:print(match[1].decode());break
+ except (OSError,ValueError):continue
+"""
+        endpoint = sandbox.exec_run(["python", "-c", find_endpoint], user="10001:10001").output.strip()
+        assert endpoint.startswith(b"ws://127.0.0.1:9222/devtools/browser/")
+        import io,tarfile
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w") as bundle:
+            item = tarfile.TarInfo("test-cdp-endpoint")
+            item.size, item.uid, item.gid, item.mode = len(endpoint), 1000, 1000, 0o600
+            bundle.addfile(item, io.BytesIO(endpoint))
+        origin.put_archive("/tmp", archive.getvalue())
         command = json.dumps({"session": token, "operation": "open",
                               "args": {"url": f"http://{origin_ip}:8000/"}})
         result = browser._docker_exec(sandbox.id, command.encode(), in_sandbox=True)
-        assert "Sandbox lifetime fixture" in json.loads(result)["result"]["snapshot"]
+        observed = json.loads(result)["result"]
+        assert "Sandbox lifetime fixture" in observed["snapshot"]
+        wait = json.dumps({"session": token, "operation": "wait", "args": {
+            "page_id": observed["page_id"], "role": "button", "name": "Control access denied"}})
+        observed = json.loads(browser._docker_exec(sandbox.id, wait.encode(), in_sandbox=True))["result"]
+        assert "Control access denied" in observed["snapshot"]
+        assert "CONTROL EXPOSED" not in observed["snapshot"]
+        assert sandbox.exec_run(["test", "!", "-f", "/workspace/x-impersonation-hit"]).exit_code == 0
+        click = json.dumps({"session": token, "operation": "act", "args": {
+            "page_id": observed["page_id"], "snapshot_id": observed["snapshot_id"],
+            "action": "click", "target": {"role": "link", "name": "Download fixture"}}})
+        downloaded = json.loads(browser._docker_exec(sandbox.id, click.encode(), in_sandbox=True))["result"]
+        download_id = downloaded["downloads"][0]["download_id"]
+        info_cmd = json.dumps({"session": token, "operation": "download_info", "args": {"download_id": download_id}})
+        info = json.loads(browser._docker_exec(sandbox.id, info_cmd.encode(), in_sandbox=True))["result"]
+        assert info["path"].startswith("/run/assist-browser/downloads/")
+        assert browser._docker_download(sandbox.id, info["path"], in_sandbox=True) == b'isolated-download-canary'
+        def native_processes(rows):
+            return [row for row in rows if not row[1].startswith("Z")
+                    and any(name in row[-1].lower()
+                            for name in ("chrome", "chromium", "crashpad"))]
+
         processes = sandbox.top(ps_args="-eo pid,stat,comm")["Processes"]
-        assert any("chrome" in row[-1].lower() and not row[1].startswith("Z")
-                   for row in processes)
+        assert native_processes(processes)
+        revoked = json.dumps({"session": token, "operation": "revoke", "args": {}})
+        assert json.loads(browser._docker_exec(sandbox.id, revoked.encode(), in_sandbox=True))["result"] == {"revoked": True}
+        deadline = time.monotonic() + 3
+        while True:
+            remaining = sandbox.top(ps_args="-eo pid,stat,comm")["Processes"]
+            if not native_processes(remaining):
+                break
+            assert time.monotonic() < deadline, remaining
+            time.sleep(0.05)
+        sandbox.reload()
+        assert sandbox.status == "running"  # revocation preserves the shell
         # No host callback runs after launch. The test-only outer PID 1 exits;
         # Docker removes the sandbox and its nested Chromium descendants.
         _wait_absent(client, sandbox.id)

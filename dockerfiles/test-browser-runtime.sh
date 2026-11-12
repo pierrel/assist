@@ -7,7 +7,9 @@ host_clock_ns=$(python3 -c 'import time; print(time.clock_gettime_ns(time.CLOCK_
 cleanup() { timeout 5s docker rm -f "$runtime_name" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
+# This independent pinned-shell probe uses its existing private home/temp mounts.
 timeout --kill-after=5s 30s docker run --rm --name "$runtime_name" \
+  --env HOME=/home/browser --env TMPDIR=/tmp \
   --env "BROWSER_TEST_BOOT_ID=$host_boot_id" \
   --env "BROWSER_TEST_CLOCK_NS=$host_clock_ns" \
   --network none --read-only --cap-drop ALL \

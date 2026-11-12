@@ -47,10 +47,18 @@ where reliability is harder than with frontier APIs.
   isolation remains planned rather than shipped.
 
 - **Website browser.** Ordinary web main-agent turns can render and interact
-  with JavaScript pages. Chromium starts lazily inside that turn's sandbox and
-  stops when the sandbox ends, including an approval or clarification pause.
+  with JavaScript pages. Full Chromium with software rendering starts on first
+  browser-tool use inside that turn's sandbox, without an external display
+  server. Its page context opens only when needed. Chromium stops when the sandbox ends,
+  including an approval or clarification pause.
+  The [browser compatibility review guide](docs/browser-site-compatibility.org)
+  maps its control and network boundaries.
   A separate browser UID can reach only its attributed listener on the
-  existing egress proxy. Browser and shell destinations follow the same
+  existing egress proxy. The host seals new browser-debugging connections
+  before any page command; agent tools cannot use that control channel.
+  Approved browser resources can make up to eight parallel connections per
+  shared host backoff window; ordinary shell connections retain their limit.
+  Browser and shell destinations follow the same
   operator allowlist (any port) and exact thread/host/port grants; page content
   cannot approve access. A policy-only browser preflight checks a top-level
   origin without contacting it and can annotate origins observed from an open

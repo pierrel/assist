@@ -2,6 +2,7 @@
 import io
 import json
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -267,6 +268,7 @@ def test_denied_http_navigation_keeps_error_without_observing_error_page(
     def denied(_url, **_kwargs):
         raise RuntimeError("proxy denied")
     page.goto = denied
+    worker.browser = object()
     worker.context = SimpleNamespace(new_page=lambda: page)
     result = worker.open("http://unlisted.example/")
     assert result["snapshot"] == ""
@@ -371,6 +373,7 @@ def test_closed_pages_do_not_consume_concurrent_page_quota():
 
 def test_six_sequential_visits_reuse_one_page_and_invalidate_old_refs(monkeypatch):
     worker = BrowserWorker()
+    worker.browser = object()
     worker.context = SimpleNamespace(new_page=lambda: _Page())
     monkeypatch.setattr(worker, "_observe", lambda page_id: {
         "page_id": page_id, "url": worker.pages[page_id].url})
@@ -388,6 +391,7 @@ def test_six_sequential_visits_reuse_one_page_and_invalidate_old_refs(monkeypatc
 
 def test_five_page_limit_is_concurrent_and_close_releases_popup_slot(monkeypatch):
     worker = BrowserWorker()
+    worker.browser = object()
     worker.context = SimpleNamespace(new_page=lambda: _Page())
     monkeypatch.setattr(worker, "_observe", lambda page_id: {"page_id": page_id})
     page_ids = [worker.open(f"https://{index}.example/")["page_id"]
@@ -416,26 +420,17 @@ def test_close_bounds_site_controlled_page_urls():
     assert len(json.dumps({"result": result}).encode()) < runner.MAX_RESULT
 
 
-def test_partial_playwright_launch_is_closed(monkeypatch):
-    closed = []
-
-    class _Chromium:
-        def launch(self, **_kwargs):
-            raise RuntimeError("launch failed")
-
-    class _Driver:
-        chromium = _Chromium()
-
-        def stop(self):
-            closed.append("driver")
-
-    monkeypatch.setattr(runner, "sync_playwright",
-                        lambda: SimpleNamespace(start=lambda: _Driver()))
+def test_unstarted_or_revoked_worker_cannot_launch_implicitly(monkeypatch):
+    monkeypatch.setattr(runner, "sync_playwright", lambda: pytest.fail("implicit relaunch"))
     worker = BrowserWorker()
-    with pytest.raises(RuntimeError, match="launch failed"):
+    with pytest.raises(BrowserInputError, match="unavailable"):
         worker._start()
-    assert closed == ["driver"]
-    assert worker.playwright is worker.browser is worker.context is None
+    worker.browser = SimpleNamespace(close=lambda: None)
+    worker.revoke()
+    with pytest.raises(BrowserInputError, match="unavailable"):
+        worker.open("https://example.com/")
+    with pytest.raises(BrowserInputError, match="cannot restart"):
+        worker.start_engine()
 
 
 def test_failed_context_cleanup_reaches_driver_even_if_browser_close_raises(
@@ -459,10 +454,15 @@ def test_failed_context_cleanup_reaches_driver_even_if_browser_close_raises(
     monkeypatch.setattr(runner, "sync_playwright",
                         lambda: SimpleNamespace(start=lambda: _Driver()))
     worker = BrowserWorker()
+    worker.browser = _Browser()
+    worker.playwright = _Driver()
     with pytest.raises(RuntimeError, match="context failed"):
         worker._start()
     assert closed == ["browser", "driver"]
     assert worker.playwright is worker.browser is worker.context is None
+    assert worker.revoked
+    with pytest.raises(BrowserInputError, match="unavailable"):
+        worker._start()
 
 
 def test_ninth_download_is_cancelled_and_reported():
@@ -487,3 +487,21 @@ def test_ready_parses_empty_proc_status_fields(monkeypatch):
     assert ready["caps"] == ["0000000000000000"] * 5
     assert ready["no_new_privs"] == "1"
     assert ready["seccomp"] == "2"
+
+
+def test_attached_browser_download_stays_in_existing_private_export_boundary(tmp_path, monkeypatch):
+    private = tmp_path / "private"
+    private.mkdir()
+    exports = private / "downloads"
+    exports.mkdir()
+    artifact = private / "playwright-artifact"
+    artifact.write_bytes(b"download-canary")
+    monkeypatch.setattr(runner, "RUNTIME_DIR", str(private))
+    monkeypatch.setattr(runner, "DOWNLOAD_DIR", str(exports))
+    download = SimpleNamespace(path=lambda: artifact, suggested_filename="fixture.txt",
+                               save_as=lambda target: __import__("shutil").copyfile(artifact, target))
+    worker = BrowserWorker()
+    worker.downloads["download-id"] = download
+    info = worker.download_info("download-id")
+    assert info == {"path": str(exports / "download-id"), "name": "fixture.txt", "size": 15}
+    assert Path(info["path"]).read_bytes() == b"download-canary"

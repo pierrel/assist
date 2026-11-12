@@ -52,3 +52,20 @@ def test_uid_fence_requires_complete_unique_attachment_set():
         _fence().install("172.20.0.3", ["172.21.0.3"])
     with pytest.raises(ValueError, match="incomplete"):
         _fence().install("172.20.0.3", ["172.20.0.3", "172.20.0.3"])
+
+
+def test_control_excludes_other_uids_before_bind_and_every_new_flow_after_seal(monkeypatch):
+    fence = _fence()
+    calls = []
+    monkeypatch.setattr(fence, "run", lambda _deadline, *args: calls.append(args))
+    fence.install("172.20.0.3", ["172.20.0.3"])
+    deny = ("/usr/bin/iptables", "-w", "3", "-I", "OUTPUT", "1",
+            "-d", "127.0.0.1", "-p", "tcp", "--dport", "9222", "-m", "owner",
+            "!", "--uid-owner", "10001", "-j", "REJECT")
+    assert calls[0] == deny
+    assert any("--sport" in call and "ESTABLISHED" in call for call in calls)
+    calls.clear()
+    fence.seal_control()
+    assert calls == [("/usr/bin/iptables", "-w", "3", "-I", "OUTPUT", "1",
+                      "-d", "127.0.0.1", "-p", "tcp", "--dport", "9222",
+                      "-m", "conntrack", "!", "--ctstate", "ESTABLISHED", "-j", "REJECT")]
