@@ -30,7 +30,7 @@ digraph Boundaries {
   C6 -> C8 [label="browser tool calls", constraint=false];
   C6 -> C12 [label="model requests"];
   C6 -> C15 [label="host tool HTTP requests"];
-  C8 -> C10 [label="create / retire container"];
+  C8 -> C10 [label="create / freeze / resume / retire"];
   C8 -> C11 [label="browser actions + lease / teardown"];
   C8 -> C14 [label="verified Git publish"];
   C10 -> C11 [label="hosts worker"];

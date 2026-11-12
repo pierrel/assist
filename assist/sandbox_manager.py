@@ -618,8 +618,9 @@ class SandboxManager:
         ``thread_scope`` binds managed web/Pi callers to their
         exact thread workspace; generic callers never infer authority from a path.
         """
-        # Never reuse container generations. The web layer tears each down at
-        # its phase boundary (manage/web/threads.py); a registry entry here
+        # This creation path never reuses container generations. The web layer
+        # reuses a frozen browser generation directly across fairness slices;
+        # all other phase boundaries tear it down. A registry entry here
         # means teardown did not complete or could not be confirmed. Reap
         # that stale container before creating a fresh one — the registry is
         # keyed by work_dir, so creating without reaping would overwrite the

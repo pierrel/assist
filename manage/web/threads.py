@@ -3498,6 +3498,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     git_publication_notice = None
     queue_handle = None
     hold_drained = False
+    keep_browser = False
     decision_key = (_run.dispatch_key or "") if _run is not None else ""
     decision_kind = "reply" if decision_key.startswith("reply-approval:") else None
 
@@ -3528,15 +3529,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             _set_status(tid, "queued", **pending_kwargs)
 
     try:
-        # Acquire the queue BEFORE starting the sandbox.  We create a fresh
-        # container per turn and attempt teardown at turn end; shutdown proves
-        # removal of retained generations. Creating only after acquiring the
-        # queue means it never ages against the 3h
-        # backstop TTL (sleep 10800 in Dockerfile.sandbox) while waiting in
-        # line (behind a holder past its hold_timeout_s, or many backlogged
-        # threads).  Observed pre-defer on 2026-05-30 thread
-        # 20260530160651-fee1ddc5: sandbox started at 16:06:52, sat queued
-        # behind a 2-hour-wedged thread, then 404'd 1h45m later.
+        # Start containers only after acquiring the queue. A live browser's
+        # container is frozen across fairness yields, then reused by the same
+        # admitted logical turn. The existing 3h wall-clock orphan TTL remains
+        # an infrastructure bound, including time spent frozen in the queue.
         #
         # `chat.message()` below tries to acquire the queue again
         # internally; the reentrant fast path (same thread_id + same
@@ -3548,11 +3544,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 user_priority=(queue_user_priority
                                or (_run is not None and _run.origin is None
                                    and _run.mode == "turn"
-                                   and _run.text is not None))) as queue_handle, GitLifecycle.acquire(
-                MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid),
-                _run.work_id if _run else tid,
-                thread_scope=(MANAGER.root_dir, tid),
-                owner_run_id=_run.id if _run else None) as git_lifecycle, ExitStack() as error_scope:
+                                   and _run.text is not None))) as queue_handle, ExitStack() as error_scope:
             # A queued run remains pending until it actually owns THREAD_QUEUE. This
             # is what makes it visible to the active turn's interjection reader. Two
             # dispatchers for one run serialize here; only the first can claim it.
@@ -3565,6 +3557,22 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     logging.info("run %s on %s reached %s before slot claim; skipping",
                                  _run.id, tid, current_run.status)
                     return
+                retained = BrowserManager.current_session(tid)
+                if (retained is not None and retained.paused
+                        and retained.work_id == _run.work_id):
+                    def cleanup_retained():
+                        if not keep_browser and BrowserManager.current_session(tid) is retained:
+                            try:
+                                BrowserManager.cleanup(tid, retained)
+                            finally:
+                                SandboxManager.cleanup(
+                                    retained.work_dir, retained.sandbox_backend.container)
+                    error_scope.callback(cleanup_retained)
+            git_lifecycle = error_scope.enter_context(GitLifecycle.acquire(
+                MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid),
+                _run.work_id if _run else tid,
+                thread_scope=(MANAGER.root_dir, tid),
+                owner_run_id=_run.id if _run else None))
             if _run is not None and _run.approval_id is None:
                 if (_runs().pending_approval(tid) is not None
                         or _runs().unfinished_approval_continuation(tid) is not None):
@@ -3660,6 +3668,14 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 except InvalidRunTransition:
                     return
             _set_status(tid, "starting_sandbox", **pending_kwargs)
+            # A fairness successor continues the same model phase. Its browser
+            # and writable sandbox remain owned by the original admitted event.
+            user_request = _browser_user_request(
+                _run, _runs().list(tid) if _run is not None else [])
+            browser_session = (BrowserManager.resume_session(
+                tid, _run.work_id, user_request)
+                if resume and _run is not None and _run.approval_id is None
+                else None)
             if not resume and resume_decision is None and origin != "task-completion":
                 def terminalize_dirty(error: GitSyncError) -> None:
                     if _run is not None:
@@ -3670,7 +3686,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                       terminalize_dirty=terminalize_dirty)
             elif origin == "task-completion":
                 git_lifecycle.handoff(rider.tz if rider else None)
-            else:
+            elif browser_session is None:
                 git_lifecycle.resume()
             if _run is not None and _run.review_snapshot is not None and not resume:
                 # A queued review cannot interject. Recheck the exact displayed
@@ -3689,7 +3705,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 rider.tz if rider else None, control_errors=(_SupersedeCapReached,)))
             sandbox = None
             sandbox_generation = None
-            browser_session = None
+            keep_browser = False
             try:
                 browser_capable = bool(
                     _run is not None and not sender
@@ -3700,12 +3716,15 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # before returning a backend; finally tears down that exact
                 # generation without replacing a newer workspace registration.
                 try:
-                    sandbox = _get_sandbox_backend(
-                        tid, tz=rider.tz if rider else None,
-                        browser_capable=browser_capable,
-                        owner_run_id=_run.id if _run is not None else None,
-                        **({"before_start": git_lifecycle.model_starting}
-                           if git_lifecycle.bound else {}))
+                    if browser_session is not None:
+                        sandbox = browser_session.sandbox_backend
+                    else:
+                        sandbox = _get_sandbox_backend(
+                            tid, tz=rider.tz if rider else None,
+                            browser_capable=browser_capable,
+                            owner_run_id=_run.id if _run is not None else None,
+                            **({"before_start": git_lifecycle.model_starting}
+                               if git_lifecycle.bound else {}))
 
                     sandbox_generation = sandbox.container if sandbox else None
                     git_lifecycle.require_sandbox(sandbox)
@@ -3714,12 +3733,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         MANAGER.thread_default_working_dir(tid))
                     raise
                 try:
-                    # Bind the browser to this Run's latest user event; ordinary
+                    # Bind the browser to this logical work's direct user event; ordinary
                     # egress policy and grants decide which origins are reachable.
-                    user_request = _browser_user_request(
-                        _run, _runs().list(tid) if _run is not None else [])
                     extra_browser_tools = ()
-                    if (sandbox is not None and browser_capable
+                    if browser_session is not None:
+                        extra_browser_tools = tuple(browser_tools(browser_session))
+                    elif (sandbox is not None and browser_capable
                             and BrowserManager.ready_for_browser(
                                 MANAGER.root_dir, tid, _run.id, sandbox_generation.id)):
                         browser_session = BrowserSession(
@@ -3727,6 +3746,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                             MANAGER.thread_default_working_dir(tid), MANAGER.root_dir,
                             user_request, work_id=_run.work_id if _run else None,
                             sandbox_generation=sandbox_generation.id,
+                            sandbox_backend=sandbox,
                             run_service=_runs())
                         BrowserManager.register(browser_session)
                         extra_browser_tools = tuple(browser_tools(browser_session))
@@ -3877,15 +3897,30 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     task_message = ((_run.pending_text or _run.text) if _run else None)
                     _bind_task_report(tid, task_message or pending_text or text,
                                       MANAGER.thread_default_working_dir(tid), sandbox)
+            except ThreadPauseRequested:
+                keep_browser = (browser_session is not None
+                                and browser_session.identity is not None
+                                and not browser_session.closed)
+                if keep_browser:
+                    try:
+                        browser_session.pause()
+                    except Exception:
+                        keep_browser = False
+                        raise
+                raise
             finally:
-                # Capture browser state before sandbox teardown. Failed teardown
+                # Terminal paths capture browser state before sandbox teardown.
+                # A fairness yield retains its frozen generation. Failed teardown
                 # retains tracked generations for shutdown proof and leaves
                 # bound Git workspaces fenced against later admission.
                 try:
-                    BrowserManager.cleanup(tid, browser_session)
+                    if not keep_browser:
+                        BrowserManager.cleanup(tid, browser_session)
                 finally:
                     try:
-                        if git_lifecycle.bound and sandbox_generation is not None:
+                        if keep_browser:
+                            pass
+                        elif git_lifecycle.bound and sandbox_generation is not None:
                             try:
                                 git_lifecycle.cleanup_model(sandbox_generation)
                             except GitSyncError:
@@ -4038,7 +4073,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         carry = THREAD_QUEUE.pop_hold(queue_handle)
         logging.info("fair-sched: %s paused (active hold %.0fs carried); queuing resume", tid,
                      carry / 1000.0)
-        DOMAIN_MANAGERS.pop(tid, None)  # fresh container on resume; drop the cached backend
+        DOMAIN_MANAGERS.pop(tid, None)  # rebuild domain tools against the resumed backend
         # Atomically create the successor and publish the paused projection before
         # making that successor runnable.
         # Admission and DELETE take this lock too, so neither can observe an
@@ -4072,8 +4107,18 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # but do not notify or execute it until admission is released below.
                 ticket = _RESUME_SCHEDULER.reserve(successor.id, tid)
         finally:
-            if ticket is not None:
-                _RESUME_SCHEDULER.commit(ticket)
+            handed_off = False
+            try:
+                if ticket is not None:
+                    _RESUME_SCHEDULER.commit(ticket)
+                    handed_off = True
+            finally:
+                if (not handed_off and keep_browser and browser_session.paused
+                        and BrowserManager.current_session(tid) is browser_session):
+                    try:
+                        BrowserManager.cleanup(tid, browser_session)
+                    finally:
+                        SandboxManager.cleanup(browser_session.work_dir, sandbox_generation)
         return
     except SandboxContainerLostError as e:
         # Distinct status message: a dead container is recoverable —
@@ -4644,19 +4689,26 @@ def _drain_held_browser_events(tid: str) -> bool:
                              or (session.run_id if session is not None else None))
                     lease = state.lease
                 if lease is not None:
-                    active_owner = any(item.id == lease["owner_run_id"]
+                    active_owner = any((item.id == lease["owner_run_id"]
+                                        or (session is not None
+                                            and item.work_id == session.work_id))
                                        and item.status == "running"
                                        for item in _runs().list(tid))
                     current_sandbox = SandboxManager.current_container(
                         MANAGER.thread_default_working_dir(tid))
                     live_generation = (current_sandbox is not None
                                        and current_sandbox.id in lease["generations"])
-                    if active_owner or live_generation:
+                    if (active_owner or live_generation) and not (
+                            session is not None and session.paused):
                         if session is not None and session.run_id == owner:
                             session.disarm_for_held_event()
                         return False
                 if session is not None and session.run_id == owner:
                     reset = session.revoke_for_promotion()
+                    if session.paused:
+                        SandboxManager.cleanup(
+                            session.work_dir, session.sandbox_backend.container)
+                        BrowserManager.cleanup(tid, session)
                 else:
                     reset = False
                 reset = (BrowserManager.confirm_owner_stopped(

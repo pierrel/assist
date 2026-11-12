@@ -250,12 +250,15 @@ class BrowserWorker:
     @staticmethod
     def _target_state(handle, base_url):
         tag = handle.evaluate("element => element.tagName.toLowerCase()")
+        input_button = tag == "input" and (handle.get_attribute("type") or "").lower() in {
+            "submit", "button", "reset"}
         role = handle.get_attribute("role") or {
-            "a": "link", "button": "button", "input": "textbox",
+            "a": "link", "button": "button", "input": "button" if input_button else "textbox",
             "textarea": "textbox"}.get(tag, "button")
         name = (handle.get_attribute("aria-label")
                 or handle.get_attribute("placeholder")
                 or handle.evaluate("element => element.labels?.[0]?.innerText || ''")
+                or (handle.evaluate("element => element.value || ''") if input_button else "")
                 or handle.inner_text() or "")[:120]
         raw_href = handle.get_attribute("href")
         href = urljoin(base_url, raw_href) if raw_href is not None else None

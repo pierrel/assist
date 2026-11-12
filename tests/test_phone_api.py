@@ -1125,7 +1125,7 @@ def test_logical_cancel_closes_only_its_chain_and_dispatches_one_follower(
         def list_with_revision(self, _tid):
             return records, 0
 
-        def cancel_logical(self, _tid, accepted_id):
+        def cancel_logical(self, _tid, accepted_id, *, browser_owner_run_id=None):
             accepted = next(item for item in records if item.id == accepted_id)
             selected = [item for item in records if item.work_id == accepted.work_id][-1]
             assert selected.status == "pending"
@@ -1230,7 +1230,7 @@ def test_phone_cancel_sanitizes_a_mid_cancel_run_store_failure(
         def list_with_revision(self, _tid):
             return [pending], 0
 
-        def cancel_logical(self, _tid, _run_id):
+        def cancel_logical(self, _tid, _run_id, *, browser_owner_run_id=None):
             raise OSError("disk full")
 
     runs = Runs()
@@ -1299,7 +1299,7 @@ def test_phone_cancel_retry_replays_a_pending_cleanup_receipt(
             self.reads += 1
             return records, 0
 
-        def cancel_logical(self, _tid, accepted_id):
+        def cancel_logical(self, _tid, accepted_id, *, browser_owner_run_id=None):
             accepted = next(item for item in records if item.id == accepted_id)
             selected = [item for item in records if item.work_id == accepted.work_id][-1]
             assert selected.status == "pending"

@@ -1050,7 +1050,8 @@ class RunService(PerThreadJsonStore[Run]):
             self._write(thread_id, runs)
             return changed
 
-    def cancel_logical(self, thread_id: str, accepted_id: str) -> list[Run]:
+    def cancel_logical(self, thread_id: str, accepted_id: str, *,
+                       browser_owner_run_id: str | None = None) -> list[Run]:
         """Atomically cancel a pending or held logical slice and receipt cleanup.
 
         The accepted handle owns the receipt so a retry can distinguish its
@@ -1075,9 +1076,10 @@ class RunService(PerThreadJsonStore[Run]):
                     changes.update(status="cancelled", updated_at=now)
                 if run.id == accepted_id:
                     changes["cancel_cleanup"] = "pending"
-                    if held:
+                    if held or browser_owner_run_id is not None:
                         changes["browser_cancel_reset"] = True
-                        changes["browser_reset_run_id"] = selected.browser_reset_run_id
+                        changes["browser_reset_run_id"] = (
+                            selected.browser_reset_run_id if held else browser_owner_run_id)
                     changes.setdefault("updated_at", now)
                 updated.append(replace(run, **changes) if changes else run)
             self._write(thread_id, updated)

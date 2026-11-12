@@ -12,6 +12,7 @@ it (out of the agent run). The dispatch-contention test waits for the real quant
 timer to request that pause and uses un-mocked model and Run queues.
 """
 import contextlib
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -189,6 +190,271 @@ def test_dispatch_waiter_runs_before_paused_holder_resumes(wired, monkeypatch):
     assert [run.status for run in first_runs] == ["interrupted", "success"]
     assert first_runs[1].work_id == first.work_id
     assert threads._runs().get(second_tid, second.id).status == "success"
+
+
+@pytest.mark.parametrize("real_browser,handoff_failure", [
+    (False, None), (False, "reserve"), (False, "commit"), pytest.param(
+    True, None, marks=pytest.mark.skipif(not os.getenv("ASSIST_BROWSER_FAIRNESS_TEST_IMAGE"),
+                                   reason="requires explicit isolated Docker image"))])
+def test_browser_form_survives_competing_thread_yield(
+        wired, monkeypatch, real_browser, handoff_failure):
+    """Real Run/affinity queues retain the exact page and filled input on resume."""
+    import json
+    from types import SimpleNamespace
+    from assist.browser import authority, manager as browser
+    first_tid, _ = wired
+    second_tid = "t-browser-competitor"
+    root = Path(web.MANAGER.root_dir)
+    (root / second_tid).mkdir()
+    mark_new_thread(str(root), second_tid)
+    queue = ThreadAffinityQueue(quantum_s=0.03, hold_timeout_s=3)
+    scheduler = threads._ResumeScheduler()
+    monkeypatch.setattr(threads, "THREAD_QUEUE", queue)
+    monkeypatch.setattr(threads, "_RESUME_SCHEDULER", scheduler)
+    failed_handoff = threading.Event()
+    if handoff_failure:
+        def fail_handoff(*_args, **_kwargs):
+            failed_handoff.set()
+            raise OSError("synthetic handoff failure")
+        monkeypatch.setattr(scheduler, handoff_failure, fail_handoff)
+    monkeypatch.setattr(threads, "_recovery_prep", lambda _q: None)
+    monkeypatch.setattr(browser, "configured_directory", lambda: str(root))
+    monkeypatch.setattr(browser, "browser_records", lambda *_a: {})
+    monkeypatch.setattr(browser.BrowserManager, "reconcile_startup", lambda _r: True)
+    browser.BrowserManager._reconciled_roots.add(str(root))
+    containers, workers, calls, controls, frozen = {}, {}, [], [], []
+    created = []
+    original_cli = browser._bounded_cli
+    monkeypatch.setattr(browser.SandboxManager, "_containers", containers)
+
+    def backend(tid, **kwargs):
+        if real_browser:
+            import docker
+            container = docker.from_env().containers.run(
+                os.environ["ASSIST_BROWSER_FAIRNESS_TEST_IMAGE"], detach=True,
+                remove=False, network_mode="none", user="0:0",
+                entrypoint=["/opt/assist-browser/bin/python",
+                            "/candidate/tests/browser_fairness_worker.py"],
+                environment={"BROWSER_SESSION_TOKEN": "synthetic-token",
+                             "BROWSER_RUNTIME_DIR": "/run",
+                             "BROWSER_DOWNLOAD_DIR": "/downloads"},
+                volumes={str(Path(__file__).resolve().parents[1]):
+                         {"bind": "/candidate", "mode": "ro"},
+                         str(root / tid): {"bind": "/workspace", "mode": "rw"}})
+            created.append(container)
+            generation = container.id
+            deadline = time.monotonic() + 5
+            try:
+                while time.monotonic() < deadline:
+                    if container.exec_run(["test", "-S", "/run/browser.sock"])[0] == 0:
+                        break
+                    threading.Event().wait(0.02)
+                else:
+                    raise RuntimeError("synthetic browser fixture socket did not become ready")
+            except Exception:
+                startup_log = root / tid / "browser-startup.log"
+                startup_log.write_bytes(container.logs())
+                raise AssertionError(f"fixture startup failed; worker log: {startup_log}")
+        else:
+            generation = f"generation-{len(workers)}"
+            container = SimpleNamespace(id=generation)
+        containers[str(root / tid)] = container
+        workers[generation] = {"filled": "", "submitted": 0}
+        with authority.fence(str(root), tid) as state:
+            run = threads._runs().get(tid, kwargs["owner_run_id"])
+            sequence = max(item.admission_sequence for item in threads._runs().list(tid)
+                           if item.user_event_id == item.id)
+            state.begin(run.id, sequence)
+            state.add_generation(run.id, generation)
+        return SimpleNamespace(container=container)
+
+    def cleanup(work_dir, expected=None):
+        container = containers.pop(work_dir, None)
+        if container is not None:
+            tid = Path(work_dir).name
+            with authority.fence(str(root), tid) as state:
+                owner = state.lease["owner_run_id"]
+                state.remove_generation(owner, container.id)
+                state.clear(owner)
+
+    def start(session):
+        if real_browser:
+            session.token = "synthetic-token"
+        session.identity = browser._ContainerIdentity(
+            str(root), "172.20.0.2", session.sandbox_generation)
+
+    def transport(generation, payload, **kwargs):
+        command = json.loads(payload)
+        operation, args = command["operation"], command["args"]
+        worker = workers[generation]
+        if real_browser:
+            import subprocess
+            return subprocess.run(
+                ["docker", "exec", "-i", generation,
+                 "/opt/assist-browser/bin/python", "/candidate/assist/browser/runner.py", "call"],
+                input=payload, capture_output=True, timeout=20, check=True).stdout
+        if operation == "act":
+            assert args["page_id"] == generation + "-page"
+            if args["action"] == "fill":
+                worker["filled"] = args["target"]["text"]
+            else:
+                assert worker["filled"] == "synthetic composer"
+                worker["submitted"] += 1
+        return json.dumps({"result": {"page_id": generation + "-page",
+                                     "snapshot_id": "observed"}}).encode()
+
+    monkeypatch.setattr(threads, "_get_sandbox_backend", backend)
+    monkeypatch.setattr(browser.SandboxManager, "cleanup", cleanup)
+    monkeypatch.setattr(browser.BrowserSession, "_start", start)
+    monkeypatch.setattr(browser.BrowserSession, "_capture_storage", lambda _s: None)
+    monkeypatch.setattr(browser, "_docker_exec", transport)
+    def control(argv, **kwargs):
+        controls.append(argv)
+        return original_cli(argv, **kwargs) if real_browser else b""
+
+    monkeypatch.setattr(browser, "_bounded_cli", control)
+    monkeypatch.setattr(browser, "disarm_sandbox_browser", lambda *_a: None)
+    monkeypatch.setattr(browser, "forget_client", lambda *_a: None)
+    if not real_browser:
+        monkeypatch.setattr(browser, "_kill_container_confirmed", lambda _g: None)
+    opened, finished = threading.Event(), threading.Event()
+    observation = {}
+
+    class Chat:
+        agent = None
+        on_queue_state = None
+
+        def __init__(self, tid, tools):
+            self.thread_id, self.tools = tid, {tool.__name__: tool for tool in tools}
+
+        def invoke(self, name, **kwargs):
+            response = self.tools[name](**kwargs)
+            assert response.startswith("{"), response
+            parsed = json.loads(response)
+            assert "result" in parsed, parsed
+            return parsed["result"]
+
+        def message(self, text):
+            if self.thread_id == second_tid:
+                calls.append("competitor")
+                if handoff_failure:
+                    return "short answer"
+                session = browser.BrowserManager.current_session(first_tid)
+                frozen.append(session is not None and session.paused)
+                if real_browser:
+                    counter = root / first_tid / "counter"
+                    before = counter.read_text()
+                    threading.Event().wait(0.1)
+                    assert counter.read_text() == before
+                return "short answer"
+            calls.append("open/fill")
+            observation.update(self.invoke("browser_open", url=(
+                "http://127.0.0.1:8000/" if real_browser else "https://example.com/form")))
+            filled = self.invoke("browser_act", page_id=observation["page_id"],
+                        snapshot_id=observation["snapshot_id"], action="fill",
+                        target={"role": "textbox", "name": "Artist", "text": "synthetic composer"}
+                        if real_browser else
+                        {"ref": "query", "text": "synthetic composer"})
+            observation.update(filled)
+            opened.set()
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                if threads.active_handle().pause_requested:
+                    raise ThreadPauseRequested("quantum pause")
+                threading.Event().wait(0.005)
+            raise AssertionError("competing turn did not trigger fairness")
+
+        def resume(self):
+            calls.append("resume/submit")
+            self.invoke("browser_act", page_id=observation["page_id"],
+                        snapshot_id=observation["snapshot_id"], action="click",
+                        target={"role": "button", "name": "SEARCH"})
+            finished.set()
+            return "submitted once"
+
+        def pending_reply(self):
+            return None
+
+        def get_messages(self):
+            return []
+
+        get_raw_messages = get_messages
+
+    monkeypatch.setattr(web.MANAGER, "get", lambda tid, **kwargs:
+                        Chat(tid, kwargs.get("browser_tools", ())))
+    first = threads._create_run(first_tid, "Find the composer", user_origin=True)
+    second = threads._create_run(second_tid, "Quick question", user_origin=True)
+    original_execute = threads._execute_run
+    first_done, second_done, resume_done = threading.Event(), threading.Event(), threading.Event()
+
+    def execute_and_finish(run_id, tid, **kwargs):
+        try:
+            return original_execute(run_id, tid, **kwargs)
+        finally:
+            (first_done if run_id == first.id else
+             second_done if tid == second_tid else resume_done).set()
+
+    monkeypatch.setattr(threads, "_execute_run", execute_and_finish)
+    scheduler.start()
+    try:
+        scheduler.submit(first.id, first_tid)
+        assert opened.wait(12 if real_browser else 2)
+        scheduler.submit(second.id, second_tid)
+        if handoff_failure:
+            assert failed_handoff.wait(2)
+            deadline = time.monotonic() + 1
+            while browser.BrowserManager.current_session(first_tid) and time.monotonic() < deadline:
+                threading.Event().wait(0.005)
+            assert browser.BrowserManager.current_session(first_tid) is None
+            assert str(root / first_tid) not in containers
+            with authority.fence(str(root), first_tid) as state:
+                assert state.lease is None
+            assert "resume/submit" not in calls
+            assert first_done.wait(2) and second_done.wait(2)
+            return
+        assert finished.wait(12 if real_browser else 3), calls
+        assert resume_done.wait(2)
+        deadline = time.monotonic() + 1
+        while browser.BrowserManager.current_session(first_tid) and time.monotonic() < deadline:
+            threading.Event().wait(0.005)
+        assert calls == ["open/fill", "competitor", "resume/submit"]
+        assert frozen == [True]
+        if real_browser:
+            assert (root / first_tid / "submissions").read_text().splitlines() == ["synthetic composer"]
+        else:
+            assert sum(worker["submitted"] for worker in workers.values()) == 1
+        assert len(workers) == 2  # one generation per logical turn
+        expected_generation = created[0].id if real_browser else "generation-0"
+        assert [argv for argv in controls if argv[1] in {"pause", "unpause"}] == [
+            ["docker", "pause", expected_generation],
+            ["docker", "unpause", expected_generation]]
+        assert browser.BrowserManager.current_session(first_tid) is None
+        assert containers == {}
+    finally:
+        browser.BrowserManager._sessions.pop(first_tid, None)
+        browser.BrowserManager._sessions.pop(second_tid, None)
+        for container in created:
+            with contextlib.suppress(Exception):
+                container.remove(force=True)
+
+
+@pytest.mark.skipif(not os.getenv("ASSIST_BROWSER_FAIRNESS_TEST_IMAGE"),
+                    reason="requires explicit isolated Docker image")
+def test_exact_stop_proof_kills_a_frozen_generation():
+    import docker
+    from assist.browser import manager as browser
+    client = docker.from_env()
+    container = client.containers.run(
+        os.environ["ASSIST_BROWSER_FAIRNESS_TEST_IMAGE"], ["sleep", "30"],
+        detach=True, remove=True, network_mode="none")
+    try:
+        container.pause()
+        browser._kill_container_confirmed(container.id)
+        with pytest.raises(docker.errors.NotFound):
+            client.containers.get(container.id)
+    finally:
+        with contextlib.suppress(docker.errors.NotFound):
+            container.remove(force=True)
 
 
 def test_pause_publishes_paused_before_an_inline_successor_or_follower(wired, monkeypatch):
