@@ -110,10 +110,21 @@ where reliability is harder than with frontier APIs.
   File-source verification uses the exact canonical encoder inverse for supported
   link destinations and raw identity for bare URIs. Encoded links with ambiguous
   escapes/code/container context fail verification without choosing a URI or
-  changing saved bytes. An HTML-like marker anywhere in the analyzed file, even
-  in code or unrelated text, rejects canonical links requiring inverse decoding;
-  this rejects the entire checker projection. Documents containing only raw
-  URI matches or links requiring no decoding are unaffected by this guard.
+  changing saved bytes. Bare/titled/whitespace link destinations, reference
+  definitions and standalone angle links requiring entity/backslash/backtick/pipe
+  serialization also fail; inverse decoding supports the exact generated
+  angle-link form. Bare URI text, same-line inline code, fenced code and an
+  initial top-level indented block retain raw URI identity. Multiline inline
+  spans, later indented blocks and
+  uncertain nested container/code contexts fail closed for serialized angle/link
+  destinations; the lexer does not establish their code semantics.
+  Ordinary number-leading prose is supported;
+  actual ordered-list markers remain unsupported for encoded links.
+  An HTML-like marker anywhere in the analyzed file, even in code or unrelated
+  text, rejects serialization-sensitive URIs outside proven code, including raw
+  URI text with entity/backslash/backtick/pipe bytes. A rejected URL fails the
+  entire checker projection, including other links' metadata. URLs requiring no
+  serialization are unaffected by this guard.
   Checker analysis removes only host-owned line numbering;
   returned file content stays literal. Unknown
   source IDs produce an unresolved-reference message that does not claim the

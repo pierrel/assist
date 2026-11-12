@@ -98,13 +98,22 @@ in both views. An ID shown in only one view keeps that meaning.
   validate without rewriting bytes; unsupported raw source/generic drafts fail
   before cleanup. Checker
   URL metadata exact-queries existing host source records: supported canonical
-  link destinations use the encoder's exact one-pass inverse; bare/standalone
-  angle URIs stay literal. Ambiguous encoded link-shaped code, escaped labels or
+  link destinations use the encoder's exact one-pass inverse; bare URI text and
+  same-line inline code, fenced code and initial indented-block URI literals stay raw.
+  Ambiguous link-shaped code, escaped labels or
   unsupported container contexts fail without byte changes/source selection.
+  Bare/titled/whitespace link destinations, reference definitions and standalone
+  angle links requiring entity/backslash/backtick/pipe serialization fail before
+  raw-source lookup. Nested container/code contexts not established by the lexer
+  fail closed. Multiline inline spans and later indented blocks are unsupported for serialized
+  angle/link destinations, without attempting container grammar. Only the
+  exact generated angle-link form supports inversion. The ordered-list guard requires full digits plus
+  punctuation and whitespace; number-leading prose remains supported.
   The HTML-like-marker guard is global to the analyzed file, including code or
-  unrelated text: any such marker rejects canonical links requiring inverse
-  decoding and fails the entire checker projection. Documents containing only
-  raw URI matches or links requiring no decoding are unaffected by this guard.
+  unrelated text: any such marker rejects serialization-sensitive URIs outside
+  proven code, including raw URI text. Any rejection fails the entire checker
+  projection, suppressing other metadata too. URLs requiring no serialization
+  are unaffected by this guard.
   Host line numbering is removed only from the checker's analysis view. Metadata
   never registers values or promotes generic records. Empty
   URL metadata remains explicit, and guarded-child search-only trust still

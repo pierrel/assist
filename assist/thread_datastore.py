@@ -33,6 +33,8 @@ _INLINE_REF = re.compile(r"ref:([A-Za-z0-9_-]*)", re.I)
 _TEXT_START = re.compile(r"https?://|\[|ref:([A-Za-z0-9_-]*)", re.I)
 _URL_LITERAL = re.compile(r"https?://[^\s<>]+", re.I)
 _LABEL_BOUNDARIES = re.compile(r"\\[^\n]|\[|\]|\n")
+_ENTITY_ESCAPE = re.compile(r"&(?=(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]+);)")
+_SOURCE_CONTAINER = re.compile(r" {0,3}(?:>|[-+*]\s|[0-9]+[.)]\s)")
 BOUND_FILE_URLS_ARTIFACT = "assist_bound_file_urls"
 
 
@@ -77,7 +79,7 @@ def _table_width(row: str, border: bool | None = None) -> tuple[int, bool]:
 
 
 def _table_lines(text: str):
-    """Recognize table cells and fenced/indented code with linear lookahead."""
+    """Recognize table cells and lexical fenced/indented code kinds linearly."""
     start, table, fence, block_start = 0, False, None, True
     while start < len(text):
         end = text.find("\n", start)
@@ -88,7 +90,8 @@ def _table_lines(text: str):
         marker = re.match(r"(`{3,}|~{3,})", row)
         opening = (not fence and marker and FencedBlockPreprocessor.FENCED_BLOCK_RE.match(
             row + "\n\n" + marker[1] + "\n"))
-        code_line = bool(fence or opening or (not table and row.startswith(("    ", "\t"))))
+        code_line = ("fenced" if fence or opening else
+                     "indented" if not table and row.startswith(("    ", "\t")) else None)
         if fence or opening:
             if fence and marker and marker[1] == fence and not row[marker.end():].strip(" "):
                 fence = None
@@ -338,8 +341,7 @@ def _label_close(text: str, start: int = 0) -> int | None:
 
 def _source_destination(url: str) -> str:
     """Serialize a source URL without changing its rendered href identity."""
-    return (re.sub(r"&(?=(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]+);)",
-                   "&amp;", url).replace("\\", "&#92;")
+    return (_ENTITY_ESCAPE.sub("&amp;", url).replace("\\", "&#92;")
            .replace("`", "&#96;").replace("|", "&#124;"))
 
 
@@ -489,16 +491,18 @@ def _decode_source_destination(value: str) -> str:
 def _file_source_records(text: str, store: ThreadDataStore) -> list[dict[str, str]]:
     """Match canonical source-link destinations or literal URLs to existing sources.
 
-    Unsupported encoded-link container contexts fail without guessing an identity.
+    Unsupported encoded destinations/containers fail without guessing an identity.
     """
     records = {}
     scanner, position = _text_scanner(text), 0
     lines = iter(_table_lines(text))
     line_start = 0
     line_end, _, code_line = next(lines, (len(text), [], False))
+    initial_indent = True
+    in_container = bool(_SOURCE_CONTAINER.match(text))
     spans, code_index = _code_spans(text), 0
     label_closes = None
-    html_context = bool(re.search(r"<[!?]|</?[A-Za-z][A-Za-z0-9-]*(?:\s|/?>)", text))
+    html_context = bool(re.search(r"<[!?]|</?[A-Za-z][A-Za-z0-9-]*(?:\s|[/>])", text))
     with store._connect() as db:
         while token := scanner(position):
             position = token.end()
@@ -506,22 +510,37 @@ def _file_source_records(text: str, store: ThreadDataStore) -> list[dict[str, st
             if not literal.lower().startswith(("http://", "https://")):
                 continue
             while token.start() > line_end:
+                previous_line = text[line_start:line_end]
+                initial_indent = initial_indent and (not previous_line.strip()
+                    or previous_line.startswith(("    ", "\t")))
                 line_start = line_end + 1
                 line_end, _, code_line = next(lines, (len(text), [], False))
+                in_container = bool(_SOURCE_CONTAINER.match(text, line_start))
             while code_index < len(spans) and token.start() >= spans[code_index][2]:
                 code_index += 1
-            in_code = code_line or (code_index < len(spans)
+            inline_code = (code_index < len(spans)
                 and spans[code_index][0] <= token.start() < spans[code_index][1])
+            in_code = bool(code_line or inline_code)
+            proven_code = ((inline_code and spans[code_index][0] >= line_start
+                            and spans[code_index][2] <= line_end) or code_line == "fenced"
+                           or (code_line == "indented" and initial_indent))
             angle = (token.start() >= 3 and text[token.start() - 3:token.start()] == "](<"
                      and text[token.end():token.end() + 2] == ">)")
+            angle_open = text[token.start() - 1:token.start()] == "<"
+            prefix = token.start() - angle_open
+            while prefix > 0 and text[prefix - 1].isspace():
+                prefix -= 1
+            destination = text[max(0, prefix - 2):prefix] in ("](", "]:")
+            if (not angle and not proven_code and (destination or angle_open or html_context)
+                    and _source_destination(literal) != literal):
+                raise ValueError("unsupported encoded source URL destination; use an automatically registered source link")
             candidate = _decode_source_destination(literal) if angle else literal
             if angle and _source_destination(candidate) != literal:
                 raise ValueError("noncanonical source URL encoding; use an automatically registered source link")
             if angle and candidate != literal:
                 if label_closes is None:
                     label_closes = set(_generic_label_ends(text).values())
-                if (in_code or token.start() - 3 not in label_closes or html_context
-                        or re.match(r" {0,3}(?:>|[-+*]\s|[0-9])", text[line_start:line_start + 16])):
+                if in_code or token.start() - 3 not in label_closes or html_context or in_container:
                     # The bounded lexer does not establish these container/escape semantics.
                     raise ValueError("ambiguous encoded source URL context; use an unescaped top-level source link for verification")
             row = db.execute("SELECT id, kind, value, title FROM records WHERE kind = 'source' AND value = ?",

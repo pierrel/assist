@@ -721,15 +721,19 @@ entities *before* its backslash/backtick/pipe substitutions. Its exact inverse
 decodes only those four emitted escapes once, never generalized HTML entities.
 Twelve URL controls prove both encoder/inverse and rendered href roundtrips,
 including literal entities, raw ampersands and unterminated entity-like text.
-Only supported canonical source-link destinations use that inverse. Bare and
-standalone angle URI values stay raw. Known inline/fenced/indented code uses
+Only supported canonical source-link destinations use that inverse. Bare URI
+text, same-line inline code, fenced code and initial indented-block URI literals
+stay raw. Standalone angle links
+requiring serialization fail explicitly under the final R7 correction below.
+Same-line inline code, fenced code and initial top-level indented code use
 literal URI identity. Encoded links in unsupported nested contexts return
 an explicit verification error rather than guess A/B; they leave files and
 source rows unchanged and grant no navigation. The HTML-like-marker guard is
 global to the analyzed file: any marker, including one in code or unrelated
-text, rejects canonical links requiring inverse decoding even when the link
-is elsewhere, failing the entire checker projection. Documents containing only
-raw URI matches or links requiring no decoding are unaffected by this guard.
+text, rejects serialization-sensitive URIs outside proven code even when the
+URI is elsewhere, including raw URI text. Any rejection fails the entire checker
+projection, suppressing other metadata too. URLs requiring no serialization are
+unaffected by this guard.
 This is a declared bounded
 verification limitation, not a new container grammar or file-ownership scheme.
 The exact nested link-shaped-code counterexample is retained as a failure control.
@@ -762,3 +766,81 @@ subtests, including all9 new context controls. The earlier main-synced broad run
 passed3143 tests plus15 subtests before these affected corrections; its identity
 edge cases are not relabeled as a final-candidate pass. A final broad check and
 retained affected rereview cover the corrected successor.
+
+** Final round 7: destination classification and numeric prose
+
+Review =5867800208= on exact =e20e5917=, submitted at 01:52:23 UTC, raised two
+verified IMPORTANT runtime defects. Bare Markdown destinations and angle
+destinations with a title or closing whitespace could fall through to raw
+identity: =[S](https://source.example/a&#124;b)= rendered the pipe URL but selected
+the distinct literal entity-looking source. The ordered-list guard also treated
+ordinary =2026 edition= prose as a list and failed the entire checker projection.
+The exact rendered href/selected-record reproductions are retained separately.
+Seven actual external rounds have now occurred; no eighth round or reset is used.
+
+The existing lexer now recognizes destination and reference-definition starts
+before allowing raw URI identity. Unsupported serialization-sensitive
+bare/title/spacing destinations, reference definitions and standalone angle links fail
+explicitly before source lookup; only the existing exact generated angle-link
+form uses the four-token inverse. Bare URI text, same-line inline code, fenced code
+and an initial top-level indented block retain raw URI identity. Later indented
+blocks are conservatively unsupported for serialized angle/link destinations.
+Nested container/code
+contexts not established by the lexical classifier fail closed without new
+blockquote grammar. The encoder's unchanged serialization is the sensitivity
+test: entity escapes, backslashes, backticks and pipes require the canonical
+form, so unsupported escapes cannot select another literal source.
+Actual ordered-list prefixes require full digits, punctuation and whitespace,
+without a truncated prefix. The classification is cached per line; ordinary
+number-leading prose remains supported. Global HTML/whole-projection limitations
+remain as documented above. No renderer, grammar, store, late rewrite or model
+change is introduced.
+
+The first corrected integrated path passed 249 tests plus 8 subtests in 2.40 s.
+Real reference-bearing writes and actual backend reads preserve the source for
+ordinary/long number-leading prose. Five unsupported destination wrappers across
+all four collision pairs fail explicitly without metadata selection, saved-byte
+changes or source promotion. Full ordered-list marker and unsupported named-entity
+controls remain fail-closed. Natural 18/18 versus 17/18 and the original explicit
+reference-edit PARTIAL/FAIL are unchanged; these deterministic cases add no model
+episode or leading prompt. Retained affected review reproduced the same fallback
+through newline-separated destination starts; the whitespace lookbehind now
+crosses LF/CRLF without parsing those unsupported forms. All remain explicit
+failures before raw lookup. The superseded first broad run was stopped before
+this one-line correction to keep runtime evidence separate; its partial output
+is not a final pass. Refined affected review and final checks follow.
+
+Root's rendered probes also invalidated the earlier standalone-angle raw
+assumption: outside code, =<https://source.example/a&#124;b>= renders the pipe URI,
+and both angle/bare reference definitions do likewise. A bare Markdown escaped
+closing parenthesis also renders a different URI from its raw source bytes.
+These forms now fail explicitly when serialization is needed. A nested
+blockquote-indented angle URI is not established as code by the bounded lexer
+and fails conservatively; this is distinct from proven code guarantees.
+The earlier fixture incorrectly passed a ReadResult object directly into
+ToolMessage, stringifying its representation and escaping real newlines. Tests
+now invoke the installed read_file tool, including its actual ReadResult and
+line-number formatter. Runtime never interprets a Python repr. Those invalidated
+fixture assumptions are not retained as production acceptance evidence.
+
+Affected security review caught another concrete continuation counterexample:
+=paragraph= followed immediately by an indented angle URI renders a link rather
+than code, but the indentation heuristic selected the literal collision. Root
+selected a bounded fail-closed scope: only same-line inline code, fenced code and an
+initial top-level indented block can bypass the unsupported serialized-form
+guard. Existing lexer state now distinguishes fenced from indented lines;
+initial indented context ends when nonblank, nonindented content appears.
+Later indented blocks fail conservatively even when the renderer treats them as
+code. No nested container grammar is added. The actual-tool group passed 301
+tests plus 8 subtests in 2.50 s before final affected review and broad checks.
+
+Root's unquoted HTML attribute probe rendered the decoded URI but selected the
+literal collision. The existing global HTML-marker guard now also rejects
+serialization-sensitive raw/noncanonical URIs outside proven code, including
+the slash-before-attribute form; no HTML parser is added. A separate concrete
+blank-paragraph backtick span also rendered an angle link while the lexical
+code pairing selected the literal collision. Only same-line inline spans count
+as proven inline code now; multiline spans remain unsupported for serialized
+angle/destination forms. Fenced code remains supported across lines. These
+broader conservative projection errors are explicit; saved bytes and source
+records remain unchanged.
