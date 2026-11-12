@@ -47,3 +47,40 @@ def test_only_historical_status_is_not_current_status_evidence():
     with pytest.raises(AssertionError):
         _assert_current_status(f"{name}\nPrevious status: Passed inspection\n",
                                name, ("Passed inspection",))
+
+
+INLINE_BEFORE = ("# Note\n\nThis note refers to Mîra Vale.\n\n"
+                 "| Name | ID | Status |\n| --- | --- | --- |\n"
+                 "| Mîra Vale | ZX-0Il1-7F0b | Pending |\n")
+
+
+def test_capability_status_only_update_preserves_original_sentence_and_table():
+    from edd.eval.test_generic_reference_binding import _assert_inline_file_update
+    _assert_inline_file_update(INLINE_BEFORE, INLINE_BEFORE.replace("| Pending |", "| Ready |"),
+                               "Mîra Vale", "ZX-0Il1-7F0b")
+
+
+@pytest.mark.parametrize("after", [
+    "Mîra Vale ZX-0Il1-7F0b Ready\n",
+    INLINE_BEFORE.replace("This note refers to Mîra Vale.\n\n", "").replace("| Pending |", "| Ready |"),
+    "This note refers to Mîra Vale. ZX-0Il1-7F0b Ready.\n",
+    INLINE_BEFORE + "Ready\n",
+    INLINE_BEFORE.replace("This note refers", "A changed sentence refers").replace("| Pending |", "| Ready |"),
+    INLINE_BEFORE.replace("| Name | ID | Status |\n| --- | --- | --- |\n", "").replace("| Pending |", "| Ready |"),
+])
+def test_capability_cannot_pass_after_deleting_or_changing_original_content(after):
+    from edd.eval.test_generic_reference_binding import _assert_inline_file_update
+    with pytest.raises(AssertionError):
+        _assert_inline_file_update(INLINE_BEFORE, after, "Mîra Vale", "ZX-0Il1-7F0b")
+
+
+@pytest.mark.parametrize("before", [
+    INLINE_BEFORE[INLINE_BEFORE.index("| Name |"):],
+    "Name | ID | Status\n--- | --- | ---\nMîra Vale | ZX-0Il1-7F0b | Pending\n",
+    "This note refers to Mîra Vale and ZX-0Il1-7F0b. Pending.\n",
+])
+def test_capability_requires_both_structures_in_first_saved_file(before):
+    from edd.eval.test_generic_reference_binding import _assert_inline_file_update
+    with pytest.raises(AssertionError):
+        _assert_inline_file_update(before, before.replace("Pending", "Ready"),
+                                   "Mîra Vale", "ZX-0Il1-7F0b")

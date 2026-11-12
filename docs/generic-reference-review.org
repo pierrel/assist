@@ -623,3 +623,34 @@ The first affected correction panel passed *334 tests plus 8 subtests in 4.15 s*
 including real file preservation, host/sandbox no-prune checks, parent paths,
 source authority and 18 status-oracle controls. Full checks and affected retained
 review follow on the frozen successor; no installed verification is claimed.
+
+
+** Round 4 human assessment and eval-only correction
+
+Review =5866861095= on =132dae8f=, submitted at 23:46:47 UTC, reports no open
+runtime issue and confirms all three round-3 findings resolved. Its overview
+nevertheless requests human assessment: the explicit capability probe's substring
+checks could pass after deleting the sentence/table. This is a ninth meaningful
+coverage observation, rather than a newly observed runtime or acceptance failure.
+
+Read-only reconstruction of the original successful first write, using its
+original immutable SQLite values, proves the retained final file equals that
+whole initial file with *only* the table's Pending cell changed to Ready. The
+original sentence and complete Markdown table remain identical. Root accepted
+this manual assessment. The exact before/final hashes and reconstruction source
+are in =/tmp/generic-r4-original-capability-regrade.json=. This regrades the same
+127.69-second explicit probe; it adds no model episode and changes no natural
+18/18 baseline or 17/18 candidate count.
+
+The authorized eval-only correction captures the first saved whole file in the
+existing trace. A pure helper requires the initial inline paragraph and valid
+Pending table row, then compares the final file with the exact original plus
+that one Ready-cell substitution. Bytes are decoded directly without newline
+normalization. Deletion, missing initial structure, sentence/header changes and
+status words outside the actual cell cannot pass. All *28 pure oracle controls*
+passed, including the previous 18 current-shipment controls, and the strengthened
+helper also accepts the original capability artifact. The full prompt sequence,
+fixtures and production code remain unchanged. No new harness, model invocation
+or repeated broad runtime checks are needed; affected retained oracle/doc review
+covers this narrow successor. Deployment still belongs to Root and no merge is
+authorized.

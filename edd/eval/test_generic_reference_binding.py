@@ -323,6 +323,43 @@ def test_main_consumes_exact_values_from_completed_child(tmp_path, monkeypatch):
     assert sum(call["name"] == "get_async_task_result" for call in calls) == 1
 
 
+def _assert_inline_file_update(before, after, name, identifier):
+    """Keep the original inline paragraph/table; change only its status cell."""
+    lines = before.splitlines(keepends=True)
+    assert any(name in line and line.strip() != name
+               and "|" not in line and not line.lstrip().startswith("#")
+               for line in lines), "missing inline paragraph"
+
+    def cells(line):
+        return [cell.strip(" \t\r\n`*_").casefold()
+                for cell in line.strip().strip("|").split("|")]
+
+    rows = []
+    for index in range(len(lines) - 2):
+        header, separator = cells(lines[index]), cells(lines[index + 1])
+        columns = [number for number, value in enumerate(header)
+                   if value in {"status", "current status"}]
+        if (len(columns) != 1 or len(header) != len(separator)
+                or not all(re.fullmatch(r":?-+:?", value) for value in separator)):
+            continue
+        for row_index in range(index + 2, len(lines)):
+            if "|" not in lines[row_index]:
+                break
+            values = cells(lines[row_index])
+            if name.casefold() in values and identifier.casefold() in values:
+                column = columns[0]
+                assert len(values) == len(header) and values[column] == "pending"
+                rows.append((row_index, column))
+    assert len(rows) == 1, "missing or ambiguous original Pending table row"
+    row_index, column = rows[0]
+    raw_cells = lines[row_index].split("|")
+    raw_column = column + int(lines[row_index].lstrip().startswith("|"))
+    assert re.search(r"\bPending\b", raw_cells[raw_column], re.I)
+    raw_cells[raw_column] = re.sub(r"\bPending\b", "Ready", raw_cells[raw_column], count=1, flags=re.I)
+    lines[row_index] = "|".join(raw_cells)
+    assert after == "".join(lines), "content changed beyond the original table status cell"
+
+
 def test_inline_reference_file_update_capability(tmp_path, monkeypatch):
     """Explicit mechanism probe; never counted as natural outcome acceptance."""
     monkeypatch.setenv("ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS", "1")
@@ -344,6 +381,7 @@ def test_inline_reference_file_update_capability(tmp_path, monkeypatch):
         "and values intact. Show me the updated file.",
     )
     results = []
+    saved_files = []
     with (patch("assist.tools.requests.get", side_effect=AssertionError("no network expected")),
           patch("assist.agent.create_context_agent", _context_fixture),
           stub_research_subagent("No external research findings are available.")):
@@ -352,7 +390,8 @@ def test_inline_reference_file_update_capability(tmp_path, monkeypatch):
         for prompt in prompts:
             result = agent.invoke({"messages": [HumanMessage(content=prompt)]}, config)
             results.append(result)
-            _save_trace(tmp_path, prompts[:len(results)], results)
+            saved_files.append((workspace / "inline.md").read_bytes().decode("utf-8"))
+            _save_trace(tmp_path, prompts[:len(results)], results, saved_files)
     calls = [call for message in results[-1]["messages"] if isinstance(message, AIMessage)
              for call in message.tool_calls]
     rows = store.list(kind="text")
@@ -365,6 +404,6 @@ def test_inline_reference_file_update_capability(tmp_path, monkeypatch):
                and all(ref in call["args"].get("old_string", "")
                        and ref in call["args"].get("new_string", "") for ref in references)
                for call in calls)
-    content = (workspace / "inline.md").read_text()
-    assert "Mîra Vale" in content and "ZX-0Il1-7F0b" in content
-    assert "Ready" in content and "Pending" not in content and "ref:" not in content
+    content = (workspace / "inline.md").read_bytes().decode("utf-8")
+    _assert_inline_file_update(saved_files[0], content, "Mîra Vale", "ZX-0Il1-7F0b")
+    assert "ref:" not in content
