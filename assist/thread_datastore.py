@@ -522,7 +522,7 @@ def _file_source_records(text: str, store: ThreadDataStore) -> list[dict[str, st
                 and spans[code_index][0] <= token.start() < spans[code_index][1])
             in_code = bool(code_line or inline_code)
             proven_code = ((inline_code and spans[code_index][0] >= line_start
-                            and spans[code_index][2] <= line_end) or code_line == "fenced"
+                            and spans[code_index][2] <= line_end)
                            or (code_line == "indented" and initial_indent))
             angle = (token.start() >= 3 and text[token.start() - 3:token.start()] == "](<"
                      and text[token.end():token.end() + 2] == ">)")
@@ -531,8 +531,12 @@ def _file_source_records(text: str, store: ThreadDataStore) -> list[dict[str, st
             while prefix > 0 and text[prefix - 1].isspace():
                 prefix -= 1
             destination = text[max(0, prefix - 2):prefix] in ("](", "]:")
-            if (not angle and not proven_code and (destination or angle_open or html_context)
-                    and _source_destination(literal) != literal):
+            serialized = _source_destination(literal) != literal
+            if html_context and serialized:
+                raise ValueError("ambiguous source URL in document with HTML-like markers; serialized URI verification is unsupported")
+            if code_line == "fenced" and serialized:
+                raise ValueError("serialized source URI verification in fenced context is unsupported")
+            if not angle and not proven_code and (destination or angle_open) and serialized:
                 raise ValueError("unsupported encoded source URL destination; use an automatically registered source link")
             candidate = _decode_source_destination(literal) if angle else literal
             if angle and _source_destination(candidate) != literal:
@@ -540,7 +544,7 @@ def _file_source_records(text: str, store: ThreadDataStore) -> list[dict[str, st
             if angle and candidate != literal:
                 if label_closes is None:
                     label_closes = set(_generic_label_ends(text).values())
-                if in_code or token.start() - 3 not in label_closes or html_context or in_container:
+                if in_code or token.start() - 3 not in label_closes or in_container:
                     # The bounded lexer does not establish these container/escape semantics.
                     raise ValueError("ambiguous encoded source URL context; use an unescaped top-level source link for verification")
             row = db.execute("SELECT id, kind, value, title FROM records WHERE kind = 'source' AND value = ?",

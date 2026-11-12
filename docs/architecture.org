@@ -99,7 +99,11 @@ in both views. An ID shown in only one view keeps that meaning.
   before cleanup. Checker
   URL metadata exact-queries existing host source records: supported canonical
   link destinations use the encoder's exact one-pass inverse; bare URI text and
-  same-line inline code, fenced code and initial indented-block URI literals stay raw.
+  same-line inline code and initial indented-block URI literals stay raw.
+  Fenced contexts, including complete and unclosed fences, reject
+  serialization-sensitive URI verification. Plain URLs needing no serialization
+  remain supported. The existing linear fenced-kind classification only rejects;
+  it never proves a raw-identity bypass. No full-text fence regex is invoked here.
   Ambiguous link-shaped code, escaped labels or
   unsupported container contexts fail without byte changes/source selection.
   Bare/titled/whitespace link destinations, reference definitions and standalone
@@ -110,8 +114,9 @@ in both views. An ID shown in only one view keeps that meaning.
   exact generated angle-link form supports inversion. The ordered-list guard requires full digits plus
   punctuation and whitespace; number-leading prose remains supported.
   The HTML-like-marker guard is global to the analyzed file, including code or
-  unrelated text: any such marker rejects serialization-sensitive URIs outside
-  proven code, including raw URI text. Any rejection fails the entire checker
+  unrelated text: any such marker rejects every serialization-sensitive URI,
+  including raw URI text and all code contexts. Code proof cannot bypass this
+  guard. Any rejection fails the entire checker
   projection, suppressing other metadata too. URLs requiring no serialization
   are unaffected by this guard.
   Host line numbering is removed only from the checker's analysis view. Metadata

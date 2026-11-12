@@ -113,16 +113,20 @@ where reliability is harder than with frontier APIs.
   changing saved bytes. Bare/titled/whitespace link destinations, reference
   definitions and standalone angle links requiring entity/backslash/backtick/pipe
   serialization also fail; inverse decoding supports the exact generated
-  angle-link form. Bare URI text, same-line inline code, fenced code and an
-  initial top-level indented block retain raw URI identity. Multiline inline
+  angle-link form. Bare URI text, same-line inline code and an
+  initial top-level indented block retain raw URI identity subject to the
+  global HTML guard below. Source verification of serialization-sensitive URIs
+  in any fenced context is unsupported, whether complete or unclosed; ordinary
+  URIs needing no serialization remain supported there. Multiline inline
   spans, later indented blocks and
   uncertain nested container/code contexts fail closed for serialized angle/link
   destinations; the lexer does not establish their code semantics.
   Ordinary number-leading prose is supported;
   actual ordered-list markers remain unsupported for encoded links.
   An HTML-like marker anywhere in the analyzed file, even in code or unrelated
-  text, rejects serialization-sensitive URIs outside proven code, including raw
-  URI text with entity/backslash/backtick/pipe bytes. A rejected URL fails the
+  text, rejects all serialization-sensitive URIs, including those in code and raw
+  URI text with entity/backslash/backtick/pipe bytes. No code context bypasses
+  this guard. A rejected URL fails the
   entire checker projection, including other links' metadata. URLs requiring no
   serialization are unaffected by this guard.
   Checker analysis removes only host-owned line numbering;

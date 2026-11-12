@@ -82,8 +82,8 @@ def test_each_colliding_source_saves_renders_and_checks_to_its_own_record(tmp_pa
     assert len(store.list(kind="source")) == 2
 
 
-@pytest.mark.parametrize("wrapper", ["Bare: {}", "`{}`", "`<{}>`", "    <{}>", "~~~\n<{}>\n~~~",
-                                    "paragraph `<{}>`", "paragraph\n\n~~~\n<{}>\n~~~", "\n    <{}>"])
+@pytest.mark.parametrize("wrapper", ["Bare: {}", "`{}`", "`<{}>`", "    <{}>",
+                                    "paragraph `<{}>`", "\n    <{}>"])
 def test_bare_and_code_literal_uri_keeps_its_own_identity(tmp_path, monkeypatch, wrapper):
     store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
     a, b = PAIRS[0]
@@ -339,4 +339,70 @@ def test_multiline_backtick_heuristic_cannot_bypass_actual_checker(tmp_path, mon
         request("read_file", file_path="/report.md"), read_file(backend, "/report.md"))
     assert checked.status == "error"
     assert not checked.artifact or not checked.artifact.get(BOUND_FILE_URLS_ARTIFACT)
+    assert saved.read_bytes() == original.encode()
+
+
+@pytest.mark.parametrize("wrapper", [
+    '<!-- ` --><a href={}>source</a><!-- ` -->',
+    '~~~\n<span>\n<{}>\n~~~',
+    '`<span> <{}>`',
+    '    <span>\n    <{}>',
+])
+def test_global_html_guard_has_no_code_bypass_and_never_changes_file(tmp_path, monkeypatch, wrapper):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    for url in PAIRS[0]:
+        register_source(store, url)
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
+    original = wrapper.format(PAIRS[0][1])
+    saved = tmp_path / "report.md"
+    saved.write_text(original)
+    backend = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+    checked = ReferenceBindingMiddleware(bind_file_refs=True)._bind_result(
+        request("read_file", file_path="/report.md"), read_file(backend, "/report.md"))
+    assert checked.status == "error" and "HTML-like" in checked.content
+    assert not checked.artifact or not checked.artifact.get(BOUND_FILE_URLS_ARTIFACT)
+    assert saved.read_bytes() == original.encode()
+
+
+@pytest.mark.parametrize("marker", ["~~~", "```"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_unclosed_fence_never_proves_code_or_selects_literal_collision(tmp_path, monkeypatch, marker, newline):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    for url in PAIRS[0]:
+        register_source(store, url)
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
+    original = marker + newline + '<' + PAIRS[0][1] + '>'
+    parsed = Hrefs()
+    parsed.feed(markdown(original, extensions=["fenced_code"]))
+    assert parsed.values == [PAIRS[0][0]]
+    saved = tmp_path / "report.md"
+    saved.write_bytes(original.encode())
+    backend = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+    checked = ReferenceBindingMiddleware(bind_file_refs=True)._bind_result(
+        request("read_file", file_path="/report.md"), read_file(backend, "/report.md"))
+    assert checked.status == "error"
+    assert not checked.artifact or not checked.artifact.get(BOUND_FILE_URLS_ARTIFACT)
+    assert saved.read_bytes() == original.encode()
+
+
+@pytest.mark.parametrize("wrapper", ["~~~\n<{}>\n~~~", "paragraph\n\n~~~\n<{}>\n~~~",
+                                    "```\n<{}>\n```", "paragraph\n\n```\n<{}>\n```"])
+@pytest.mark.parametrize("serialized", [False, True])
+def test_fenced_projection_keeps_plain_uri_but_rejects_serialization_without_changes(tmp_path, monkeypatch, wrapper, serialized):
+    store = ThreadDataStore(str(tmp_path / "thread.sqlite"))
+    url = PAIRS[0][1] if serialized else "https://source.example/exact"
+    register_source(store, url)
+    monkeypatch.setattr("assist.thread_datastore._current_store", lambda: store)
+    original = wrapper.format(url)
+    saved = tmp_path / "report.md"
+    saved.write_text(original)
+    backend = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+    checked = ReferenceBindingMiddleware(bind_file_refs=True)._bind_result(
+        request("read_file", file_path="/report.md"), read_file(backend, "/report.md"))
+    if serialized:
+        assert checked.status == "error" and "fenced" in checked.content
+        assert not checked.artifact or not checked.artifact.get(BOUND_FILE_URLS_ARTIFACT)
+    else:
+        assert checked.status == "success"
+        assert checked.artifact[BOUND_FILE_URLS_ARTIFACT] == (url,)
     assert saved.read_bytes() == original.encode()
