@@ -1,4 +1,4 @@
-"""Offline browser observations expose current pages and turn boundaries."""
+"""Offline browser fixtures preserve pages and legal turn continuations."""
 from edd.eval.test_browser_agent import _BrowserSite
 import pytest
 
@@ -128,9 +128,13 @@ def test_form_observation_keeps_values_targets_and_page_boundary(tmp_path):
     assert "error" in site.command("observe", page_id="page-1")
 
 
-@pytest.mark.parametrize("page_id,close_after_review", [
-    ("page-1", False), ("missing-page", False), ("page-1", True)])
-def test_continuity_eval_requires_a_successful_review(monkeypatch, page_id, close_after_review):
+@pytest.mark.parametrize("page_id,close_after_review,context_phase", [
+    ("page-1", False, None), ("missing-page", False, None), ("page-1", True, None),
+    pytest.param("page-1", False, "before", id="context_before_browser"),
+    pytest.param("page-1", False, "after", id="context_after_pause")])
+def test_continuity_eval_requires_a_successful_review(
+        monkeypatch, page_id, close_after_review, context_phase):
+    import hashlib
     import time
     from threading import Event
     from langchain_core.messages import AIMessage
@@ -147,21 +151,35 @@ def test_continuity_eval_requires_a_successful_review(monkeypatch, page_id, clos
                              "target": {"ref": "destination", "text": "Portland"}}, 3),
         call("browser_act", {"page_id": page_id, "snapshot_id": "form-1", "action": "click",
                              "target": {"ref": "review"}}, 4)]
+    if context_phase:
+        description = "Inspect trip notes in the local workspace."
+        task_id = "task-eval-" + hashlib.sha256(
+            f"1\0context-agent\0{description}".encode()).hexdigest()[:12]
+        task_responses = [
+            call("start_async_task", {"description": description,
+                                      "subagent_type": "context-agent"}, 101),
+            AIMessage(content="I started the context task."),
+            call("get_async_task_result", {"task_id": task_id}, 102)]
+        index = 0 if context_phase == "before" else 3
+        responses[index:index] = task_responses
     if close_after_review:
         responses.append(call("browser_close", {"page_id": page_id}, 5))
     responses.append(AIMessage(content="Portland draft reviewed."))
     model = _RecordingModel(responses=responses)
     original = _RecordingModel._generate
-    calls = 0
+    pause_waited = False
     def generate(self, *args, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 4:
+        nonlocal pause_waited
+        upcoming = self.responses[self.i]
+        if not pause_waited and any((tool["name"] == "browser_act" and tool["args"].get("action") == "click")
+               or (context_phase == "after" and tool["name"] == "start_async_task")
+               for tool in upcoming.tool_calls):
             handle = active_handle()
             deadline = time.monotonic() + 2
             while not handle.pause_requested and time.monotonic() < deadline:
                 Event().wait(0.001)
             assert handle.pause_requested
+            pause_waited = True
         return original(self, *args, **kwargs)
     monkeypatch.setattr(_RecordingModel, "_generate", generate)
     monkeypatch.setattr(TestBrowserAgent, "model", model, raising=False)
