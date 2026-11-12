@@ -3703,7 +3703,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 _run, _runs().list(tid) if _run is not None else [])
             browser_session = (BrowserManager.resume_session(
                 tid, _run.work_id, user_request)
-                if resume and _run is not None and _run.approval_id is None
+                if resume and _run is not None
                 else None)
             if not resume and resume_decision is None and origin != "task-completion":
                 def terminalize_dirty(error: GitSyncError) -> None:
@@ -3714,7 +3714,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 git_lifecycle.prepare(rider.tz if rider else None,
                                       terminalize_dirty=terminalize_dirty)
             elif origin == "task-completion":
-                git_lifecycle.handoff(rider.tz if rider else None)
+                # Retained slices already passed handoff on their first slice.
+                if browser_session is None:
+                    git_lifecycle.handoff(rider.tz if rider else None)
             elif browser_session is None:
                 git_lifecycle.resume()
             if _run is not None and _run.review_snapshot is not None and not resume:

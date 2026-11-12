@@ -122,8 +122,11 @@ in both views. An ID shown in only one view keeps that meaning.
   A fairness successor reuses its exact session/backend after C8 freezes the
   container with Docker pause. C8 unpauses only the same logical work, direct
   user event and generation after checking the current admission sequence.
-  The original lease owner remains stable across physical Run slices. Approval,
-  terminal and error boundaries close the browser; new-user and cancellation
+  The original lease owner remains stable across physical Run slices, including
+  accepted-approval execution and task-completion continuations. A retained
+  completion slice skips the initial Git handoff rather than stopping its writer.
+  Entering an approval wait, terminal and error boundaries close the browser;
+  new-user and cancellation
   resets prove the frozen generation stopped before releasing held work.
   The existing three-hour container expiry includes frozen queue time.
   An eligible child borrows the same backend after its durable parent work and
