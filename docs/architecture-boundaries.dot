@@ -25,15 +25,15 @@ digraph Boundaries {
        fillcolor="#f3f3f3"];
   C15 [label="C15  Network destinations\nweb pages · search · travel services",
        fillcolor="#f3f3f3"];
-  C16 [label="C16  Host user systemd\nindependent of web worker", fillcolor="#f3f3f3"];
+  C21 [label="C21  Host user systemd\nindependent of web worker", fillcolor="#f3f3f3"];
 
   C6 -> C10 [label="file / shell tool calls"];
   C6 -> C8 [label="browser tool calls", constraint=false];
   C6 -> C12 [label="model requests"];
   C6 -> C15 [label="host tool HTTP requests"];
   C8 -> C10 [label="create / freeze / resume / retire"];
-  C8 -> C16 [label="original generation +3h deadline"];
-  C16 -> C10 [label="exact labelled removal; retries on daemon failure"];
+  C8 -> C21 [label="original generation +3h deadline"];
+  C21 -> C10 [label="exact labelled removal; retries on daemon failure"];
   C8 -> C11 [label="browser actions + lease / teardown"];
   C8 -> C14 [label="verified Git publish"];
   C10 -> C11 [label="hosts worker"];

@@ -26,7 +26,7 @@ digraph Assist {
        color="#a46b36"];
   C12 [label="C12  Model endpoint\nOpenAI-compatible HTTP",
        fillcolor="#f3f3f3"];
-  C16 [label="C16  Host user systemd\nexact-generation deadline", fillcolor="#f3f3f3"];
+  C21 [label="C21  Host user systemd\nexact-generation deadline", fillcolor="#f3f3f3"];
 
   C1a -> C2 [label="HTTP requests"];
   C2 -> C3 [label="admit before dispatch"];
@@ -38,8 +38,8 @@ digraph Assist {
   C7 -> C3 [label="child + follow-up Runs", constraint=false];
   C7 -> C8 [label="borrow shared execution; defer Git", constraint=false];
   C4 -> C8 [label="Git / sandbox / browser slice control"];
-  C8 -> C16 [label="arm once at container creation"];
-  C16 -> C10 [label="remove original generation at +3h"];
+  C8 -> C21 [label="arm once at container creation"];
+  C21 -> C10 [label="remove original generation at +3h"];
   C6 -> C8 [label="browser tool calls", constraint=false];
   C3 -> C9 [label="Run records", style=dashed];
   C5 -> C9 [label="checkpoints + files", style=dashed];

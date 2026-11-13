@@ -170,7 +170,7 @@ in both views. An ID shown in only one view keeps that meaning.
   related travel tools call configured services. Websites visited by C11 are
   also destinations. Host Python tools call services directly; sandbox and
   browser requests cross C13's allowlist and exact-grant boundary first.
-- *C16 Host user systemd.* [[file:../assist/sandbox_expiry.py][sandbox_expiry.py]]
+- *C21 Host user systemd.* [[file:../assist/sandbox_expiry.py][sandbox_expiry.py]]
   arms one transient deadline for each ordinary managed Docker generation at
   original creation + three hours. The unit outlives the web process and its
   frozen containers; only exact host-labelled generations can be removed.

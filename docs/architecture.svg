@@ -116,16 +116,16 @@
 <polygon fill="#49647d" stroke="#49647d" points="669.56,-234.05 676.84,-232.65 670.27,-229.21 669.56,-234.05"/>
 <text xml:space="preserve" text-anchor="middle" x="761.37" y="-133.92" font-family="DejaVu Sans" font-size="11.00">borrow shared execution; defer Git</text>
 </g>
-<!-- C8&#45;&gt;C16 -->
+<!-- C8&#45;&gt;C21 -->
 <g id="edge11" class="edge">
-<title>C8&#45;&gt;C16</title>
+<title>C8&#45;&gt;C21</title>
 <path fill="none" stroke="#49647d" d="M850.95,-225.34C885.68,-208.45 931.42,-186.2 967.57,-168.61"/>
 <polygon fill="#49647d" stroke="#49647d" points="968.55,-170.86 973.77,-165.6 966.4,-166.46 968.55,-170.86"/>
 <text xml:space="preserve" text-anchor="middle" x="992.52" y="-190.37" font-family="DejaVu Sans" font-size="11.00">arm once at container creation</text>
 </g>
-<!-- C16&#45;&gt;C10 -->
+<!-- C21&#45;&gt;C10 -->
 <g id="edge12" class="edge">
-<title>C16&#45;&gt;C10</title>
+<title>C21&#45;&gt;C10</title>
 <path fill="none" stroke="#49647d" d="M981.77,-112.57C951.73,-95.83 912.15,-73.77 880.66,-56.22"/>
 <polygon fill="#49647d" stroke="#49647d" points="881.88,-54.09 874.57,-52.83 879.5,-58.37 881.88,-54.09"/>
 <text xml:space="preserve" text-anchor="middle" x="1014.02" y="-77.46" font-family="DejaVu Sans" font-size="11.00">remove original generation at +3h</text>
@@ -214,11 +214,11 @@
 <text xml:space="preserve" text-anchor="middle" x="233.93" y="-27.33" font-family="DejaVu Sans" font-size="15.00">C12 &#160;Model endpoint</text>
 <text xml:space="preserve" text-anchor="middle" x="233.93" y="-11.58" font-family="DejaVu Sans" font-size="15.00">OpenAI&#45;compatible HTTP</text>
 </g>
-<!-- C16 -->
+<!-- C21 -->
 <g id="node13" class="node">
-<title>C16</title>
+<title>C21</title>
 <path fill="#f3f3f3" stroke="#34506a" d="M1113.74,-164.57C1113.74,-164.57 940.12,-164.57 940.12,-164.57 934.12,-164.57 928.12,-158.57 928.12,-152.57 928.12,-152.57 928.12,-124.91 928.12,-124.91 928.12,-118.91 934.12,-112.91 940.12,-112.91 940.12,-112.91 1113.74,-112.91 1113.74,-112.91 1119.74,-112.91 1125.74,-118.91 1125.74,-124.91 1125.74,-124.91 1125.74,-152.57 1125.74,-152.57 1125.74,-158.57 1119.74,-164.57 1113.74,-164.57"/>
-<text xml:space="preserve" text-anchor="middle" x="1026.93" y="-140.24" font-family="DejaVu Sans" font-size="15.00">C16 &#160;Host user systemd</text>
+<text xml:space="preserve" text-anchor="middle" x="1026.93" y="-140.24" font-family="DejaVu Sans" font-size="15.00">C21 &#160;Host user systemd</text>
 <text xml:space="preserve" text-anchor="middle" x="1026.93" y="-124.49" font-family="DejaVu Sans" font-size="15.00">exact&#45;generation deadline</text>
 </g>
 </g>
