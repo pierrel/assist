@@ -401,12 +401,14 @@ def test_turn_sandbox_restores_private_storage_in_new_generation(tmp_path, monke
             assert backend is not None
             container = SandboxManager.current_container(str(work_dir))
             assert container is not None
-            assert backend.native_agent_dir is False
-            assert all(mount.get("Destination") != "/agent" for mount in container.attrs["Mounts"])
+            assert backend.native_agent_dir is True
+            assert any(mount.get("Destination") == "/agent" for mount in container.attrs["Mounts"])
             assert not any(value.startswith("ASSIST_") for value in container.attrs["Config"]["Env"])
             monkeypatch.setattr(backend, "_proxy_logs_since", lambda *_a: None)
-            assert backend.execute("test ! -e /agent/memory.md").exit_code == 0
-            assert "PARENT_PRIVATE_CANARY" not in str(backend.read("/agent/memory.md"))
+            assert "PARENT_PRIVATE_CANARY" in backend.execute("cat /agent/memory.md").output
+            assert "PARENT_PRIVATE_CANARY" in str(backend.read("/agent/memory.md").file_data)
+            denied = container.exec_run(["cat", "/agent/memory.md"], user="10001:10001")
+            assert denied.exit_code != 0 and b"PARENT_PRIVATE_CANARY" not in denied.output
             session = browser.BrowserSession(
                 "t", run.id, str(work_dir), str(tmp_path / "threads"),
                 browser.BrowserUserRequest(

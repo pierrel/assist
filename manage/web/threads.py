@@ -2728,8 +2728,9 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                     session = BrowserManager.current_session(run.parent_thread_id)
                     if session is not None:
                         # Child work remains scoped by its own durable Run and
-                        # tools. Borrow execution, never the parent's memory or
-                        # browser tools. The browser lease still names its owner.
+                        # tools. Its trusted delegate shares the persistent
+                        # filesystem, without inheriting browser tools. The
+                        # browser lease still names its owner.
                         parent = _runs().get(run.parent_thread_id, run.parent_run_id)
                         event_id = (session.user_request.event_id
                                     if session.user_request is not None else None)

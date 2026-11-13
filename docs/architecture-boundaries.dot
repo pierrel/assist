@@ -13,7 +13,7 @@ digraph Boundaries {
   C8 [label="C8  Host authorities\ncontainer, browser, Git, grants"];
   C9 [label="C9  Durable thread state\nthread files + Git checkout",
       fillcolor="#fff4d7"];
-  C10 [label="C10  Shared execution\nparent + eligible child · file/shell tools",
+  C10 [label="C10  Shared execution\ntrusted parent + child · native /agent",
        fillcolor="#fff0df", color="#a46b36"];
   C11 [label="C11  Browser worker\nChromium · untrusted page content",
        fillcolor="#fff0df", color="#a46b36"];
@@ -40,5 +40,5 @@ digraph Boundaries {
   C10 -> C13 [label="network requests"];
   C11 -> C13 [label="attributed page requests"];
   C13 -> C15 [label="allowed sandbox/browser requests"];
-  C10 -> C9 [label="bind-mounted workspace", style=dashed];
+  C10 -> C9 [label="workspace + persistent /agent mounts", style=dashed];
 }

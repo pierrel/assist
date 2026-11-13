@@ -56,7 +56,7 @@ def test_browser_tools_and_skill_route_are_web_main_only(tmp_path):
     assert "/browser-skill/" not in delegate.skill_sources
 
 
-def test_managed_execution_binds_thread_authority_without_private_mount(tmp_path, monkeypatch):
+def test_managed_execution_binds_authority_and_persistent_agent_mount(tmp_path, monkeypatch):
     from manage.web import state
     from assist.sandbox_manager import SandboxManager
 
@@ -70,4 +70,4 @@ def test_managed_execution_binds_thread_authority_without_private_mount(tmp_path
     for work_dir, kwargs in calls:
         assert work_dir == str(tmp_path / "thread" / "domain")
         assert kwargs["thread_scope"] == (str(tmp_path), "thread")
-        assert kwargs["agent_dir"] is None
+        assert kwargs["agent_dir"] == str(tmp_path / "thread" / "agent")

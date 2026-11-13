@@ -555,7 +555,7 @@ class ThreadManager:
     def thread_tmp_dir(self, tid: str) -> str:
         return os.path.join(self.thread_dir(tid), "tmp")
 
-    # Private main-agent state, outside both the repo and renderable scratch.
+    # Persistent agent state shared with trusted children, outside the repo and scratch.
     # The thread directory owns its lifecycle, so hard_delete removes it naturally.
     def thread_agent_dir(self, tid: str) -> str:
         return os.path.join(self.thread_dir(tid), "agent")
