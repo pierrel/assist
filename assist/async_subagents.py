@@ -62,6 +62,7 @@ class AsyncTaskContext:
 _CONTEXT: ContextVar[AsyncTaskContext | None] = ContextVar(
     "assist_async_task_context", default=None)
 _APP: ASGIApp | None = None
+_RUN_CREATE_BODY_LIMIT_BYTES = 66_000  # manage.web.agent_protocol.MAX_BODY_BYTES
 
 
 def configure_async_subagent_app(app: ASGIApp) -> None:
@@ -114,7 +115,21 @@ def _task_value(thread: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
-def _checker_evidence(description: str, parent_messages: list, research: dict) -> str:
+def _run_create_body_bytes(content: str, assistant_id: str,
+                           metadata: dict[str, str]) -> int:
+    """Measure the JSON fields sent by the installed LangGraph SDK run client."""
+    body = {
+        "input": {"messages": [{"role": "user", "content": content}]},
+        "stream_mode": "values", "stream_subgraphs": False,
+        "stream_resumable": False, "metadata": metadata,
+        "assistant_id": assistant_id,
+    }
+    return len(httpx.Request("POST", "http://assist-agent/runs",
+                             json=body).content)
+
+
+def _checker_evidence(description: str, parent_messages: list, research: dict,
+                      metadata: dict[str, str]) -> str:
     """Pass bounded recorded evidence, not extra navigation authority, to a checker."""
     from assist.middleware.research_observations import project_research_observations
 
@@ -144,6 +159,12 @@ def _checker_evidence(description: str, parent_messages: list, research: dict) -
         "omitted_child_observations": child_packet.get("omitted_observations", "unknown"),
         "omitted_parent_observations": parent_packet["omitted_observations"],
         "omitted_child_access_outcomes": child_packet.get("omitted_access_outcomes", "unknown"),
+        "skipped_child_results_or_rows": child_packet.get("skipped_or_unpaired_results", "unknown"),
+        "unpaired_child_calls": child_packet.get("unpaired_recorded_calls", "unknown"),
+        "skipped_parent_results_or_rows": parent_packet["skipped_or_unpaired_results"],
+        "unpaired_parent_calls": parent_packet["unpaired_recorded_calls"],
+        "evidence_limits": ("Checkpoint history may omit earlier reads; skipped or "
+                            "unpaired retrievals and truncated text cannot establish absence."),
         "source_access_status": ("A missing access outcome does not prove a fetch failed; "
                                  "successful read_url observations separately show opened content."),
     }
@@ -151,8 +172,17 @@ def _checker_evidence(description: str, parent_messages: list, research: dict) -
     budget = min(12_000, 64_000 - len(description.encode()) - len(prefix.encode()))
     if budget <= 0:
         return description
-    while (appendix["source_observations"] or appendix["host_access_outcomes"]) and len(
-            json.dumps(appendix, ensure_ascii=False).encode()) > budget:
+    def fits(rendered: str) -> bool:
+        content = description + prefix + rendered
+        # LangGraph SDK sends these fields in one JSON request. A UTF-8 budget
+        # on `content` alone misses JSON escaping and the metadata envelope.
+        return (len(content.encode()) <= 64_000
+                and len(rendered.encode()) <= budget
+                and _run_create_body_bytes(
+                    content, "fact-check-agent", metadata) <= _RUN_CREATE_BODY_LIMIT_BYTES)
+
+    rendered = json.dumps(appendix, ensure_ascii=False)
+    while (appendix["source_observations"] or appendix["host_access_outcomes"]) and not fits(rendered):
         if appendix["source_observations"] and (
                 len(appendix["source_observations"]) > len(appendix["host_access_outcomes"])
                 or not appendix["host_access_outcomes"]):
@@ -163,8 +193,8 @@ def _checker_evidence(description: str, parent_messages: list, research: dict) -
             appendix["host_access_outcomes"].pop()
             appendix["omitted_access_outcomes_for_checker_budget"] = appendix.get(
                 "omitted_access_outcomes_for_checker_budget", 0) + 1
-    rendered = json.dumps(appendix, ensure_ascii=False)
-    return description + prefix + rendered if len(rendered.encode()) <= budget else description
+        rendered = json.dumps(appendix, ensure_ascii=False)
+    return description + prefix + rendered if fits(rendered) else description
 
 
 def _format_task(task: dict[str, Any], *, include_result: bool = True,
@@ -220,6 +250,11 @@ def _start_async_task(
 
     async def launch(client):
         child_description = description
+        metadata = {
+            "parent_thread_id": context.parent_thread_id,
+            "parent_run_id": context.parent_run_id,
+            "dispatch_key": dispatch_key,
+        }
         if subagent_type == "fact-check-agent" and context.parent_work_id.startswith(
                 "task-completion:"):
             research_id = context.parent_work_id.removeprefix("task-completion:")
@@ -232,28 +267,27 @@ def _start_async_task(
                     and research.get("parent_thread_id") == context.parent_thread_id
                     and research.get("agent_name") == "research-agent"
                     and research.get("status") == "success"):
-                child_description = _checker_evidence(description, parent_messages, research)
+                child_description = _checker_evidence(
+                    description, parent_messages, research, metadata)
+        if (_run_create_body_bytes(child_description, subagent_type, metadata)
+                > _RUN_CREATE_BODY_LIMIT_BYTES):
+            return ("Task description is too large for child admission. "
+                    "Shorten it while retaining the original request and material facts.")
         await client.threads.create(
             thread_id=task_id,
             if_exists="do_nothing",
-            metadata={
-                "parent_thread_id": context.parent_thread_id,
-                "parent_run_id": context.parent_run_id,
-                "dispatch_key": dispatch_key,
-            },
+            metadata=metadata,
         )
         return await client.runs.create(
             task_id,
             subagent_type,
             input={"messages": [{"role": "user", "content": child_description}]},
-            metadata={
-                "parent_thread_id": context.parent_thread_id,
-                "parent_run_id": context.parent_run_id,
-                "dispatch_key": dispatch_key,
-            },
+            metadata=metadata,
         )
 
-    _run(launch)
+    launched = _run(launch)
+    if isinstance(launched, str):
+        return launched
     return (f"Started subagent. task_id: {task_id}. In the user reply, call it a "
             "subagent or task, never background or async. Report this full ID. "
             "Do any independent work required by a loaded skill, then return "

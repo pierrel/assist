@@ -320,6 +320,26 @@ def test_six_tools_round_trip_through_real_private_asgi(monkeypatch, tmp_path):
     assert submitted
 
 
+def test_oversized_serialized_child_request_creates_no_thread_or_run(
+        monkeypatch, tmp_path):
+    submitted = _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    parent = threads._create_run("parent", "question")
+    configure_async_subagent_app(web._agent_app)
+    runtime = SimpleNamespace(tool_call_id="oversized")
+    context = AsyncTaskContext("parent", parent.id, parent.work_id)
+    task_id = async_tasks._task_id(context, "oversized")
+
+    with async_task_context(context):
+        response = TOOLS["start_async_task"].func(
+            "\\" * 32_900, "fact-check-agent", runtime)
+
+    assert response.startswith("Task description is too large for child admission.")
+    assert not os.path.exists(threads.MANAGER.thread_dir(task_id))
+    assert threads._runs().list(task_id) == []
+    assert submitted == []
+
+
 def test_missing_async_task_reference_returns_tool_result(monkeypatch, tmp_path):
     _root(monkeypatch, tmp_path)
     threads.MANAGER.reserve("parent")
