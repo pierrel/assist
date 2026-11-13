@@ -1,0 +1,48 @@
+#+title: Managed execution expiry outside the frozen container
+#+date: 2026-11-13
+
+* Verified gaps
+Docker pause freezes PID 1's exit as well as browser and shell processes. A
+two-second sleep remained allocated after three seconds paused. The previous
+three-hour sleep therefore did not bound frozen resources after worker loss.
+A real queue-wait timeout also preceded the retained-session ExitStack callback
+and left an exact paused session registered after terminal error.
+
+* Repair
+Every ordinary managed generation is labelled and armed once, at creation,
+with a transient timer in the host user's existing systemd manager. Its
+calendar deadline is Docker's original Created timestamp plus three hours.
+The host helper validates the immutable 64-hex Docker ID and both owned labels
+before force-removing that exact generation. It survives the web worker and
+its cgroup. Repeated pauses and child borrowing do not reset the deadline.
+Pi, read-only Git verification and unscoped development containers retain their
+existing lifecycles. No new daemon, durable store or scheduler is introduced.
+
+The host requires systemd-run/systemctl user-manager access and Docker CLI
+authority. System-service environments need not contain session bus variables:
+the helper explicitly selects the current UID's /run/user/<uid>/bus. Timer-arm
+failure invokes existing confirmed teardown before a backend can be returned.
+Unsupported hosts fail closed. Transient Docker failure retains the host unit's
+removal retry; already-removed generations converge successfully. Normal stop
+proof cancels the exact unit best effort, after the generation is stopped.
+
+On terminal queue-entry failure, only a captured pending resume's same-work
+paused session and exact generation are cleaned, under its thread gate. A
+skipped duplicate, replacement object, newer logical work or active shared
+child must not be stopped by that stale receipt. Unconfirmed teardown retains
+the existing tracked obligation and reports an honest error.
+
+* Validation
+An isolated generation from the exact production image expires while paused
+after its arming worker exits. Deterministic controls cover immutable IDs,
+owned-label rejection, normal-removal races, Docker failure, original deadline,
+failed-arm teardown, browserless managed execution and real queue timeout.
+The existing matched N3/N5/N10 browser panel is retained: these host cleanup
+repairs change no prompts, tools, fixtures, or model pass oracles.
+
+* Historical supersessions
+This amendment replaces only the three-hour-expiry assumption in
+=2026-11-12-browser-shared-execution.org=, section =Git and terminal boundaries=:
+PID 1 sleep cannot remove a Docker-paused generation. The host timer now owns
+that bound; the shared restricted-container design and authority boundaries
+remain in force.

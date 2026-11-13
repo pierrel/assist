@@ -3528,6 +3528,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     queue_handle = None
     hold_drained = False
     keep_browser = False
+    queued_browser = None
     decision_key = (_run.dispatch_key or "") if _run is not None else ""
     decision_kind = "reply" if decision_key.startswith("reply-approval:") else None
 
@@ -3558,10 +3559,15 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             _set_status(tid, "queued", **pending_kwargs)
 
     try:
+        if (_run is not None and _run.resume
+                and _runs().get(tid, _run.id).status == "pending"):
+            candidate = BrowserManager.current_session(tid)
+            if candidate is not None and candidate.paused and candidate.work_id == _run.work_id:
+                queued_browser = (candidate, candidate.sandbox_backend.container)
         # Start containers only after acquiring the queue. A live browser's
         # container is frozen across fairness yields, then reused by the same
-        # admitted logical turn. The existing 3h wall-clock orphan TTL remains
-        # an infrastructure bound, including time spent frozen in the queue.
+        # admitted logical turn. Its host systemd timer enforces the original
+        # creation + 3h deadline, including time frozen in the queue.
         #
         # `chat.message()` below tries to acquire the queue again
         # internally; the reentrant fast path (same thread_id + same
@@ -4225,6 +4231,22 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # observer fires post-release, exactly like the normal terminal exits).
         pass
     except Exception as e:
+        # Queue entry can fail before the normal retained-session callback exists.
+        if queue_handle is None and queued_browser is not None:
+            captured, container = queued_browser
+            try:
+                with BrowserManager.bounded_thread_gate(tid):
+                    if (BrowserManager.current_session(tid) is captured and captured.paused
+                            and captured.work_id == _run.work_id
+                            and captured.sandbox_generation == container.id):
+                        try:
+                            BrowserManager.cleanup(tid, captured)
+                        finally:
+                            SandboxManager.cleanup(captured.work_dir, container)
+            except Exception:
+                logging.error("paused queue failure teardown unconfirmed for %s", tid,
+                              exc_info=True)
+                e = RuntimeError(str(e) + "; paused sandbox teardown is unconfirmed")
         # A terminal tail failure must not report a stale ready state; reset so
         # the observer reports the
         # authoritative "error", never a stale "ready", when that tail fails. A

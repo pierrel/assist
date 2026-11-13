@@ -44,6 +44,8 @@ def confirm_generation_stopped(container_id: str) -> None:
         if (inspected.returncode != 0 and
                 (b"no such object" in inspected.stderr.lower()
                  or b"no such container" in inspected.stderr.lower())):
+            from assist.sandbox_expiry import cancel
+            cancel(container_id)
             return
         time.sleep(0.05)
     raise RuntimeError("sandbox generation teardown is unconfirmed")
@@ -624,8 +626,8 @@ class SandboxManager:
         # means teardown did not complete or could not be confirmed. Reap
         # that stale container before creating a fresh one — the registry is
         # keyed by work_dir, so creating without reaping would overwrite the
-        # reference and orphan it (the 3h backstop TTL would eventually catch
-        # it, but reaping now is immediate).
+        # reference and orphan it. Stop confirmation here is immediate; managed
+        # ordinary execution also has an independent host deadline.
         from assist.browser import authority
         from assist.browser.manager import BrowserManager
 
@@ -796,6 +798,7 @@ class SandboxManager:
                     with authority.fence(threads_root, thread_id) as state:
                         state.clear(owner)
                 raise
+            timed_execution = thread_scope is not None and include_egress_approvals
             container = client.containers.run(
                 SANDBOX_IMAGE,
                 detach=True,
@@ -808,7 +811,8 @@ class SandboxManager:
                 working_dir="/workspace",
                 stdin_open=True,
                 tty=False,
-                labels={"assist.sandbox": "true"},
+                labels={"assist.sandbox": "true", **(
+                    {"assist.turn-expiry": "host-3h-v1"} if timed_execution else {})},
                 network=EGRESS_NETWORK,
                 environment=sandbox_env,
                 **browser_options,
@@ -820,6 +824,9 @@ class SandboxManager:
             logger.info("Started sandbox container %s for %s", container.id[:12], work_dir)
             cls._containers[work_dir] = container
             try:
+                if timed_execution:
+                    from assist.sandbox_expiry import arm
+                    arm(container.id)
                 cls._record_egress_client(
                     client, container, work_dir,
                     kind="sandbox" if include_egress_approvals else "pi")
@@ -973,6 +980,8 @@ class SandboxManager:
             expected_container.wait(timeout=10)
         except NotFound:
             pass  # Auto-removal is also proof that this exact generation exited.
+        from assist.sandbox_expiry import cancel
+        cancel(expected_container.id)
         if cls._containers.get(work_dir) is not expected_container:
             raise RuntimeError("Git sandbox generation changed during teardown")
         scoped_owner = cls._generation_owners.get(expected_container.id)
@@ -1034,7 +1043,8 @@ class SandboxManager:
         crash ``_containers`` is empty, but the containers survive — and a
         ``docker exec``'d tool command keeps running inside one, mutating the
         host-bind-mounted /workspace that a recovery resume's FRESH container
-        mounts too, for up to the 3h backstop TTL. Lifespan startup completes
+        mounts too. Managed ordinary generations have a host deadline, but
+        legacy generations may have only PID 1's running-time sleep. Startup completes
         this proof before recovery dispatch or listener admission.
 
         Scoped to containers whose /workspace bind-mount lives under
