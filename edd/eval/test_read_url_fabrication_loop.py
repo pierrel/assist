@@ -54,9 +54,13 @@ _reads: Counter = Counter()
 class _Resp404:
     status_code = 404
     text = "Not Found"
+    headers = {"Content-Type": "text/html"}
 
     def raise_for_status(self):
         raise requests.exceptions.HTTPError("404 Client Error: Not Found for url")
+
+    def close(self):
+        pass
 
 
 def _mock_get(url, **kw):

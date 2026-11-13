@@ -117,7 +117,9 @@ class _MockSiteBackend(FilesystemBackend, SandboxBackendProtocol):
 
 class _FakeResp:
     def __init__(self, text): self.text, self.status_code = text, 200
+    headers = {"Content-Type": "text/html"}
     def raise_for_status(self): pass
+    def close(self): pass
 
 
 def _mock_requests_get(url, **kwargs):

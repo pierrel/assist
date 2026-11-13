@@ -1818,6 +1818,7 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "2adcfe28db08132dd20a8f37cecfeb303605be6d9ba0378db78a4b239c246eb1",
         "5a1e784f8c29d0b5c3e291da6490fff8a78595355b478806a5025cf9efc25e58",
         "fc494968b68f77a2099f8850ccfc6bd9d466ca10e56ccac3c7a0d2d524d81ffa",
+        "b8148c39cd0fb4117668d7f421e6837ceb3e186940ce73925c5448ce401256eb",
     },
     "assist/templates/receptionist_system.md.j2": {
         "f2bfbc35fb540f64c385b74c7bf590517b80bc5ee9abd660eb3ad736bb3adb8e",
@@ -2014,7 +2015,7 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "propose_region_download": {"638cb587cde24979bcd6ee36a7169d8b61bec09afd2ab7adf2afecb3f1695d58"},
     "quiet": {"37edd06eeaad498ac37a8509d6dfe30bb094bed2aa71e858f45b4990445bb715"},
     "read_file": {"2e139ac315b65f5b6614591642b26defae959ab6878fff990f26f0b997feb5af"},
-    "read_url": {"a4e5eae871d9956ee0227f48f8e86eb1c96b1740cb73a7e1a1e57a8cfae18716"},
+    "read_url": {"3e240a25237877389a37d1ee2f23f8f2d164337f85fae8d28b5e736b5be31905"},
     "remove_allowed_host": {"4bc5319afb9de4381fdd059f5bb35034caccacee5eb52b7443a6af2c27ed0498"},
     "request_egress": {"84fdeccfd7466d726247ecc6c482c1bded92bf33eb54a7ce137cd42c233c35b4"},
     "resume_schedule": {"884f79fb96c7e374a2e204ed9f00203243607a71a1440a954936a0516a612183"},
@@ -2161,7 +2162,7 @@ _TOOL_RESULT_METADATA = {
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "3fdc2a14548f6c69e27018545300de7d69f0b3c0e8b3f57b6012fce77a9ae955"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "ac473b36ffc181f8d05bef48d53c33b29131c170a37a97eed1150630bec52a1d"
+    "41499afdcba05892541ae9d8ff1140885e8348fd0cb1249abce6d2adf74c1538"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
