@@ -42,6 +42,7 @@ _PROMPT = ("I'm evaluating the Helio product line. Tell me about each tier — A
 
 
 class _Resp:
+    headers = {"Content-Type": "text/html"}
     def __init__(self, *, json_payload=None, text=""):
         self._json, self.text, self.status_code = json_payload, text, 200
 
@@ -49,6 +50,9 @@ class _Resp:
         return self._json
 
     def raise_for_status(self):
+        pass
+
+    def close(self):
         pass
 
 

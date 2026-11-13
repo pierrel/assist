@@ -1661,8 +1661,12 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
             status_code = 200
             text = ("<main>HoloBeam 4K projector: $899. "
                     "Shipping and tax are calculated at checkout.</main>")
+            headers = {"Content-Type": "text/html"}
 
             def raise_for_status(self):
+                pass
+
+            def close(self):
                 pass
 
             def json(self):
