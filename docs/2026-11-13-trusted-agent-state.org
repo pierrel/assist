@@ -1,0 +1,47 @@
+#+title: Trusted children share persistent agent files
+#+date: 2026-11-13
+
+* Problem and decision
+Parents could access =/agent= only through host-routed file tools, while native
+shell commands and trusted children could not see the same files. Pierre asked
+to retain the persistent mount and remove child-only filesystem separation.
+Children share the agent environment; host isolation and existing browser,
+approval, cancellation, Git and expiry boundaries remain.
+
+* Evidence
+The actual managed Docker factory discarded the supplied agent directory.
+In two fresh isolated generations, shell reads failed and file tools resolved
+the path under =/workspace/agent= instead. Restoring the existing mount let the
+actual parent/delegate/research/context factories use the files, and a later
+generation read child-written state. The real scheduler/Chromium regression
+also preserves a filled page across queued child execution and submits once.
+These are deterministic runtime checks, not local-model behavior trials.
+
+* Shared filesystem and remaining boundaries
+Ordinary managed execution mounts the existing thread-owned agent directory.
+Docker file tools and shell commands use that native path. Research's sibling
+backend preserves the mount capability while retaining its references default
+and report cleanup. Parent and children use the same ordinary execution UID.
+The directory is made mode 0700 before startup because the separate browser
+worker UID must not read mounted agent state. No host application environment,
+Docker socket or host authority directory is added to the container.
+
+Filesystem sharing does not change each role's prompt or tools. Main-agent
+thread-state instructions remain main-owned; a child gets its self-contained
+task and may read/write shared files normally. Context/critique retain their
+read-only discovery contract because their rollback assumes no writes. Other
+shell-capable delegates use the native mount. No child filesystem namespace or
+host-only parent file route is added. Local non-Docker mode retains its virtual
+file mapping; it does not create a privileged host-wide =/agent= mount.
+
+The agent directory remains outside Git and renderable scratch, persists across
+container generations and is deleted with its thread. Existing user-event and
+work ownership, full freeze for unrelated turns, exact browser resume, stop-all-
+writers-before-host-Git, deferred child publication and cancellation recovery
+remain unchanged. The original-creation host expiry is not reset.
+
+* Historical supersessions
+This replaces the parent-only agent-state separation in
+=2026-11-12-browser-shared-execution.org=, section =Ownership and privacy=.
+The shared-container and host-authority design remain; trusted children now
+share persistent agent files natively rather than being excluded from them.

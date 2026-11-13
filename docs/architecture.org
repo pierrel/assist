@@ -106,10 +106,12 @@ in both views. An ID shown in only one view keeps that meaning.
   exact host/port grants.
 - *C10 Execution sandbox.* [[file:../assist/sandbox.py][DockerSandboxBackend]]
   sends file and shell tools to one restricted container shared by a logical
-  parent turn and its eligible children, with a bound workspace and scratch.
-  It has no private =/agent= mount or generic application environment. Visible
-  parent file tools reach private state through C6's host-side composite route;
-  child file and shell tools receive neither that route nor browser tools.
+  parent turn and its eligible children, with a bound workspace, scratch and
+  persistent =/agent= state. Parent and trusted child file/shell tools use the
+  same native mounts; no parent-only host route exists in Docker mode.
+  The =/agent= directory is mode 0700 for their shared execution UID, so the
+  separate browser-worker UID cannot traverse it. Generic application
+  environment and browser tools remain outside child execution.
   [[file:../assist/sandbox_manager.py][SandboxManager]] creates and cleans it.
   Non-Git web work can fall back to a host backend when Docker is unavailable;
   Git-bound turns fail closed. The CLI is host-backed.
@@ -213,8 +215,11 @@ agent retrieves the result with =get_async_task_result=.
   orchestration]], [[file:../assist/skills/][shared skills]], and any present
   domain or web-supplied sources. The catalog is not the full set of skill bodies.
 - *C18 Context.* [[file:../assist/middleware/memory_middleware.py][Memory
-  middleware]] reloads repository =AGENTS.md= and, when private thread state
-  exists, host-routed =/agent/memory.md= each turn. [[file:../assist/middleware/context_rider_middleware.py][The
+  middleware]] reloads repository =AGENTS.md= and, for a main thread with
+  persistent state, native =/agent/memory.md= each turn. Local non-Docker mode
+  retains its virtual file route. Trusted children can read/write shared files
+  through their existing role tools; their task prompts do not inherit the
+  parent's thread-state policy. [[file:../assist/middleware/context_rider_middleware.py][The
   context rider]] adds current time context for the model call when supplied;
   it is not checkpointed as conversation history. Conversation messages and
   graph checkpoints belong to C5/C9.
@@ -301,8 +306,9 @@ after the original user turn has ended.
   regression]], [[file:../tests/test_event_late_replay.py][late replay test]]
   and [[file:../tests/test_thread_queue.py][cap test]] cover the handoff. C8
   still owns Git, sandbox and browser effects; execution shares that one model
-  slot. C6 routes parent-private state outside shared execution, and C7 borrows
-  the active parent's restricted generation without child publication.
+  slot. C7 borrows the active parent's restricted generation, including native
+  persistent =/agent= files, without separate child publication. Host authority
+  files and the separate browser-worker UID remain outside that shared trust.
 - For browser continuity, follow [[file:../assist/browser/manager.py][=pause=
   and =resume_session=]] and [[file:../manage/web/threads.py][=_process_message=
   and =_drain_held_browser_events=]]. The integrated fairness test exercises

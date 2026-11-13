@@ -237,6 +237,10 @@ def test_browser_form_survives_competing_thread_yield(
     def backend(tid, **kwargs):
         if real_browser:
             import docker
+            agent_dir = root / (tid + "-agent")
+            agent_dir.mkdir(exist_ok=True, mode=0o700)
+            if tid == first_tid:
+                (agent_dir / "memory.md").write_text("SHARED_AGENT_CANARY\n")
             container = docker.from_env().containers.run(
                 os.environ["ASSIST_BROWSER_FAIRNESS_TEST_IMAGE"], detach=True,
                 remove=False, network_mode="none", user="0:0",
@@ -247,7 +251,8 @@ def test_browser_form_survives_competing_thread_yield(
                              "BROWSER_DOWNLOAD_DIR": "/downloads"},
                 volumes={str(Path(__file__).resolve().parents[1]):
                          {"bind": "/candidate", "mode": "ro"},
-                         str(root / tid): {"bind": "/workspace", "mode": "rw"}})
+                         str(root / tid): {"bind": "/workspace", "mode": "rw"},
+                         str(agent_dir): {"bind": "/agent", "mode": "rw"}})
             created.append(container)
             generation = container.id
             deadline = time.monotonic() + 5
@@ -275,7 +280,7 @@ def test_browser_form_survives_competing_thread_yield(
             state.add_generation(run.id, generation)
         if real_browser:
             from assist.sandbox import DockerSandboxBackend
-            result = DockerSandboxBackend(container)
+            result = DockerSandboxBackend(container, native_agent_dir=True)
             monkeypatch.setattr(result, "_proxy_logs_since", lambda *_a: None)
             return result
         return SimpleNamespace(container=container)
@@ -368,9 +373,9 @@ def test_browser_form_survives_competing_thread_yield(
                         assert self.sandbox.write("/workspace/child-result.txt", "child findings").error is None
                         readback = self.sandbox.read("/workspace/child-result.txt")
                         assert readback.error is None and "child findings" in str(readback.file_data)
-                        private = self.sandbox.execute("test ! -e /agent/memory.md")
-                        assert private.exit_code == 0
-                        assert "PARENT_PRIVATE_CANARY" not in str(self.sandbox.read("/agent/memory.md"))
+                        assert "SHARED_AGENT_CANARY" in self.sandbox.execute("cat /agent/memory.md").output
+                        assert self.sandbox.write("/agent/child-note.md", "CHILD_AGENT_NOTE").error is None
+                        assert self.sandbox.execute("printf 'CHILD_APPEND\\n' >> /agent/memory.md").exit_code == 0
                     else:
                         assert counter.read_text() == before
                 return "child findings" if same_parent_child else "short answer"
@@ -393,6 +398,9 @@ def test_browser_form_survives_competing_thread_yield(
 
         def resume(self):
             calls.append("resume/submit")
+            if real_browser and same_parent_child:
+                assert "CHILD_AGENT_NOTE" in self.sandbox.execute("cat /agent/child-note.md").output
+                assert "CHILD_APPEND" in str(self.sandbox.read("/agent/memory.md").file_data)
             self.invoke("browser_act", page_id=observation["page_id"],
                         snapshot_id=observation["snapshot_id"], action="click",
                         target={"role": "button", "name": "SEARCH"})
@@ -415,9 +423,6 @@ def test_browser_form_survives_competing_thread_yield(
             second_tid, "delegate-agent", "Read the input and write findings", mode="child",
             parent_thread_id=first_tid, parent_run_id=first.id, dispatch_key="synthetic-child")
         (root / first_tid / "allowed-input.txt").write_text("allowed child input")
-        private_dir = root / "private-agent"
-        private_dir.mkdir()
-        (private_dir / "memory.md").write_text("PARENT_PRIVATE_CANARY")
     else:
         second = threads._create_run(second_tid, "Quick question", user_origin=True)
     original_execute = threads._execute_run
@@ -465,7 +470,8 @@ def test_browser_form_survives_competing_thread_yield(
                 print({"shared_container": created[0].id,
                        "page_id": observation["page_id"], "child_run": second.id,
                        "child_status": child.status, "submissions": 1,
-                       "private_state_readable": False})
+                       "shared_agent_state_readable": True,
+                       "child_agent_write_persisted": True})
         else:
             assert sum(worker["submitted"] for worker in workers.values()) == 1
         assert len(workers) == (1 if same_parent_child else 2)

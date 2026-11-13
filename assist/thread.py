@@ -188,12 +188,11 @@ class Thread:
         runs. It is mutually exclusive with `spec`; ordinary embedders use the
         single `AgentSpec` declaration surface.
 
-        Passing ``agent_dir`` enables per-thread private working state. Passing
+        Passing ``agent_dir`` enables per-thread persistent working state. Passing
         ``scratch_dir`` maps persistent private scratch to ``/tmp`` when this
-        local Thread has no Docker sandbox. ``agent_dir`` stays host-routed with
-        managed Docker execution too. Both are per-instance wiring, not
-        part of the reusable ``AgentSpec`` declaration; the web composition
-        passes them only to visible main agents.
+        local Thread has no Docker sandbox. Managed parents and trusted children
+        instead use the native persistent ``/agent`` mount. Both arguments are
+        per-instance wiring, not part of the reusable ``AgentSpec`` declaration.
 
         ``thread_datastore_path`` supplies the host-owned record store used to
         resolve source references before replies are streamed or checkpointed.

@@ -1333,16 +1333,14 @@ def _invoke_web(trace: CensusTrace, root: Path, *, full: bool,
     sandbox_root = root / name / "sandbox"
     sandbox_root.mkdir(parents=True)
     sandbox = SyntheticSandbox(str(sandbox_root))
-    # Managed execution is shared without a private mount; only the visible
-    # parent's composition adds its host-routed private file tools.
-    sandbox.native_agent_dir = False
+    # Managed execution exposes the same native agent mount to trusted children.
     configurable = None
     if full and not delegate:
         (sandbox_root / "workspace").mkdir()
         (sandbox_root / "workspace" / "AGENTS.md").write_text(
             "SYNTHETIC_REPOSITORY_MEMORY\n", encoding="utf-8")
-        agent_dir = Path(manager.thread_agent_dir(tid))
-        agent_dir.mkdir(parents=True)
+        agent_dir = sandbox_root / "agent"
+        agent_dir.mkdir()
         (agent_dir / "memory.md").write_text(
             "SYNTHETIC_THREAD_MEMORY\n", encoding="utf-8")
         _write_skill(

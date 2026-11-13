@@ -610,8 +610,8 @@ class SandboxManager:
         """Create one per-turn sandbox from a named authority profile.
 
         Managed web execution and Pi preview omit generic application
-        environment and private agent mounts. Ordinary web execution retains
-        its egress approvals; Pi uses its separate no-grant profile. Scoped
+        environment. Ordinary web execution mounts persistent agent state and
+        retains egress approvals; Pi has no agent mount or grants. Scoped
         authority records ownership before Docker create;
         an optional legacy ``before_start`` callback runs there too. A prior
         managed generation is reconciled before replacement.
@@ -767,6 +767,11 @@ class SandboxManager:
                     os.chown(agent_dir, st.st_uid, st.st_gid)
                 except OSError:
                     pass
+                if os.stat(agent_dir).st_uid != st.st_uid:
+                    raise RuntimeError("agent directory must be owned by the sandbox user")
+                # Parent and trusted children use the workspace UID. The
+                # separate browser UID must not traverse this mounted state.
+                os.chmod(agent_dir, 0o700)
                 volumes[agent_dir] = {
                     "bind": "/agent",
                     "mode": "rw",
@@ -848,7 +853,7 @@ class SandboxManager:
                             owner_run_id: str | None = None):
         """Return execution with ordinary egress, restricted for managed web work."""
         return cls._get_sandbox_backend(
-            work_dir, tz, None if thread_scope is not None else agent_dir,
+            work_dir, tz, agent_dir,
             include_assist_env=thread_scope is None,
             include_egress_approvals=True, before_start=before_start,
             browser_capable=browser_capable,
