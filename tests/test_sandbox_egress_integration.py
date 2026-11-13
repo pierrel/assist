@@ -158,10 +158,10 @@ class TestSandboxEgressEndToEnd(unittest.TestCase):
         )
 
 
-class TestThreadMemorySandboxContainment(unittest.TestCase):
-    """A child container cannot read the parent's private bind mount."""
+class TestExplicitAgentMountContainment(unittest.TestCase):
+    """An independent unmounted container cannot read a declared agent mount."""
 
-    def test_parent_file_and_shell_access_child_has_neither(self):
+    def test_mounted_file_and_shell_access_unmounted_container_has_neither(self):
         thread_dir = tempfile.mkdtemp(prefix="agent-memory-e2e-")
         work_dir = os.path.join(thread_dir, "domain")
         agent_dir = os.path.join(thread_dir, "agent")

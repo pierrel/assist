@@ -44,6 +44,8 @@ def confirm_generation_stopped(container_id: str) -> None:
         if (inspected.returncode != 0 and
                 (b"no such object" in inspected.stderr.lower()
                  or b"no such container" in inspected.stderr.lower())):
+            from assist.sandbox_expiry import cancel
+            cancel(container_id)
             return
         time.sleep(0.05)
     raise RuntimeError("sandbox generation teardown is unconfirmed")
@@ -607,10 +609,10 @@ class SandboxManager:
                                 owner_run_id: str | None = None):
         """Create one per-turn sandbox from a named authority profile.
 
-        ``include_assist_env`` is the line between ordinary Deep Agents work and
-        Pi preview work. A Pi sandbox retains Docker's workspace and egress
-        containment but receives no generic application environment or private
-        agent mount. Scoped authority records ownership before Docker create;
+        Managed web execution and Pi preview omit generic application
+        environment. Ordinary web execution mounts persistent agent state and
+        retains egress approvals; Pi has no agent mount or grants. Scoped
+        authority records ownership before Docker create;
         an optional legacy ``before_start`` callback runs there too. A prior
         managed generation is reconciled before replacement.
         Read-only Git verification omits persistent scratch/private mounts, so
@@ -618,13 +620,14 @@ class SandboxManager:
         ``thread_scope`` binds managed web/Pi callers to their
         exact thread workspace; generic callers never infer authority from a path.
         """
-        # Never reuse container generations. The web layer tears each down at
-        # its phase boundary (manage/web/threads.py); a registry entry here
+        # This creation path never reuses container generations. The web layer
+        # reuses a frozen browser generation directly across fairness slices;
+        # all other phase boundaries tear it down. A registry entry here
         # means teardown did not complete or could not be confirmed. Reap
         # that stale container before creating a fresh one — the registry is
         # keyed by work_dir, so creating without reaping would overwrite the
-        # reference and orphan it (the 3h backstop TTL would eventually catch
-        # it, but reaping now is immediate).
+        # reference and orphan it. Stop confirmation here is immediate; managed
+        # ordinary execution also has an independent host deadline.
         from assist.browser import authority
         from assist.browser.manager import BrowserManager
 
@@ -764,6 +767,11 @@ class SandboxManager:
                     os.chown(agent_dir, st.st_uid, st.st_gid)
                 except OSError:
                     pass
+                if os.stat(agent_dir).st_uid != st.st_uid:
+                    raise RuntimeError("agent directory must be owned by the sandbox user")
+                # Parent and trusted children use the workspace UID. The
+                # separate browser UID must not traverse this mounted state.
+                os.chmod(agent_dir, 0o700)
                 volumes[agent_dir] = {
                     "bind": "/agent",
                     "mode": "rw",
@@ -795,6 +803,7 @@ class SandboxManager:
                     with authority.fence(threads_root, thread_id) as state:
                         state.clear(owner)
                 raise
+            timed_execution = thread_scope is not None and include_egress_approvals
             container = client.containers.run(
                 SANDBOX_IMAGE,
                 detach=True,
@@ -807,7 +816,8 @@ class SandboxManager:
                 working_dir="/workspace",
                 stdin_open=True,
                 tty=False,
-                labels={"assist.sandbox": "true"},
+                labels={"assist.sandbox": "true", **(
+                    {"assist.turn-expiry": "host-3h-v1"} if timed_execution else {})},
                 network=EGRESS_NETWORK,
                 environment=sandbox_env,
                 **browser_options,
@@ -819,6 +829,9 @@ class SandboxManager:
             logger.info("Started sandbox container %s for %s", container.id[:12], work_dir)
             cls._containers[work_dir] = container
             try:
+                if timed_execution:
+                    from assist.sandbox_expiry import arm
+                    arm(container.id)
                 cls._record_egress_client(
                     client, container, work_dir,
                     kind="sandbox" if include_egress_approvals else "pi")
@@ -838,9 +851,10 @@ class SandboxManager:
                             before_start=None, browser_capable: bool = False,
                             thread_scope: tuple[str, str] | None = None,
                             owner_run_id: str | None = None):
-        """Return the ordinary sandbox; managed callers bind its thread authority."""
+        """Return execution with ordinary egress, restricted for managed web work."""
         return cls._get_sandbox_backend(
-            work_dir, tz, agent_dir, include_assist_env=True,
+            work_dir, tz, agent_dir,
+            include_assist_env=thread_scope is None,
             include_egress_approvals=True, before_start=before_start,
             browser_capable=browser_capable,
             thread_scope=thread_scope, owner_run_id=owner_run_id)
@@ -971,6 +985,8 @@ class SandboxManager:
             expected_container.wait(timeout=10)
         except NotFound:
             pass  # Auto-removal is also proof that this exact generation exited.
+        from assist.sandbox_expiry import cancel
+        cancel(expected_container.id)
         if cls._containers.get(work_dir) is not expected_container:
             raise RuntimeError("Git sandbox generation changed during teardown")
         scoped_owner = cls._generation_owners.get(expected_container.id)
@@ -1032,7 +1048,8 @@ class SandboxManager:
         crash ``_containers`` is empty, but the containers survive — and a
         ``docker exec``'d tool command keeps running inside one, mutating the
         host-bind-mounted /workspace that a recovery resume's FRESH container
-        mounts too, for up to the 3h backstop TTL. Lifespan startup completes
+        mounts too. Managed ordinary generations have a host deadline, but
+        legacy generations may have only PID 1's running-time sleep. Startup completes
         this proof before recovery dispatch or listener admission.
 
         Scoped to containers whose /workspace bind-mount lives under

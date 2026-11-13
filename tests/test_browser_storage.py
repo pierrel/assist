@@ -1,9 +1,10 @@
 """Cross-turn auth state stays private, bounded and generation-owned."""
 import os
+import json
 
 import pytest
 
-from assist.browser import authority, storage
+from assist.browser import authority, manager as browser, storage
 
 
 @pytest.fixture
@@ -40,6 +41,29 @@ def test_failed_capture_can_discard_only_its_owned_snapshot(owner):
     assert storage.load(root, thread_id) == _state()
     storage.discard(root, thread_id, "run", "sandbox-generation")
     assert storage.load(root, thread_id) is None
+
+
+@pytest.mark.parametrize("response", ["error", "transport", "empty", "fresh", "no-context"])
+def test_capture_replaces_or_discards_stale_auth_on_worker_outcome(
+        owner, monkeypatch, response):
+    root, thread_id = owner
+    old = _state("old-auth")
+    fresh = {"cookies": [], "origins": []} if response == "empty" else _state("fresh")
+    storage.save(root, thread_id, "run", "sandbox-generation", old)
+    session = browser.BrowserSession(thread_id, "run", root, root, None)
+    session.identity = browser._ContainerIdentity(root, "172.20.0.9", "sandbox-generation")
+
+    def capture(*_args, **_kwargs):
+        if response == "transport":
+            raise browser.BrowserUnavailable("worker transport timed out")
+        if response == "error":
+            return b'{"error":"browser storage exceeds limit"}'
+        return json.dumps({"result": None if response == "no-context" else fresh}).encode()
+
+    monkeypatch.setattr(browser, "_docker_exec", capture)
+    session._capture_storage()
+    expected = None if response in {"error", "transport"} else old if response == "no-context" else fresh
+    assert storage.load(root, thread_id) == expected
 
 
 def test_storage_rejects_unsafe_file_and_oversized_state(owner, tmp_path):

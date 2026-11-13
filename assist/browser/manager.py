@@ -212,11 +212,13 @@ class BrowserSession:
                  threads_root: str, user_request: BrowserUserRequest | None,
                  *, work_id: str | None = None,
                  sandbox_generation: str | None = None,
+                 sandbox_backend=None,
                  run_service: RunService | None = None):
         self.thread_id = thread_id
         self.run_id = run_id
         self.work_dir = work_dir
         self.sandbox_generation = sandbox_generation
+        self.sandbox_backend = sandbox_backend
         self.threads_root = threads_root
         self.user_request = user_request
         self.work_id = work_id
@@ -228,6 +230,7 @@ class BrowserSession:
         self.identity: _ContainerIdentity | None = None
         self.startup_uncertain = False
         self.closed = False
+        self.paused = False
         self._lock = threading.RLock()
 
     def _start(self):
@@ -309,6 +312,13 @@ class BrowserSession:
 
     def _latest_direct_sequence(self) -> int:
         runs = self.run_service.list(self.thread_id)
+        if self.work_id is not None:
+            work = [run for run in runs if run.work_id == self.work_id]
+            # Checkpoint repair can replace a cancelled slice; explicit user
+            # cancellation receipts permanently revoke the logical work.
+            if work and (work[-1].status == "cancelled"
+                         or any(run.cancel_cleanup is not None for run in work)):
+                raise BrowserUnavailable("browser work was cancelled")
         if any(run.status == "revocation_pending" for run in runs):
             raise BrowserUnavailable("newer user message revoked browser startup")
         return max((run.admission_sequence for run in runs
@@ -323,8 +333,8 @@ class BrowserSession:
             state.begin(self.run_id, sequence)
 
     def _fence_command(self) -> None:
-        sequence = self._latest_direct_sequence()
         with authority.fence(self.threads_root, self.thread_id) as state:
+            sequence = self._latest_direct_sequence()
             lease = state.lease
             if (lease is None or lease["owner_run_id"] != self.run_id
                     or lease["sequence"] != sequence
@@ -340,7 +350,7 @@ class BrowserSession:
                 self._stop()
 
     def _capture_storage(self):
-        if self.identity is None:
+        if self.identity is None or self.paused:
             return
         from assist.browser import storage
         try:
@@ -349,6 +359,8 @@ class BrowserSession:
             response = json.loads(_docker_exec(
                 self.identity.generation, command,
                 timeout=5, in_sandbox=True))
+            if "error" in response:
+                raise BrowserUnavailable("browser auth state capture failed")
             if "result" in response and response["result"] is not None:
                 storage.save(self.threads_root, self.thread_id, self.run_id,
                              self.identity.generation, response["result"])
@@ -393,10 +405,20 @@ class BrowserSession:
                 raise BrowserUnavailable("browser session cannot adopt this request")
             self.user_request = request
 
+    def pause(self):
+        """Attempt private storage capture, then freeze the exact container."""
+        with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
+            self._capture_storage()
+            _bounded_cli(["docker", "pause", self.sandbox_generation],
+                         limit=4096, timeout=10)
+            self.paused = True
+
     def command(self, operation: str, **args):
         with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
             if self.closed:
-                raise BrowserUnavailable("browser Run has ended")
+                raise BrowserUnavailable("browser turn has ended")
+            if self.paused:
+                raise BrowserUnavailable("browser work is paused by the scheduler")
             if self.startup_uncertain:
                 raise BrowserUnavailable(
                     "browser startup outcome is unconfirmed for this Run")
@@ -508,6 +530,40 @@ class BrowserManager:
             return cls._sessions.get(thread_id)
 
     @classmethod
+    def resume_session(cls, thread_id: str, work_id: str,
+                       request: BrowserUserRequest | None) -> BrowserSession | None:
+        """Reuse a retained session/backend for the same admitted logical turn."""
+        with cls.bounded_thread_gate(thread_id):
+            session = cls.current_session(thread_id)
+            if session is None:
+                return None
+            with session._lock:
+                if (session.closed
+                        or session.sandbox_backend is None
+                        or session.work_id != work_id
+                        or session.user_request != request):
+                    cls.cleanup(thread_id, session)
+                    return None
+                session._fence_command()
+                container = SandboxManager.current_container(session.work_dir)
+                if container is None or container.id != session.sandbox_generation:
+                    raise BrowserUnavailable("paused browser sandbox generation changed")
+                if not session.paused:
+                    raise BrowserUnavailable("browser sandbox was not paused")
+                try:
+                    _bounded_cli(["docker", "unpause", session.sandbox_generation],
+                                 limit=4096, timeout=10)
+                except Exception:
+                    # Unpause may have taken effect before its acknowledgment.
+                    try:
+                        cls.cleanup(thread_id, session)
+                    finally:
+                        SandboxManager.cleanup(session.work_dir, container)
+                    raise
+                session.paused = False
+                return session
+
+    @classmethod
     def confirm_generation_stopped(cls, generation: str) -> None:
         _kill_container_confirmed(generation)
 
@@ -565,8 +621,11 @@ class BrowserManager:
                             lease is not None
                             and lease["owner_run_id"] == owner_run_id
                             and generation in lease["generations"])
-                return (state.covered and admitted
-                        and not browser_records(map_dir, thread_id))
+                records = browser_records(map_dir, thread_id)
+                own_worker = owner_run_id is not None and all(
+                    record.kind == "sandbox" and record.generation == generation
+                    for record in records.values())
+                return state.covered and admitted and (not records or own_worker)
         except (OSError, RuntimeError, ValueError, TimeoutError):
             return False
 
@@ -672,10 +731,9 @@ class BrowserManager:
         with cls.bounded_thread_gate(session.thread_id):
             if not os.path.isdir(os.path.join(session.threads_root, session.thread_id)):
                 raise BrowserUnavailable("browser thread no longer exists")
-            if not cls.ready_for_browser(
-                    session.threads_root, session.thread_id,
-                    session.run_id, session.sandbox_generation):
+            if os.path.realpath(session.threads_root) not in cls._reconciled_roots:
                 raise BrowserUnavailable("browser startup reconciliation is incomplete")
+            session._fence_command()
             with cls._lock:
                 if session.thread_id in cls._sessions:
                     raise BrowserUnavailable("thread already has a browser Run")

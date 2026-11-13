@@ -13,7 +13,7 @@ digraph Boundaries {
   C8 [label="C8  Host authorities\ncontainer, browser, Git, grants"];
   C9 [label="C9  Durable thread state\nthread files + Git checkout",
       fillcolor="#fff4d7"];
-  C10 [label="C10  Execution sandbox\nper-turn container · file/shell tools",
+  C10 [label="C10  Shared execution\ntrusted parent + child · native /agent",
        fillcolor="#fff0df", color="#a46b36"];
   C11 [label="C11  Browser worker\nChromium · untrusted page content",
        fillcolor="#fff0df", color="#a46b36"];
@@ -25,17 +25,20 @@ digraph Boundaries {
        fillcolor="#f3f3f3"];
   C15 [label="C15  Network destinations\nweb pages · search · travel services",
        fillcolor="#f3f3f3"];
+  C21 [label="C21  Host user systemd\nindependent of web worker", fillcolor="#f3f3f3"];
 
   C6 -> C10 [label="file / shell tool calls"];
   C6 -> C8 [label="browser tool calls", constraint=false];
   C6 -> C12 [label="model requests"];
   C6 -> C15 [label="host tool HTTP requests"];
-  C8 -> C10 [label="create / retire container"];
+  C8 -> C10 [label="create / freeze / resume / retire"];
+  C8 -> C21 [label="original generation +3h deadline"];
+  C21 -> C10 [label="exact labelled removal; retries on daemon failure"];
   C8 -> C11 [label="browser actions + lease / teardown"];
   C8 -> C14 [label="verified Git publish"];
   C10 -> C11 [label="hosts worker"];
   C10 -> C13 [label="network requests"];
   C11 -> C13 [label="attributed page requests"];
   C13 -> C15 [label="allowed sandbox/browser requests"];
-  C10 -> C9 [label="bind-mounted workspace", style=dashed];
+  C10 -> C9 [label="workspace + persistent /agent mounts", style=dashed];
 }

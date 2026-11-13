@@ -12,13 +12,12 @@ The proxy admits a bounded browser connection burst within its existing
 shared host backoff window. Host authorization and turn ownership stay with
 their existing components.
 
-This view describes the implemented browser delta in this checkout, using the
-stable IDs in [[file:architecture.org][the main architecture map]]. Its merged
-baseline is =ecb665c6= (architecture PR308, documenting runtime =df4bb845=).
-The browser code is the reviewed =04ae3956= candidate from PR309. The current
-maintenance rebase adds architecture documentation while preserving those
-runtime bytes. A deployment can contain additional separately reviewed changes;
-this map covers the source in this branch.
+This view describes PR309's native Chromium, startup handshake and throttle
+delta, merged at =3e0941eb= against =c2d2739=. It uses the stable IDs in
+[[file:architecture.org][the main architecture map]]. That map describes later
+browser-lifetime changes and shared parent/child execution. This
+view covers the native browser's engine, control and network boundaries;
+it does not assert that later lifecycle work preserves every PR309 runtime byte.
 
 [[file:browser-site-compatibility.svg]]
 
@@ -31,10 +30,10 @@ UID and PID namespace.
 
 * Where the change lives
 
-| ID | Responsibility and code | Change in this branch |
+| ID | Responsibility and code | Native Chromium delta |
 |----+-------------------------+-----------------------|
 | C8 | [[file:../assist/browser/manager.py][BrowserSession]] and [[file:../assist/browser/turn_runtime.py][turn_runtime.launch]]; [[file:../assist/sandbox_manager.py][SandboxManager]] | Verify the exact generation and worker identity, then seal new debugging connections before returning startup success. Refresh the proxy fingerprint for the changed connection admission. |
-| C10 | [[file:../assist/sandbox_manager.py][SandboxManager]] and [[file:../dockerfiles/launch-turn-browser.py][turn launcher]] | Existing per-turn container, UID separation, private runtime and generation lifetime are retained. The sandbox already supplies full Chromium; its independent pinned shell remains for smoke checks. |
+| C10 | [[file:../assist/sandbox_manager.py][SandboxManager]] and [[file:../dockerfiles/launch-turn-browser.py][turn launcher]] | PR309 retains the containing turn sandbox, UID separation and private runtime. Later shared parent/child execution is described in the main architecture map. The sandbox supplies full Chromium; its independent pinned shell remains for smoke checks. |
 | C11 | [[file:../assist/browser/runner.py][BrowserWorker.start_engine, _start and revoke]] | Start native Chromium, attach over public CDP, keep page-context creation lazy, preserve the download export boundary, and terminate descendants on revocation. |
 | C13 | [[file:../dockerfiles/egress-proxy.py][HostThrottle, admit_host and target_policy]] and [[file:../assist/egress/client_map.py][client attribution]] | Admit up to eight browser connections in the same shared hostname window. Ordinary shell admission stays at one; destination authorization remains before connect. |
 
@@ -82,8 +81,10 @@ C10 remains the containing generation, controlled by C8.
    existing private Unix socket. Revocation closes the context, browser and
    driver, then the worker sends its reply and exits inner PID 1. That namespace
    exit kills native descendants while leaving the ordinary shell turn alive.
-   Stopping the containing C10 generation also destroys Chromium; the existing
-   common three-hour container expiry bounds a host-outage survivor.
+   Stopping the containing C10 generation also destroys Chromium. Ordinary
+   managed generations have an independent host-systemd three-hour deadline,
+   including frozen time and web-worker loss. PID 1 sleep alone bounds only a
+   running survivor; a Docker-paused generation cannot exit on that sleep.
 
 * Supporting changes to read next
 

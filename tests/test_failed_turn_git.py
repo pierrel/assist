@@ -26,6 +26,9 @@ def worker_workspace(bound_thread, monkeypatch, tmp_path):
     monkeypatch.setattr(threads, "get_cached_description", lambda _tid: "description")
     monkeypatch.setattr(threads.BrowserManager, "reconcile_startup", lambda *_args: False)
     monkeypatch.setattr(threads.BrowserManager, "cleanup", lambda *_args: None)
+    # This fixture isolates post-model Git failure preservation; shared owner
+    # admission and generation fencing have independent integration coverage.
+    monkeypatch.setattr(threads.BrowserManager, "register", lambda *_args: None)
     monkeypatch.setattr(threads, "EGRESS_STORE", None)
     stopped = []
     generation = SimpleNamespace(id="model-generation")

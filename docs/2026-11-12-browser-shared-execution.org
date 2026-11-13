@@ -1,0 +1,84 @@
+#+title: Browser continuity through shared parent and child execution
+#+date: 2026-11-12
+State: Implementing the accepted shared-container alternative
+
+* Problem and decision
+
+A browser form survived fair scheduling to an unrelated workspace, but a child
+of the same parent replaced the parent's sandbox and destroyed its page. The
+child completed successfully while the parent resumed with an invalid browser
+generation. A separate browser container would preserve the page but introduce
+another lifetime and ownership boundary.
+
+Pierre chose one shared restricted execution container for the logical parent
+turn and its child work. Keep the existing workspace, egress, browser UID and
+host-owned authority boundaries; remove child replacement and publication while
+the shared writer remains active. No pool, store, scheduler or recovery service
+is added.
+
+* Ownership and privacy
+
+The existing host session owns the exact backend, container, browser token and
+original logical work/user event. Physical Run successors reuse that owner. A
+child can borrow only when its durable parent Run has that same work and event;
+an older child's mismatch is an error before effects or replacement. Children
+keep their own checkpoints, briefs, tools and provenance configuration. They do
+not receive browser tools.
+
+Managed execution has no private =/agent= mount and inherits no generic
+=ASSIST_*= application environment. The visible parent's existing file tools
+route =/agent/= to its private host directory, including memory loading. Child
+file and shell tools have no such route or mount. Shared execution retains
+ordinary egress approvals, the browser UID boundary and sealed control channel.
+
+A fairness yield freezes the exact container. A same-parent child unpauses it
+under the existing authority/checkout fences and refreezes it before releasing
+its scopes. Parent background processes and page JavaScript also run during
+that child's slice, as expected for shared execution. An unrelated thread sees
+the whole container frozen. Newer-user, cancellation, generation and approval
+checks remain host-owned; an uncertain browser action is never replayed.
+
+* Git and terminal boundaries
+
+A borrowed child leaves intended file effects in the shared workspace and
+returns its findings without a separate credentialed Git operation. For bound
+Git work its result states that publication remains pending. The parent's
+ordinary terminal boundary first proves the shared container stopped, then
+commits and publishes through the existing Git path. No writable generation
+survives into credentialed Git.
+
+Parent errors retain files through existing failed-turn Git preservation.
+Cancellation retains local file effects; an uncommitted checkout is held by the
+next clean preflight rather than silently discarded or replayed. Publication
+failure remains a visible saved-work/reconciliation condition. A child that
+executes after the parent's lifetime has ended uses the ordinary standalone
+execution boundary; it cannot borrow a newer unrelated parent's live session.
+Approval, terminal, supersession and restart cleanup retain their existing
+page-loss boundaries. The three-hour container backstop remains an explicit
+infrastructure limit.
+
+* Acceptance evidence and review path
+
+The deterministic regression uses the actual Run and affinity queues. Its Docker
+variant opens and fills a synthetic local form, yields to a same-parent delegate,
+reads allowed input and writes/readbacks findings with real shell/file tools,
+then resumes the same page and submits once. Only one execution container is
+created. A host-private canary remains unreadable from shared execution. This
+fixture replaces engine bootstrap; separate real startup/UID/proxy checks cover
+that boundary.
+
+Additional checks cover durable child lineage after an earlier fairness resume,
+rejection of an older child, parent-only host memory routing, restricted creation
+arguments and no host Git while the shared writer exists. Temporary real Git
+repositories verify child file effects publish only after parent teardown.
+Failure and cancellation checks must retain effects without replay, and current
+architecture/comment alignment is a separate review pass.
+
+* Historical supersessions
+
+This replaces the physical-Run generation lifetime in
+[[file:2026-10-01-browser-v1-sandbox-generation-simplification.org][the October 1 browser simplification]],
+=Contract and flow= items 1–2. A logical parent's execution generation now
+survives fair-scheduler Run slices and eligible child execution. Terminal,
+approval and exact-stop requirements remain; per-child replacement and Git
+publication no longer apply while that generation is borrowed.

@@ -358,11 +358,10 @@ def create_agent(model: BaseChatModel,
     gates Assist's built-in record lookup tools; Thread sets it from its
     datastore path.
 
-    Passing ``agent_dir`` enables local-mode private state at ``/agent`` and
-    auto-loads ``/agent/memory.md``. ``scratch_dir`` maps persistent local-mode
-    scratch to ``/tmp``. A sandbox provides both through its native mounts. The
-    web composition supplies either only to visible main agents and omits them
-    for delegates and specialists.
+    A native sandbox mount or local ``agent_dir`` enables persistent state at
+    ``/agent``; main agents auto-load ``/agent/memory.md``. Managed parents and
+    trusted children share the native filesystem. Only local mode needs a host-backed
+    virtual route. ``scratch_dir`` maps persistent local-mode scratch to ``/tmp``.
 
     **Domain skills are auto-discovered** from
     ``<working_dir>/.claude/skills/`` (the agent-agnostic agentskills.io
@@ -398,9 +397,11 @@ def create_agent(model: BaseChatModel,
     async_main = not delegate and bool(spec.async_subagent_tools)
     web_quick_research = spec.web_main and spec.main_guidance_skills
     caller_research_skill = delegate
-    thread_memory_enabled = bool(
-        getattr(sandbox_backend, "native_agent_dir", False) is True
-        if sandbox_backend is not None else agent_dir is not None)
+    # Filesystem access is shared; the parent's thread-state prompt is not the
+    # delegate's task-state policy. Keep its existing repository-memory prompt.
+    thread_memory_enabled = (not delegate and (
+        (sandbox_backend is None and agent_dir is not None) or
+        getattr(sandbox_backend, "native_agent_dir", False) is True))
     mw, (retry_middle, json_validation_mw, tool_name_mw) = _hardening_middleware()
     logging_mw = ModelLoggingMiddleware(
         "delegate-agent" if delegate else "general-agent")
@@ -426,7 +427,7 @@ def create_agent(model: BaseChatModel,
     if async_main:
         extra_routes.setdefault(
             MAIN_SKILLS_ROUTE, create_skills_backend(MAIN_SKILLS_DIR))
-    if agent_dir is not None and sandbox_backend is None:
+    if sandbox_backend is None and agent_dir is not None:
         extra_routes["/agent/"] = _EmptyFileRecoveryFilesystemBackend(
             root_dir=agent_dir, virtual_mode=True)
     if scratch_dir is not None and sandbox_backend is None:
@@ -533,9 +534,10 @@ def create_agent(model: BaseChatModel,
         thread_memories_path=thread_memories_path)
 
     # ``None`` retains the legacy in-process subagents for the one-source shape.
-    # Thread-memory agents suppress them because deepagents would make the child
-    # inherit the private /agent backend. Any explicit sequence also suppresses
-    # them: web main supplies lifecycle tools, while web triage supplies none.
+    # Delegates retain their existing specialists and repository-memory prompt.
+    # Other thread-memory compositions keep their lifecycle tool shape.
+    # An explicit sequence owns dispatch: web main supplies lifecycle tools,
+    # while web triage supplies none.
     context_sub = None
     research_sub = None
     legacy_subagents = (
@@ -552,8 +554,8 @@ def create_agent(model: BaseChatModel,
                                           default_backend=spec.default_backend)
         )
 
-    # NOTE: research-agent is confined to <working_dir>/references/ via
-    # `create_references_backend` and does NOT inherit `default_backend`.
+    # NOTE: research-agent defaults report files to <working_dir>/references/
+    # and does NOT inherit `default_backend`. A native /agent mount stays shared.
     # For embedders using `default_backend` (e.g. emacsos file-chat), the
     # research-agent's report writes land on the SERVER's working_dir, not
     # the embedder's filesystem.  Acceptable v1 — research is rare and
@@ -845,12 +847,11 @@ def create_research_agent(model: BaseChatModel,
     base_mw.append(ThreadQueueMiddleware())
     base_mw.append(EmptyResponseRecoveryMiddleware())
 
-    # Confine the research agent's filesystem reach to <working_dir>/references/.
-    # The agent (and its critique/fact-check sub-sub-agents, which inherit
-    # this backend via deepagents' subagent middleware) cannot
-    # accidentally resolve paths outside the references subdirectory in
-    # normal use (local mode blocks `..` traversal; sandbox mode prepends
-    # the prefix but does not normalize, see assist/research_cleanup.py).
+    # Default report paths to <working_dir>/references/, including specialists
+    # that inherit this backend. This controls report placement and cleanup,
+    # not trusted-child permissions: a native /agent mount remains available.
+    # Local mode blocks `..`; sandbox mode prefixes relative report paths
+    # without normalizing them (see assist/research_cleanup.py).
     # Cleanup of intermediate files happens in `ReferencesCleanupRunnable`
     # outside the agent's loop.
     if sandbox_backend:
@@ -896,6 +897,7 @@ def create_research_agent(model: BaseChatModel,
             sandbox_backend.container,
             work_dir=references_path,
             strip_prefixes=("references",),
+            native_agent_dir=sandbox_backend.native_agent_dir,
         )
         backend = create_sandbox_composite_backend(references_sandbox)
     else:

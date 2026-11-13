@@ -1,9 +1,11 @@
 """Direct-message admission and crash recovery use durable browser proofs."""
+import json
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from threading import Event
 from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 import pytest
 
@@ -187,6 +189,150 @@ def test_held_message_disarms_active_browser_without_killing_shell(
         assert runs.get("t", held.id).status == "revocation_pending"
     finally:
         SandboxManager._containers.pop(work_dir, None)
+
+
+@pytest.mark.parametrize("boundary", ["new_user", "cancel"])
+@pytest.mark.parametrize("cleared", [False, True])
+def test_paused_browser_reset_proves_stop_before_releasing_work(
+        monkeypatch, admitted, boundary, cleared):
+    from assist.browser import storage
+    root, runs = admitted
+    source = runs.create("t", "general-agent", "Find a composer", user_origin=True)
+    runs.claim("t", source.id)
+    runs.transition("t", source.id, "interrupted")
+    successor = runs.create("t", "general-agent", None, work_id=source.work_id,
+                            resume=True, user_event_id=source.id)
+    work_dir = str(root / "t" / "domain")
+    container = SimpleNamespace(id="paused-generation")
+    monkeypatch.setattr(threads.MANAGER, "thread_default_working_dir", lambda _t: work_dir)
+    monkeypatch.setattr(browser.SandboxManager, "_containers", {work_dir: container})
+    session = browser.BrowserSession(
+        "t", source.id, work_dir, str(root),
+        browser.BrowserUserRequest(source.id, source.work_id, source.text,
+                                   source.admission_sequence),
+        work_id=source.work_id, sandbox_generation=container.id,
+        sandbox_backend=SimpleNamespace(container=container), run_service=runs)
+    session.identity = browser._ContainerIdentity(str(root), "172.20.0.2", container.id)
+    monkeypatch.setattr(browser.BrowserManager, "_sessions", {"t": session})
+    with authority.fence(str(root), "t") as state:
+        state.begin(source.id, source.admission_sequence)
+        state.add_generation(source.id, container.id)
+    old = {"cookies": [{"name": "session", "value": "old-auth"}], "origins": []}
+    fresh = ({"cookies": [], "origins": []} if cleared else
+             {"cookies": [{"name": "session", "value": "new-auth"}],
+              "origins": [{"origin": "https://fixture.example", "localStorage": [
+                  {"name": "draft", "value": "current"}]}]})
+    storage.save(str(root), "t", source.id, container.id, old)
+    captures = []
+    controls = []
+    def transport(_generation, payload, **_kwargs):
+        if json.loads(payload)["operation"] == "storage_state":
+            captures.append(True)
+            return json.dumps({"result": fresh}).encode()
+        return b'{"result":{}}'
+    def freeze(argv, **_kwargs):
+        controls.append(argv[1])
+        if argv[1] == "pause":
+            assert storage.load(str(root), "t") == fresh
+        return b""
+    monkeypatch.setattr(browser, "_docker_exec", transport)
+    monkeypatch.setattr(browser, "_bounded_cli", freeze)
+    session.pause()
+    assert captures == [True]
+    monkeypatch.setattr(browser, "disarm_sandbox_browser", lambda *_a: None)
+    monkeypatch.setattr(browser, "forget_client", lambda *_a: None)
+    monkeypatch.setattr(threads, "_schedule_browser_revocation_retry", lambda _t: None)
+    monkeypatch.setattr(browser.SandboxManager, "cleanup", lambda path, _c:
+                        browser.SandboxManager._containers.pop(path, None))
+    monkeypatch.setattr(phone_api, "_thread_dir", lambda _t: str(root / "t"))
+    monkeypatch.setattr(phone_api.state, "_get_status", lambda _t: {"stage": "paused"})
+    reset_errors = []
+    monkeypatch.setattr(threads, "_set_status", lambda *_a, **kwargs: reset_errors.append(kwargs))
+    monkeypatch.setattr(phone_api.RUN_STREAMS, "finish", lambda *_a: None)
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *_a: None)
+    attempts = []
+
+    def stop(generation):
+        attempts.append(generation)
+        if len(attempts) == 1:
+            raise browser.BrowserUnavailable("synthetic Docker stop failure")
+
+    monkeypatch.setattr(browser, "_kill_container_confirmed", stop)
+    if boundary == "new_user":
+        held, _ = threads._accept_message_run("t", "A different request")
+        assert held.status == "revocation_pending"
+        with pytest.raises(browser.BrowserUnavailable, match="newer user"):
+            browser.BrowserManager.resume_session("t", source.work_id, session.user_request)
+        receipt_id = held.id
+    else:
+        code, response = phone_api._cancel_logical_run("t", source.id)
+        assert code == 202 and response["outcome"] == "cancelling"
+        receipt_id = source.id
+        receipt = runs.get("t", receipt_id)
+        assert receipt.browser_cancel_reset and receipt.browser_reset_run_id == source.id
+        assert runs.get("t", successor.id).status == "cancelled"
+        with pytest.raises(browser.BrowserUnavailable, match="cancelled"):
+            session._fence_command()
+
+    assert not threads._drain_held_browser_events("t")
+    receipt = runs.get("t", receipt_id)
+    assert (receipt.status == "revocation_pending" if boundary == "new_user"
+            else receipt.cancel_cleanup == "pending")
+    assert browser.BrowserManager.current_session("t") is session
+    assert threads._drain_held_browser_events("t"), (reset_errors, runs.get("t", receipt_id))
+    receipt = runs.get("t", receipt_id)
+    assert (receipt.status == "pending" if boundary == "new_user"
+            else receipt.cancel_cleanup == "complete")
+    assert browser.BrowserManager.current_session("t") is None
+    assert browser.SandboxManager.current_container(work_dir) is None
+    assert storage.load(str(root), "t") == fresh
+    assert "unpause" not in controls
+    with authority.fence(str(root), "t") as state:
+        assert state.lease is None
+
+
+def test_new_user_admitted_before_unpause_validation_revokes_the_borrow(monkeypatch, admitted):
+    import threading
+    root, runs = admitted
+    owner = runs.create("t", "general-agent", "Current task", user_origin=True)
+    work_dir = str(root / "t" / "domain")
+    container = SimpleNamespace(id="shared-generation")
+    session = browser.BrowserSession(
+        "t", owner.id, work_dir, str(root),
+        browser.BrowserUserRequest(owner.id, owner.work_id, owner.text, owner.admission_sequence),
+        work_id=owner.work_id, sandbox_generation=container.id,
+        sandbox_backend=SimpleNamespace(container=container), run_service=runs)
+    session.paused = True
+    session.identity = browser._ContainerIdentity(str(root), "172.20.0.2", container.id)
+    monkeypatch.setattr(browser.BrowserManager, "_sessions", {"t": session})
+    monkeypatch.setattr(browser.SandboxManager, "_containers", {work_dir: container})
+    with authority.fence(str(root), "t") as state:
+        state.begin(owner.id, owner.admission_sequence)
+        state.add_generation(owner.id, container.id)
+    controls = []
+    monkeypatch.setattr(browser, "_bounded_cli", lambda argv, **_k: controls.append(argv) or b"")
+    fence = authority.fence
+    arrived, release = Event(), Event()
+
+    @contextmanager
+    def before_validation(*args, **kwargs):
+        if threading.current_thread().name.startswith("borrow-validation"):
+            arrived.set()
+            assert release.wait(3)
+        with fence(*args, **kwargs) as state:
+            yield state
+
+    monkeypatch.setattr(authority, "fence", before_validation)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="borrow-validation") as pool:
+        borrowing = pool.submit(browser.BrowserManager.resume_session,
+                                "t", owner.work_id, session.user_request)
+        assert arrived.wait(3)
+        held, _busy = threads._accept_message_run("t", "A newer request")
+        assert held.status == "revocation_pending"
+        release.set()
+        with pytest.raises(browser.BrowserUnavailable, match="newer user"):
+            borrowing.result(timeout=3)
+    assert session.paused and controls == []
 
 
 def test_map_disabled_failed_owner_scan_keeps_held_event(monkeypatch, admitted):

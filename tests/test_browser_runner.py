@@ -125,6 +125,26 @@ def test_changed_button_name_cannot_be_clicked():
     assert not button.clicked
 
 
+@pytest.mark.parametrize("kind", ["submit", "button", "reset"])
+def test_input_button_uses_value_as_name_and_rejects_changed_value(kind):
+    class InputButton(_Link):
+        value = "SEARCH"
+
+        def evaluate(self, expression):
+            if "tagName" in expression:
+                return "input"
+            return self.value if "element.value" in expression else ""
+
+    worker = BrowserWorker()
+    button = InputButton(None, name="", tag="input", kind=kind)
+    _observed(worker, button)
+    assert worker.targets["page"]["observed"][1:3] == ("button", "SEARCH")
+    button.value = "Delete account"
+    with pytest.raises(BrowserInputError, match="target changed"):
+        worker.act("page", "snapshot", "click", {"role": "button", "name": "SEARCH"})
+    assert not button.clicked
+
+
 def test_changed_field_attributes_cannot_be_filled():
     worker = BrowserWorker()
     field = _Link(None, "Search", tag="input", kind="text")

@@ -66,7 +66,7 @@ in both views. An ID shown in only one view keeps that meaning.
   the eligibility read stalls. An ordinary first web turn runs in a FastAPI
   =BackgroundTask=; the resume scheduler handles resumptions and recoveries.
   The web worker [[file:../manage/web/threads.py][=_process_message=]] owns the
-  per-run Git, sandbox and browser control before it constructs C5. In-memory
+  Git, sandbox and browser control before it constructs C5. In-memory
   queues do not replace Run records.
 
 ** Agent and durable state
@@ -105,7 +105,13 @@ in both views. An ID shown in only one view keeps that meaning.
   lifetime and leases. [[file:../assist/egress/store.py][EgressStore]] owns
   exact host/port grants.
 - *C10 Execution sandbox.* [[file:../assist/sandbox.py][DockerSandboxBackend]]
-  sends file and shell tools to a per-turn container with a bound workspace.
+  sends file and shell tools to one restricted container shared by a logical
+  parent turn and its eligible children, with a bound workspace, scratch and
+  persistent =/agent= state. Parent and trusted child file/shell tools use the
+  same native mounts; no parent-only host route exists in Docker mode.
+  The =/agent= directory is mode 0700 for their shared execution UID, so the
+  separate browser-worker UID cannot traverse it. Generic application
+  environment and browser tools remain outside child execution.
   [[file:../assist/sandbox_manager.py][SandboxManager]] creates and cleans it.
   Non-Git web work can fall back to a host backend when Docker is unavailable;
   Git-bound turns fail closed. The CLI is host-backed.
@@ -115,6 +121,37 @@ in both views. An ID shown in only one view keeps that meaning.
   the turn sandbox. In this branch the worker controls full native Chromium
   with software rendering and a sealed private CDP channel; see the
   [[file:browser-site-compatibility.org][browser compatibility view]].
+  A fairness successor reuses its exact session/backend after C8 freezes the
+  container with Docker pause. C8 unpauses only the same logical work, direct
+  user event and generation after checking the current admission sequence.
+  An unconfirmed unpause closes the session and attempts exact-generation
+  teardown before releasing the slot; failed stop proof remains tracked.
+  Before freezing it attempts a private storage snapshot, including cleared login
+  state. Successful captures survive paused reset without thawing; a failed
+  capture discards the owned snapshot rather than restoring stale login state.
+  The original lease owner remains stable across physical Run slices, including
+  accepted-approval execution and task-completion continuations. A retained
+  completion slice skips the initial Git handoff rather than stopping its writer.
+  Entering an approval wait, terminal and error boundaries close the browser;
+  new-user and cancellation
+  resets prove the frozen generation stopped before releasing held work.
+  Checkpoint-verified approval repair may replace a cancelled physical slice;
+  explicit cancellation receipts keep the entire logical work revoked.
+  A host user-systemd transient timer removes each exact labelled ordinary
+  managed generation at its original creation + three hours, including frozen
+  queue time and web-worker loss. Timer-arm failure proves teardown before
+  returning; a Docker-daemon outage leaves a failed removal retrying. The host
+  user manager must be available, including its =/run/user/<uid>/bus= socket;
+  unsupported hosts fail closed. In-container PID 1 sleep does not enforce the
+  paused bound. A terminal queue-entry failure cleans only its captured paused
+  resume session/work/generation; skipped duplicates and newer owners survive.
+  An eligible child borrows the same backend after its durable parent work and
+  user event match the owner. Child execution refreezes it before releasing the
+  model/checkout scopes. Parent background processes and page JavaScript run
+  during that shared slice; unrelated work keeps them frozen. Child Git
+  publication is deferred until the parent stops the writable generation.
+  [[file:2026-11-12-browser-shared-execution.org][The shared-execution design]]
+  records the accepted boundary and cancellation/error preservation behavior.
   [[file:../assist/browser/storage.py][storage.py]] holds a limited later-turn
   storage snapshot, not live tabs.
 - *C12 Model endpoint.* [[file:../assist/model_manager.py][model_manager.py]]
@@ -135,6 +172,12 @@ in both views. An ID shown in only one view keeps that meaning.
   related travel tools call configured services. Websites visited by C11 are
   also destinations. Host Python tools call services directly; sandbox and
   browser requests cross C13's allowlist and exact-grant boundary first.
+- *C21 Host user systemd.* [[file:../assist/sandbox_expiry.py][sandbox_expiry.py]]
+  arms one transient deadline for each ordinary managed Docker generation at
+  original creation + three hours. The unit outlives the web process and its
+  frozen containers; only exact host-labelled generations can be removed.
+  Missing user-manager access prevents backend admission, while Docker failure
+  leaves an owed removal retry. Confirmed normal teardown cancels the unit.
 
 ** Agent and guidance view
 
@@ -172,8 +215,11 @@ agent retrieves the result with =get_async_task_result=.
   orchestration]], [[file:../assist/skills/][shared skills]], and any present
   domain or web-supplied sources. The catalog is not the full set of skill bodies.
 - *C18 Context.* [[file:../assist/middleware/memory_middleware.py][Memory
-  middleware]] reloads repository =AGENTS.md= and, when private thread state
-  exists, =/agent/memory.md= each turn. [[file:../assist/middleware/context_rider_middleware.py][The
+  middleware]] reloads repository =AGENTS.md= and, for a main thread with
+  persistent state, native =/agent/memory.md= each turn. Local non-Docker mode
+  retains its virtual file route. Trusted children can read/write shared files
+  through their existing role tools; their task prompts do not inherit the
+  parent's thread-state policy. [[file:../assist/middleware/context_rider_middleware.py][The
   context rider]] adds current time context for the model call when supplied;
   it is not checkpointed as conversation history. Conversation messages and
   graph checkpoints belong to C5/C9.
@@ -259,8 +305,24 @@ after the original user turn has ended.
 - [[file:../tests/test_fair_scheduling_integration.py][The integrated fairness
   regression]], [[file:../tests/test_event_late_replay.py][late replay test]]
   and [[file:../tests/test_thread_queue.py][cap test]] cover the handoff. C8
-  still owns Git, sandbox and browser effects; this change adds no model slot
-  and makes no C5/C6/C7 implementation change.
+  still owns Git, sandbox and browser effects; execution shares that one model
+  slot. C7 borrows the active parent's restricted generation, including native
+  persistent =/agent= files, without separate child publication. Host authority
+  files and the separate browser-worker UID remain outside that shared trust.
+- For browser continuity, follow [[file:../assist/browser/manager.py][=pause=
+  and =resume_session=]] and [[file:../manage/web/threads.py][=_process_message=
+  and =_drain_held_browser_events=]]. The integrated fairness test exercises
+  open, fill, a competing-thread quantum yield, resume and exactly one submit.
+  Its opt-in Docker variant uses network-isolated Chromium with a synthetic
+  HTTP form and proves a background writer stays frozen for another workspace
+  but runs during same-parent child execution. It replaces worker startup; the
+  [[file:../tests/test_browser_docker.py][production bootstrap/UID/proxy test]]
+  separately checks private-state denial and armed-worker pause/resume.
+  [[file:../tests/test_thread_git_simple.py][Real temporary Git tests]] prove
+  publication waits for writer stop, errors preserve a recoverable commit and
+  cancellation preserves local effects behind the clean preflight.
+  [[file:../tests/test_browser_lifecycle_v12.py][The lifecycle tests]]
+  prove newer-user/cancellation reset receipts survive failed stop attempts.
 
 * Conditional paths and limits of this view
 

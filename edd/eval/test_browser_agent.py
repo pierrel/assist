@@ -3,13 +3,15 @@
 The browser site, static requests.get response, shell network, and research
 specialist are stubbed; the approval journey uses a real local EgressStore.
 The real main graph chooses whether to load skills, try static navigation,
-and use stateful browser tools. Set
+and use stateful browser tools. The fairness journey also delivers deterministic
+context-task completion wakes on the same checkpoint when needed. Set
 ASSIST_BROWSER_EVAL_BASELINE=1 to remove browser tools for a comparison.
 """
 import os
 import signal
 import tempfile
 from dataclasses import replace
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import TestCase, mock
 
@@ -25,7 +27,7 @@ from assist.egress.tools import egress_tools
 from assist.model_manager import select_assistant_model
 from assist.thread_manager import web_main_skill_sources
 
-from .utils import (agent_tool_calls, create_filesystem,
+from .utils import (agent_tool_calls, complete_web_main_tasks, create_filesystem,
                     prompt_rewrite_web_main_spec, stub_research_subagent)
 
 
@@ -54,11 +56,34 @@ class _OfflineBackend(FilesystemBackend, SandboxBackendProtocol):
 
 
 class _TurnBackend(_OfflineBackend):
-    """Expose the web main's private /agent mount in continuity journeys."""
+    """Expose private parent file state in offline continuity journeys."""
     native_agent_dir = True
 
 
+@contextmanager
+def _browser_task_fixture():
+    """Scope deterministic task state and context to these empty workspaces."""
+    from . import test_async_subagents as tasks
+
+    tasks.reset_task_fixture()
+    original = tasks._RESULT.func
+    def result(task_id):
+        if (tasks._TASK_TYPES.get(task_id) == "context-agent"
+                and tasks._TASK_STATUSES.get(task_id) == "success"
+                and task_id not in tasks._TASK_RESULTS):
+            tasks._TASK_RESULTS[task_id] = (
+                "No relevant local notes or preferences were found. "
+                "README.org contains no task-specific details.")
+        return original(task_id)
+    try:
+        with mock.patch.object(tasks._RESULT, "func", result):
+            yield
+    finally:
+        tasks.reset_task_fixture()
+
+
 class _BrowserSite:
+    """Selected stateful scenarios retain one current page for observations."""
     def __init__(self, scenario, root):
         self.scenario = scenario
         self.root = Path(root)
@@ -66,6 +91,7 @@ class _BrowserSite:
         self.approved = False
         self.session_open = False
         self.turn = 1
+        self.page_sequence = 0
         self.form_values = {}
         self.auth_cookie = scenario == "approval"
 
@@ -76,7 +102,8 @@ class _BrowserSite:
 
     def _form_page(self, snapshot):
         return self._page(
-            snapshot,
+            snapshot + " Destination: " + self.form_values.get("destination", "blank")
+            + ". Travel date: " + self.form_values.get("travel-date", "blank") + ".",
             [{"ref": "destination", "role": "textbox", "name": "Destination"},
              {"ref": "travel-date", "role": "textbox", "name": "Travel date"},
              {"ref": "review", "role": "button", "name": "Review"}],
@@ -86,20 +113,53 @@ class _BrowserSite:
               page_id="page-1", network_errors=()):
         url = ("http://host.docker.internal:5050/" if self.scenario == "internal-status"
                else f"https://{self.scenario}.fern.example/")
-        return {"result": {"page_id": page_id, "snapshot_id": snapshot_id,
+        if self.scenario in {"v1-form", "approval", "v1-auth"}:
+            page_id = self.current_page_id
+            if self.scenario == "approval":
+                url = self.approval_url
+        response = {"result": {"page_id": page_id, "snapshot_id": snapshot_id,
                 "url": url,
                 "snapshot": snapshot, "targets": list(targets),
                 "pages": [{"page_id": page_id, "url": url}],
                 "downloads": list(downloads),
                 "network_errors": list(network_errors)}}
+        if self.scenario in {"v1-form", "approval", "v1-auth"}:
+            self.current_page = response
+        return response
 
     def command(self, operation, **args):
         self.calls.append((operation, args))
+        selected = self.scenario in {"v1-form", "approval", "v1-auth"}
+        if operation == "open" and selected:
+            reuse = args.get("reuse_page_id")
+            if reuse is not None:
+                if not self.session_open or reuse != self.current_page_id:
+                    return {"error": "old page is closed"}
+            else:
+                self.page_sequence += 1
+                self.current_page_id = f"page-{self.page_sequence}"
+            if self.scenario == "v1-form":
+                self.form_values = {}
+        if operation == "close" and selected:
+            if not self.session_open or args.get("page_id") != self.current_page_id:
+                return {"error": "old page is closed"}
+            self.session_open = False
+            self.form_values = {}
+            return {"result": {"closed_page_id": self.current_page_id,
+                               "pages": [], "active_page_id": None}}
+        if operation == "wait" and selected:
+            if not self.session_open or args.get("page_id") != self.current_page_id:
+                return {"error": "old page is closed"}
+            if any(target.get("role") == args.get("role")
+                   and target.get("name") == args.get("name")
+                   for target in self.current_page["result"]["targets"]):
+                return self.current_page
+            return {"error": "named control is not visible"}
         if operation == "open":
             if self.scenario == "v1-form":
                 self.session_open = True
                 return self._form_page(
-                    "Trip draft. Destination and travel date are blank; review does not submit.")
+                    "Trip draft. Review does not submit.")
             if self.scenario == "v1-stale":
                 self.session_open = True
                 return self._page(
@@ -122,6 +182,7 @@ class _BrowserSite:
                     snapshot_id=f"auth-{self.turn}", page_id=f"page-{self.turn}")
             if self.scenario == "approval":
                 self.session_open = True
+                self.approval_url = args["url"]
                 if not self.auth_cookie:
                     return self._page("Sign in required.")
                 if args.get("url", "").startswith("https://partner.fern.example/"):
@@ -177,7 +238,7 @@ class _BrowserSite:
         if operation == "act":
             target = args.get("target") or {}
             if self.scenario == "v1-form":
-                if not self.session_open or args.get("page_id") != f"page-{self.turn}":
+                if not self.session_open or args.get("page_id") != self.current_page_id:
                     return {"error": "old page is closed"}
                 ref = target.get("ref") or {
                     ("textbox", "Destination"): "destination",
@@ -207,15 +268,18 @@ class _BrowserSite:
             if self.scenario == "v1-secret":
                 return {"error": "secret fields are unsupported"}
             if self.scenario == "approval":
-                if not self.session_open:
+                if (not self.session_open
+                        or args.get("page_id") != self.current_page_id):
                     return {"error": "browser state expired; reopen the page"}
                 if (target.get("ref") == "partner-report" or
                         target.get("href") == "https://partner.fern.example/report"):
                     if self.approved and args.get("snapshot_id") == "approved":
+                        self.approval_url = "https://partner.fern.example/report"
                         return self._page("Latest report: October Reliability Review.",
                                           snapshot_id="report")
                     if self.approved:
                         return {"error": "stale target; re-observe the page"}
+                    self.approval_url = "https://partner.fern.example/report"
                     return self._page("The partner report did not load.",
                                       snapshot_id="denied", network_errors=[{
                                           "host": "partner.fern.example:443",
@@ -246,12 +310,21 @@ class _BrowserSite:
             return self._page("Next shuttle arrival: 9:40 a.m. Pacific.",
                               snapshot_id="second")
         if operation == "observe":
+            if self.scenario in {"v1-form", "approval", "v1-auth"}:
+                if not self.session_open or args.get("page_id") != self.current_page_id:
+                    return {"error": "old page is closed"}
+                return self.current_page
             if self.scenario == "delayed":
                 return self._page("Next shuttle arrival: 9:40 a.m. Pacific.",
                                   snapshot_id="second")
             return self._page("This page requires interaction.")
         if operation == "preflight":
             url = args.get("url", "")
+            partner_denied = (self.scenario == "approval" and not self.approved
+                              and url.startswith("https://partner.fern.example/"))
+            if selected and args.get("page_id") and not partner_denied:
+                if not self.session_open or args["page_id"] != self.current_page_id:
+                    return {"error": "old page is closed"}
             if self.scenario == "multi-origin" and args.get("page_id"):
                 return {"result": {
                     "top_level": {"origin": "https://multi-origin.fern.example:443",
@@ -353,7 +426,7 @@ class TestBrowserAgent(TestCase):
                 prompt_rewrite_web_main_spec(tools=tuple(browser_tools(site))),
                 web_main=True, main_guidance_skills=True,
                 skill_sources=web_main_skill_sources(browser=True))
-            with mock.patch("assist.tools.requests.get",
+            with _browser_task_fixture(), mock.patch("assist.tools.requests.get",
                             return_value=_StaticShell(scenario)), \
                  stub_research_subagent():
                 agent = AgentHarness(create_agent(
@@ -367,15 +440,17 @@ class TestBrowserAgent(TestCase):
                             TimeoutError("browser V1 eval turn exceeded 150 seconds")))
                     signal.alarm(150)
                     try:
-                        result = invoke_with_rollback(
+                        invoke_with_rollback(
                             agent.agent,
                             {"messages": [{"role": "user", "content": prompt}]},
                             {"configurable": {"thread_id": agent.thread_id},
                              "recursion_limit": 120})
+                        complete_web_main_tasks(agent)
+                        answer = str(agent.all_messages()[-1].content)
                     finally:
                         signal.alarm(0)
                         signal.signal(signal.SIGALRM, previous)
-                    answers.append(str(result["messages"][-1].content))
+                    answers.append(answer)
                     calls_by_turn.append(site.calls[before:])
                     if index + 1 < len(prompts):
                         site.end_turn()
@@ -435,6 +510,92 @@ class TestBrowserAgent(TestCase):
         self.assertTrue(any(op == "open" for op, _ in turns[0]), turns)
         self.assertIn("October Reliability Review", answers[0])
         self.assertFalse(agent_tool_calls(agent, "task"), agent.all_messages())
+
+    def test_v1_form_continues_after_fair_yield(self):
+        """A natural draft request continues on its filled page after a queue yield."""
+        from threading import Event, Thread as WorkerThread
+        from assist.thread_queue import ThreadAffinityQueue, ThreadPauseRequested
+
+        with tempfile.TemporaryDirectory(prefix="browser_fair_eval_") as root:
+            create_filesystem(root, {"README.org": "Personal workspace.", "agent": {}})
+            site = _BrowserSite("v1-form", root)
+            queue = ThreadAffinityQueue(quantum_s=0.01, hold_timeout_s=180)
+            queued, competed = Event(), Event()
+
+            def compete():
+                with queue.acquire("other-browser-eval", on_state_change=lambda stage:
+                                   queued.set() if stage == "queued" else None):
+                    competed.set()
+
+            competitor = WorkerThread(target=compete, daemon=True)
+            command = site.command
+            launched = False
+            click_results = []
+
+            def command_with_waiter(operation, **args):
+                nonlocal launched
+                result = command(operation, **args)
+                if operation == "act" and args.get("action") == "click":
+                    click_results.append(result)
+                if (not launched and operation == "act" and args.get("action") == "fill"
+                        and site.form_values.get("destination") == "Portland"):
+                    launched = True
+                    competitor.start()
+                    self.assertTrue(queued.wait(2), "competitor did not queue")
+                return result
+
+            site.command = command_with_waiter
+            spec = replace(
+                prompt_rewrite_web_main_spec(tools=tuple(browser_tools(site))),
+                web_main=True, main_guidance_skills=True,
+                skill_sources=web_main_skill_sources(browser=True))
+            with _browser_task_fixture(), \
+                 mock.patch("assist.tools.requests.get", return_value=_StaticShell("v1-form")), \
+                 stub_research_subagent():
+                agent = AgentHarness(create_agent(
+                    self.model, root, sandbox_backend=_TurnBackend(root), spec=spec))
+                config = {"configurable": {"thread_id": agent.thread_id}, "recursion_limit": 120}
+                previous = signal.signal(signal.SIGALRM, lambda *_args: (_ for _ in ()).throw(
+                    TimeoutError("browser fairness eval exceeded 150 seconds")))
+                signal.alarm(150)
+                try:
+                    with self.assertRaises(ThreadPauseRequested):
+                        with queue.acquire(str(agent.thread_id)):
+                            invoke_with_rollback(agent.agent, {"messages": [{"role": "user", "content":
+                                "Use https://v1-form.fern.example/ to draft a trip to Portland. "
+                                "Review the draft, but do not submit it."}]}, config)
+                        with queue.acquire(str(agent.thread_id)):
+                            complete_web_main_tasks(agent)
+                    self.assertTrue(competed.wait(2), "competing slice did not run")
+                    self.assertEqual(site.form_values.get("destination"), "Portland")
+                    before_resume = len(site.calls)
+                    with queue.acquire(str(agent.thread_id)):
+                        invoke_with_rollback(agent.agent, None, config)
+                    with queue.acquire(str(agent.thread_id)):
+                        complete_web_main_tasks(agent)
+                finally:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, previous)
+                    if launched:
+                        competitor.join(2)
+            resumed = site.calls[before_resume:]
+            self.assertFalse(any(op == "open" for op, _ in resumed), resumed)
+            clicks = [(index, args.get("target") or {})
+                      for index, (op, args) in enumerate(site.calls)
+                      if op == "act" and args.get("action") == "click"]
+            self.assertEqual(len(clicks), 1, site.calls)
+            index, target = clicks[0]
+            self.assertGreaterEqual(index, before_resume, site.calls)
+            resolved = target.get("ref") or {
+                ("button", "Review"): "review"}.get((target.get("role"), target.get("name")))
+            self.assertEqual(resolved, "review", site.calls)
+            self.assertNotIn("error", click_results[0], click_results)
+            reviewed = click_results[0].get("result", {})
+            self.assertEqual(reviewed.get("snapshot_id"), f"review-{site.turn}", click_results)
+            self.assertIn("Review only", reviewed.get("snapshot", ""), click_results)
+            self.assertIn("Portland", reviewed.get("snapshot", ""), click_results)
+            self.assertEqual(sum(op == "open" for op, _ in site.calls), 1, site.calls)
+            self.assertIn("Portland", str(agent.all_messages()[-1].content))
 
     def test_v1_partial_form_reconstructs_with_semantic_note(self):
         _, site, answers, turns, note = self._v1_turns("v1-form", [
@@ -565,7 +726,8 @@ class TestBrowserAgent(TestCase):
                     tools=tuple(browser_tools(site))),
                 web_main=True, main_guidance_skills=True,
                 skill_sources=web_main_skill_sources(browser=True))
-            with mock.patch("assist.agent._execution_egress_tools", tuple(tools)), \
+            with _browser_task_fixture(), \
+                 mock.patch("assist.agent._execution_egress_tools", tuple(tools)), \
                  mock.patch.object(egress_tools_module, "_thread_id", lambda: tid), \
                  mock.patch("assist.tools.requests.get",
                             return_value=_StaticShell("approval")), \
@@ -580,11 +742,12 @@ class TestBrowserAgent(TestCase):
                             TimeoutError("browser approval eval turn exceeded 150 seconds")))
                     signal.alarm(150)
                     try:
-                        result = invoke_with_rollback(
+                        invoke_with_rollback(
                             agent.agent, {"messages": [{"role": "user", "content": prompt}]},
                             {"configurable": {"thread_id": agent.thread_id},
                              "recursion_limit": 500})
-                        return str(result["messages"][-1].content)
+                        complete_web_main_tasks(agent)
+                        return str(agent.all_messages()[-1].content)
                     except Exception as error:
                         recent = [(type(message).__name__,
                                    str(message.content)[:250],
@@ -618,7 +781,7 @@ class TestBrowserAgent(TestCase):
                 # events, not instructions embedded in either user prompt.
                 store.resolve(key, "hour")
                 site.approved = True
-                site.session_open = False
+                site.end_turn()
                 assert site.auth_cookie
                 second = turn("I approved that site. What is the report called?")
 

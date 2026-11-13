@@ -490,6 +490,77 @@ def test_explicit_repair_rechecks_checkpoint_and_preserves_accepted_receipt(reco
     assert service.get(owner.thread_id, accepted.id).status == "cancelled"
 
 
+def test_repaired_pending_approval_executes_with_registered_sandbox(sqlite_approval, monkeypatch):
+    """A verified repair executes once despite its checkpoint-blocked predecessor."""
+    from assist.browser import authority, manager as browser
+    tid, root, service, _queued = sqlite_approval
+    effects = []
+
+    def gate(value):
+        interrupt({"action_requests": [ACTION]})
+        effects.append("approved action")
+        return {"messages": [AIMessage("Done")]}
+
+    with sqlite3.connect(root / "repair.db", check_same_thread=False) as connection:
+        builder = StateGraph(MessagesState)
+        builder.add_node("gate", gate)
+        builder.add_edge(START, "gate"); builder.add_edge("gate", END)
+        graph = builder.compile(checkpointer=SqliteSaver(connection))
+        owner = service.create(tid, "general-agent", "Email this person", user_origin=True)
+        service.claim(tid, owner.id)
+        config = {"configurable": {"thread_id": tid, "work_id": owner.work_id}}
+        graph.invoke({"messages": [HumanMessage(owner.text)]}, config, durability="sync")
+        snapshot = graph.get_state(config)
+        approval = service.publish_approval(tid, owner.id, action=ACTION, requests=[ACTION],
+            proposal=PROPOSAL, interrupt_id=snapshot.interrupts[0].id,
+            checkpoint_id=snapshot.config["configurable"]["checkpoint_id"])
+        accepted, _ = threads.email_decision_core(tid, "approve", approval.id, phone_preview=True)
+        service.reconcile_approval(tid, approval.id, checkpoint_id=None,
+                                   blocked_reason="temporary checkpoint read failure")
+        assert service.get(tid, accepted.id).status == "cancelled"
+        assert service.get(tid, accepted.id).cancel_cleanup is None
+
+        def get(value, configurable=None, **kwargs):
+            chat = Thread.__new__(Thread)
+            chat.thread_id, chat.agent = tid, graph
+            chat.runconfig = {"configurable": {"thread_id": tid, **(configurable or {})}}
+            chat._run = lambda value: graph.invoke(value, chat.runconfig, durability="sync")["messages"][-1].content
+            return chat
+
+        monkeypatch.setattr(state.MANAGER, "get", get)
+        repaired = threads.repair_approval_core(tid, approval.id)
+        assert repaired.work_id == accepted.work_id and repaired.id != accepted.id
+        assert service.approval(tid, approval.id).recovery_checkpoint_id
+        authority.mark_new_thread(str(root), tid)
+        monkeypatch.setattr(browser.BrowserManager, "_sessions", {})
+        monkeypatch.setattr(browser.BrowserManager, "_reconciled_roots", {str(root)})
+        monkeypatch.setattr(browser.BrowserManager, "reconcile_startup", lambda *_a: True)
+        monkeypatch.setattr(browser.BrowserManager, "ready_for_browser", lambda *_a: False)
+        registered = []
+        register = browser.BrowserManager.register
+
+        def record_registration(session):
+            register(session)
+            registered.append(session)
+
+        def backend(_tid, **kwargs):
+            generation = "repaired-generation"
+            with authority.fence(str(root), tid) as current:
+                current.begin(kwargs["owner_run_id"], owner.admission_sequence)
+                current.add_generation(kwargs["owner_run_id"], generation)
+            return SimpleNamespace(container=SimpleNamespace(id=generation))
+
+        monkeypatch.setattr(browser.BrowserManager, "register", record_registration)
+        monkeypatch.setattr(threads, "_get_sandbox_backend", backend)
+        threads._execute_run(repaired.id, tid)
+        result = service.get(tid, repaired.id)
+        assert result.status == "success", result.error
+        assert effects == ["approved action"]
+        assert len(registered) == 1 and registered[0].run_id == repaired.id
+        assert registered[0].closed and browser.BrowserManager.current_session(tid) is None
+        assert service.approval(tid, approval.id).state == "completed"
+
+
 def test_verified_nonmail_gate_completes_without_deciding_new_reply(sqlite_approval, monkeypatch):
     tid, root, service, queued = sqlite_approval
     decisions = []
