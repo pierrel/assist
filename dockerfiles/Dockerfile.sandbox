@@ -85,7 +85,8 @@ WORKDIR /workspace
 USER sandbox
 
 # Backstop TTL only. The web layer proves the exact container stopped when
-# its turn ends. After a host outage this 3h sleep bounds orphan lifetime.
+# its turn ends. This sleep bounds running orphans; Docker pause freezes PID 1
+# exit too. Managed ordinary execution has a separate host systemd deadline.
 # It exceeds the normal 2h queue hold cap, but a force-released turn can keep
 # running, so TTL expiry during a live turn is an infrastructure failure.
 CMD ["sleep", "10800"]

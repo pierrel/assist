@@ -627,8 +627,11 @@ class TestSandboxManager(TestCase):
                 ('browser-net', '172.31.0.0/16') if isolated
                 else ('ordinary-net', '172.30.0.0/16'))
         self.network_identity.start()
+        self.expiry_patch = patch('assist.sandbox_expiry.arm')
+        self.arm_expiry = self.expiry_patch.start()
 
     def tearDown(self):
+        self.expiry_patch.stop()
         self.network_identity.stop()
         SandboxManager._docker_client = None
         SandboxManager._containers.clear()
@@ -684,10 +687,12 @@ class TestSandboxManager(TestCase):
         client.containers.run.return_value = container
         with patch.object(SandboxManager, '_get_docker_client', return_value=client), \
              patch.object(BrowserManager, 'reconcile_startup', return_value=True), \
-             patch.object(BrowserManager, 'confirm_owner_stopped', return_value=False):
+             patch.object(BrowserManager, 'confirm_owner_stopped', return_value=False), \
+             patch('assist.sandbox_expiry.arm') as arm_expiry:
             SandboxManager.get_sandbox_backend(
                 test_path, browser_capable=True,
                 thread_scope=(self.temp_dir, "browser-turn"))
+        arm_expiry.assert_called_once_with(container.id)
         options = client.containers.run.call_args.kwargs
         assert options["tmpfs"]["/run/assist-browser"].endswith(
             "uid=10001,gid=10001,mode=0700")
@@ -716,12 +721,28 @@ class TestSandboxManager(TestCase):
             SandboxManager.get_sandbox_backend(
                 test_path, thread_scope=(self.temp_dir, "managed-turn"),
                 owner_run_id="claimed-run")
+        self.arm_expiry.assert_called_once_with(container.id)
+        self.assertEqual(client.containers.run.call_args.kwargs["labels"]["assist.turn-expiry"],
+                         "host-3h-v1")
         with authority.fence(self.temp_dir, "managed-turn") as state:
             self.assertEqual(state.lease["owner_run_id"], "claimed-run")
             self.assertEqual(state.lease["generations"], [container.id])
         with patch('assist.sandbox_manager.confirm_generation_stopped') as stopped:
             SandboxManager.cleanup(test_path, container)
         stopped.assert_called_once_with(container.id)
+        with authority.fence(self.temp_dir, "managed-turn") as state:
+            self.assertIsNone(state.lease)
+        self.arm_expiry.side_effect = RuntimeError("timer unavailable")
+        with patch.object(SandboxManager, '_get_docker_client', return_value=client), \
+             patch.object(BrowserManager, 'reconcile_startup', return_value=True), \
+             patch.object(BrowserManager, 'confirm_owner_stopped', return_value=False), \
+             patch('assist.sandbox_manager.confirm_generation_stopped') as stopped:
+            with self.assertRaisesRegex(RuntimeError, "timer unavailable"):
+                SandboxManager.get_sandbox_backend(
+                    test_path, thread_scope=(self.temp_dir, "managed-turn"),
+                    owner_run_id="failed-arm")
+        stopped.assert_called_once_with(container.id)
+        self.assertNotIn(test_path, SandboxManager._containers)
         with authority.fence(self.temp_dir, "managed-turn") as state:
             self.assertIsNone(state.lease)
 

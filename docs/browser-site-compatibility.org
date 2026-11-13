@@ -81,8 +81,10 @@ C10 remains the containing generation, controlled by C8.
    existing private Unix socket. Revocation closes the context, browser and
    driver, then the worker sends its reply and exits inner PID 1. That namespace
    exit kills native descendants while leaving the ordinary shell turn alive.
-   Stopping the containing C10 generation also destroys Chromium; the existing
-   common three-hour container expiry bounds a host-outage survivor.
+   Stopping the containing C10 generation also destroys Chromium. Ordinary
+   managed generations have an independent host-systemd three-hour deadline,
+   including frozen time and web-worker loss. PID 1 sleep alone bounds only a
+   running survivor; a Docker-paused generation cannot exit on that sleep.
 
 * Supporting changes to read next
 

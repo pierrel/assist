@@ -81,8 +81,13 @@ where reliability is harder than with frontier APIs.
   the agent reopens and observes the page.
   A short `/agent/browser-recovery.md` note may describe non-sensitive progress.
   Chromium has its own PID namespace inside the turn sandbox. Its processes
-  stop when that exact sandbox generation stops; during a host outage without
-  restart, the sandbox's common three-hour PID 1 expiry bounds their lifetime.
+  stop when that exact sandbox generation stops. Managed ordinary execution
+  requires the host user's systemd manager and Docker CLI. A transient host
+  timer removes the exact labelled generation at its original creation + three
+  hours, even while Docker-paused and after the web worker exits. Backend
+  creation fails closed if the timer cannot be armed. Docker-daemon failures leave the unit
+  retrying its owed removal. The in-container PID 1 sleep alone cannot expire
+  a paused container. Repeated fairness pauses do not renew the deadline.
   On restart, a new managed generation waits for confirmed cleanup. Browser
   and shell share the sandbox's network and mounts.
 

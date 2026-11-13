@@ -135,7 +135,14 @@ in both views. An ID shown in only one view keeps that meaning.
   resets prove the frozen generation stopped before releasing held work.
   Checkpoint-verified approval repair may replace a cancelled physical slice;
   explicit cancellation receipts keep the entire logical work revoked.
-  The existing three-hour container expiry includes frozen queue time.
+  A host user-systemd transient timer removes each exact labelled ordinary
+  managed generation at its original creation + three hours, including frozen
+  queue time and web-worker loss. Timer-arm failure proves teardown before
+  returning; a Docker-daemon outage leaves a failed removal retrying. The host
+  user manager must be available, including its =/run/user/<uid>/bus= socket;
+  unsupported hosts fail closed. In-container PID 1 sleep does not enforce the
+  paused bound. A terminal queue-entry failure cleans only its captured paused
+  resume session/work/generation; skipped duplicates and newer owners survive.
   An eligible child borrows the same backend after its durable parent work and
   user event match the owner. Child execution refreezes it before releasing the
   model/checkout scopes. Parent background processes and page JavaScript run
@@ -163,6 +170,12 @@ in both views. An ID shown in only one view keeps that meaning.
   related travel tools call configured services. Websites visited by C11 are
   also destinations. Host Python tools call services directly; sandbox and
   browser requests cross C13's allowlist and exact-grant boundary first.
+- *C16 Host user systemd.* [[file:../assist/sandbox_expiry.py][sandbox_expiry.py]]
+  arms one transient deadline for each ordinary managed Docker generation at
+  original creation + three hours. The unit outlives the web process and its
+  frozen containers; only exact host-labelled generations can be removed.
+  Missing user-manager access prevents backend admission, while Docker failure
+  leaves an owed removal retry. Confirmed normal teardown cancels the unit.
 
 ** Agent and guidance view
 
