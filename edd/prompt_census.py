@@ -1704,7 +1704,6 @@ _TOOL_ORIGINS = {
     "open_thread": "assist.receptionist",
     "pause_schedule": "assist.schedule.tools",
     "propose_region_download": "assist.geo.tools",
-    "put_thread_data": "assist.thread_datastore",
     "quiet": "assist.events.quiet",
     "read_file": "deepagents.middleware.filesystem",
     "read_url": "assist.tools",
@@ -1811,7 +1810,7 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "eb8fadd6b3a275dbc4c3fa86ad34b2c7a312d3e74651a61255c75a8c9b7e59a6",
     },
     "assist/templates/deepagents/sub_research.txt.j2": {
-        "b8148c39cd0fb4117668d7f421e6837ceb3e186940ce73925c5448ce401256eb",
+        "2fb38661bd9f1d97dbeb218a6560c1782209d5c7b0f3337ec0171d85f3465d11",
     },
     "assist/templates/receptionist_system.md.j2": {
         "f2bfbc35fb540f64c385b74c7bf590517b80bc5ee9abd660eb3ad736bb3adb8e",
@@ -1976,7 +1975,6 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "get_async_task_result": {"8752493ed656605373caa6e21c68c7f475f4d5229c7fb25f5c6591ce006337c4"},
     "get_async_task_status": {"c33c01ff704822245b71c109bbd185c0d5407d7cc23d2426698177850a7da85e"},
     "get_thread_data": {"cf48da0160665da8de0518a09d717575b50334c69d87878b96455495c1f09be8"},
-    "put_thread_data": {"98abdd08ca8addbc965fdfe78899c4255cd6527fca981ac47e9563296723a506"},
     "create_schedule": {"17ae4733ba78d32789761332c0b782600873027412beecd2a7d2d2b548392f34"},
     "create_subscription": {"72476dc729012cbe0f9d65af14dc1541a7fb2a9e88e5f29730f9b68969fc7974"},
     "delete_schedule": {"ac6a06a26f9df248183a12c5aab9ecaafe637804ac61c2f4d9edca588d15359f"},
@@ -2009,11 +2007,11 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "propose_region_download": {"638cb587cde24979bcd6ee36a7169d8b61bec09afd2ab7adf2afecb3f1695d58"},
     "quiet": {"37edd06eeaad498ac37a8509d6dfe30bb094bed2aa71e858f45b4990445bb715"},
     "read_file": {"2e139ac315b65f5b6614591642b26defae959ab6878fff990f26f0b997feb5af"},
-    "read_url": {"abde9b86efc284e5f6f92d684b94240349c6713f929291f72c763ceee67e8a9f"},
+    "read_url": {"a4e5eae871d9956ee0227f48f8e86eb1c96b1740cb73a7e1a1e57a8cfae18716"},
     "remove_allowed_host": {"4bc5319afb9de4381fdd059f5bb35034caccacee5eb52b7443a6af2c27ed0498"},
     "request_egress": {"84fdeccfd7466d726247ecc6c482c1bded92bf33eb54a7ce137cd42c233c35b4"},
     "resume_schedule": {"884f79fb96c7e374a2e204ed9f00203243607a71a1440a954936a0516a612183"},
-    "search_internet": {"728fbae6093bfb06ec06c4a708ebbf79bbd8d7e309abf022b233edd827b9ae88"},
+    "search_internet": {"a240ffc08228c91577dde743290e775c51b5aa1c3b059cd147f490fa999def13"},
     "search_thread_data": {"6d8f14f76518a8531d3b6b764a6c98485db139d1f4ebb46ff491c2ff78f8a88b"},
     "send_email": {
         "13a0df1decb69fe0f4839784c892bd4d5b68b341beef6c5985e799f8d86ab9a7",
@@ -2154,9 +2152,9 @@ _TOOL_RESULT_METADATA = {
 }
 
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "e872aa82afe6561a23aa0866c5f778abb038979c9d4006ca708b004993c30fa8"
+    "3fdc2a14548f6c69e27018545300de7d69f0b3c0e8b3f57b6012fce77a9ae955"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "b6ceca29d5ab351c6d4c4d791e2074a013d71b475075e9da551df1fe80769bc0"
+    "c36e1114dd2a4686e16e2957a3f5adbfacf7b1c69fc9b1c2a97899f577c05ec1"
 
 
 
