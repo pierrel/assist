@@ -61,19 +61,21 @@ def cancel(generation):
 def expire(generation):
     """Remove only the exact host-labelled managed execution generation."""
     _identity(generation)
+    missing = re.compile(r"(?:error|error response from daemon): no such (?:object|container): "
+                         + re.escape(generation), re.IGNORECASE)
     found = subprocess.run([
         "docker", "inspect", "--format",
         '{{index .Config.Labels "assist.sandbox"}} {{index .Config.Labels "' + LABEL + '"}}',
         generation], capture_output=True, text=True, timeout=5)
     if found.returncode:
-        if "no such" in found.stderr.lower():
+        if missing.fullmatch(found.stderr.strip()):
             return
         raise RuntimeError("expiry could not inspect exact generation")
     if found.stdout.strip() != "true " + MARKER:
         raise ValueError("expiry generation is not host-owned managed execution")
     removed = subprocess.run(["docker", "rm", "--force", generation],
                              capture_output=True, text=True, timeout=10)
-    if removed.returncode and "no such" not in removed.stderr.lower():
+    if removed.returncode and not missing.fullmatch(removed.stderr.strip()):
         raise RuntimeError("expiry exact generation removal is unconfirmed")
 
 

@@ -59,13 +59,33 @@ def test_timer_arm_failure_is_not_silently_accepted(monkeypatch):
 @pytest.mark.parametrize("daemon_down", [False, True])
 def test_expiry_normal_teardown_race_and_daemon_failure(monkeypatch, daemon_down):
     run = Mock(side_effect=[SimpleNamespace(returncode=0, stdout="true " + expiry.MARKER),
-        SimpleNamespace(returncode=1, stderr="daemon unavailable" if daemon_down else "No such container")])
+        SimpleNamespace(returncode=1, stderr="daemon unavailable" if daemon_down else
+                        "Error response from daemon: No such container: " + GENERATION)])
     monkeypatch.setattr(expiry.subprocess, "run", run)
     if daemon_down:
         with pytest.raises(RuntimeError, match="unconfirmed"):
             expiry.expire(GENERATION)
     else:
         expiry.expire(GENERATION)
+
+
+@pytest.mark.parametrize("during_removal", [False, True])
+def test_missing_daemon_socket_is_not_missing_generation(monkeypatch, during_removal):
+    error = SimpleNamespace(returncode=1,
+        stderr="dial unix /tmp/missing.sock: connect: no such file or directory")
+    responses = ([SimpleNamespace(returncode=0, stdout="true " + expiry.MARKER), error]
+                 if during_removal else [error])
+    monkeypatch.setattr(expiry.subprocess, "run", Mock(side_effect=responses))
+    with pytest.raises(RuntimeError):
+        expiry.expire(GENERATION)
+
+
+def test_exact_missing_generation_converges(monkeypatch):
+    run = Mock(return_value=SimpleNamespace(returncode=1,
+        stderr="error: no such object: " + GENERATION))
+    monkeypatch.setattr(expiry.subprocess, "run", run)
+    expiry.expire(GENERATION)
+    assert run.call_count == 1
 
 
 @pytest.mark.skipif(os.getenv("ASSIST_BROWSER_DOCKER_TEST") != "1", reason="explicit isolated Docker/systemd test")
