@@ -10,11 +10,103 @@ in a fixture so order-of-execution doesn't matter."""
 from __future__ import annotations
 
 import ast
+from pathlib import Path
+import subprocess
 
 import pytest
 from unittest.mock import patch, MagicMock
 
 from assist import tools
+from assist import pdf_text
+
+
+def test_pdf_parser_extracts_page_text_and_rejects_unreadable():
+    pdf = Path(__file__).parent / "fixtures/pdf/sample.pdf"
+    text = pdf_text.extract_pdf(pdf.read_bytes())
+    assert "Treatment Guide" in text
+    assert "Page 1:" in text
+    encrypted = Path(__file__).parent / "fixtures/pdf/encrypted.pdf"
+    for body in (encrypted.read_bytes(), b"%PDF-broken"):
+        with pytest.raises(Exception):
+            pdf_text.extract_pdf(body)
+
+
+def test_pdf_parser_marks_page_and_character_limits(monkeypatch):
+    body = (Path(__file__).parent / "fixtures/pdf/sample.pdf").read_bytes()
+    assert pdf_text._MAX_PAGES == 25
+    assert pdf_text._MAX_CHARS == 200_000
+    with monkeypatch.context() as patcher:
+        patcher.setattr(pdf_text, "_MAX_PAGES", 1)
+        assert "truncated at the page" in pdf_text.extract_pdf(body)
+    with monkeypatch.context() as patcher:
+        patcher.setattr(pdf_text, "_MAX_CHARS", 30)
+        assert "truncated at the page" in pdf_text.extract_pdf(body)
+
+
+def test_pdf_download_bounds_reported_and_actual_bytes(monkeypatch):
+    assert pdf_text._MAX_INPUT == 25 * 1024 * 1024
+    class Response:
+        headers = {"Content-Length": "100"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size):
+            yield b"12345"
+            yield b"67890"
+
+    monkeypatch.setattr(pdf_text, "_MAX_INPUT", 8)
+    with patch.object(pdf_text.requests, "get", return_value=Response()):
+        with pytest.raises(ValueError, match="oversized PDF"):
+            pdf_text._fetch_pdf("https://example.org/a.pdf")
+    Response.headers = {}
+    with patch.object(pdf_text.requests, "get", return_value=Response()):
+        with pytest.raises(ValueError, match="oversized PDF"):
+            pdf_text._fetch_pdf("https://example.org/a.pdf")
+
+
+def test_read_url_pdf_uses_bounded_child_and_preserves_error_contract():
+    with patch.object(tools.subprocess, "run", return_value=subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=b"Page 1: certified outcome", stderr=b"")) as run:
+        assert "certified outcome" in tools.read_url("https://example.org/report.pdf")
+    assert run.call_args.kwargs["timeout"] == 30
+    assert run.call_args.kwargs["stderr"] == subprocess.DEVNULL
+    assert run.call_args.kwargs["input"] == b"https://example.org/report.pdf"
+    with patch.object(tools.subprocess, "run", return_value=subprocess.CompletedProcess(
+            args=[], returncode=2, stdout=b"", stderr=b"")):
+        assert tools.read_url("https://failed.example/report.pdf").startswith(
+            "Error fetching URL: PDF text unavailable")
+
+
+def test_read_url_pdf_child_timeout_is_error():
+    with patch.object(tools.subprocess, "run", side_effect=subprocess.TimeoutExpired([], 30)):
+        result = tools.read_url("https://slow.example/report.pdf")
+    assert "exceeded 30 seconds" in result
+
+
+def test_read_url_pdf_http_failure_is_distinct_from_bad_pdf():
+    with patch.object(tools.subprocess, "run", return_value=subprocess.CompletedProcess(
+            args=[], returncode=3, stdout=b"", stderr=b"")):
+        result = tools.read_url("https://notfound.example/report.pdf")
+    assert "PDF URL returned an HTTP error" in result
+
+
+def test_read_url_does_not_refetch_extensionless_pdf():
+    response = MagicMock()
+    response.headers = {"Content-Type": "application/pdf"}
+    response.raise_for_status.return_value = None
+    with (patch.object(tools.requests, "get", return_value=response) as get,
+          patch.object(tools.subprocess, "run") as run):
+        result = tools.read_url("https://one-shot.example/download?token=once")
+    assert "direct .pdf URL" in result
+    get.assert_called_once()
+    run.assert_not_called()
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +139,9 @@ def _html_resp(html):
 # -------------------- _host_throttle (read_url) -------------------------
 
 class TestHostThrottle:
+    def test_malformed_read_url_returns_recoverable_error(self):
+        assert tools.read_url("http://[bad").startswith("Error fetching URL:")
+
     def test_first_call_to_a_host_does_not_sleep(self):
         with patch.object(tools, "time") as t:
             t.time.return_value = 1000.0
@@ -451,7 +546,7 @@ class TestReadUrlExtraction:
         assert "tail text" in tools._extract_main_content("<article>tail text &amp")
 
     def test_returns_full_content_uncapped(self):
-        # read_url no longer truncates — it returns the full extracted text; the
+        # HTML read_url no longer truncates — it returns the full extracted text; the
         # large-result offload to a file is ToolResultToFileMiddleware's job now.
         assert len(self._read("<article><p>" + ("x" * 30000) + "</p></article>")) == 30000
         assert len(self._read("<article><p>" + ("x" * 9000) + "</p></article>")) == 9000

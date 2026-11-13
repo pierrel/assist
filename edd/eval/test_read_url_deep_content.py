@@ -38,7 +38,9 @@ _HTML = _TOP + f"<h2>Facts</h2><p>{_DEEP_FACT} It opened in 2011.</p></article>"
 
 class _Resp:
     text = _HTML
+    headers = {"Content-Type": "text/html"}
     def raise_for_status(self): pass
+    def close(self): pass
 
 
 def _mock_get(url, **kw):

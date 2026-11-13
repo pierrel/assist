@@ -66,8 +66,12 @@ _reads: Counter = Counter()
 
 class _Resp:
     text = _PAGE_HTML
+    headers = {"Content-Type": "text/html"}
 
     def raise_for_status(self):
+        pass
+
+    def close(self):
         pass
 
 

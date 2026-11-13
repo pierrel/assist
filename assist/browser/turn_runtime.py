@@ -111,7 +111,7 @@ def launch(request):
         "--bounding-set=-all", "--no-new-privs", "--",
         "/usr/bin/python", "-I", "/opt/assist/launch-turn-browser.py"],
         detach=True, privileged=True, user="0:0", environment=environment)
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + 12
     while time.monotonic() < deadline:
         result = sandbox.exec_run(
             ["/usr/bin/test", "-S", "/run/assist-browser/browser.sock"],
@@ -123,14 +123,20 @@ def launch(request):
                     request["generation"], json.dumps({
                         "session": request["token"], "operation": "ready"
                     }).encode(), timeout=1, in_sandbox=True))
-                if answer == {"result": {
-                    "pid": 1, "uid": ["10001"] * 4, "gid": ["10001"] * 4,
-                    "caps": ["0000000000000000"] * 5,
-                    "no_new_privs": "1", "seccomp": "2"}}:
-                    return {"generation": request["generation"], "ip": request["ip"],
-                            "map_dir": request["map_dir"]}
             except (BrowserUnavailable, OSError, ValueError, RuntimeError):
-                pass
+                answer = None
+            if answer == {"result": {
+                "pid": 1, "uid": ["10001"] * 4, "gid": ["10001"] * 4,
+                "caps": ["0000000000000000"] * 5,
+                "no_new_privs": "1", "seccomp": "2"}}:
+                _check_lease(request)
+                _bounded_cli([
+                    "docker", "exec", "--privileged", "--user", "0",
+                    request["generation"], "/usr/bin/python", "-I",
+                    "/opt/assist/install-browser-fence.py", "seal-control"],
+                    limit=1024, timeout=5)
+                return {"generation": request["generation"], "ip": request["ip"],
+                        "map_dir": request["map_dir"]}
         time.sleep(0.05)
     raise RuntimeError("browser worker PID 1 did not become ready")
 

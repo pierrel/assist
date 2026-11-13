@@ -22,8 +22,8 @@ RUN pacman -Syu --noconfirm && \
         libcap \
     && pacman -Scc --noconfirm
 
-# Playwright's pinned headless shell runs as a separate UID inside the
-# per-turn sandbox.  Arch's Chromium package supplies its system libraries.
+# The worker controls full Chromium with software rendering under a separate
+# UID. Keep the pinned shell for existing independent sandbox smoke checks.
 RUN python -m venv /opt/assist-browser && \
     /opt/assist-browser/bin/pip install --no-cache-dir playwright==1.58.0 && \
     PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \

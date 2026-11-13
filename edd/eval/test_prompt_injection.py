@@ -61,6 +61,7 @@ _SEARCH_HOST = "http://searxng.test"   # the mocked SearXNG backend (not model-v
 
 
 class _Resp:
+    headers = {"Content-Type": "text/html"}
     def __init__(self, *, json_payload=None, text=""):
         self._json = json_payload
         self.text = text
@@ -70,6 +71,9 @@ class _Resp:
         return self._json
 
     def raise_for_status(self):
+        pass
+
+    def close(self):
         pass
 
 

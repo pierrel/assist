@@ -6,6 +6,9 @@ import os
 import re
 import socket
 import stat
+import subprocess
+import tempfile
+import time
 import sys
 from time import monotonic
 from urllib.parse import urljoin, urlsplit
@@ -93,16 +96,50 @@ class BrowserWorker:
         self.requests = {}
         self.request_partial = set()
         self.initial_storage = None
+        self.chromium = None
+        self.revoked = False
         self.page_namespace = os.environ.get("BROWSER_GENERATION", uuid4().hex)[:16]
 
+    def start_engine(self):
+        """Attach to our blank native browser before the host seals its port."""
+        if self.browser is not None or self.revoked:
+            raise BrowserInputError("browser engine cannot restart")
+        environment = {name: os.environ[name] for name in ("PATH", "HOME", "TMPDIR")}
+        try:
+            deadline = monotonic() + 8
+            with tempfile.TemporaryFile(dir=RUNTIME_DIR) as startup_log:
+                self.chromium = subprocess.Popen([
+                    "/usr/bin/chromium", "--ozone-platform=headless", "--use-gl=angle",
+                    "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--no-first-run",
+                    "--no-default-browser-check", "--disable-background-networking",
+                    "--disable-component-update", "--disable-sync", "--disable-extensions",
+                    "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9222",
+                    f"--user-data-dir={RUNTIME_DIR}/chromium", "--no-startup-window",
+                    f"--proxy-server=http://{PROXY_HOST}:{PROXY_PORT}",
+                    "--proxy-bypass-list=<-loopback>"], env=environment,
+                    stdout=subprocess.DEVNULL, stderr=startup_log)
+                while True:
+                    startup_log.seek(0)
+                    match = re.search(rb"DevTools listening on (ws://127\.0\.0\.1:9222/devtools/browser/[^\s]+)",
+                                      startup_log.read(32768))
+                    if self.chromium.poll() is not None or monotonic() >= deadline:
+                        raise BrowserInputError("native browser startup failed")
+                    if match:
+                        break
+                    time.sleep(0.02)
+                self.playwright = sync_playwright().start()
+                self.browser = self.playwright.chromium.connect_over_cdp(
+                    match[1].decode("ascii"), timeout=5000)
+        except Exception:
+            self.revoke()
+            raise
+
     def _start(self):
+        if self.revoked or self.browser is None:
+            raise BrowserInputError("browser engine is unavailable")
         if self.context is not None:
             return
         try:
-            self.playwright = sync_playwright().start()
-            self.browser = self.playwright.chromium.launch(
-                headless=True, chromium_sandbox=True, downloads_path=DOWNLOAD_DIR,
-                proxy={"server": f"http://{PROXY_HOST}:{PROXY_PORT}", "bypass": ""})
             self.context = self.browser.new_context(
                 accept_downloads=True, service_workers="block",
                 **({"storage_state": self.initial_storage}
@@ -110,15 +147,7 @@ class BrowserWorker:
             self.context.set_default_timeout(10000)
             self.context.on("page", self._register_page)
         except Exception:
-            for resource, method in ((self.context, "close"),
-                                     (self.browser, "close"),
-                                     (self.playwright, "stop")):
-                if resource is not None:
-                    try:
-                        getattr(resource, method)()
-                    except Exception:
-                        pass
-            self.context = self.browser = self.playwright = None
+            self.revoke()
             raise
 
     def _prune_pages(self):
@@ -180,7 +209,9 @@ class BrowserWorker:
 
     def _request_failed(self, request):
         host = host_port(request.url)
-        self._error(host, request.resource_type, "request_failed")
+        failure = request.failure
+        reason = failure if isinstance(failure, str) and re.fullmatch(r"net::[A-Z0-9_]+", failure) else "request_failed"
+        self._error(host, request.resource_type, reason)
 
     def _response(self, response):
         if response.status >= 400:
@@ -298,6 +329,8 @@ class BrowserWorker:
                           for ident, value in self.downloads.items()],
             "network_errors": self.errors[-12:],
         }
+        if len(page.url) <= 8192:
+            result["_source_url"] = page.url
         if observation_errors:
             result["observation_errors"] = observation_errors
         while snapshot and self._result_size({**result, "snapshot": snapshot}) > 32768:
@@ -434,13 +467,17 @@ class BrowserWorker:
         if download is None:
             raise BrowserInputError("unknown download ID")
         path = download.path()
-        if not path or not os.path.realpath(path).startswith(DOWNLOAD_DIR + "/"):
+        if not path or not os.path.realpath(path).startswith(RUNTIME_DIR + "/"):
             raise BrowserInputError("download is unavailable")
-        stat = os.stat(path)
-        if not os.path.isfile(path) or stat.st_size > 20 * 1024 * 1024:
+        info = os.stat(path)
+        if not os.path.isfile(path) or info.st_size > 20 * 1024 * 1024:
             raise BrowserInputError("download exceeds the 20 MiB transfer limit")
-        return {"path": str(path), "name": download.suggested_filename[:180],
-                "size": stat.st_size}
+        # CDP attachment uses Playwright's private artifact directory. Export
+        # only a completed, size-checked download through the existing boundary.
+        destination = os.path.join(DOWNLOAD_DIR, download_id)
+        download.save_as(destination)
+        return {"path": destination, "name": download.suggested_filename[:180],
+                "size": info.st_size}
 
     @staticmethod
     def _policy(host, port, deadline):
@@ -556,15 +593,30 @@ class BrowserWorker:
 
 
     def revoke(self):
-        """Close an active browser without ending its containing shell turn."""
-        for resource, method in ((self.context, "close"),
-                                 (self.browser, "close"),
-                                 (self.playwright, "stop")):
-            if resource is not None:
-                getattr(resource, method)()
-        self.context = self.browser = self.playwright = None
-        self.pages.clear()
-        self.snapshots.clear()
+        """Close the engine permanently; only a new turn may launch another."""
+        self.revoked = True
+        try:
+            for resource, method in ((self.context, "close"),
+                                     (self.browser, "close"),
+                                     (self.playwright, "stop")):
+                if resource is not None:
+                    try:
+                        getattr(resource, method)()
+                    except Exception:
+                        pass
+        finally:
+            for process in (self.chromium,):
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=1)
+            self.context = self.browser = self.playwright = None
+            self.chromium = None
+            self.pages.clear()
+            self.snapshots.clear()
         return {"revoked": True}
 
 
@@ -573,6 +625,7 @@ def serve():
         os._exit(124)
     worker = BrowserWorker()
     os.makedirs(DOWNLOAD_DIR, mode=0o700, exist_ok=True)
+    worker.start_engine()
     with socket.socket(socket.AF_UNIX) as server:
         server.bind(SOCKET)
         os.chmod(SOCKET, 0o600)
@@ -592,6 +645,10 @@ def serve():
                 if len(encoded) > MAX_RESULT:
                     encoded = b'{"error":"browser observation exceeds limit"}'
                 conn.sendall(encoded)
+                if worker.revoked:
+                    # PID 1 exit kills every native descendant; the outer
+                    # shell turn remains outside this namespace.
+                    os._exit(0)
 
 
 def call():
