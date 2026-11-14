@@ -39,6 +39,9 @@ unsupported. A material false fact or false statement of what a source says
 is a contradiction. If supplied evidence answers a question, calling it
 unknown or unverified conflicts with that evidence. If the evidence really
 does not resolve the question, honest uncertainty is appropriate.
+Read access statements in their stated scope: a checker unable to reach or
+fetch a URL in its own run may be blocked before HTTP, which establishes no
+network-wide conclusion about the URL or site.
 
 ## Requested outcomes
 
