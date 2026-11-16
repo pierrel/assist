@@ -1,0 +1,345 @@
+{
+  "version": "nonconvergence-suite-v1",
+  "source_scope": "normal web main and real research graph; only retrieval responses may be frozen",
+  "cases": [
+    {
+      "id": "music_bundle",
+      "category": "natural bundled note update",
+      "prompt": "Please update notes/rsd-2026.md for Phoenix and Deafheaven's 2026 Record Store Day releases. Keep the note concise and sourced, correct anything stale, and tell me what changed or could not be verified.",
+      "required_facts": [
+        "Phoenix's United is listed by Record Store Day as a 2026 RSD Exclusive Release dated April 18, 2026, on LP, label Rhino, quantity 3,500",
+        "Phoenix's Alphabetical is also listed by Record Store Day for the April 18, 2026 event; source https://recordstoreday.com/SpecialRelease/19973",
+        "Deafheaven's KEXP Sessions is listed by Record Store Day as a 2026 RSD Exclusive Release dated April 18, 2026, on 12-inch single, quantity 6,500",
+        "The existing claim that Deafheaven's Lonely People With Power is itself a 2026 RSD exclusive is unsupported by the official special-release evidence and must be corrected or qualified"
+      ],
+      "workspace_files": {
+        "notes/rsd-2026.md": "# 2026 Record Store Day: Phoenix and Deafheaven\n- Phoenix: United has a 2026 Record Store Day exclusive pressing; details need checking.\n- Deafheaven: Lonely People With Power is a 2026 Record Store Day exclusive; details need checking.\n"
+      },
+      "primary_reference_urls": [
+        "https://recordstoreday.com/SpecialRelease/19972",
+        "https://recordstoreday.com/SpecialRelease/19973",
+        "https://recordstoreday.com/SpecialRelease/19982",
+        "https://recordstoreday.com/UPC/075678601378"
+      ],
+      "fixture": "music",
+      "deadline_seconds": 2700,
+      "expected_updated_files": [
+        "notes/rsd-2026.md"
+      ],
+      "pair_group": "music-bundled-components",
+      "diagnostic_source_markers": [
+        "3,500",
+        "Alphabetical",
+        "KEXP Sessions",
+        "6,500"
+      ]
+    },
+    {
+      "id": "music_phoenix",
+      "category": "natural component note update",
+      "prompt": "Please update notes/rsd-2026.md for Phoenix’s 2026 Record Store Day releases. Keep the note concise and sourced, correct anything stale about Phoenix, and tell me what changed or could not be verified.",
+      "required_facts": [
+        "Phoenix's United is listed by Record Store Day as a 2026 RSD Exclusive Release dated April 18, 2026, on LP, label Rhino, quantity 3,500",
+        "Phoenix's Alphabetical is also listed by Record Store Day for the April 18, 2026 event; source https://recordstoreday.com/SpecialRelease/19973"
+      ],
+      "workspace_files": {
+        "notes/rsd-2026.md": "# 2026 Record Store Day: Phoenix and Deafheaven\n- Phoenix: United has a 2026 Record Store Day exclusive pressing; details need checking.\n- Deafheaven: Lonely People With Power is a 2026 Record Store Day exclusive; details need checking.\n"
+      },
+      "primary_reference_urls": [
+        "https://recordstoreday.com/SpecialRelease/19972",
+        "https://recordstoreday.com/SpecialRelease/19973",
+        "https://recordstoreday.com/SpecialRelease/19982",
+        "https://recordstoreday.com/UPC/075678601378"
+      ],
+      "fixture": "music",
+      "deadline_seconds": 2700,
+      "expected_updated_files": [
+        "notes/rsd-2026.md"
+      ],
+      "pair_group": "music-bundled-components",
+      "diagnostic_source_markers": [
+        "3,500",
+        "Alphabetical"
+      ]
+    },
+    {
+      "id": "music_deafheaven",
+      "category": "natural component note update",
+      "prompt": "Please update notes/rsd-2026.md for Deafheaven’s 2026 Record Store Day releases. Keep the note concise and sourced, correct anything stale about Deafheaven, and tell me what changed or could not be verified.",
+      "required_facts": [
+        "Deafheaven's KEXP Sessions is listed by Record Store Day as a 2026 RSD Exclusive Release dated April 18, 2026, on 12-inch single, quantity 6,500",
+        "The existing claim that Deafheaven's Lonely People With Power is itself a 2026 RSD exclusive is unsupported by the official special-release evidence and must be corrected or qualified"
+      ],
+      "workspace_files": {
+        "notes/rsd-2026.md": "# 2026 Record Store Day: Phoenix and Deafheaven\n- Phoenix: United has a 2026 Record Store Day exclusive pressing; details need checking.\n- Deafheaven: Lonely People With Power is a 2026 Record Store Day exclusive; details need checking.\n"
+      },
+      "primary_reference_urls": [
+        "https://recordstoreday.com/SpecialRelease/19972",
+        "https://recordstoreday.com/SpecialRelease/19973",
+        "https://recordstoreday.com/SpecialRelease/19982",
+        "https://recordstoreday.com/UPC/075678601378"
+      ],
+      "fixture": "music",
+      "deadline_seconds": 2700,
+      "expected_updated_files": [
+        "notes/rsd-2026.md"
+      ],
+      "pair_group": "music-bundled-components",
+      "diagnostic_source_markers": [
+        "KEXP Sessions",
+        "6,500"
+      ]
+    },
+    {
+      "id": "ballot_bundle",
+      "category": "natural bundled note update",
+      "prompt": "Please update my existing 2024 California and Oregon ballot-measure notes with the official outcomes and a concise explanation of what each measure does. Keep points that are already correct, correct stale ones, and tell me what remains unverified.",
+      "required_facts": [
+        "Approved in November 2024; authorized $10 billion in bonds for K–12 public school and community college facilities.",
+        "Approved in November 2024; amended California Constitution to recognize a fundamental right to marry regardless of sex or race, removing man-and-woman-only language.",
+        "Failed in November 2024; proposal would increase highest corporate minimum taxes and distribute revenue to eligible individuals."
+      ],
+      "expected_updated_files": [
+        "notes/california-2024.md",
+        "notes/oregon-2024.md"
+      ],
+      "workspace_files": {
+        "notes/california-2024.md": "# 2024 California ballot measures\n- Proposition 2 concerns K–12 public school and community college facilities. The bond amount is $8 billion (needs checking).\n- Proposition 3 concerns the constitutional right to marry. Its election outcome has not been checked.\n",
+        "notes/oregon-2024.md": "# 2024 Oregon ballot measures\n- Measure 118 proposed changes to corporate minimum taxes and rebates to residents.\n- Measure 118 appears to have passed (needs checking).\n"
+      },
+      "primary_reference_urls": [
+        "https://elections.cdn.sos.ca.gov/sov/2024-general/sov/65-official-dec-vote-results-bm.pdf",
+        "https://vigarchive.sos.ca.gov/2024/general/propositions/2/title-summary.htm",
+        "https://vigarchive.sos.ca.gov/2024/general/propositions/3/title-summary.htm",
+        "https://www.oregonlegislature.gov/bills_laws/lawsstatutes/2025OrLawForeword.pdf",
+        "https://sos.oregon.gov/elections/Documents/G24-Certified-Ballot-Statement.pdf"
+      ],
+      "fixture": "ballot",
+      "deadline_seconds": 2700,
+      "pair_group": "ballot-bundled-components",
+      "diagnostic_source_markers": [
+        "$10 billion",
+        "fundamental right",
+        "Measure 118 failed"
+      ]
+    },
+    {
+      "id": "ballot_ca2",
+      "category": "natural component note update",
+      "prompt": "Please update my existing note on California Proposition 2 with its official 2024 outcome and a concise explanation of what it does. Keep points that are already correct, correct stale ones, and tell me what remains unverified.",
+      "required_facts": [
+        "Approved in November 2024; authorized $10 billion in bonds for K–12 public school and community college facilities."
+      ],
+      "expected_updated_files": [
+        "notes/california-2024.md"
+      ],
+      "workspace_files": {
+        "notes/california-2024.md": "# 2024 California ballot measures\n- Proposition 2 concerns K–12 public school and community college facilities. The bond amount is $8 billion (needs checking).\n- Proposition 3 concerns the constitutional right to marry. Its election outcome has not been checked.\n",
+        "notes/oregon-2024.md": "# 2024 Oregon ballot measures\n- Measure 118 proposed changes to corporate minimum taxes and rebates to residents.\n- Measure 118 appears to have passed (needs checking).\n"
+      },
+      "primary_reference_urls": [
+        "https://elections.cdn.sos.ca.gov/sov/2024-general/sov/65-official-dec-vote-results-bm.pdf",
+        "https://vigarchive.sos.ca.gov/2024/general/propositions/2/title-summary.htm",
+        "https://vigarchive.sos.ca.gov/2024/general/propositions/3/title-summary.htm",
+        "https://www.oregonlegislature.gov/bills_laws/lawsstatutes/2025OrLawForeword.pdf",
+        "https://sos.oregon.gov/elections/Documents/G24-Certified-Ballot-Statement.pdf"
+      ],
+      "fixture": "ballot",
+      "deadline_seconds": 2700,
+      "pair_group": "ballot-bundled-components",
+      "diagnostic_source_markers": [
+        "$10 billion"
+      ]
+    },
+    {
+      "id": "ballot_ca3",
+      "category": "natural component note update",
+      "prompt": "Please update my existing note on California Proposition 3 with its official 2024 outcome and a concise explanation of what it does. Keep points that are already correct, correct stale ones, and tell me what remains unverified.",
+      "required_facts": [
+        "Approved in November 2024; amended California Constitution to recognize a fundamental right to marry regardless of sex or race, removing man-and-woman-only language."
+      ],
+      "expected_updated_files": [
+        "notes/california-2024.md"
+      ],
+      "workspace_files": {
+        "notes/california-2024.md": "# 2024 California ballot measures\n- Proposition 2 concerns K–12 public school and community college facilities. The bond amount is $8 billion (needs checking).\n- Proposition 3 concerns the constitutional right to marry. Its election outcome has not been checked.\n",
+        "notes/oregon-2024.md": "# 2024 Oregon ballot measures\n- Measure 118 proposed changes to corporate minimum taxes and rebates to residents.\n- Measure 118 appears to have passed (needs checking).\n"
+      },
+      "primary_reference_urls": [
+        "https://elections.cdn.sos.ca.gov/sov/2024-general/sov/65-official-dec-vote-results-bm.pdf",
+        "https://vigarchive.sos.ca.gov/2024/general/propositions/2/title-summary.htm",
+        "https://vigarchive.sos.ca.gov/2024/general/propositions/3/title-summary.htm",
+        "https://www.oregonlegislature.gov/bills_laws/lawsstatutes/2025OrLawForeword.pdf",
+        "https://sos.oregon.gov/elections/Documents/G24-Certified-Ballot-Statement.pdf"
+      ],
+      "fixture": "ballot",
+      "deadline_seconds": 2700,
+      "pair_group": "ballot-bundled-components",
+      "diagnostic_source_markers": [
+        "fundamental right"
+      ]
+    },
+    {
+      "id": "ballot_or118",
+      "category": "natural component note update",
+      "prompt": "Please update my existing note on Oregon Measure 118 with its official 2024 outcome and a concise explanation of what it would have done. Keep points that are already correct, correct stale ones, and tell me what remains unverified.",
+      "required_facts": [
+        "Failed in November 2024; proposal would increase highest corporate minimum taxes and distribute revenue to eligible individuals."
+      ],
+      "expected_updated_files": [
+        "notes/oregon-2024.md"
+      ],
+      "workspace_files": {
+        "notes/california-2024.md": "# 2024 California ballot measures\n- Proposition 2 concerns K–12 public school and community college facilities. The bond amount is $8 billion (needs checking).\n- Proposition 3 concerns the constitutional right to marry. Its election outcome has not been checked.\n",
+        "notes/oregon-2024.md": "# 2024 Oregon ballot measures\n- Measure 118 proposed changes to corporate minimum taxes and rebates to residents.\n- Measure 118 appears to have passed (needs checking).\n"
+      },
+      "primary_reference_urls": [
+        "https://elections.cdn.sos.ca.gov/sov/2024-general/sov/65-official-dec-vote-results-bm.pdf",
+        "https://vigarchive.sos.ca.gov/2024/general/propositions/2/title-summary.htm",
+        "https://vigarchive.sos.ca.gov/2024/general/propositions/3/title-summary.htm",
+        "https://www.oregonlegislature.gov/bills_laws/lawsstatutes/2025OrLawForeword.pdf",
+        "https://sos.oregon.gov/elections/Documents/G24-Certified-Ballot-Statement.pdf"
+      ],
+      "fixture": "ballot",
+      "deadline_seconds": 2700,
+      "pair_group": "ballot-bundled-components",
+      "diagnostic_source_markers": [
+        "Measure 118 failed"
+      ]
+    },
+    {
+      "id": "helio_eight",
+      "category": "natural synthetic multipart note update",
+      "prompt": "Please update notes/helio.md with reliable hardware details for the Aurora, Borealis, Cascade, Drift, Ember, Frost, Gale, and Harbor tiers. Keep the note concise, retain correct details, and mark anything you cannot verify.",
+      "required_facts": [
+        "Accurate distinctive hardware detail for each of the eight named tiers",
+        "Preserve the verified Cascade controller fact",
+        "Do not promote the unverified Moonrise tier"
+      ],
+      "workspace_files": {
+        "notes/helio.md": "# Helio product comparison\n\nStatus as of 2024-09-12: this is a working note, not a published buying guide. The tier names repeat in old catalogs, so a line near the right name is not proof of a current specification. Preserve a verified line until a source actually contradicts it.\n\n## Current comparison\n- Aurora: an old retailer card called its power cell TIDELOCK. That card was later withdrawn. Cooling, controller and current power details still need source checks.\n- Borealis: an undated spreadsheet calls its controller FERNWEH, but the spreadsheet has mixed Aurora and Borealis rows. Its power-cell details need a current specification.\n- Cascade: FERNWEH-3 controller was verified earlier against the manufacturer sheet; keep it unless newer primary evidence changes it. A reseller's Cascade battery figure is unverified.\n- Drift: an archived launch blog mentions an optical module. Determine what the current tier actually specifies.\n- Ember: the warranty FAQ names Ember but does not provide a hardware bill of materials.\n- Frost: an installer checklist describes a Frost port. The current system board is not yet verified.\n- Gale: a trade-show note records a field demonstration, not a released configuration.\n- Harbor: a service manual mentions a storage assembly, but it may cover several models.\n- Moonrise: rumored extra tier in a forum thread. Its existence is unverified.\n\n## Source queue and cautions\n- Aurora manufacturer page is the likely starting point. The previous Aurora retailer card is stale, and the note should not quietly recycle its TIDELOCK claim.\n- Borealis distributor snippets appear to repeat the spreadsheet. Find the Borealis manufacturer page before replacing the ambiguous controller line.\n- Cascade manufacturer page was previously inspected for the controller fact. The rest of that page may include accessory options that are not included in the base tier.\n- Drift launch blog, Ember FAQ, and Frost installer checklist may be useful leads; distinguish page title from actual current specification text.\n- Gale trade-show and Harbor service references use the tier names in captions. Check whether each passage describes the product or a demo unit.\n- The buyer guide repeats Aurora, Borealis, Cascade, Drift, Ember, Frost, Gale and Harbor together; it is a navigation aid, not eight independent primary specifications.\n\n## Previous edits\n2024-08-20: copied the eight-tier name list from an old comparison table. This did not verify individual hardware facts.\n2024-08-27: corrected Cascade controller from FERNWEH-2 to FERNWEH-3 after checking a manufacturer sheet. Other Cascade details were left open.\n2024-09-02: added the Aurora retailer power-cell line with an uncertainty tag when its card disappeared.\n2024-09-07: noticed Borealis and Aurora labels may have been swapped in the spreadsheet. No Borealis controller correction was made.\n2024-09-12: added Drift, Ember, Frost, Gale and Harbor research tasks. These are names to check, not proven features.\n\n## Editorial reminders\nKeep supported and unsupported entries distinguishable. When only one tier has a usable page, do not present the whole eight-tier comparison as verified. A concise answer should still retain the correct Cascade controller and say which named tiers remain uncertain.\n"
+      },
+      "expected_updated_files": [
+        "notes/helio.md"
+      ],
+      "fixture": "helio",
+      "deadline_seconds": 2700,
+      "pair_group": "helio-eight-stress",
+      "diagnostic_source_markers": [
+        "QUASAR-9",
+        "Borealis tier has TIDELOCK",
+        "Cascade tier has FERNWEH-3",
+        "MARLINSPIKE",
+        "GLIMMERWICK",
+        "SLIPSTREAM-7",
+        "HALCYON-2",
+        "KESTREL-5"
+      ]
+    },
+    {
+      "id": "helio_three",
+      "category": "natural synthetic complex completing control",
+      "prompt": "Please update notes/helio.md with reliable hardware details for the Aurora, Borealis, and Cascade tiers. Keep the note concise, retain correct details, and mark anything you cannot verify.",
+      "required_facts": [
+        "Accurate distinctive hardware detail for Aurora, Borealis, and Cascade",
+        "Preserve the verified Cascade controller fact"
+      ],
+      "workspace_files": {
+        "notes/helio.md": "# Helio product comparison\n\nStatus as of 2024-09-12: this is a working note, not a published buying guide. The tier names repeat in old catalogs, so a line near the right name is not proof of a current specification. Preserve a verified line until a source actually contradicts it.\n\n## Current comparison\n- Aurora: an old retailer card called its power cell TIDELOCK. That card was later withdrawn. Cooling, controller and current power details still need source checks.\n- Borealis: an undated spreadsheet calls its controller FERNWEH, but the spreadsheet has mixed Aurora and Borealis rows. Its power-cell details need a current specification.\n- Cascade: FERNWEH-3 controller was verified earlier against the manufacturer sheet; keep it unless newer primary evidence changes it. A reseller's Cascade battery figure is unverified.\n- Drift: an archived launch blog mentions an optical module. Determine what the current tier actually specifies.\n- Ember: the warranty FAQ names Ember but does not provide a hardware bill of materials.\n- Frost: an installer checklist describes a Frost port. The current system board is not yet verified.\n- Gale: a trade-show note records a field demonstration, not a released configuration.\n- Harbor: a service manual mentions a storage assembly, but it may cover several models.\n- Moonrise: rumored extra tier in a forum thread. Its existence is unverified.\n\n## Source queue and cautions\n- Aurora manufacturer page is the likely starting point. The previous Aurora retailer card is stale, and the note should not quietly recycle its TIDELOCK claim.\n- Borealis distributor snippets appear to repeat the spreadsheet. Find the Borealis manufacturer page before replacing the ambiguous controller line.\n- Cascade manufacturer page was previously inspected for the controller fact. The rest of that page may include accessory options that are not included in the base tier.\n- Drift launch blog, Ember FAQ, and Frost installer checklist may be useful leads; distinguish page title from actual current specification text.\n- Gale trade-show and Harbor service references use the tier names in captions. Check whether each passage describes the product or a demo unit.\n- The buyer guide repeats Aurora, Borealis, Cascade, Drift, Ember, Frost, Gale and Harbor together; it is a navigation aid, not eight independent primary specifications.\n\n## Previous edits\n2024-08-20: copied the eight-tier name list from an old comparison table. This did not verify individual hardware facts.\n2024-08-27: corrected Cascade controller from FERNWEH-2 to FERNWEH-3 after checking a manufacturer sheet. Other Cascade details were left open.\n2024-09-02: added the Aurora retailer power-cell line with an uncertainty tag when its card disappeared.\n2024-09-07: noticed Borealis and Aurora labels may have been swapped in the spreadsheet. No Borealis controller correction was made.\n2024-09-12: added Drift, Ember, Frost, Gale and Harbor research tasks. These are names to check, not proven features.\n\n## Editorial reminders\nKeep supported and unsupported entries distinguishable. When only one tier has a usable page, do not present the whole eight-tier comparison as verified. A concise answer should still retain the correct Cascade controller and say which named tiers remain uncertain.\n"
+      },
+      "expected_updated_files": [
+        "notes/helio.md"
+      ],
+      "fixture": "helio",
+      "deadline_seconds": 2700,
+      "pair_group": "helio-three-components",
+      "diagnostic_source_markers": [
+        "QUASAR-9",
+        "Borealis tier has TIDELOCK",
+        "Cascade tier has FERNWEH-3"
+      ]
+    },
+    {
+      "id": "helio_three_partial",
+      "category": "natural synthetic partial-source control",
+      "prompt": "Please update notes/helio.md with reliable hardware details for the Aurora, Borealis, and Cascade tiers. Keep the note concise, retain correct details, and mark anything you cannot verify.",
+      "required_facts": [
+        "Accurate supported details for Aurora and Cascade",
+        "Honest uncertainty if the Borealis source is unavailable"
+      ],
+      "workspace_files": {
+        "notes/helio.md": "# Helio product comparison\n\nStatus as of 2024-09-12: this is a working note, not a published buying guide. The tier names repeat in old catalogs, so a line near the right name is not proof of a current specification. Preserve a verified line until a source actually contradicts it.\n\n## Current comparison\n- Aurora: an old retailer card called its power cell TIDELOCK. That card was later withdrawn. Cooling, controller and current power details still need source checks.\n- Borealis: an undated spreadsheet calls its controller FERNWEH, but the spreadsheet has mixed Aurora and Borealis rows. Its power-cell details need a current specification.\n- Cascade: FERNWEH-3 controller was verified earlier against the manufacturer sheet; keep it unless newer primary evidence changes it. A reseller's Cascade battery figure is unverified.\n- Drift: an archived launch blog mentions an optical module. Determine what the current tier actually specifies.\n- Ember: the warranty FAQ names Ember but does not provide a hardware bill of materials.\n- Frost: an installer checklist describes a Frost port. The current system board is not yet verified.\n- Gale: a trade-show note records a field demonstration, not a released configuration.\n- Harbor: a service manual mentions a storage assembly, but it may cover several models.\n- Moonrise: rumored extra tier in a forum thread. Its existence is unverified.\n\n## Source queue and cautions\n- Aurora manufacturer page is the likely starting point. The previous Aurora retailer card is stale, and the note should not quietly recycle its TIDELOCK claim.\n- Borealis distributor snippets appear to repeat the spreadsheet. Find the Borealis manufacturer page before replacing the ambiguous controller line.\n- Cascade manufacturer page was previously inspected for the controller fact. The rest of that page may include accessory options that are not included in the base tier.\n- Drift launch blog, Ember FAQ, and Frost installer checklist may be useful leads; distinguish page title from actual current specification text.\n- Gale trade-show and Harbor service references use the tier names in captions. Check whether each passage describes the product or a demo unit.\n- The buyer guide repeats Aurora, Borealis, Cascade, Drift, Ember, Frost, Gale and Harbor together; it is a navigation aid, not eight independent primary specifications.\n\n## Previous edits\n2024-08-20: copied the eight-tier name list from an old comparison table. This did not verify individual hardware facts.\n2024-08-27: corrected Cascade controller from FERNWEH-2 to FERNWEH-3 after checking a manufacturer sheet. Other Cascade details were left open.\n2024-09-02: added the Aurora retailer power-cell line with an uncertainty tag when its card disappeared.\n2024-09-07: noticed Borealis and Aurora labels may have been swapped in the spreadsheet. No Borealis controller correction was made.\n2024-09-12: added Drift, Ember, Frost, Gale and Harbor research tasks. These are names to check, not proven features.\n\n## Editorial reminders\nKeep supported and unsupported entries distinguishable. When only one tier has a usable page, do not present the whole eight-tier comparison as verified. A concise answer should still retain the correct Cascade controller and say which named tiers remain uncertain.\n"
+      },
+      "expected_updated_files": [
+        "notes/helio.md"
+      ],
+      "fixture": "helio-partial",
+      "deadline_seconds": 2700,
+      "pair_group": "helio-three-partial-source",
+      "diagnostic_source_markers": [
+        "QUASAR-9",
+        "Cascade tier has FERNWEH-3"
+      ]
+    },
+    {
+      "id": "helio_aurora",
+      "category": "natural synthetic component note update",
+      "prompt": "Please update notes/helio.md with reliable hardware details for the Helio Aurora tier. Keep the note concise, retain correct details, and mark anything you cannot verify.",
+      "required_facts": [
+        "Helio Aurora has QUASAR-9 cooling loop with the correct source"
+      ],
+      "workspace_files": {
+        "notes/helio.md": "# Helio product comparison\n\nStatus as of 2024-09-12: this is a working note, not a published buying guide. The tier names repeat in old catalogs, so a line near the right name is not proof of a current specification. Preserve a verified line until a source actually contradicts it.\n\n## Current comparison\n- Aurora: an old retailer card called its power cell TIDELOCK. That card was later withdrawn. Cooling, controller and current power details still need source checks.\n- Borealis: an undated spreadsheet calls its controller FERNWEH, but the spreadsheet has mixed Aurora and Borealis rows. Its power-cell details need a current specification.\n- Cascade: FERNWEH-3 controller was verified earlier against the manufacturer sheet; keep it unless newer primary evidence changes it. A reseller's Cascade battery figure is unverified.\n- Drift: an archived launch blog mentions an optical module. Determine what the current tier actually specifies.\n- Ember: the warranty FAQ names Ember but does not provide a hardware bill of materials.\n- Frost: an installer checklist describes a Frost port. The current system board is not yet verified.\n- Gale: a trade-show note records a field demonstration, not a released configuration.\n- Harbor: a service manual mentions a storage assembly, but it may cover several models.\n- Moonrise: rumored extra tier in a forum thread. Its existence is unverified.\n\n## Source queue and cautions\n- Aurora manufacturer page is the likely starting point. The previous Aurora retailer card is stale, and the note should not quietly recycle its TIDELOCK claim.\n- Borealis distributor snippets appear to repeat the spreadsheet. Find the Borealis manufacturer page before replacing the ambiguous controller line.\n- Cascade manufacturer page was previously inspected for the controller fact. The rest of that page may include accessory options that are not included in the base tier.\n- Drift launch blog, Ember FAQ, and Frost installer checklist may be useful leads; distinguish page title from actual current specification text.\n- Gale trade-show and Harbor service references use the tier names in captions. Check whether each passage describes the product or a demo unit.\n- The buyer guide repeats Aurora, Borealis, Cascade, Drift, Ember, Frost, Gale and Harbor together; it is a navigation aid, not eight independent primary specifications.\n\n## Previous edits\n2024-08-20: copied the eight-tier name list from an old comparison table. This did not verify individual hardware facts.\n2024-08-27: corrected Cascade controller from FERNWEH-2 to FERNWEH-3 after checking a manufacturer sheet. Other Cascade details were left open.\n2024-09-02: added the Aurora retailer power-cell line with an uncertainty tag when its card disappeared.\n2024-09-07: noticed Borealis and Aurora labels may have been swapped in the spreadsheet. No Borealis controller correction was made.\n2024-09-12: added Drift, Ember, Frost, Gale and Harbor research tasks. These are names to check, not proven features.\n\n## Editorial reminders\nKeep supported and unsupported entries distinguishable. When only one tier has a usable page, do not present the whole eight-tier comparison as verified. A concise answer should still retain the correct Cascade controller and say which named tiers remain uncertain.\n"
+      },
+      "expected_updated_files": [
+        "notes/helio.md"
+      ],
+      "fixture": "helio",
+      "deadline_seconds": 2700,
+      "pair_group": "helio-three-components",
+      "diagnostic_source_markers": [
+        "QUASAR-9"
+      ]
+    },
+    {
+      "id": "helio_borealis",
+      "category": "natural synthetic component note update",
+      "prompt": "Please update notes/helio.md with reliable hardware details for the Helio Borealis tier. Keep the note concise, retain correct details, and mark anything you cannot verify.",
+      "required_facts": [
+        "Helio Borealis has TIDELOCK power cell with the correct source"
+      ],
+      "workspace_files": {
+        "notes/helio.md": "# Helio product comparison\n\nStatus as of 2024-09-12: this is a working note, not a published buying guide. The tier names repeat in old catalogs, so a line near the right name is not proof of a current specification. Preserve a verified line until a source actually contradicts it.\n\n## Current comparison\n- Aurora: an old retailer card called its power cell TIDELOCK. That card was later withdrawn. Cooling, controller and current power details still need source checks.\n- Borealis: an undated spreadsheet calls its controller FERNWEH, but the spreadsheet has mixed Aurora and Borealis rows. Its power-cell details need a current specification.\n- Cascade: FERNWEH-3 controller was verified earlier against the manufacturer sheet; keep it unless newer primary evidence changes it. A reseller's Cascade battery figure is unverified.\n- Drift: an archived launch blog mentions an optical module. Determine what the current tier actually specifies.\n- Ember: the warranty FAQ names Ember but does not provide a hardware bill of materials.\n- Frost: an installer checklist describes a Frost port. The current system board is not yet verified.\n- Gale: a trade-show note records a field demonstration, not a released configuration.\n- Harbor: a service manual mentions a storage assembly, but it may cover several models.\n- Moonrise: rumored extra tier in a forum thread. Its existence is unverified.\n\n## Source queue and cautions\n- Aurora manufacturer page is the likely starting point. The previous Aurora retailer card is stale, and the note should not quietly recycle its TIDELOCK claim.\n- Borealis distributor snippets appear to repeat the spreadsheet. Find the Borealis manufacturer page before replacing the ambiguous controller line.\n- Cascade manufacturer page was previously inspected for the controller fact. The rest of that page may include accessory options that are not included in the base tier.\n- Drift launch blog, Ember FAQ, and Frost installer checklist may be useful leads; distinguish page title from actual current specification text.\n- Gale trade-show and Harbor service references use the tier names in captions. Check whether each passage describes the product or a demo unit.\n- The buyer guide repeats Aurora, Borealis, Cascade, Drift, Ember, Frost, Gale and Harbor together; it is a navigation aid, not eight independent primary specifications.\n\n## Previous edits\n2024-08-20: copied the eight-tier name list from an old comparison table. This did not verify individual hardware facts.\n2024-08-27: corrected Cascade controller from FERNWEH-2 to FERNWEH-3 after checking a manufacturer sheet. Other Cascade details were left open.\n2024-09-02: added the Aurora retailer power-cell line with an uncertainty tag when its card disappeared.\n2024-09-07: noticed Borealis and Aurora labels may have been swapped in the spreadsheet. No Borealis controller correction was made.\n2024-09-12: added Drift, Ember, Frost, Gale and Harbor research tasks. These are names to check, not proven features.\n\n## Editorial reminders\nKeep supported and unsupported entries distinguishable. When only one tier has a usable page, do not present the whole eight-tier comparison as verified. A concise answer should still retain the correct Cascade controller and say which named tiers remain uncertain.\n"
+      },
+      "expected_updated_files": [
+        "notes/helio.md"
+      ],
+      "fixture": "helio",
+      "deadline_seconds": 2700,
+      "pair_group": "helio-three-components",
+      "diagnostic_source_markers": [
+        "Borealis tier has TIDELOCK"
+      ]
+    },
+    {
+      "id": "helio_cascade",
+      "category": "natural synthetic component note update",
+      "prompt": "Please update notes/helio.md with reliable hardware details for the Helio Cascade tier. Keep the note concise, retain correct details, and mark anything you cannot verify.",
+      "required_facts": [
+        "Helio Cascade has FERNWEH-3 controller with the correct source"
+      ],
+      "workspace_files": {
+        "notes/helio.md": "# Helio product comparison\n\nStatus as of 2024-09-12: this is a working note, not a published buying guide. The tier names repeat in old catalogs, so a line near the right name is not proof of a current specification. Preserve a verified line until a source actually contradicts it.\n\n## Current comparison\n- Aurora: an old retailer card called its power cell TIDELOCK. That card was later withdrawn. Cooling, controller and current power details still need source checks.\n- Borealis: an undated spreadsheet calls its controller FERNWEH, but the spreadsheet has mixed Aurora and Borealis rows. Its power-cell details need a current specification.\n- Cascade: FERNWEH-3 controller was verified earlier against the manufacturer sheet; keep it unless newer primary evidence changes it. A reseller's Cascade battery figure is unverified.\n- Drift: an archived launch blog mentions an optical module. Determine what the current tier actually specifies.\n- Ember: the warranty FAQ names Ember but does not provide a hardware bill of materials.\n- Frost: an installer checklist describes a Frost port. The current system board is not yet verified.\n- Gale: a trade-show note records a field demonstration, not a released configuration.\n- Harbor: a service manual mentions a storage assembly, but it may cover several models.\n- Moonrise: rumored extra tier in a forum thread. Its existence is unverified.\n\n## Source queue and cautions\n- Aurora manufacturer page is the likely starting point. The previous Aurora retailer card is stale, and the note should not quietly recycle its TIDELOCK claim.\n- Borealis distributor snippets appear to repeat the spreadsheet. Find the Borealis manufacturer page before replacing the ambiguous controller line.\n- Cascade manufacturer page was previously inspected for the controller fact. The rest of that page may include accessory options that are not included in the base tier.\n- Drift launch blog, Ember FAQ, and Frost installer checklist may be useful leads; distinguish page title from actual current specification text.\n- Gale trade-show and Harbor service references use the tier names in captions. Check whether each passage describes the product or a demo unit.\n- The buyer guide repeats Aurora, Borealis, Cascade, Drift, Ember, Frost, Gale and Harbor together; it is a navigation aid, not eight independent primary specifications.\n\n## Previous edits\n2024-08-20: copied the eight-tier name list from an old comparison table. This did not verify individual hardware facts.\n2024-08-27: corrected Cascade controller from FERNWEH-2 to FERNWEH-3 after checking a manufacturer sheet. Other Cascade details were left open.\n2024-09-02: added the Aurora retailer power-cell line with an uncertainty tag when its card disappeared.\n2024-09-07: noticed Borealis and Aurora labels may have been swapped in the spreadsheet. No Borealis controller correction was made.\n2024-09-12: added Drift, Ember, Frost, Gale and Harbor research tasks. These are names to check, not proven features.\n\n## Editorial reminders\nKeep supported and unsupported entries distinguishable. When only one tier has a usable page, do not present the whole eight-tier comparison as verified. A concise answer should still retain the correct Cascade controller and say which named tiers remain uncertain.\n"
+      },
+      "expected_updated_files": [
+        "notes/helio.md"
+      ],
+      "fixture": "helio",
+      "deadline_seconds": 2700,
+      "pair_group": "helio-three-components",
+      "diagnostic_source_markers": [
+        "Cascade tier has FERNWEH-3"
+      ]
+    }
+  ]
+}
