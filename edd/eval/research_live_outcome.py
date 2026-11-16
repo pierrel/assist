@@ -76,7 +76,7 @@ def _checkpoint_reply(checkpoint: Path, thread_id: str,
     return str(replies[-1]["content"]), replies[-1].get("id")
 
 
-def _completed_parent_run(parent_runs, children, required_role=None):
+def _completed_parent_run(parent_runs, children, required_role=None, parent_started_at=None):
     """Accept only the final parent Run after all launched child work has settled."""
     if not parent_runs or parent_runs[-1].status != "success":
         return None
@@ -94,12 +94,20 @@ def _completed_parent_run(parent_runs, children, required_role=None):
         return (parent if not required_role and datetime.fromisoformat(
             parent.updated_at) >= max(datetime.fromisoformat(child.updated_at)
                                      for child in children) else None)
+    if any(not any(run.dispatch_key == f"task-completion:{child.id}"
+                   for run in parent_runs) for child in returning):
+        # A terminal child can precede creation of its parent wake. A different
+        # wake finishing during that gap is still a draft of the whole result.
+        return None
     completed = next((child for child in returning
                       if parent.work_id == f"task-completion:{child.thread_id}"), None)
     if completed is None:
         return None
     latest_result_at = max(datetime.fromisoformat(child.updated_at) for child in returning)
-    if datetime.fromisoformat(parent.created_at) < latest_result_at:
+    # A completion Run can be admitted while a sibling is still pending, then
+    # claimed after that sibling settles. Its creation time is not execution time.
+    started_at = (parent_started_at or {}).get(getattr(parent, "id", ""), parent.created_at)
+    if datetime.fromisoformat(started_at) < latest_result_at:
         return None
     if required_role and (completed.assistant_id != required_role
                           or completed.status != "success"):
@@ -345,6 +353,7 @@ def run(case_id: str, artifact: Path, egress_proof: Path, env_path: Path,
     original_write = RunService._write
     status_lock = threading.Lock()
     last_run_status: dict[tuple[str, str], str] = {}
+    parent_started_at: dict[str, str] = {}
     change_version = 0
 
     def write_and_notify(self, thread_id, records):
@@ -356,6 +365,8 @@ def run(case_id: str, artifact: Path, egress_proof: Path, env_path: Path,
                     key = (thread_id, record.id)
                     if last_run_status.get(key) != record.status:
                         last_run_status[key] = record.status
+                        if record.status == "running":
+                            parent_started_at[record.id] = record.updated_at
                         append_private(artifact / "lifecycle.jsonl", "run_status",
                                        run_thread_id=thread_id, run_id=record.id,
                                        parent_run_id=record.parent_run_id,
@@ -407,8 +418,11 @@ def run(case_id: str, artifact: Path, egress_proof: Path, env_path: Path,
             updates = _saved_note_updates(domain, originals) if originals else {}
             artifact_ready = (_requested_updates(selected, updates)
                               if originals else bool(reports))
+            with status_lock:
+                observed_starts = dict(parent_started_at)
             completed_parent = _completed_parent_run(
-                parent_runs, children, selected.get("required_delivery_role"))
+                parent_runs, children, selected.get("required_delivery_role"),
+                observed_starts)
             completed_child_id = _completed_child_id(completed_parent)
             reply = (_checkpoint_reply(threads_root / "threads.db", tid, completed_child_id)
                      if artifact_ready and completed_parent and not delivered else None)
@@ -435,7 +449,8 @@ def run(case_id: str, artifact: Path, egress_proof: Path, env_path: Path,
                     and artifact_ready and children
                     and all(child.status in {"success", "error", "timeout", "cancelled"}
                             for child in children)):
-                ordinary_parent = _completed_parent_run(parent_runs, children)
+                ordinary_parent = _completed_parent_run(
+                    parent_runs, children, parent_started_at=observed_starts)
                 ordinary_child_id = _completed_child_id(ordinary_parent)
                 ordinary_reply = (_checkpoint_reply(threads_root / "threads.db", tid,
                                                     ordinary_child_id)

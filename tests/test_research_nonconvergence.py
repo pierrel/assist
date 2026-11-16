@@ -390,7 +390,8 @@ def test_no_model_run_store_to_supervisor_to_observer_smoke(tmp_path):
     service.transition(parent.thread_id, parent.id, "running")
     service.transition(parent.thread_id, parent.id, "success")
     continuation = service.create("parent", "general-agent", None,
-                                  work_id="task-completion:sub-research")
+                                  work_id="task-completion:sub-research",
+                                  dispatch_key=f"task-completion:{child.id}")
     service.transition("parent", continuation.id, "running")
     service.transition("parent", continuation.id, "success")
     assert _completed_parent_run(service.list("parent"),
