@@ -3533,6 +3533,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     decision_key = (_run.dispatch_key or "") if _run is not None else ""
     decision_kind = "reply" if decision_key.startswith("reply-approval:") else None
 
+    def waits_for_retained_work() -> bool:
+        retained = BrowserManager.current_session(tid)
+        return (_run is not None and not _run.resume and _run.user_event_id != _run.id
+                and retained is not None and not retained.closed
+                and retained.work_id != _run.work_id)
+
     def on_queue_wait(stage: str) -> None:
         # `ThreadAffinityQueue.acquire` fires the callback with "queued"
         # (when this thread has to wait) and then "running" (when it
@@ -3556,10 +3562,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # Approval waiters preserve the admitted proposal projection until the
         # owner/action check below; writing here could overwrite a newer card.
         if (stage == "queued" and not resume and resume_decision is None
-                and THREAD_QUEUE.peek_holder() != tid):
+                and THREAD_QUEUE.peek_holder() != tid and not waits_for_retained_work()):
             _set_status(tid, "queued", **pending_kwargs)
 
     try:
+        if waits_for_retained_work():
+            return  # Normal terminal dispatch releases this durable background ticket.
         if (_run is not None and _run.resume
                 and _runs().get(tid, _run.id).status == "pending"):
             candidate = BrowserManager.current_session(tid)
@@ -3567,8 +3575,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 queued_browser = (candidate, candidate.sandbox_backend.container)
         # Start containers only after acquiring the queue. A live browser's
         # container is frozen across fairness yields, then reused by the same
-        # admitted logical turn. Its host systemd timer enforces the original
-        # creation + 3h deadline, including time frozen in the queue.
+        # admitted logical turn. Its host age check preserves the generation
+        # while that existing authority owns it, including frozen queue time.
         #
         # `chat.message()` below tries to acquire the queue again
         # internally; the reentrant fast path (same thread_id + same
@@ -3593,6 +3601,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     logging.info("run %s on %s reached %s before slot claim; skipping",
                                  _run.id, tid, current_run.status)
                     return
+                if waits_for_retained_work():
+                    return  # Another dispatcher may have paused while this one queued.
                 retained = BrowserManager.current_session(tid)
                 if (retained is not None and retained.paused
                         and retained.work_id == _run.work_id):
@@ -3700,7 +3710,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     return
             if _run is not None:
                 try:
-                    _run = _runs().claim(tid, _run.id)
+                    with _RUN_ADMISSION_LOCK:
+                        _run = _runs().claim(tid, _run.id)
                 except InvalidRunTransition:
                     return
             _set_status(tid, "starting_sandbox", **pending_kwargs)
@@ -4237,13 +4248,26 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             captured, container = queued_browser
             try:
                 with BrowserManager.bounded_thread_gate(tid):
-                    if (BrowserManager.current_session(tid) is captured and captured.paused
-                            and captured.work_id == _run.work_id
-                            and captured.sandbox_generation == container.id):
-                        try:
-                            BrowserManager.cleanup(tid, captured)
-                        finally:
-                            SandboxManager.cleanup(captured.work_dir, container)
+                    with _RUN_ADMISSION_LOCK:
+                        if (BrowserManager.current_session(tid) is not captured or not captured.paused
+                                or captured.work_id != _run.work_id
+                                or captured.sandbox_generation != container.id):
+                            return  # A replacement or borrowing child owns the handoff.
+                        work = [run for run in _runs().list(tid)
+                                if run.work_id == _run.work_id]
+                        if not work or work[-1].id != _run.id or work[-1].status != "pending":
+                            return  # A duplicate wait no longer owns this logical work.
+                        # Retire the pending ticket before releasing admission.
+                        # A concurrent dispatcher must not claim it during teardown.
+                        if isinstance(e, QueueWaitTimeout):
+                            _runs().transition(tid, _run.id, "timeout", error=str(e))
+                        else:
+                            _runs().claim(tid, _run.id)
+                            _runs().transition(tid, _run.id, "error", error=str(e))
+                    try:
+                        BrowserManager.cleanup(tid, captured)
+                    finally:
+                        SandboxManager.cleanup(captured.work_dir, container)
             except Exception:
                 logging.error("paused queue failure teardown unconfirmed for %s", tid,
                               exc_info=True)

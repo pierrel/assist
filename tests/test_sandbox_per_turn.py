@@ -1,8 +1,8 @@
 """One container per turn, with confirmed stop before replacement.
 
-Managed ordinary execution has a host wall-clock deadline outside Docker's
-freezer. PID 1 sleep alone bounds only running orphans. Exceeding the normal
-queue hold cap reduces premature expiry; a force-released turn can outlast it.
+Managed ordinary execution has no independent PID 1 deadline. The owning Run
+controls teardown; its host age check leaves still-owned generations alone.
+Legacy unscoped execution retains the image's running-time sleep backstop.
 
 Covered here:
   - cleanup() proves the captured generation stopped before registry release.
@@ -117,7 +117,7 @@ class TestNoReuse(_SandboxStateBase):
                 self.assertEqual([call.args[0] for call in arm_expiry.call_args_list],
                                  [first.id, second.id])
                 self.assertEqual([call.kwargs for call in arm_expiry.call_args_list],
-                                 [{"thread_id": "thread"}, {"thread_id": "thread"}])
+                                 [{"thread_id": "thread", "threads_root": root}] * 2)
 
         self.assertIsNot(second, first, "container was reused across turns")
         stopped.assert_called_once_with(first.id)

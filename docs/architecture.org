@@ -137,14 +137,21 @@ in both views. An ID shown in only one view keeps that meaning.
   resets prove the frozen generation stopped before releasing held work.
   Checkpoint-verified approval repair may replace a cancelled physical slice;
   explicit cancellation receipts keep the entire logical work revoked.
-  A host user-systemd transient timer removes each exact labelled ordinary
-  managed generation at its original creation + three hours, including frozen
-  queue time and web-worker loss. Timer-arm failure proves teardown before
-  returning; a Docker-daemon outage leaves a failed removal retrying. The host
+  A host user-systemd transient timer checks each exact labelled ordinary
+  managed generation at its original creation + three hours. Existing generation
+  and authority fences protect owned execution through parent and child slices;
+  the timer removes only proven ownerless generations. Unknown ownership is
+  retained for normal cleanup or startup reconciliation. Managed PID 1 has no
+  independent deadline; the existing scheduler cap unwinds through normal cleanup
+  and persists the Run's terminal outcome. Timer-arm failure proves teardown before returning; a Docker-daemon
+  outage leaves a failed inspection/removal retrying. The host
   user manager must be available, including its =/run/user/<uid>/bus= socket;
-  unsupported hosts fail closed. In-container PID 1 sleep does not enforce the
-  paused bound. A terminal queue-entry failure cleans only its captured paused
+  unsupported hosts fail closed. A terminal queue-entry failure cleans only its captured paused
   resume session/work/generation; skipped duplicates and newer owners survive.
+  Queue-failure cleanup revalidates the latest pending ticket and captured paused
+  session under the browser gate and Run admission lock before retiring it.
+  Fresh background work waits behind a retained different-work session; direct
+  owner input retains its existing revocation path.
   An eligible child borrows the same backend after its durable parent work and
   user event match the owner. Child execution refreezes it before releasing the
   model/checkout scopes. Parent background processes and page JavaScript run
@@ -173,14 +180,19 @@ in both views. An ID shown in only one view keeps that meaning.
   also destinations. Host Python tools call services directly; sandbox and
   browser requests cross C13's allowlist and exact-grant boundary first.
 - *C21 Host user systemd.* [[file:../assist/sandbox_expiry.py][sandbox_expiry.py]]
-  arms one transient deadline for each ordinary managed Docker generation at
+  arms one transient age check for each ordinary managed Docker generation at
   original creation + three hours. The unit outlives the web process and its
-  frozen containers; only exact host-labelled generations can be removed.
+  frozen containers. Existing generation/admission fences must prove the exact
+  labelled generation ownerless before removal. Owned or unknown generations
+  remain for normal lifecycle cleanup or startup orphan reconciliation; no timer
+  renewal or separate worker-liveness tracking is introduced.
   Missing user-manager access prevents backend admission, while Docker failure
   leaves an owed removal retry. Confirmed normal teardown cancels the unit.
   The unit retains the host-supplied thread ID for timestamped exact-generation
   expiry attempt/outcome records in the user journal, even after teardown.
-  This identity is diagnostic only; ownership labels still authorize removal.
+  The thread ID and root retained by new units locate the existing authority;
+  labels and that fenced ownership check authorize removal. Legacy units without
+  authority context retain the generation. See [[file:2026-11-16-owned-sandbox-lifetime.org][the ownership lifetime amendment]].
 
 ** Agent and guidance view
 

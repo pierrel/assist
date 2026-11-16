@@ -1,0 +1,86 @@
+#+title: Preserve owned sandbox execution at the host age check
+#+date: 2026-11-16
+
+* Problem and evidence
+A logical turn may remain in progress while waiting for the scheduler or its
+children. Container age is not evidence that this work ended. The prior host
+helper removed an exact labelled generation at creation plus three hours
+without consulting ownership. The image's PID 1 also ran =sleep 10800=, which
+could end active execution independently. These are code-proven interruption
+paths, not a claim of an observed production incident.
+
+Fresh external review also identified two ordinary dispatch paths that could
+destroy retained work: scheduled fresh execution could replace a paused parent's
+container, and a duplicate resume's wait timeout could tear down its successor's
+unchanged session. Four deterministic controls reproduced those paths before
+their correction.
+
+* Ownership controls teardown
+Ordinary managed creation now overrides PID 1 with =sleep infinity=. The
+existing Run scheduler's cumulative active limit is unchanged: its timeout
+unwinds through normal cleanup and persists the terminal Run outcome. Explicit cancellation, newer-user
+revocation, approval/terminal boundaries, failed admission, and startup orphan
+reconciliation retain their existing exact-generation stop proofs.
+
+The existing host timer remains a one-time age check. New units retain the
+thread root and ID alongside the immutable Docker ID, encoded in argv to avoid
+systemd expansion. The helper acquires the existing generation fence and then
+the authority fence, in creation's lock order. It holds them through any
+removal. A covered authority whose lease lists that generation retains it,
+including physical-Run transitions, queued resumes and borrowed child slices.
+An idle conversation alone is not an owner: a readable covered authority with
+no matching generation permits exact labelled removal. No Run-status snapshot,
+heartbeat, lease format, renewal timer, or second lifecycle manager is added.
+
+Missing/unreadable authority, a missing thread directory, or legacy timer
+arguments without authority context retain the container. A missing directory
+does not prove the process using its bind mount has stopped. An ambiguous
+crashed-worker owner can therefore remain until existing startup reconciliation
+or explicit operator cleanup. There is no longer an independent three-hour
+bound on owned orphan resources.
+
+Fresh background work now remains pending behind a retained different-work
+session, with a second check after queue acquisition. Existing terminal dispatch
+releases it after the parent finishes. Direct owner input keeps its explicit
+revocation behavior. A failed queued resume rechecks its captured paused session
+and latest pending same-work ticket under the browser gate and Run admission
+lock. It retires only that ticket before exact cleanup. Already-claimed or
+superseded tickets, replaced sessions and a generation borrowed by a child
+remain untouched, including their parent resume and status projection.
+
+* Diagnostics and validation
+Each age-check attempt and outcome records UTC time, immutable generation and
+the original thread ID in the host user's journal. =retained_owned= and
+=retained_unknown= finish the check without renewal. =removed= requires Docker
+success; =already_absent= requires an exact-ID absence response. Docker failure
+retains the existing retry behavior. Logs contain no prompts, thread titles,
+workspace paths, raw labels, credentials or Docker error output. Legacy units
+without a thread ID report null.
+
+Deterministic tests create real Run/authority records for active parents,
+pending work, fair-paused successors and queued/running children. They require
+the age check to leave the owned generation intact, followed by the existing
+success/cancellation cleanup clearing ownership only after stop confirmation.
+Real file-lock contention checks admission racing the age check and proves both
+fences remain held through ownerless removal. Missing/corrupt authority and
+legacy arguments must retain; exact absence and removal failures stay distinct.
+Dispatch controls cover both direct schedule calls and queued execution, then
+require the deferred schedule to finish after parent cleanup. Duplicate wait
+controls advance the captured ticket to running or a newer successor; a further
+control uses actual session borrowing by a child and verifies its eventual
+handoff can still dispatch the preserved parent resume.
+
+Opt-in Docker/systemd fixtures use a synthetic thread and isolated container.
+One exercises the actual factory's =sleep infinity= override, exits the timer
+arming worker, freezes execution, and requires =retained_owned= at a short age
+check before normal cancellation cleanup removes it. A separate covered but
+ownerless fixture must be removed, with its original thread still in the
+journal. These fixtures are prepared for isolated verification; no live result
+is claimed here. No model-facing guidance or behavioral eval changes occur.
+
+* Historical supersessions
+This amendment supersedes =2026-11-13-browser-host-expiry.org=, section =Repair=,
+only where it gives the host timer unconditional three-hour removal authority.
+Existing generation/authority ownership now overrides age, and managed PID 1
+has no independent cutoff. That document's frozen-container experiment remains
+historical evidence; timer diagnostics do not establish a new orphan deadline.

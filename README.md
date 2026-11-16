@@ -58,6 +58,9 @@ where reliability is harder than with frontier APIs.
   execution container, preserving live pages and filled inputs across fairness
   slices. The whole container freezes for unrelated work; a child of the same
   logical work unpauses it and shares its background processes and page activity.
+  Fresh scheduled/background work on that thread waits for the retained logical
+  turn to finish. A duplicate resume timeout cannot retire another dispatcher's
+  ticket or the generation currently borrowed by a child.
   Trusted children share persistent `/agent` files; the separate browser-worker
   UID cannot traverse that directory. A newer user event or
   cancellation revokes the old browser before later work can proceed.
@@ -86,18 +89,27 @@ where reliability is harder than with frontier APIs.
   Chromium has its own PID namespace inside the turn sandbox. Its processes
   stop when that exact sandbox generation stops. Managed ordinary execution
   requires the host user's systemd manager and Docker CLI. A transient host
-  timer removes the exact labelled generation at its original creation + three
-  hours, even while Docker-paused and after the web worker exits. Backend
-  creation fails closed if the timer cannot be armed. Docker-daemon failures leave the unit
-  retrying its owed removal. The in-container PID 1 sleep alone cannot expire
-  a paused container. Repeated fairness pauses do not renew the deadline.
+  timer checks the exact labelled generation at its original creation + three
+  hours, even while Docker-paused and after the web worker exits. It removes
+  only a generation proven ownerless under the existing thread generation and
+  authority fences. A still-owned generation remains alive for its logical
+  parent and children, including queued and fair-paused work. Managed PID 1
+  uses `sleep infinity`; the existing scheduler limit still raises through
+  normal cleanup and persists the Run's terminal outcome. Timer-arm failure still fails backend creation
+  closed. Docker inspection/removal failures retain the existing unit retry.
+  There is no renewal or new liveness mechanism: ambiguous crashed-worker
+  ownership waits for existing startup reconciliation or operator cleanup.
   Expiry attempts and outcomes are JSON records in the host user's journal,
   with a UTC timestamp, full container generation and its original thread ID.
   The timer retains that ID after container or thread teardown; older timers
   without it report `null`. `removed` means Docker confirmed removal;
   `already_absent` means exact-ID inspection or removal found it already gone.
   `inspect_failed` and `removal_unconfirmed` retain retries, while
-  `ownership_rejected` refuses removal. These records contain no prompts,
+  `ownership_rejected` refuses removal. `retained_owned` leaves teardown to the
+  existing lifecycle owner; `retained_unknown` preserves a generation whose
+  authority cannot be proved, including legacy timers without authority context.
+  Both retained outcomes finish the age check without scheduling another one.
+  These records contain no prompts,
   workspace paths or Docker error output. Inspect them as the service user:
   `journalctl --user -u 'assist-turn-expiry-*.service' --since today -o cat`.
   On restart, a new managed generation waits for confirmed cleanup. Browser

@@ -627,7 +627,7 @@ class SandboxManager:
         # that stale container before creating a fresh one — the registry is
         # keyed by work_dir, so creating without reaping would overwrite the
         # reference and orphan it. Stop confirmation here is immediate; managed
-        # ordinary execution also has an independent host deadline.
+        # ordinary execution also has an ownerless-generation age check.
         from assist.browser import authority
         from assist.browser.manager import BrowserManager
 
@@ -806,6 +806,9 @@ class SandboxManager:
             timed_execution = thread_scope is not None and include_egress_approvals
             container = client.containers.run(
                 SANDBOX_IMAGE,
+                # The owning Run ends managed execution. Image PID 1's legacy
+                # sleep deadline must not kill active or fair-paused logical work.
+                **({"command": ["sleep", "infinity"]} if timed_execution else {}),
                 detach=True,
                 remove=True,
                 **({"name": "assist-turn-" + hashlib.sha256(
@@ -831,7 +834,7 @@ class SandboxManager:
             try:
                 if timed_execution:
                     from assist.sandbox_expiry import arm
-                    arm(container.id, thread_id=thread_id)
+                    arm(container.id, thread_id=thread_id, threads_root=threads_root)
                 cls._record_egress_client(
                     client, container, work_dir,
                     kind="sandbox" if include_egress_approvals else "pi")
@@ -1048,7 +1051,7 @@ class SandboxManager:
         crash ``_containers`` is empty, but the containers survive — and a
         ``docker exec``'d tool command keeps running inside one, mutating the
         host-bind-mounted /workspace that a recovery resume's FRESH container
-        mounts too. Managed ordinary generations have a host deadline, but
+        mounts too. Managed ordinary generations defer age cleanup while owned;
         legacy generations may have only PID 1's running-time sleep. Startup completes
         this proof before recovery dispatch or listener admission.
 
