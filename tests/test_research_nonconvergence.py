@@ -370,9 +370,16 @@ def test_provider_trace_records_actual_extra_body_without_network(tmp_path):
         ChatOpenAI._generate = lambda _model, _messages, **_kwargs: object()
         install_model_and_tool_trace(tmp_path)
         model = ChatOpenAI(model="fixture-model", api_key="fixture-key",
-                           base_url="http://127.0.0.1:1",
+                           base_url="http://127.0.0.1:1", temperature=1.0,
+                           top_p=0.95,
                            extra_body={"top_k": 20})
-        model._generate([HumanMessage(content="Synthetic")])
+        messages = [HumanMessage(content="Synthetic")]
+        model._generate(messages)
+        bound = model.bind(temperature=0.1, top_p=0.8, max_tokens=2048,
+                           extra_body={"top_k": 20,
+                                       "chat_template_kwargs": {"enable_thinking": False}})
+        effective = model._get_request_payload(messages, **bound.kwargs)
+        model._generate(messages, **bound.kwargs)
     finally:
         Thread.__init__, Thread._run, ChatOpenAI._stream, ChatOpenAI._generate = original
         if "acquire" in vars(THREAD_QUEUE):
@@ -381,8 +388,14 @@ def test_provider_trace_records_actual_extra_body_without_network(tmp_path):
               (tmp_path / "provider-calls.jsonl").read_text().splitlines()]
     assert events[0]["event"] == "provider_request"
     assert events[0]["extra_body"] == {"top_k": 20}
+    assert (events[0]["temperature"], events[0]["top_p"]) == (1.0, 0.95)
     assert events[1]["event"] == "provider_finished"
     assert events[1]["completed"]
+    assert events[2]["event"] == "provider_request"
+    assert (events[2]["temperature"], events[2]["top_p"]) == (
+        effective["temperature"], effective["top_p"]) == (0.1, 0.8)
+    assert events[2]["extra_body"] == bound.kwargs["extra_body"]
+    assert events[3]["event"] == "provider_finished"
 
 
 def test_artifact_observer_keeps_provider_bytes_and_time_separate(tmp_path):

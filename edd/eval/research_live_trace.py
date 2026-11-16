@@ -156,7 +156,8 @@ def install_model_and_tool_trace(artifact: Path) -> None:
             messages=messages_to_dict(messages), tools=kwargs.get("tools"),
             tool_choice=kwargs.get("tool_choice"),
             response_format=kwargs.get("response_format"),
-            temperature=model.temperature, top_p=model.top_p,
+            temperature=kwargs.get("temperature", model.temperature),
+            top_p=kwargs.get("top_p", model.top_p),
             extra_body=kwargs.get("extra_body", model.extra_body),
         )
 
