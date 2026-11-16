@@ -39,6 +39,11 @@ class FrozenRetrieval:
     def __init__(self, artifact: Path, search_url: str, fixture_name: str):
         manifest = json.loads(Path(__file__).with_name("research_live_sources.json").read_text())
         self.pages = {row["url"]: row for row in manifest["fixtures"][fixture_name]}
+        self.citation_tiers = {
+            urlsplit(url).path.removeprefix("/tier/") for url in self.pages
+            if urlsplit(url).path.startswith("/tier/")
+            and "/" not in urlsplit(url).path.removeprefix("/tier/")
+        }
         self.fixture_name = fixture_name
         self.search_url = search_url.rstrip("/") + "/search"
         self.artifact = artifact
@@ -71,15 +76,17 @@ class FrozenRetrieval:
         self._record("frozen_page", url=url, status=row["status"])
         return _Response(body=row["body"], status=row["status"])
 
-    @staticmethod
-    def _citation_page(url: str) -> dict | None:
+    def _citation_page(self, url: str) -> dict | None:
         parsed = urlsplit(url)
-        if parsed.scheme != "https" or parsed.netloc != "helio-specs.test":
+        if (parsed.scheme != "https" or parsed.netloc != "helio-specs.test"
+                or parsed.query or parsed.fragment):
             return None
         parts = parsed.path.strip("/").split("/")
-        if len(parts) < 3 or parts[0] != "cite" or parts[2] not in {str(i) for i in range(12)}:
-            return None
-        if len(parts) > 5:
+        if (parsed.path != "/" + "/".join(parts)
+                or len(parts) not in {3, 4, 5} or parts[0] != "cite"
+                or parts[1] not in self.citation_tiers
+                or parts[2] not in {str(i) for i in range(12)}
+                or any(part not in {str(i) for i in range(8)} for part in parts[3:])):
             return None
         more = " ".join(f"https://helio-specs.test{parsed.path}/{index}"
                         for index in range(8)) if len(parts) < 5 else ""

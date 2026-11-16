@@ -181,6 +181,12 @@ def summarize_records(supervisor: dict, checkpoint: dict, trace: list[dict],
                        if event.get("event") == "worker_finished"]
     worker_delivery = (bool(finished_events[-1].get("delivered"))
                        if finished_events else None)
+    observation_cutoff = (bool(finished_events[-1].get("observation_cutoff"))
+                          if finished_events else any(event.get("event") == "observation_cutoff"
+                                                      for event in lifecycle))
+    evaluator_cancel_requested = (bool(finished_events[-1].get("evaluator_cancel_requested"))
+                                  if finished_events else any(event.get("event") == "child_cancel_requested"
+                                                              for event in lifecycle))
     capability = supervisor.get("evaluation_profile", "web-main") != "web-main"
     mismatched_parents = sorted(str(run_id) for run_id, end in all_ends.items()
                                 if run_id in all_starts
@@ -246,6 +252,9 @@ def summarize_records(supervisor: dict, checkpoint: dict, trace: list[dict],
                            "external_deadline_non_delivery" if supervisor["timed_out"] else
                            "product_run_timeout" if product_timeouts else
                            "product_run_error" if product_errors else
+                           "cancelled_or_incomplete" if cancellations
+                           and not evaluator_cancel_requested else
+                           "observation_cutoff_non_delivery" if observation_cutoff else
                            "cancelled_or_incomplete" if cancellations else
                            "worker_failed_before_model" if supervisor["worker_exit_code"] != 0
                            and not model_starts else
@@ -261,6 +270,8 @@ def summarize_records(supervisor: dict, checkpoint: dict, trace: list[dict],
         "durable_runs_all_terminal": durable_closed if runs else None,
         "durable_runs_all_success": all_success if runs else None,
         "worker_reported_delivery": worker_delivery,
+        "observation_cutoff": observation_cutoff,
+        "evaluator_cancel_requested": evaluator_cancel_requested,
         "durable_run_active_ms_sum_reported": sum(run.get("active_ms") or 0
                                                    for run in runs),
         "product_timeout_runs": product_timeouts,

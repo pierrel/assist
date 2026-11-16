@@ -24,7 +24,7 @@ claim that those sites currently serve those exact bytes. Helio pages and
 names are wholly invented. `research_live_fixtures.py` substitutes responses
 for the existing host `search_internet` and `read_url` tools, including PDF
 text. Unmatched searches return empty results; URLs outside listed pages and
-the bounded Helio citation frontier return an explicit corpus miss. It prevents
+the finite Helio citation frontier return an explicit corpus miss. It prevents
 browser navigation in these fixture runs. A corpus miss says nothing about a
 site's real availability. Inspect `fixture.jsonl` and `trace.jsonl` for every
 trial; an agent's shell/network action outside those substituted tools makes
@@ -40,17 +40,19 @@ nesting caused the timing difference.
 ## Prepare and run later
 
 Use an immutable private copy of the installed product, overlay only this
-suite's `edd/eval/research_live_*` files plus `research_trace.py` and
-`research_nonconvergence.py`, and run
+suite's fixed eight-file eval inventory, and run
 `research_live_supervisor --preflight-only` first. Preflight rejects any
 `assist/`, `manage/`, or `dockerfiles/` byte drift from the declared installed
-source and any stale eval overlay. Keep the source JSON and every attempt.
+source and any stale or missing eval overlay against a separate reviewed source
+checkout. The source checkout must differ from the private product copy; the
+executing module is not its own expected source. Keep the source JSON and every
+attempt.
 
 The supervisor CLI takes these positional arguments:
 
 ```
 python -m edd.eval.research_live_supervisor CASE_ID ARTIFACT_DIR \
-  PRIVATE_PRODUCT_ROOT DEPLOYED_CODE_ROOT AGENTIC_CLI \
+  PRIVATE_PRODUCT_ROOT DEPLOYED_CODE_ROOT REVIEWED_EVAL_SOURCE AGENTIC_CLI \
   CURRENT_EGRESS_PROOF ENV_FILE [--profile web-main] [--preflight-only]
 ```
 
@@ -82,7 +84,10 @@ python -m edd.eval.research_nonconvergence ARTIFACT_DIR > metrics.json
 
 The observer distinguishes external deadline non-delivery, product Run
 timeout/error, cancellation, setup failure, capability answer and normal web
-delivery. It reports actual task/Run ancestry, pending branches, repeated
+delivery. An unfinished turn at the internal observation cutoff remains
+non-delivery even if evaluator cancellation or TestClient shutdown later makes
+a draft look final; evaluator-requested cancellation is recorded separately
+from an agent's cancellation. It reports actual task/Run ancestry, pending branches, repeated
 normalized search/page requests, source-marker visibility, reported tokens,
 provider-message JSON byte volume, model and retrieval spans, durable Run
 pending time, model-slot wait and reported active time. Summed spans can

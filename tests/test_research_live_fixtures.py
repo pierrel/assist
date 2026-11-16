@@ -43,8 +43,18 @@ def test_helio_citation_frontier_is_background_only(tmp_path):
     assert "QUASAR-9" not in page.text
     deep = fixture.get("https://helio-specs.test/cite/aurora/0/0/0")
     assert deep.status_code == 200
-    with pytest.raises(requests.ConnectionError):
-        fixture.get("https://unrecorded.test/page")
+    for url in (
+        "https://unrecorded.test/page",
+        "https://helio-specs.test/cite/unrecorded-tier/0",
+        "https://helio-specs.test/cite/aurora/12",
+        "https://helio-specs.test/cite/aurora/0/999",
+        "https://helio-specs.test/cite/aurora/0/0/8",
+        "https://helio-specs.test/cite/aurora/0?unrecorded=1",
+        "https://helio-specs.test//cite/aurora/0/",
+        "https://helio-specs.test/" + "/" * 21 + "cite/aurora/0" + "/" * 20,
+    ):
+        with pytest.raises(requests.ConnectionError, match="no recorded response"):
+            fixture.get(url)
 
 
 def test_ballot_pdf_source_uses_exact_frozen_response(tmp_path):

@@ -127,6 +127,28 @@ def test_delivered_worker_receipt_survives_earlier_terminal_slices(earlier_statu
     assert not result["durable_runs_all_success"]
 
 
+def test_evaluator_cutoff_cancellation_cannot_promote_later_draft_to_delivery():
+    supervisor = {"checkpoint_threads": ["parent"], "timed_out": False,
+                  "worker_exit_code": 1, "elapsed_seconds": 90,
+                  "run_reconciliation": {"after": {"parent": [
+                      {"id": "parent", "status": "success", "parent_run_id": None},
+                      {"id": "child", "status": "cancelled", "parent_run_id": "parent"}]}}}
+    checkpoint = {"threads": [{"thread_id": "parent", "checkpoint_ns": "",
+                               "messages": [{"type": "ai", "data": {
+                                   "content": "Draft saved after cleanup", "tool_calls": []}}]}]}
+    receipt = {"event": "worker_finished", "delivered": False,
+               "observation_cutoff": True, "evaluator_cancel_requested": True}
+    observed = summarize_records(supervisor, checkpoint, [], artifact_ready=True,
+                                 lifecycle=[receipt])
+    assert observed["classification"] == "observation_cutoff_non_delivery"
+    assert not observed["worker_reported_delivery"]
+    assert observed["cancelled_runs"] == 1
+    agent_cancel = summarize_records(supervisor, checkpoint, [], artifact_ready=True,
+                                     lifecycle=[{**receipt,
+                                                 "evaluator_cancel_requested": False}])
+    assert agent_cancel["classification"] == "cancelled_or_incomplete"
+
+
 def test_echoed_marker_in_failed_retrieval_is_not_a_source_finding():
     trace = [_tool("tool_start", "read_url", "u1", 1),
              _tool("tool_end", "read_url", "u1", 2,
@@ -443,22 +465,28 @@ def test_preflight_rejects_runtime_or_eval_overlay_drift(tmp_path):
     local = Path(__file__).resolve().parents[1] / "edd" / "eval"
     overlay = product / "edd" / "eval"
     overlay.mkdir(parents=True)
-    for name in ("research_trace.py", "research_nonconvergence.py"):
+    from edd.eval.research_live_supervisor import EVAL_FILES
+    for name in EVAL_FILES:
         (overlay / name).write_bytes((local / name).read_bytes())
-    for path in local.glob("research_live_*"):
-        if path.is_file() and path.suffix in {".py", ".json"}:
-            (overlay / path.name).write_bytes(path.read_bytes())
-    source, duration = preflight("music_bundle", product, deployed)
+    eval_source = local.parents[1]
+    source, duration = preflight("music_bundle", product, deployed, eval_source)
     assert duration == 2700
     assert source["eval_files"]["research_live_cases.json"]
-    _, direct_duration = preflight("music_bundle", product, deployed,
+    _, direct_duration = preflight("music_bundle", product, deployed, eval_source,
                                    profile="research-manager-capability")
     assert direct_duration == 600
     (overlay / "research_live_cases.json").write_text("changed")
     with pytest.raises(RuntimeError, match="changed eval overlay"):
-        preflight("music_bundle", product, deployed)
+        preflight("music_bundle", product, deployed, eval_source)
     (overlay / "research_live_cases.json").write_bytes(
         (local / "research_live_cases.json").read_bytes())
+    (overlay / "research_live_sources.json").unlink()
+    with pytest.raises(RuntimeError, match="missing or changed eval overlay"):
+        preflight("music_bundle", product, deployed, eval_source)
+    (overlay / "research_live_sources.json").write_bytes(
+        (local / "research_live_sources.json").read_bytes())
+    with pytest.raises(RuntimeError, match="eval source must be separate"):
+        preflight("music_bundle", product, deployed, product)
     (product / "assist" / "sentinel.py").write_text("changed\n")
     with pytest.raises(RuntimeError, match="differs from the declared"):
-        preflight("music_bundle", product, deployed)
+        preflight("music_bundle", product, deployed, eval_source)

@@ -457,6 +457,13 @@ def run(case_id: str, artifact: Path, egress_proof: Path, env_path: Path,
                 break
             with changed:
                 changed.wait(timeout=min(60.0, max(0.0, deadline - time.monotonic())))
+        observation_cutoff = (not delivered and not natural_candidate
+                              and time.monotonic() >= deadline)
+        if observation_cutoff:
+            append_private(artifact / "lifecycle.jsonl", "observation_cutoff",
+                           parent_thread_id=tid,
+                           parent_statuses=[run.status for run in service.list(tid)],
+                           child_statuses=[run.status for run in _current_children(service, tid)])
         from manage.web.protocol_service import SERVICE
         for child in _current_children(service, tid):
             key = child.thread_id, child.work_id
@@ -472,41 +479,11 @@ def run(case_id: str, artifact: Path, egress_proof: Path, env_path: Path,
                 for child in _current_children(service, tid)):
             with changed:
                 changed.wait(timeout=min(5.0, settle_by - time.monotonic()))
-    # A parent continuation can finish while TestClient drains its active turn
-    # after the internal observation window closes. Check the same durable Run,
-    # artifacts, and final checkpoint once before classifying non-delivery.
-    if not delivered:
-        parent_runs = service.list(tid)
-        children = _current_children(service, tid)
-        completed_parent = _completed_parent_run(
-            parent_runs, children, selected.get("required_delivery_role"))
-        domain = threads_root / tid / "domain"
-        reports = [path for suffix in ("*.md", "*.org")
-                   for path in sorted((domain / "references").glob(suffix))
-                   if path.is_file() and path.stat().st_size]
-        originals = selected.get("workspace_files", {})
-        updates = _saved_note_updates(domain, originals) if originals else {}
-        if ((_requested_updates(selected, updates) if originals else bool(reports))
-                and completed_parent):
-            completed_child_id = _completed_child_id(completed_parent)
-            reply = _checkpoint_reply(threads_root / "threads.db", tid,
-                                      completed_child_id)
-            if reply is not None:
-                delivered = True
-                if originals:
-                    (artifact / "saved-note-updates.json").write_text(
-                        json.dumps(updates, indent=2) + "\n")
-                append_private(artifact / "lifecycle.jsonl",
-                               "note_update_available" if originals else "report_available",
-                               parent_thread_id=tid, after_internal_cutoff=True,
-                               note_paths=list(updates),
-                               report_paths=[str(path.relative_to(threads_root))
-                                             for path in reports],
-                               answer=reply[0], message_id=reply[1],
-                               parent_run_id=completed_parent.id)
     append_private(artifact / "lifecycle.jsonl", "worker_finished",
                    parent_thread_id=tid, delivered=delivered,
                    natural_candidate=natural_candidate,
+                   observation_cutoff=observation_cutoff,
+                   evaluator_cancel_requested=bool(cancel_requested),
                    parent_statuses=[run.status for run in service.list(tid)],
                    child_statuses=[run.status for run in _current_children(service, tid)])
     if not delivered and not natural_candidate:

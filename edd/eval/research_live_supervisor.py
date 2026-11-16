@@ -100,9 +100,17 @@ def _reconcile_private_runs(root: Path) -> dict:
     return {"before": before, "after": after}
 
 
-def preflight(case_id: str, product: Path, deployed: Path,
+EVAL_FILES = (
+    "research_trace.py", "research_nonconvergence.py",
+    "research_live_supervisor.py", "research_live_trace.py",
+    "research_live_fixtures.py", "research_live_cases.json",
+    "research_live_sources.json", "research_live_outcome.py",
+)
+
+
+def preflight(case_id: str, product: Path, deployed: Path, eval_source: Path,
               *, profile: str = "web-main") -> tuple[dict, int]:
-    """Prove the future worker's runtime and eval bytes before admission."""
+    """Compare the private worker with installed runtime and separate eval source."""
     if profile not in {"web-main", "research-leaf", "research-manager-capability",
                        "delegate-capability"}:
         raise ValueError(f"unknown research evaluation profile: {profile}")
@@ -110,16 +118,13 @@ def preflight(case_id: str, product: Path, deployed: Path,
     deployed_source = _fingerprint(deployed)
     if source != deployed_source:
         raise RuntimeError("private product differs from the declared deployed snapshot")
-    eval_names = [
-        "research_trace.py", "research_nonconvergence.py",
-        *[path.name for path in sorted(Path(__file__).parent.glob("research_live_*"))
-          if path.is_file() and path.suffix in {".py", ".json"}],
-    ]
+    if eval_source.resolve() == product.resolve():
+        raise RuntimeError("eval source must be separate from the private product copy")
     source["eval_files"] = {}
-    for name in eval_names:
-        local = Path(__file__).parent / name
+    for name in EVAL_FILES:
+        local = eval_source / "edd" / "eval" / name
         copied = product / "edd" / "eval" / name
-        if not copied.is_file() or copied.read_bytes() != local.read_bytes():
+        if not local.is_file() or not copied.is_file() or copied.read_bytes() != local.read_bytes():
             raise RuntimeError(f"private snapshot has missing or changed eval overlay: {name}")
         source["eval_files"][name] = hashlib.sha256(local.read_bytes()).hexdigest()
     source["evaluation_profile"] = profile
@@ -136,6 +141,7 @@ def preflight(case_id: str, product: Path, deployed: Path,
 
 
 def run(case_id: str, artifact: Path, product: Path, deployed: Path,
+        eval_source: Path,
         agentic_cli: Path, egress_proof: Path, env_path: Path,
         *, profile: str = "web-main") -> int:
     os.umask(0o077)
@@ -143,7 +149,8 @@ def run(case_id: str, artifact: Path, product: Path, deployed: Path,
         raise RuntimeError("private artifact must be an absolute real path")
     if artifact.exists():
         raise FileExistsError(artifact)
-    source, duration = preflight(case_id, product, deployed, profile=profile)
+    source, duration = preflight(case_id, product, deployed, eval_source,
+                                 profile=profile)
     sys.path.insert(0, str(product))
     artifact.mkdir(mode=0o700, parents=True)
     (artifact / "source.json").write_text(json.dumps(source) + "\n")
@@ -187,7 +194,8 @@ def run(case_id: str, artifact: Path, product: Path, deployed: Path,
         "production_env_paths"]["ASSIST_EGRESS_APPROVALS_DIR"]
     os.environ["ASSIST_EGRESS_RUNTIME_DIR"] = egress[
         "reuse_validation"]["runtime_dir"]
-    os.environ.pop("ASSIST_EGRESS_CLIENT_MAP_DIR", None)
+    os.environ["ASSIST_EGRESS_CLIENT_MAP_DIR"] = egress[
+        "reuse_validation"]["client_map_dir"]
     from assist.sandbox_manager import SandboxManager
     from assist.browser.manager import BrowserManager
     # This private eval must not prune unrelated client-map records.
@@ -255,7 +263,7 @@ def run(case_id: str, artifact: Path, product: Path, deployed: Path,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("case_id", "artifact", "product", "deployed", "agentic_cli",
+    for name in ("case_id", "artifact", "product", "deployed", "eval_source", "agentic_cli",
                  "egress_proof", "env_path"):
         parser.add_argument(name, type=Path if name != "case_id" else str)
     parser.add_argument("--profile", choices=("web-main", "research-leaf",
@@ -267,10 +275,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.preflight_only:
         source, duration = preflight(args.case_id, args.product, args.deployed,
+                                     args.eval_source,
                                      profile=args.profile)
         print(json.dumps({"case_id": args.case_id, "profile": args.profile,
                           "deadline_seconds": duration, "source": source}, indent=2))
         raise SystemExit(0)
     raise SystemExit(run(args.case_id, args.artifact, args.product, args.deployed,
+                         args.eval_source,
                          args.agentic_cli, args.egress_proof, args.env_path,
                          profile=args.profile))
