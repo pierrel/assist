@@ -255,16 +255,22 @@ class BrowserWorker:
         role = handle.get_attribute("role") or {
             "a": "link", "button": "button", "input": "button" if input_button else "textbox",
             "textarea": "textbox"}.get(tag, "button")
+        button_value = handle.evaluate("""element => {
+            const value = element.value || '';
+            return value.length <= 2000 ? value : null;
+        }""") if input_button else None
+        if input_button and button_value is None:
+            raise BrowserInputError("input-button value exceeds the limit")
         name = (handle.get_attribute("aria-label")
                 or handle.get_attribute("placeholder")
                 or handle.evaluate("element => element.labels?.[0]?.innerText || ''")
-                or (handle.evaluate("element => element.value || ''") if input_button else "")
+                or button_value
                 or handle.inner_text() or "")[:120]
         raw_href = handle.get_attribute("href")
         href = urljoin(base_url, raw_href) if raw_href is not None else None
         fill_attrs = tuple(handle.get_attribute(attr) for attr in (
             "type", "name", "id", "autocomplete", "placeholder", "aria-label"))
-        return role, name, href, raw_href, fill_attrs
+        return role, name, href, raw_href, fill_attrs, button_value
 
     @staticmethod
     def _result_size(result):
@@ -308,10 +314,10 @@ class BrowserWorker:
                     continue
                 if not handle.is_visible():
                     continue
-                role, name, href, raw_href, fill_attrs = self._target_state(
+                role, name, href, raw_href, fill_attrs, button_value = self._target_state(
                     handle, page.url)
                 ref = uuid4().hex[:10]
-                targets[ref] = (handle, role, name, href, raw_href, fill_attrs)
+                targets[ref] = (handle, role, name, href, raw_href, fill_attrs, button_value)
                 described.append({"ref": ref, "role": role, "name": name,
                                   **({"href": href[:1024]} if href and role == "link" else {})})
             except Exception:
@@ -411,26 +417,26 @@ class BrowserWorker:
             selected = self.targets.get(page_id, {}).get(ref)
             if selected is None:
                 raise BrowserInputError("unknown or stale target reference")
-            locator, role, name, observed_href, raw_href, fill_attrs = selected
+            locator, role, name, observed_href, raw_href, fill_attrs, button_value = selected
         elif href:
             matches = [item for item in self.targets.get(page_id, {}).values()
                        if item[1] == "link" and item[3] == href]
             if len(matches) != 1:
                 raise BrowserInputError("href is absent or ambiguous; use an observed ref")
-            locator, role, name, observed_href, raw_href, fill_attrs = matches[0]
+            locator, role, name, observed_href, raw_href, fill_attrs, button_value = matches[0]
         elif isinstance(role, str) and isinstance(name, str):
             matches = [item for item in self.targets.get(page_id, {}).values()
                        if item[1:3] == (role, name)]
             if len(matches) != 1:
                 raise BrowserInputError("role/name target is absent or ambiguous")
-            locator, role, name, observed_href, raw_href, fill_attrs = matches[0]
+            locator, role, name, observed_href, raw_href, fill_attrs, button_value = matches[0]
         else:
             raise BrowserInputError("give an observed ref, exact href, or role and name")
         if not locator.is_visible():
             raise BrowserInputError("observed target is no longer visible")
-        live_role, live_name, live_href, live_raw_href, live_attrs = self._target_state(
+        live_role, live_name, live_href, live_raw_href, live_attrs, live_value = self._target_state(
             locator, page.url)
-        if (live_role, live_name) != (role, name):
+        if (live_role, live_name, live_value) != (role, name, button_value):
             raise BrowserInputError("observed target changed")
         if (live_href, live_raw_href) != (observed_href, raw_href):
             raise BrowserInputError("observed link changed")

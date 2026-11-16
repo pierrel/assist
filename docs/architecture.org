@@ -137,6 +137,10 @@ in both views. An ID shown in only one view keeps that meaning.
   resets prove the frozen generation stopped before releasing held work.
   Checkpoint-verified approval repair may replace a cancelled physical slice;
   explicit cancellation receipts keep the entire logical work revoked.
+  The browser worker binds observed input-button values independently of their
+  accessible names and rejects actions after either changes.
+  It bounds button values to 2,000 UTF-16 code units inside the page before IPC;
+  oversized values are not admitted as targets.
   A host user-systemd transient timer checks each exact labelled ordinary
   managed generation at its original creation + three hours. Existing generation
   and authority fences protect owned execution through parent and child slices;

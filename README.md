@@ -80,6 +80,9 @@ where reliability is harder than with frontier APIs.
   request up to three needed hosts through ordinary individual approval cards.
   Browser tools do not return non-HTTP(S)
   page content. An empty new popup can be reused for an HTTP(S) visit.
+  Observed input-button values remain bound independently of accessible names;
+  changing a labelled submit button's value invalidates its observed target.
+  Values exceeding 2,000 UTF-16 code units are not targetable.
   Deleting a thread proves its browser sandbox stopped before removing thread
   state. A private, size-limited Playwright snapshot can restore cookies and
   local storage on a later turn. Live tabs, DOM form inputs, page IDs and

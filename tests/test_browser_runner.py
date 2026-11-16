@@ -108,7 +108,7 @@ def test_changed_observed_link_fails_for_every_target_selector(selector):
     _observed(worker, link)
     worker.targets["page"]["observed"] = (
         link, "link", "Manual", "https://example.com/original", "/original",
-        worker.targets["page"]["observed"][-1])
+        *worker.targets["page"]["observed"][5:])
 
     with pytest.raises(BrowserInputError, match="observed link changed"):
         worker.act("page", "snapshot", "click", selector)
@@ -143,6 +143,50 @@ def test_input_button_uses_value_as_name_and_rejects_changed_value(kind):
     with pytest.raises(BrowserInputError, match="target changed"):
         worker.act("page", "snapshot", "click", {"role": "button", "name": "SEARCH"})
     assert not button.clicked
+
+
+@pytest.mark.parametrize("label", ["aria-label", "placeholder", "associated"])
+@pytest.mark.parametrize("selector", [{"ref": "observed"},
+                                     {"role": "button", "name": "Apply operation"}])
+@pytest.mark.parametrize("changed", [False, True, "oversized"])
+def test_labelled_submit_value_is_bound_independently(label, selector, changed):
+    class LabelledSubmit(_Link):
+        value = "save"
+
+        def get_attribute(self, attribute):
+            if attribute in {"aria-label", "placeholder"}:
+                return "Apply operation" if attribute == label else None
+            return super().get_attribute(attribute)
+
+        def evaluate(self, expression):
+            if "tagName" in expression:
+                return "input"
+            if "element.value" in expression:
+                return self.value if len(self.value) <= 2000 else None
+            return "Apply operation" if label == "associated" else ""
+
+    worker = BrowserWorker()
+    button = LabelledSubmit(None, name="", tag="input", kind="submit")
+    _observed(worker, button)
+    worker._observe = lambda _page: {"snapshot": "after click"}
+    if changed:
+        button.value = "x" * 2001 if changed == "oversized" else "delete"
+        with pytest.raises(BrowserInputError, match="target changed|value exceeds"):
+            worker.act("page", "snapshot", "click", selector)
+        assert not button.clicked
+    else:
+        worker.act("page", "snapshot", "click", selector)
+        assert button.clicked
+
+
+def test_oversized_input_button_cannot_be_observed():
+    class OversizedSubmit(_Link):
+        def evaluate(self, expression):
+            return "input" if "tagName" in expression else None
+
+    button = OversizedSubmit(None, name="Apply operation", tag="input", kind="submit")
+    with pytest.raises(BrowserInputError, match="value exceeds"):
+        BrowserWorker._target_state(button, _Page.url)
 
 
 def test_changed_field_attributes_cannot_be_filled():
