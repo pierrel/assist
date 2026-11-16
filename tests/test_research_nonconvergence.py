@@ -94,6 +94,20 @@ def test_async_completion_rider_counts_only_after_returned_finding():
     assert result["finding_visibility"]["DECISIVE-42"]["parent_model_input"]
 
 
+def test_earlier_parent_retrieval_survives_later_duplicate_child_return():
+    trace = [_tool("tool_start", "search_internet", "parent-source", 1),
+             _tool("tool_end", "search_internet", "parent-source", 2,
+                   output="DECISIVE-42"),
+             {"event": "model_start", "thread_id": "parent", "at": 3,
+              "batches": [[{"type": "tool", "data": {"content": "DECISIVE-42"}}]]},
+             _tool("tool_start", "task", "later-child", 4),
+             _tool("tool_end", "task", "later-child", 10,
+                   output="DECISIVE-42")]
+    result = _records(trace=trace)
+    assert result["finding_visibility"]["DECISIVE-42"] == {
+        "retrieval_result": True, "task_return": True, "parent_model_input": True}
+
+
 def test_nested_worker_model_input_is_not_parent_finding_visibility():
     worker = {"event": "model_start", "thread_id": "parent", "at": 3,
               "batches": [[{"type": "tool", "data": {"content": "DECISIVE-42"}}]]}

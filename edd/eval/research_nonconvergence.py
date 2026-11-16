@@ -251,7 +251,7 @@ def summarize_records(supervisor: dict, checkpoint: dict, trace: list[dict],
         if source_at is not None:
             first_source_at = (source_at if first_source_at is None
                                else min(first_source_at, source_at))
-        evidence_at = min((event["at"] for event in (returned or source_events)
+        evidence_at = min((event["at"] for event in (*returned, *source_events)
                            if "at" in event), default=None)
         parent_visible = [event for event in trace
                           if event.get("event") == "model_start"
