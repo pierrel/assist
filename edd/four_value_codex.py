@@ -148,7 +148,7 @@ def _call(
     if status == "pending_validation" and (output / "answer.json").exists():
         try:
             record["answer"] = json.loads((output / "answer.json").read_text())
-        except json.JSONDecodeError as exc:
+        except (UnicodeError, json.JSONDecodeError) as exc:
             record["status"] = "invalid_json"
             record["error"] = str(exc)
     (output / "record.json").write_text(json.dumps(record, indent=2) + "\n")
