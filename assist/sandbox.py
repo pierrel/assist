@@ -9,7 +9,7 @@ explicitly (see _run_uid_gid / upload_files).
 Paths are prefixed with work_dir (/workspace) so that agent paths like
 /myfile.txt map to /workspace/myfile.txt inside the container, which is
 where the host bind mount lives. ``/agent`` passes through only on a
-backend explicitly constructed for a container with that private main-agent mount.
+backend explicitly constructed for that persistent shared-agent mount.
 """
 
 import hashlib

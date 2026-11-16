@@ -298,7 +298,6 @@ def _get_domain_manager(tid: str, domain: str | None = None) -> DomainManager | 
 
 
 def _get_sandbox_backend(tid: str, tz: str | None = None, *,
-                         include_agent: bool = True,
                          browser_capable: bool = False,
                          owner_run_id: str | None = None, before_start=None):
     """Get sandbox backend for a thread, or None if Docker is unavailable.
@@ -306,8 +305,8 @@ def _get_sandbox_backend(tid: str, tz: str | None = None, *,
     ``tz`` is the per-turn context-rider timezone, so this turn's sandbox ``date``
     runs in the user's local time (else the host/server zone).
 
-    ``include_agent`` mounts the visible thread's private main-agent directory.
-    Hidden child runs pass ``False`` and receive self-contained task briefs instead.
+    The parent's persistent agent directory is mounted in the same execution
+    environment used by its trusted children and later turns.
 
     Git reconciliation is owned by the queued writer, not sandbox construction;
     resumed slices must not fast-forward their in-flight worktree. Scoped
@@ -317,7 +316,7 @@ def _get_sandbox_backend(tid: str, tz: str | None = None, *,
     work_dir = MANAGER.thread_default_working_dir(tid)
     return SandboxManager.get_sandbox_backend(
         work_dir, tz=tz,
-        agent_dir=(MANAGER.thread_agent_dir(tid) if include_agent else None),
+        agent_dir=MANAGER.thread_agent_dir(tid),
         browser_capable=browser_capable, thread_scope=(MANAGER.root_dir, tid),
         owner_run_id=owner_run_id,
         **({"before_start": before_start} if before_start is not None else {}))

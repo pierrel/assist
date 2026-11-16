@@ -1,8 +1,8 @@
 """One container per turn, with confirmed stop before replacement.
 
-The wall-clock TTL bounds orphan lifetime after a host outage. Exceeding the
-normal queue hold cap reduces premature expiry; it is not a proof that a
-force-released live turn cannot outlast the TTL.
+Managed ordinary execution has no independent PID 1 deadline. The owning Run
+controls teardown; its host age check leaves still-owned generations alone.
+Legacy unscoped execution retains the image's running-time sleep backstop.
 
 Covered here:
   - cleanup() proves the captured generation stopped before registry release.
@@ -105,7 +105,8 @@ class TestNoReuse(_SandboxStateBase):
             p = self._patches(work_dir)
             with p[0], p[1], p[2], p[3], p[4], p[5] as stopped, \
                  patch.object(BrowserManager, "reconcile_startup", return_value=True), \
-                 patch.object(BrowserManager, "confirm_owner_stopped", return_value=False):
+                 patch.object(BrowserManager, "confirm_owner_stopped", return_value=False), \
+                 patch("assist.sandbox_expiry.arm") as arm_expiry:
                 SandboxManager.get_sandbox_backend(
                     work_dir, thread_scope=(root, "thread"))
                 first = SandboxManager._containers[work_dir]
@@ -113,6 +114,10 @@ class TestNoReuse(_SandboxStateBase):
                 SandboxManager.get_sandbox_backend(
                     work_dir, thread_scope=(root, "thread"))
                 second = SandboxManager._containers[work_dir]
+                self.assertEqual([call.args[0] for call in arm_expiry.call_args_list],
+                                 [first.id, second.id])
+                self.assertEqual([call.kwargs for call in arm_expiry.call_args_list],
+                                 [{"thread_id": "thread", "threads_root": root}] * 2)
 
         self.assertIsNot(second, first, "container was reused across turns")
         stopped.assert_called_once_with(first.id)

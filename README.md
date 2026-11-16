@@ -23,8 +23,9 @@ where reliability is harder than with frontier APIs.
 
 - **Small-LLM-tuned memory.** Cross-conversation facts and preferences live in
   the workspace's `AGENTS.md`; private working state for one long-running thread
-  lives under `/agent`. Visible web main-agent turns auto-load both; other
-  constructions retain repository memory alone. `/user` is the user-facing alias
+  lives under `/agent`. Visible web main-agent turns auto-load both. Trusted
+  children share the native files while retaining their task-specific prompts
+  and tools. `/user` is the user-facing alias
   for the established `/workspace`, while persistent `/tmp` is scratch space for
   conversions and render artifacts.
 
@@ -53,6 +54,19 @@ where reliability is harder than with frontier APIs.
   including an approval or clarification pause.
   The [browser compatibility review guide](docs/browser-site-compatibility.org)
   maps its control and network boundaries.
+  A logical parent turn and its eligible child work share one restricted
+  execution container, preserving live pages and filled inputs across fairness
+  slices. The whole container freezes for unrelated work; a child of the same
+  logical work unpauses it and shares its background processes and page activity.
+  Fresh scheduled/background work on that thread waits for the retained logical
+  turn to finish. A duplicate resume timeout cannot retire another dispatcher's
+  ticket or the generation currently borrowed by a child.
+  Trusted children share persistent `/agent` files; the separate browser-worker
+  UID cannot traverse that directory. A newer user event or
+  cancellation revokes the old browser before later work can proceed.
+  See the [shared-execution design](docs/2026-11-12-browser-shared-execution.org)
+  with its [trusted-state amendment](docs/2026-11-13-trusted-agent-state.org)
+  and [current architecture](docs/architecture.org).
   A separate browser UID can reach only its attributed listener on the
   existing egress proxy. The host seals new browser-debugging connections
   before any page command; agent tools cannot use that control channel.
@@ -66,6 +80,9 @@ where reliability is harder than with frontier APIs.
   request up to three needed hosts through ordinary individual approval cards.
   Browser tools do not return non-HTTP(S)
   page content. An empty new popup can be reused for an HTTP(S) visit.
+  Observed input-button values remain bound independently of accessible names;
+  changing a labelled submit button's value invalidates its observed target.
+  Values exceeding 2,000 UTF-16 code units are not targetable.
   Deleting a thread proves its browser sandbox stopped before removing thread
   state. A private, size-limited Playwright snapshot can restore cookies and
   local storage on a later turn. Live tabs, DOM form inputs, page IDs and
@@ -73,8 +90,31 @@ where reliability is harder than with frontier APIs.
   the agent reopens and observes the page.
   A short `/agent/browser-recovery.md` note may describe non-sensitive progress.
   Chromium has its own PID namespace inside the turn sandbox. Its processes
-  stop when that exact sandbox generation stops; during a host outage without
-  restart, the sandbox's common three-hour PID 1 expiry bounds their lifetime.
+  stop when that exact sandbox generation stops. Managed ordinary execution
+  requires the host user's systemd manager and Docker CLI. A transient host
+  timer checks the exact labelled generation at its original creation + three
+  hours, even while Docker-paused and after the web worker exits. It removes
+  only a generation proven ownerless under the existing thread generation and
+  authority fences. A still-owned generation remains alive for its logical
+  parent and children, including queued and fair-paused work. Managed PID 1
+  uses `sleep infinity`; the existing scheduler limit still raises through
+  normal cleanup and persists the Run's terminal outcome. Timer-arm failure still fails backend creation
+  closed. Docker inspection/removal failures retain the existing unit retry.
+  There is no renewal or new liveness mechanism: ambiguous crashed-worker
+  ownership waits for existing startup reconciliation or operator cleanup.
+  Expiry attempts and outcomes are JSON records in the host user's journal,
+  with a UTC timestamp, full container generation and its original thread ID.
+  The timer retains that ID after container or thread teardown; older timers
+  without it report `null`. `removed` means Docker confirmed removal;
+  `already_absent` means exact-ID inspection or removal found it already gone.
+  `inspect_failed` and `removal_unconfirmed` retain retries, while
+  `ownership_rejected` refuses removal. `retained_owned` leaves teardown to the
+  existing lifecycle owner; `retained_unknown` preserves a generation whose
+  authority cannot be proved, including legacy timers without authority context.
+  Both retained outcomes finish the age check without scheduling another one.
+  These records contain no prompts,
+  workspace paths or Docker error output. Inspect them as the service user:
+  `journalctl --user -u 'assist-turn-expiry-*.service' --since today -o cat`.
   On restart, a new managed generation waits for confirmed cleanup. Browser
   and shell share the sandbox's network and mounts.
 
@@ -1092,9 +1132,13 @@ Visible Assist threads have two sources:
 - `/agent/memory.md` is private state for this thread: its goal, operating
   protocol, corrections, decisions, progress, blockers, and useful working notes.
   Other `/agent/*` files can hold supporting material. The main agent manages the
-  directory proactively; it survives turns and is deleted with the thread. Spawned
-  child agents receive a self-contained brief instead of the private `/agent`
-  route/mount or its prompt.
+  directory proactively; it survives turns and is deleted with the thread.
+  Parents and trusted children share its native Docker mount through ordinary
+  file and shell tools. Children keep a self-contained task brief; sharing files
+  does not inject the parent's conversation or thread-state policy into them.
+  The directory belongs to the ordinary execution UID with mode 0700, keeping
+  the separate browser-worker UID out. Local non-Docker mode retains a virtual
+  file route because it has no container mount.
 - `/user` is the user-owned alias for `/workspace`; use either path for user
   deliverables while existing `/workspace` references remain compatible.
 - `/tmp` persists for the thread and is for disposable conversions, generated
@@ -1281,7 +1325,21 @@ re-anchoring, even when a later turn replaces the error banner.
 
 ## Docker Sandbox
 
-On the web path, the agent executes shell commands inside a Docker container rather than on the host. Each turn gets a fresh container with the domain repository bind-mounted at `/workspace`, also exposed as `/user`; persistent thread scratch at `/tmp`; and, for ordinary visible Deep main-agent turns, private state at `/agent`. Ordinary Deep sandboxes inherit the configured `ASSIST_*` environment, so that profile is not yet a credential-free boundary. Pi and Git preparation/commit profiles omit the generic application environment and private agent mount. The CLI path remains host-backed.
+On the web path, shell commands run in a restricted Docker container with the
+domain repository at `/workspace` (also `/user`) and persistent scratch at `/tmp`.
+A logical parent and its eligible child work share that execution generation.
+The existing thread-owned `/agent` directory is mounted for native shell and
+file access and persists into later generations. It inherits no generic
+`ASSIST_*` application environment. Docker file tools use that mount directly;
+there is no separate parent host route. The mount is mode 0700 for the shared
+execution UID, preventing access by the distinct browser-worker UID.
+Children keep their own tools and provenance; they do not inherit browser tools.
+Git-bound shared children return findings and local file effects with publication
+pending. The parent stops the shared writer before ordinary commit/publication.
+Error recovery preserves working files; cancellation retains local effects, and
+the next clean preflight holds an uncommitted checkout for reconciliation rather
+than replaying work. Pi and Git preparation/commit keep their restricted profiles.
+The CLI path remains host-backed.
 
 The sandbox and browser images are built automatically by `make web` (and `make deploy`). To build them manually:
 ```bash

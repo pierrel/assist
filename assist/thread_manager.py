@@ -395,10 +395,10 @@ class ThreadManager:
             return Thread(
                 working_dir, **thread_kwargs,
                 spec=AgentSpec(role="delegate", async_subagent_tools=None))
+        agent_dir = self.thread_agent_dir(thread_id)
+        os.makedirs(agent_dir, exist_ok=True)
+        thread_kwargs["agent_dir"] = agent_dir
         if sandbox_backend is None:
-            agent_dir = self.thread_agent_dir(thread_id)
-            os.makedirs(agent_dir, exist_ok=True)
-            thread_kwargs["agent_dir"] = agent_dir
             if assistant_id == "general-agent" and not triage:
                 thread_kwargs["scratch_dir"] = self.thread_tmp_dir(thread_id)
         return Thread(
@@ -555,7 +555,7 @@ class ThreadManager:
     def thread_tmp_dir(self, tid: str) -> str:
         return os.path.join(self.thread_dir(tid), "tmp")
 
-    # Private main-agent state, outside both the repo and renderable scratch.
+    # Persistent agent state shared with trusted children, outside the repo and scratch.
     # The thread directory owns its lifecycle, so hard_delete removes it naturally.
     def thread_agent_dir(self, tid: str) -> str:
         return os.path.join(self.thread_dir(tid), "agent")
