@@ -91,6 +91,15 @@ where reliability is harder than with frontier APIs.
   creation fails closed if the timer cannot be armed. Docker-daemon failures leave the unit
   retrying its owed removal. The in-container PID 1 sleep alone cannot expire
   a paused container. Repeated fairness pauses do not renew the deadline.
+  Expiry attempts and outcomes are JSON records in the host user's journal,
+  with a UTC timestamp, full container generation and its original thread ID.
+  The timer retains that ID after container or thread teardown; older timers
+  without it report `null`. `removed` means Docker confirmed removal;
+  `already_absent` means exact-ID inspection or removal found it already gone.
+  `inspect_failed` and `removal_unconfirmed` retain retries, while
+  `ownership_rejected` refuses removal. These records contain no prompts,
+  workspace paths or Docker error output. Inspect them as the service user:
+  `journalctl --user -u 'assist-turn-expiry-*.service' --since today -o cat`.
   On restart, a new managed generation waits for confirmed cleanup. Browser
   and shell share the sandbox's network and mounts.
 

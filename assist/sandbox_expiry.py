@@ -1,5 +1,7 @@
 """Host-owned deadline for managed execution, including Docker-paused time."""
 from datetime import datetime, timedelta, timezone
+import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -8,6 +10,7 @@ import sys
 
 LABEL = "assist.turn-expiry"
 MARKER = "host-3h-v1"
+logger = logging.getLogger(__name__)
 
 
 def _identity(generation):
@@ -25,8 +28,8 @@ def _environment():
     return env
 
 
-def arm(generation, *, lifetime=10800):
-    """Arm once at creation; failure must be followed by confirmed teardown."""
+def arm(generation, *, thread_id=None, lifetime=10800):
+    """Retain thread identity; callers must confirm teardown if arming fails."""
     unit = _identity(generation)
     created = subprocess.run(
         ["docker", "inspect", "--format", "{{.Created}}", generation],
@@ -42,6 +45,8 @@ def arm(generation, *, lifetime=10800):
         "--property=RestartSec=10s", "--property=StartLimitIntervalSec=0",
         "--property=RestartPreventExitStatus=2", "--property=TimeoutStartSec=20s",
         sys.executable, str(Path(__file__).resolve()), generation,
+        # Hex keeps systemd's specifier/environment expansion out of thread IDs.
+        *((thread_id.encode("utf-8").hex(),) if thread_id is not None else ()),
     ], env=_environment(), capture_output=True, timeout=10, check=True)
 
 
@@ -58,29 +63,50 @@ def cancel(generation):
         pass
 
 
-def expire(generation):
-    """Remove only the exact host-labelled managed execution generation."""
+def _event(generation, thread_id, outcome):
+    logger.info("%s", json.dumps({
+        "event": "sandbox_expiry", "timestamp": datetime.now(timezone.utc).isoformat(),
+        "generation": generation, "thread_id": thread_id, "outcome": outcome,
+    }))
+
+
+def expire(generation, *, thread_id=None):
+    """Log and remove exact host-labelled execution; thread identity is diagnostic."""
     _identity(generation)
     missing = re.compile(r"(?:error|error response from daemon): no such (?:object|container): "
                          + re.escape(generation), re.IGNORECASE)
-    found = subprocess.run([
-        "docker", "inspect", "--format",
-        '{{index .Config.Labels "assist.sandbox"}} {{index .Config.Labels "' + LABEL + '"}}',
-        generation], capture_output=True, text=True, timeout=5)
-    if found.returncode:
-        if missing.fullmatch(found.stderr.strip()):
-            return
-        raise RuntimeError("expiry could not inspect exact generation")
-    if found.stdout.strip() != "true " + MARKER:
-        raise ValueError("expiry generation is not host-owned managed execution")
-    removed = subprocess.run(["docker", "rm", "--force", generation],
-                             capture_output=True, text=True, timeout=10)
-    if removed.returncode and not missing.fullmatch(removed.stderr.strip()):
-        raise RuntimeError("expiry exact generation removal is unconfirmed")
+    _event(generation, thread_id, "attempt")
+    outcome = "inspect_failed"
+    try:
+        found = subprocess.run([
+            "docker", "inspect", "--format",
+            '{{index .Config.Labels "assist.sandbox"}} {{index .Config.Labels "' + LABEL + '"}}',
+            generation], capture_output=True, text=True, timeout=5)
+        if found.returncode:
+            if missing.fullmatch(found.stderr.strip()):
+                outcome = "already_absent"
+                return
+            raise RuntimeError("expiry could not inspect exact generation")
+        if found.stdout.strip() != "true " + MARKER:
+            outcome = "ownership_rejected"
+            raise ValueError("expiry generation is not host-owned managed execution")
+        outcome = "removal_unconfirmed"
+        removed = subprocess.run(["docker", "rm", "--force", generation],
+                                 capture_output=True, text=True, timeout=10)
+        if removed.returncode:
+            if not missing.fullmatch(removed.stderr.strip()):
+                raise RuntimeError("expiry exact generation removal is unconfirmed")
+            outcome = "already_absent"
+        else:
+            outcome = "removed"
+    finally:
+        _event(generation, thread_id, outcome)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     try:
-        expire(sys.argv[1])
+        expire(sys.argv[1], thread_id=(
+            bytes.fromhex(sys.argv[2]).decode("utf-8") if len(sys.argv) > 2 else None))
     except (ValueError, IndexError):
         raise SystemExit(2)

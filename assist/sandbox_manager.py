@@ -831,7 +831,7 @@ class SandboxManager:
             try:
                 if timed_execution:
                     from assist.sandbox_expiry import arm
-                    arm(container.id)
+                    arm(container.id, thread_id=thread_id)
                 cls._record_egress_client(
                     client, container, work_dir,
                     kind="sandbox" if include_egress_approvals else "pi")

@@ -178,6 +178,9 @@ in both views. An ID shown in only one view keeps that meaning.
   frozen containers; only exact host-labelled generations can be removed.
   Missing user-manager access prevents backend admission, while Docker failure
   leaves an owed removal retry. Confirmed normal teardown cancels the unit.
+  The unit retains the host-supplied thread ID for timestamped exact-generation
+  expiry attempt/outcome records in the user journal, even after teardown.
+  This identity is diagnostic only; ownership labels still authorize removal.
 
 ** Agent and guidance view
 

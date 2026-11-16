@@ -116,6 +116,8 @@ class TestNoReuse(_SandboxStateBase):
                 second = SandboxManager._containers[work_dir]
                 self.assertEqual([call.args[0] for call in arm_expiry.call_args_list],
                                  [first.id, second.id])
+                self.assertEqual([call.kwargs for call in arm_expiry.call_args_list],
+                                 [{"thread_id": "thread"}, {"thread_id": "thread"}])
 
         self.assertIsNot(second, first, "container was reused across turns")
         stopped.assert_called_once_with(first.id)

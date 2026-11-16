@@ -692,7 +692,7 @@ class TestSandboxManager(TestCase):
             SandboxManager.get_sandbox_backend(
                 test_path, browser_capable=True,
                 thread_scope=(self.temp_dir, "browser-turn"))
-        arm_expiry.assert_called_once_with(container.id)
+        arm_expiry.assert_called_once_with(container.id, thread_id="browser-turn")
         options = client.containers.run.call_args.kwargs
         assert options["tmpfs"]["/run/assist-browser"].endswith(
             "uid=10001,gid=10001,mode=0700")
@@ -721,7 +721,7 @@ class TestSandboxManager(TestCase):
             SandboxManager.get_sandbox_backend(
                 test_path, thread_scope=(self.temp_dir, "managed-turn"),
                 owner_run_id="claimed-run")
-        self.arm_expiry.assert_called_once_with(container.id)
+        self.arm_expiry.assert_called_once_with(container.id, thread_id="managed-turn")
         self.assertEqual(client.containers.run.call_args.kwargs["labels"]["assist.turn-expiry"],
                          "host-3h-v1")
         with authority.fence(self.temp_dir, "managed-turn") as state:
