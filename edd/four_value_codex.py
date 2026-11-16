@@ -109,16 +109,20 @@ def _call(
     events = []
     for line in stdout.splitlines():
         try:
-            events.append(json.loads(line))
+            item = json.loads(line)
+            if isinstance(item, dict):
+                events.append(item)
         except json.JSONDecodeError:
             pass
-    starts = [item["thread_id"] for item in events
-              if item.get("type") == "thread.started"]
+    starts = [item.get("thread_id") for item in events
+              if item.get("type") == "thread.started"
+              and isinstance(item.get("thread_id"), str)]
     ends = [item for item in events if item.get("type") == "turn.completed"]
     observed = _observed_model(starts[0]) if code == 0 and len(starts) == 1 else None
     unexpected_tool = any(
-        item.get("type", "").startswith("item.")
-        and item.get("item", {}).get("type") not in (None, "agent_message")
+        isinstance(item.get("type"), str) and item["type"].startswith("item.")
+        and (not isinstance(item.get("item"), dict)
+             or item["item"].get("type") != "agent_message")
         for item in events
     )
     status = ("transport_error" if code else "model_identity_error"

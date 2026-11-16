@@ -185,6 +185,36 @@ def test_codex_launch_error_is_nonverdict(tmp_path, monkeypatch):
     assert (tmp_path / "role/record.json").exists()
 
 
+def test_nonobject_jsonl_after_cli_error_still_records_nonverdict(tmp_path,
+                                                                  monkeypatch):
+    def fake_run(*args, **kwargs):
+        return SimpleNamespace(returncode=1, stderr="CLI failed", stdout="null\n[]\n")
+
+    monkeypatch.setattr(four_value_codex.subprocess, "run", fake_run)
+    record = four_value_codex._call("correct", "prompt", tmp_path / "role",
+                                    codex="codex", model="gpt-6.1-sol",
+                                    effort="medium", cwd=tmp_path, cap_seconds=180)
+    assert record["status"] == "transport_error"
+    assert json.loads((tmp_path / "role/record.json").read_text())["status"] \
+           == "transport_error"
+
+
+def test_malformed_item_event_is_nonverdict(tmp_path, monkeypatch):
+    def fake_run(command, **kwargs):
+        Path(command[command.index("--output-last-message") + 1]).write_text("{}")
+        return SimpleNamespace(returncode=0, stderr="", stdout=(
+            '{"type":"thread.started","thread_id":"t"}\n'
+            '{"type":"item.completed","item":[]}\n'
+            '{"type":"turn.completed","usage":{}}\n'))
+
+    monkeypatch.setattr(four_value_codex.subprocess, "run", fake_run)
+    monkeypatch.setattr(four_value_codex, "_observed_model", lambda _: "gpt-6.1-sol")
+    record = four_value_codex._call("correct", "prompt", tmp_path / "role",
+                                    codex="codex", model="gpt-6.1-sol",
+                                    effort="medium", cwd=tmp_path, cap_seconds=180)
+    assert record["status"] == "unexpected_tool_use"
+
+
 def test_invented_calibration_packet_keeps_host_labels_out_of_observations():
     path = Path(__file__).resolve().parents[1] / (
         "edd/eval/fixtures/outcome-judge/four_value_synthetic.json")
