@@ -108,6 +108,8 @@ def _call(
         if isinstance(stderr, bytes):
             stderr = stderr.decode(errors="replace")
         code = 124
+    except UnicodeError as exc:
+        stdout, stderr, code = "", str(exc), 125
     except OSError as exc:
         stdout, stderr, code = "", str(exc), 127
     (output / "events.jsonl").write_text(stdout)

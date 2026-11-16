@@ -185,6 +185,19 @@ def test_codex_launch_error_is_nonverdict(tmp_path, monkeypatch):
     assert (tmp_path / "role/record.json").exists()
 
 
+def test_undecodable_cli_output_records_nonverdict(tmp_path, monkeypatch):
+    def bad_output(*args, **kwargs):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(four_value_codex.subprocess, "run", bad_output)
+    record = four_value_codex._call("focused", "prompt", tmp_path / "role",
+                                    codex="codex", model="gpt-6.1-sol",
+                                    effort="medium", cwd=tmp_path, cap_seconds=180)
+    assert record["status"] == "transport_error"
+    assert json.loads((tmp_path / "role/record.json").read_text())["status"] \
+           == "transport_error"
+
+
 def test_nonobject_jsonl_after_cli_error_still_records_nonverdict(tmp_path,
                                                                   monkeypatch):
     def fake_run(*args, **kwargs):
