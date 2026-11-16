@@ -222,6 +222,23 @@ def summarize_records(supervisor: dict, checkpoint: dict, trace: list[dict],
     cancellations = sum(run.get("status") == "cancelled" for run in runs)
     visibility = {}
     first_source_at = None
+    sync_tasks = [event for event in starts if event.get("name") == "task"
+                  and event.get("thread_id") == parent_id]
+
+    def parent_model_scope(event: dict) -> bool:
+        at = event.get("at")
+        if not isinstance(at, int | float):
+            return False
+        for task in sync_tasks:
+            started = task.get("at")
+            ended = all_ends.get(task.get("run_id"))
+            finished = ended.get("at") if ended else None
+            if not isinstance(started, int | float):
+                return False
+            if started <= at and (not isinstance(finished, int | float) or at < finished):
+                return False
+        return True
+
     for marker in finding_markers:
         if not marker:
             raise ValueError("finding markers must be nonempty")
@@ -239,6 +256,7 @@ def summarize_records(supervisor: dict, checkpoint: dict, trace: list[dict],
         parent_visible = [event for event in trace
                           if event.get("event") == "model_start"
                           and event.get("thread_id") == parent_id
+                          and parent_model_scope(event)
                           and evidence_at is not None
                           and event.get("at", 0) > evidence_at
                           and _handoff_contains(event.get("batches") or [], marker)]

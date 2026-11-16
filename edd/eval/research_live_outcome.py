@@ -86,20 +86,20 @@ def _completed_parent_run(parent_runs, children, required_role=None):
     if any(child.status not in {"success", "error", "timeout", "cancelled"}
            for child in children):
         return None
-    # A cancelled sibling has no completion wake. Require the latest child
-    # that can deliver a result, rather than an earlier draft's receipt.
-    completed = max((child for child in children if child.status != "cancelled"),
-                    key=lambda child: datetime.fromisoformat(child.updated_at),
-                    default=None)
-    if completed is None:
+    # A cancelled sibling has no completion wake. Other child wake order need
+    # not match completion order, so match the parent receipt and all settled work.
+    returning = [child for child in children if child.status != "cancelled"]
+    if not returning:
         # A parent may cancel all delegated work and still return a final answer.
         return (parent if not required_role and datetime.fromisoformat(
             parent.updated_at) >= max(datetime.fromisoformat(child.updated_at)
                                      for child in children) else None)
-    if parent.work_id != f"task-completion:{completed.thread_id}":
+    completed = next((child for child in returning
+                      if parent.work_id == f"task-completion:{child.thread_id}"), None)
+    if completed is None:
         return None
-    if datetime.fromisoformat(parent.created_at) < datetime.fromisoformat(
-            completed.updated_at):
+    latest_result_at = max(datetime.fromisoformat(child.updated_at) for child in returning)
+    if datetime.fromisoformat(parent.created_at) < latest_result_at:
         return None
     if required_role and (completed.assistant_id != required_role
                           or completed.status != "success"):
@@ -283,6 +283,7 @@ def run(case_id: str, artifact: Path, egress_proof: Path, env_path: Path,
         "RESEARCH_CONVERGENCE_DIR": str(artifact),
         "ASSIST_EGRESS_APPROVALS_DIR": egress["production_env_paths"]["ASSIST_EGRESS_APPROVALS_DIR"],
         "ASSIST_EGRESS_RUNTIME_DIR": egress["reuse_validation"]["runtime_dir"],
+        "ASSIST_EGRESS_CLIENT_MAP_DIR": egress["reuse_validation"]["client_map_dir"],
     })
     # Import the selected deployed-source copy only after private roots exist.
     from fastapi.testclient import TestClient
@@ -344,8 +345,10 @@ def run(case_id: str, artifact: Path, egress_proof: Path, env_path: Path,
     original_write = RunService._write
     status_lock = threading.Lock()
     last_run_status: dict[tuple[str, str], str] = {}
+    change_version = 0
 
     def write_and_notify(self, thread_id, records):
+        nonlocal change_version
         result = original_write(self, thread_id, records)
         if self.root_dir == str(threads_root):
             with status_lock:
@@ -359,11 +362,13 @@ def run(case_id: str, artifact: Path, egress_proof: Path, env_path: Path,
                                        assistant_id=record.assistant_id,
                                        status=record.status)
             with changed:
+                change_version += 1
                 changed.notify_all()
         return result
 
     RunService._write = write_and_notify
     accepted_at = time.time()
+    # Reserve teardown time; the final read before evaluator cancellation is the cutoff.
     deadline = time.monotonic() + selected["deadline_seconds"] - 180
     append_private(artifact / "lifecycle.jsonl", "trial_started",
                    case_id=case_id, deadline_seconds=selected["deadline_seconds"])
@@ -379,7 +384,9 @@ def run(case_id: str, artifact: Path, egress_proof: Path, env_path: Path,
         delivered = False
         natural_candidate = False
         cancel_requested: set[tuple[str, str]] = set()
-        while time.monotonic() < deadline:
+        while True:
+            with changed:
+                observed_version = change_version
             parent_runs = service.list(tid)
             children = _current_children(service, tid)
             for declined in _decline_private_egress(client, egress_routes, tid):
@@ -455,8 +462,11 @@ def run(case_id: str, artifact: Path, egress_proof: Path, env_path: Path,
             if delivered and all(child.status in {"success", "error", "timeout", "cancelled"}
                                  for child in children):
                 break
+            if time.monotonic() >= deadline:
+                break
             with changed:
-                changed.wait(timeout=min(60.0, max(0.0, deadline - time.monotonic())))
+                if change_version == observed_version:
+                    changed.wait(timeout=min(60.0, max(0.0, deadline - time.monotonic())))
         observation_cutoff = (not delivered and not natural_candidate
                               and time.monotonic() >= deadline)
         if observation_cutoff:

@@ -67,6 +67,15 @@ def test_cancelled_unneeded_sibling_needs_no_new_parent_wake():
     assert _completed_parent_run([final], [research, unused]) is final
 
 
+def test_parent_wake_order_can_differ_from_child_completion_order():
+    first = child("first", "research-agent", updated="20:02:00")
+    second = child("second", "research-agent", updated="20:03:00")
+    delayed_first_wake = run("task-completion:first", created="20:04:00")
+    assert _completed_parent_run([delayed_first_wake], [first, second]) is delayed_first_wake
+    premature = run("task-completion:first", created="20:02:30")
+    assert _completed_parent_run([premature], [first, second]) is None
+
+
 def test_parent_can_finish_after_cancelling_all_children():
     cancelled = child("unused", "research-agent", "cancelled", "20:03:00")
     final = run("initial", created="20:01:00", updated="20:04:00")

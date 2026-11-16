@@ -84,10 +84,13 @@ python -m edd.eval.research_nonconvergence ARTIFACT_DIR > metrics.json
 
 The observer distinguishes external deadline non-delivery, product Run
 timeout/error, cancellation, setup failure, capability answer and normal web
-delivery. An unfinished turn at the internal observation cutoff remains
-non-delivery even if evaluator cancellation or TestClient shutdown later makes
-a draft look final; evaluator-requested cancellation is recorded separately
-from an agent's cancellation. It reports actual task/Run ancestry, pending branches, repeated
+delivery. The `case deadline − 180 seconds` timer triggers one final status,
+artifact and checkpoint read; that read, before evaluator cancellation, defines
+the observation cutoff. The timer itself is not the scoring timestamp. An
+unfinished turn at that cutoff remains non-delivery even if cancellation or
+TestClient shutdown later makes a draft look final. Evaluator-requested
+cancellation is recorded separately from an agent's cancellation. The observer
+reports actual task/Run ancestry, pending branches, repeated
 normalized search/page requests, source-marker visibility, reported tokens,
 provider-message JSON byte volume, model and retrieval spans, durable Run
 pending time, model-slot wait and reported active time. Summed spans can

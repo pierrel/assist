@@ -94,6 +94,20 @@ def test_async_completion_rider_counts_only_after_returned_finding():
     assert result["finding_visibility"]["DECISIVE-42"]["parent_model_input"]
 
 
+def test_nested_worker_model_input_is_not_parent_finding_visibility():
+    worker = {"event": "model_start", "thread_id": "parent", "at": 3,
+              "batches": [[{"type": "tool", "data": {"content": "DECISIVE-42"}}]]}
+    trace = [_tool("tool_start", "task", "outer", 1),
+             _tool("tool_end", "search_internet", "source", 2,
+                   output="DECISIVE-42"), worker,
+             _tool("tool_end", "task", "outer", 4, output="DECISIVE-42")]
+    assert not _records(trace=trace)["finding_visibility"]["DECISIVE-42"][
+        "parent_model_input"]
+    parent = {**worker, "at": 5}
+    assert _records(trace=[*trace, parent])["finding_visibility"]["DECISIVE-42"][
+        "parent_model_input"]
+
+
 def test_wrong_parent_and_lost_returned_finding_are_reported():
     trace = [_tool("tool_start", "task", "lead", 1),
              _tool("tool_end", "task", "lead", 2, parent="wrong-model",
