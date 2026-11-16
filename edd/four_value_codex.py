@@ -74,7 +74,7 @@ def _observed_model(thread_id: str) -> str | None:
                 contexts.append(payload)
         model = contexts[-1].get("model") if contexts else None
         return model if isinstance(model, str) else None
-    except (OSError, json.JSONDecodeError, KeyError):
+    except (OSError, UnicodeError, json.JSONDecodeError, KeyError):
         return None
 
 

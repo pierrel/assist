@@ -199,14 +199,15 @@ def test_nonobject_jsonl_after_cli_error_still_records_nonverdict(tmp_path,
            == "transport_error"
 
 
-@pytest.mark.parametrize("session_line", (
-    "null", "[]", '{"type":"turn_context","payload":[]}',
+@pytest.mark.parametrize("session_bytes", (
+    b"null\n", b"[]\n", b'{"type":"turn_context","payload":[]}\n',
+    b"\xff\n",
 ))
 def test_malformed_session_metadata_records_nonverdict(tmp_path, monkeypatch,
-                                                       session_line):
+                                                       session_bytes):
     sessions = tmp_path / "codex-home/sessions"
     sessions.mkdir(parents=True)
-    (sessions / "session-t.jsonl").write_text(session_line + "\n")
+    (sessions / "session-t.jsonl").write_bytes(session_bytes)
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
 
     def fake_run(command, **kwargs):
