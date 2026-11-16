@@ -1,6 +1,7 @@
 """CPU controls for delivery and ancestry diagnostics; no model is called."""
 
 import json
+from types import SimpleNamespace
 
 from edd.eval.research_nonconvergence import summarize, summarize_records
 from pathlib import Path
@@ -10,7 +11,75 @@ import pytest
 from edd.eval.research_live_supervisor import _reconcile_private_runs, preflight
 from edd.eval.research_live_trace import _Trace, install_model_and_tool_trace
 from edd.eval.research_live_outcome import _completed_child_id, _completed_parent_run
+from edd.eval import research_live_outcome
 from assist.run_service import RunService
+
+
+@pytest.mark.parametrize("entry,answer_file", [
+    ("_run_research_leaf", "leaf-answer.txt"),
+    ("_run_research_manager_capability", "research-manager-answer.txt"),
+    ("_run_delegate_capability", "delegate-answer.txt"),
+])
+def test_direct_roles_use_current_private_sandbox_contract(
+        tmp_path, monkeypatch, entry, answer_file):
+    from assist.sandbox_manager import SandboxManager
+    from manage.web import state
+    import assist.agent
+    import assist.thread
+
+    thread_id = "private-thread"
+    root = tmp_path / "threads"
+    root.mkdir()
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    observed = {}
+
+    class Manager:
+        root_dir = str(root)
+        model = object()
+        checkpointer = object()
+
+        def reserve(self):
+            return thread_id
+
+        def thread_dir(self, tid):
+            path = root / tid
+            path.mkdir(exist_ok=True)
+            return str(path)
+
+        def make_default_working_dir(self, thread_dir):
+            path = Path(thread_dir) / "domain"
+            path.mkdir(exist_ok=True)
+            return str(path)
+
+        def thread_default_working_dir(self, tid):
+            return str(root / tid / "domain")
+
+        def thread_agent_dir(self, tid):
+            return str(root / tid / "agent")
+
+        def get(self, *args, **kwargs):
+            return SimpleNamespace(message=lambda prompt: "answer")
+
+    manager = Manager()
+    monkeypatch.setattr(state, "MANAGER", manager)
+    monkeypatch.setattr(SandboxManager, "get_sandbox_backend", classmethod(
+        lambda cls, work_dir, **kwargs: observed.update(
+            work_dir=work_dir, kwargs=kwargs) or SimpleNamespace(container=object())))
+    monkeypatch.setattr(SandboxManager, "cleanup", lambda *args: None)
+    monkeypatch.setattr(assist.agent, "create_research_agent", lambda *args, **kwargs: object())
+    monkeypatch.setattr(assist.thread, "Thread", lambda *args, **kwargs:
+                        SimpleNamespace(message=lambda prompt: "answer"))
+    threads = SimpleNamespace(MANAGER=manager,
+                              _get_sandbox_backend=state._get_sandbox_backend)
+
+    getattr(research_live_outcome, entry)(
+        threads, {"prompt": "Find the answer.",
+                  "workspace_files": {"notes/note.md": "original\n"}}, artifact)
+
+    assert (artifact / answer_file).read_text() == "answer"
+    assert observed["work_dir"] == manager.thread_default_working_dir(thread_id)
+    assert observed["kwargs"]["agent_dir"] == manager.thread_agent_dir(thread_id)
 
 
 def _records(*, timeout=False, final=True, artifact=True, nested=False, trace=()):

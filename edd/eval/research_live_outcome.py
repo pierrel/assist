@@ -194,7 +194,7 @@ def _run_research_leaf(threads, selected: dict, artifact: Path) -> None:
     append_private(artifact / "lifecycle.jsonl", "leaf_started", thread_id=tid)
     sandbox = None
     try:
-        sandbox = threads._get_sandbox_backend(tid, include_agent=False)
+        sandbox = threads._get_sandbox_backend(tid)
         if sandbox is None:
             raise RuntimeError("live research leaf requires the ordinary Docker sandbox")
         leaf = manager.get(tid, sandbox_backend=sandbox, assistant_id="research-agent")
@@ -225,7 +225,7 @@ def _run_research_manager_capability(threads, selected: dict, artifact: Path) ->
     append_private(artifact / "lifecycle.jsonl", "research_manager_capability_started",
                    thread_id=tid)
     try:
-        sandbox = threads._get_sandbox_backend(tid, include_agent=False)
+        sandbox = threads._get_sandbox_backend(tid)
         if sandbox is None:
             raise RuntimeError("nested research capability requires Docker sandbox")
         graph = create_research_agent(manager.model, str(workspace), manager.checkpointer,
@@ -258,7 +258,7 @@ def _run_delegate_capability(threads, selected: dict, artifact: Path) -> None:
                    thread_id=tid, assistant_id="delegate-agent")
     sandbox = None
     try:
-        sandbox = threads._get_sandbox_backend(tid, include_agent=False)
+        sandbox = threads._get_sandbox_backend(tid)
         if sandbox is None:
             raise RuntimeError("delegate capability requires the ordinary Docker sandbox")
         delegate = manager.get(tid, sandbox_backend=sandbox,
