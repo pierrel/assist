@@ -412,3 +412,93 @@ def test_host_age_check_removes_ownerless_paused_container_after_worker_exit(sco
     finally:
         subprocess.run(["docker", "rm", "-f", cid], capture_output=True, timeout=5)
         expiry.cancel(cid)
+
+
+@pytest.mark.skipif(os.getenv("ASSIST_BROWSER_DOCKER_TEST") != "1", reason="explicit isolated Docker/systemd test")
+def test_retained_age_check_then_worker_crash_is_reclaimed_at_startup(tmp_path, monkeypatch):
+    """Retention does not prevent ordinary fresh-process orphan reconciliation."""
+    import select
+    import signal
+    from textwrap import dedent
+    from assist.browser import authority
+
+    root = tmp_path / "threads"
+    work = root / THREAD_ID / "domain"
+    work.mkdir(parents=True)
+    authority.mark_new_thread(str(root), THREAD_ID)
+    monkeypatch.setenv("ASSIST_THREADS_DIR", str(root))
+    monkeypatch.setenv("ASSIST_EGRESS_CLIENT_MAP_DIR", str(tmp_path / "client-map"))
+    cid = subprocess.check_output([
+        "docker", "run", "-d", "--rm", "--network", "none",
+        "--mount", f"type=bind,src={work},dst=/workspace",
+        "--label", "assist.sandbox=true", "--label", expiry.LABEL + "=" + expiry.MARKER,
+        "--entrypoint", "/bin/sleep", os.environ["ASSIST_BROWSER_TEST_SANDBOX_IMAGE"],
+        "infinity"], text=True, timeout=10).strip()
+    worker = None
+    try:
+        worker = subprocess.Popen([sys.executable, "-c", dedent("""
+            import json, sys
+            from assist.browser import authority
+            from assist.run_service import RunService
+            from assist.sandbox_expiry import arm
+            root, thread, generation = sys.argv[1:]
+            runs = RunService(root)
+            owner = runs.create(thread, 'general-agent', 'Synthetic crash work', user_origin=True)
+            runs.claim(thread, owner.id)
+            with authority.generation_fence(root, thread), authority.fence(root, thread) as state:
+                state.begin(owner.id, owner.admission_sequence)
+                state.add_generation(owner.id, generation)
+            arm(generation, thread_id=thread, threads_root=root, lifetime=4)
+            print(json.dumps({'owner_run_id': owner.id, 'generation': generation}), flush=True)
+            sys.stdin.read()
+        """), str(root), THREAD_ID, cid], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert select.select([worker.stdout], [], [], 15)[0], "owner did not arm its timer"
+        owner = json.loads(worker.stdout.readline())
+        assert owner["generation"] == cid
+        time.sleep(5)
+        assert worker.poll() is None
+        assert subprocess.check_output([
+            "docker", "inspect", "--format", "{{.State.Running}}", cid],
+            text=True, timeout=5).strip() == "true"
+        journal = subprocess.check_output([
+            "journalctl", "--user", "-u", expiry._identity(cid) + ".service",
+            "--no-pager", "-o", "cat"], env=expiry._environment(), text=True, timeout=5)
+        events = [json.loads(line) for line in journal.splitlines()
+                  if line.startswith('{"event": "sandbox_expiry"')]
+        assert [event["outcome"] for event in events] == ["attempt", "retained_owned"], journal
+        assert all(event["thread_id"] == THREAD_ID and event["generation"] == cid
+                   for event in events)
+        worker.kill()
+        assert worker.wait(timeout=5) == -signal.SIGKILL
+        assert subprocess.check_output([
+            "docker", "inspect", "--format", "{{.State.Running}}", cid],
+            text=True, timeout=5).strip() == "true"
+        with authority.fence(str(root), THREAD_ID) as state:
+            assert state.lease["owner_run_id"] == owner["owner_run_id"]
+            assert state.lease["generations"] == [cid]
+        restarted = subprocess.run([sys.executable, "-c", dedent("""
+            import json, sys
+            from assist.browser import authority
+            from assist.browser.manager import BrowserManager
+            from assist.sandbox_manager import SandboxManager
+            root, thread = sys.argv[1:]
+            assert not SandboxManager._containers
+            SandboxManager.reap_orphans(root)
+            assert BrowserManager.reconcile_startup(root)
+            with authority.fence(root, thread) as state:
+                assert state.covered and state.lease is None
+            print(json.dumps({'startup_cleanup': 'reconciled', 'owner': None}))
+        """), str(root), THREAD_ID], capture_output=True, text=True, timeout=30)
+        assert restarted.returncode == 0, restarted.stderr
+        missing = subprocess.run(["docker", "inspect", cid], capture_output=True, text=True, timeout=5)
+        assert missing.returncode != 0 and cid in missing.stderr and "no such" in missing.stderr.lower()
+        print(json.dumps({"events": events, "crashed_owner": owner,
+                          "restart": json.loads(restarted.stdout), "removed_generation": cid}))
+    finally:
+        if worker is not None:
+            if worker.poll() is None:
+                worker.kill()
+            worker.communicate(timeout=5)
+        subprocess.run(["docker", "rm", "-f", cid], capture_output=True, timeout=5)
+        expiry.cancel(cid)
