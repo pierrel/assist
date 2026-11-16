@@ -65,9 +65,15 @@ def _observed_model(thread_id: str) -> str | None:
         contexts = []
         for line in matches[0].read_text().splitlines():
             item = json.loads(line)
+            if not isinstance(item, dict):
+                return None
             if item.get("type") == "turn_context":
-                contexts.append(item["payload"])
-        return contexts[-1].get("model") if contexts else None
+                payload = item.get("payload")
+                if not isinstance(payload, dict):
+                    return None
+                contexts.append(payload)
+        model = contexts[-1].get("model") if contexts else None
+        return model if isinstance(model, str) else None
     except (OSError, json.JSONDecodeError, KeyError):
         return None
 

@@ -199,6 +199,32 @@ def test_nonobject_jsonl_after_cli_error_still_records_nonverdict(tmp_path,
            == "transport_error"
 
 
+@pytest.mark.parametrize("session_line", (
+    "null", "[]", '{"type":"turn_context","payload":[]}',
+))
+def test_malformed_session_metadata_records_nonverdict(tmp_path, monkeypatch,
+                                                       session_line):
+    sessions = tmp_path / "codex-home/sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "session-t.jsonl").write_text(session_line + "\n")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+
+    def fake_run(command, **kwargs):
+        Path(command[command.index("--output-last-message") + 1]).write_text("{}")
+        return SimpleNamespace(returncode=0, stderr="", stdout=(
+            '{"type":"thread.started","thread_id":"t"}\n'
+            '{"type":"turn.completed","usage":{}}\n'))
+
+    monkeypatch.setattr(four_value_codex.subprocess, "run", fake_run)
+    record = four_value_codex._call("correct", "prompt", tmp_path / "role",
+                                    codex="codex", model="gpt-6.1-sol",
+                                    effort="medium", cwd=tmp_path, cap_seconds=180)
+    assert record["status"] == "model_identity_error"
+    assert record["observed_model"] is None
+    assert json.loads((tmp_path / "role/record.json").read_text())["status"] \
+           == "model_identity_error"
+
+
 def test_malformed_item_event_is_nonverdict(tmp_path, monkeypatch):
     def fake_run(command, **kwargs):
         Path(command[command.index("--output-last-message") + 1]).write_text("{}")
