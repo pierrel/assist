@@ -89,6 +89,10 @@ pending time, model-slot wait and reported active time. Summed spans can
 overlap; they are not a partition of wall time. A source marker is a timing
 probe, not a semantic truth check. `provider_message_json_bytes_sum` is
 serialized message size, not measured wire traffic.
+Older captures that stored only Run ID/status, and direct profiles with no
+durable Run records, have no measured durable ancestry; their child count and
+durable depth are `null`, not measured zero. Synchronous task starts/returns
+remain independently observable in their raw trace.
 
 ## Outcome review after each trial
 

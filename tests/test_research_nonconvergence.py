@@ -399,6 +399,24 @@ def test_observer_reports_missing_parent_without_inventing_ancestry():
     assert observed["classification"] == "incomplete_or_error"
 
 
+def test_old_run_rows_without_parent_fields_report_unknown_ancestry():
+    supervisor = {"checkpoint_threads": ["parent"], "timed_out": False,
+                  "worker_exit_code": 0, "elapsed_seconds": 5,
+                  "run_reconciliation": {"after": {"parent": [
+                      {"id": "p1", "status": "success"},
+                      {"id": "p2", "status": "success"}]}}}
+    checkpoint = {"threads": [{"thread_id": "parent", "checkpoint_ns": "",
+                               "messages": [{"type": "ai", "data": {
+                                   "content": "Done", "tool_calls": []}}]}]}
+    result = summarize_records(supervisor, checkpoint, [], artifact_ready=True,
+                               lifecycle=[{"event": "worker_finished",
+                                           "delivered": True}])
+    assert result["classification"] == "delivered_within_window"
+    assert result["durable_ancestry_available"] is False
+    assert result["child_runs"] is None
+    assert result["max_durable_child_depth"] is None
+
+
 @pytest.mark.parametrize("status,classification", [
     ("timeout", "product_run_timeout"),
     ("error", "product_run_error"),

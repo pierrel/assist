@@ -73,6 +73,11 @@ def _handoff_contains(batches: list, marker: str) -> bool:
 
 
 def _durable_graph(runs: list[dict]) -> dict:
+    if not runs or any("parent_run_id" not in run for run in runs):
+        return {"durable_ancestry_available": False,
+                "child_runs": None, "missing_durable_parent_ids": None,
+                "cyclic_durable_run_ids": None,
+                "max_durable_child_depth": None}
     by_id = {run["id"]: run for run in runs if run.get("id")}
     children = [run for run in runs if run.get("parent_run_id")]
     missing = sorted({str(run["parent_run_id"]) for run in children
@@ -91,7 +96,8 @@ def _durable_graph(runs: list[dict]) -> dict:
             depth += 1
             parent = by_id[parent].get("parent_run_id")
         depths.append(depth)
-    return {"child_runs": len(children), "missing_durable_parent_ids": missing,
+    return {"durable_ancestry_available": bool(runs),
+            "child_runs": len(children), "missing_durable_parent_ids": missing,
             "cyclic_durable_run_ids": sorted(cycles),
             "max_durable_child_depth": max(depths, default=0)}
 
