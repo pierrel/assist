@@ -2,6 +2,8 @@
 
 Run from a source checkout with an observation JSON and a private output directory.
 The caller authorizes sending that observation to the selected Codex model.
+The CLI read-only sandbox does not prevent model-generated file reads; use only
+an environment whose readable files are approved for provider access.
 No Assist runtime or default judge imports this module.
 """
 

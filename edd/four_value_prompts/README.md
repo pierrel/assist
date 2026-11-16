@@ -13,7 +13,10 @@ python -m edd.four_value_codex OBSERVATION.json PRIVATE_OUTPUT_DIR \
 ```
 
 The caller must authorize sending the observation to the selected model. Use
-public or approved redacted data. The output directory is new and owner-only;
+public or approved redacted data, and run in an environment where readable files
+are safe for provider access. The prompt forbids tools and the runner rejects
+observed tool use afterward, but the CLI's read-only sandbox permits file reads
+during the call. Rejection cannot undo a read. The output directory is new and owner-only;
 the Codex CLI also retains its own local session record. Each role has a
 180-second cap by default. A failed or incomplete role is recorded as a
 nonverdict, with no retry or combined grade. The per-role folders retain the
