@@ -20,6 +20,7 @@ from assist.browser.runner import BrowserWorker
 from assist.browser import runner
 from assist.middleware.thread_queue_middleware import ThreadQueueMiddleware
 from assist.thread_queue import ThreadAffinityQueue
+from assist.thread_queue import ThreadPauseRequested
 from manage import web
 from manage.web import threads
 from tests.test_fair_scheduling_integration import wired
@@ -198,6 +199,182 @@ def test_viewer_pixels_cross_private_transport_without_widening_agent_results(tm
         runner.call()
         server.join(2)
     assert output.getvalue()==response and len(response)>runner.MAX_RESULT
+
+
+@pytest.mark.parametrize('state',['empty','closed','remaining','transport'])
+def test_handback_discovers_current_pages_without_admitting_stale_effects(controlled,monkeypatch,state):
+    _root,_runs,_owner,_successor,session,_stopped=controlled
+    pages=[] if state in {'empty','closed'} else [{'page_id':'current','url':'https://example.test/'}]
+    effects=[]
+    def transport(_generation,payload,**_kwargs):
+        command=json.loads(payload)
+        if command['operation']=='viewer':
+            if state=='transport':raise OSError('private transport unavailable')
+            answer={'pages':pages}
+        elif command['operation']=='observe':
+            if command['args']['page_id']!='current':
+                return json.dumps({'error':'unknown or closed page ID'}).encode()
+            answer={'page_id':'current','snapshot':'Current human page'}
+        else:
+            effects.append(command['operation'])
+            answer={'page_id':'opened'}
+        return json.dumps({'result':answer}).encode()
+    monkeypatch.setattr(browser,'_docker_exec',transport)
+    session.return_control(session.viewer_token,session.human_client)
+    browser.BrowserManager.resume_session('t',session.work_id,session.user_request)
+    if state=='transport':
+        with pytest.raises(OSError,match='unavailable'):
+            session.command('open',url='https://example.test/')
+        session.model_boundary()
+        assert session.needs_observation and not session.handoff_observed and effects==[]
+        return
+    if state=='closed':
+        assert session.command('observe',page_id='gone')['result']['pages']==[]
+    else:
+        assert session.command('open',url='https://example.test/')['pages']==pages
+    assert 'error' in session.command('open',url='https://example.test/')
+    if state=='remaining':
+        session.model_boundary()
+        assert session.needs_observation
+        assert session.command('observe',page_id='gone')['pages']==pages
+        assert session.command('observe',page_id='current')['result']['snapshot']=='Current human page'
+        assert 'error' in session.command('open',url='https://example.test/')
+    session.model_boundary()
+    assert session.command('open',url='https://example.test/')['result']['page_id']=='opened'
+    assert effects==['open']
+
+
+@pytest.fixture
+def handoff_host(wired,monkeypatch):
+    tid,_=wired
+    root=Path(web.MANAGER.root_dir)
+    queue=ThreadAffinityQueue()
+    scheduler=threads._ResumeScheduler()
+    containers,stopped,notifications={},{},[]
+    faults={'stop':False}
+    monkeypatch.setattr(threads,'THREAD_QUEUE',queue)
+    monkeypatch.setattr(threads,'_RESUME_SCHEDULER',scheduler)
+    monkeypatch.setattr(browser.BrowserManager,'_sessions',{})
+    monkeypatch.setattr(browser.BrowserManager,'_reconciled_roots',{str(root)})
+    monkeypatch.setattr(browser.BrowserManager,'reconcile_startup',lambda *_a:True)
+    monkeypatch.setattr(browser.BrowserManager,'ready_for_browser',lambda *_a:True)
+    monkeypatch.setattr(browser.SandboxManager,'_containers',containers)
+    monkeypatch.setattr(browser,'configured_directory',lambda:str(root))
+    monkeypatch.setattr(threads,'configured_directory',lambda:str(root))
+    monkeypatch.setattr(browser,'browser_records',lambda *_a:{})
+    monkeypatch.setattr(threads,'browser_records',lambda *_a:{})
+    monkeypatch.setattr(browser,'_sandbox_generations',lambda *_a:set())
+    monkeypatch.setattr(browser,'_bounded_cli',lambda *_a,**_k:b'')
+    monkeypatch.setattr(browser,'disarm_sandbox_browser',lambda *_a:None)
+    monkeypatch.setattr(browser,'forget_client',lambda *_a:None)
+    monkeypatch.setattr(browser.BrowserSession,'_capture_storage',lambda _s:None)
+    def backend(t,**kwargs):
+        container=SimpleNamespace(id='host-'+t)
+        containers[str(root/t)]=container
+        run=threads._runs().get(t,kwargs['owner_run_id'])
+        with authority.fence(str(root),t) as lease:
+            lease.begin(run.id,run.admission_sequence)
+            lease.add_generation(run.id,container.id)
+        return SimpleNamespace(container=container)
+    def start(session):
+        session.identity=browser._ContainerIdentity(str(root),'172.20.0.2',session.sandbox_generation)
+    def stop(generation):
+        if faults['stop']:raise browser.BrowserUnavailable('exact stop unconfirmed')
+        stopped[generation]=stopped.get(generation,0)+1
+    def cleanup(work_dir,expected=None):
+        if faults['stop']:raise browser.BrowserUnavailable('exact stop unconfirmed')
+        container=containers.pop(work_dir,None)
+        if container:
+            with authority.fence(str(root),Path(work_dir).name) as lease:
+                if lease.lease:
+                    owner=lease.lease['owner_run_id']
+                    lease.remove_generation(owner,container.id)
+                    lease.clear(owner)
+    monkeypatch.setattr(threads,'_get_sandbox_backend',backend)
+    monkeypatch.setattr(browser.BrowserSession,'_start',start)
+    monkeypatch.setattr(browser,'_kill_container_confirmed',stop)
+    monkeypatch.setattr(browser.SandboxManager,'cleanup',cleanup)
+    monkeypatch.setattr(browser,'_docker_exec',lambda *_a,**_k:json.dumps({'result':{
+        'page_id':'page','snapshot_id':'snapshot','snapshot':'Synthetic form'}}).encode())
+    monkeypatch.setattr(threads,'_queue_browser_revocation',lambda t:notifications.append(t))
+    return tid,root,scheduler,stopped,notifications,faults
+
+
+@pytest.mark.parametrize('stop_failure',[False,True])
+def test_takeover_fence_rejection_settles_only_after_exact_stop_and_dispatches_new_user(handoff_host,monkeypatch,stop_failure):
+    tid,root,scheduler,stopped,notifications,faults=handoff_host
+    newer=[]
+    class Chat:
+        agent=None
+        on_queue_state=None
+        pending_reply=lambda self:None
+        get_messages=lambda self:[]
+        get_raw_messages=get_messages
+        def message(self,text):
+            if text=='New instruction':return 'New instruction processed'
+            session=browser.BrowserManager.current_session(tid)
+            session.command('open',url='https://example.test/')
+            session.request_human(session.viewer_token,'a'*32)
+            newer.append(threads._accept_message_run(tid,'New instruction')[0])
+            faults['stop']=stop_failure
+            raise ThreadPauseRequested('boundary after newer direct admission')
+    monkeypatch.setattr(web.MANAGER,'get',lambda *_a,**_k:Chat())
+    old=threads._create_run(tid,'Old work',user_origin=True)
+    if stop_failure:
+        with pytest.raises(browser.BrowserUnavailable,match='unconfirmed'):
+            threads._execute_run(old.id,tid)
+        assert threads._runs().get(tid,old.id).status=='running'
+        assert threads._runs().get(tid,newer[0].id).status=='revocation_pending'
+        with authority.fence(str(root),tid) as lease:
+            assert lease.lease['generations']==['host-'+tid]
+        assert scheduler._q.empty()
+        return
+    threads._execute_run(old.id,tid)
+    assert threads._runs().get(tid,old.id).status=='error'
+    assert stopped=={'host-'+tid:1} and len(notifications)>=2
+    assert threads._drain_held_browser_events(tid)
+    item=scheduler._q.get_nowait()
+    assert item['run_id']==newer[0].id
+    threads._execute_run(item['run_id'],item['tid'])
+    assert threads._runs().get(tid,newer[0].id).status=='success'
+
+
+def test_immediate_return_after_human_activation_cannot_run_failed_handoff_cleanup(handoff_host,monkeypatch):
+    tid,_root,scheduler,stopped,_notifications,_faults=handoff_host
+    original_gate=browser.BrowserManager.bounded_thread_gate
+    returned=Event()
+    sessions=[]
+    @contextmanager
+    def return_at_gate_exit(t):
+        with original_gate(t):yield
+        session=browser.BrowserManager.current_session(t)
+        if session and session.human_active and not returned.is_set():
+            returned.set()
+            session.return_control(session.viewer_token,session.human_client)
+    monkeypatch.setattr(browser.BrowserManager,'bounded_thread_gate',return_at_gate_exit)
+    class Chat:
+        agent=None
+        on_queue_state=None
+        pending_reply=lambda self:None
+        get_messages=lambda self:[]
+        get_raw_messages=get_messages
+        def message(self,_text):
+            session=browser.BrowserManager.current_session(tid)
+            session.command('open',url='https://example.test/')
+            session.request_human(session.viewer_token,'a'*32)
+            sessions.append(session)
+            raise ThreadPauseRequested('human boundary')
+        def resume(self):return 'Same browser resumed'
+    monkeypatch.setattr(web.MANAGER,'get',lambda *_a,**_k:Chat())
+    old=threads._create_run(tid,'Take over',user_origin=True)
+    threads._execute_run(old.id,tid)
+    assert returned.is_set() and stopped=={}
+    assert browser.BrowserManager.current_session(tid) is sessions[0]
+    assert sessions[0].paused and not sessions[0].closed
+    item=scheduler._q.get_nowait()
+    threads._execute_run(item['run_id'],item['tid'])
+    assert threads._runs().get(tid,item['run_id']).status=='success'
+    assert stopped=={'host-'+tid:1}
 
 
 @pytest.mark.skipif(not os.getenv("ASSIST_BROWSER_HANDOFF_CHROMIUM"),

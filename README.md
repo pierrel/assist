@@ -129,7 +129,11 @@ where reliability is harder than with frontier APIs.
   checkpoint resumes, and requires the agent to observe changed state before
   further browser effects. Unrelated threads can progress during human control;
   trusted child work waits. The shared container's background processes keep
-  running while the human controls it. Cancellation and newer direct messages
+  running while the human controls it.
+  If tabs were closed or replaced, the handback reports current page IDs or an
+  empty website set. A fresh empty state permits reopening only after another
+  model response; transport failure does not count as an observation.
+  Cancellation and newer direct messages
   retire the old viewer/session through normal exact-stop cleanup. The existing
   ownership-aware age check retains active human work. A service restart ends
   live-page continuity; normal stored-login recovery remains available.

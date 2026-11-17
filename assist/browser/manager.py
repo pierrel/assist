@@ -516,7 +516,12 @@ class BrowserSession:
                     "browser startup outcome is unconfirmed for this Run")
             self._fence_command()
             if self.needs_observation and operation != "observe":
-                return {"error": "Human control changed this page. Call browser_observe before further browser actions."}
+                pages = self._handoff_pages()
+                if not pages:
+                    self.handoff_observed = True
+                return {"error": ("Human control changed this browser. Observe a current page before further actions."
+                                  if pages else "No live website pages remain after human control. Reconsider the next browser action using this fresh state."),
+                        "pages": pages}
             if operation in {"open", "preflight"}:
                 _url_target(args["url"])
                 if self.identity is None:
@@ -535,12 +540,28 @@ class BrowserSession:
                     timeout=20, in_sandbox=True))
                 if not isinstance(parsed, dict):
                     raise BrowserUnavailable("browser worker returned invalid data")
+                if (operation == "observe" and self.needs_observation
+                        and parsed.get("error") == "unknown or closed page ID"):
+                    pages = self._handoff_pages()
+                    parsed = ({"error": parsed["error"], "pages": pages} if pages else
+                              {"result": {"page_id": None, "pages": [],
+                                          "snapshot": "No live website pages remain after human control."}})
                 if operation == "observe" and "result" in parsed:
                     self.handoff_observed = True
                 return parsed
             except Exception:
                 self._stop()
                 raise
+
+    def _handoff_pages(self):
+        """Read bounded worker metadata; transport failures never release the barrier."""
+        reply = json.loads(_docker_exec(self.identity.generation, json.dumps({
+            "session": self.token, "operation": "viewer", "args": {"action": "tabs"}
+        }).encode(), timeout=10, in_sandbox=True))
+        pages = reply.get("result", {}).get("pages")
+        if not isinstance(pages, list):
+            raise BrowserUnavailable("current browser pages could not be observed")
+        return pages
 
     def model_boundary(self):
         """Only a new model response after fresh observation can authorize effects."""

@@ -83,7 +83,7 @@ from assist.schedule.scheduler import Scheduler
 from manage.web.drain import DrainClosed, RUN_GATE
 from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
-from assist.browser.manager import BrowserManager, BrowserSession, BrowserUserRequest, browser_tools
+from assist.browser.manager import BrowserManager, BrowserSession, BrowserUserRequest, BrowserUnavailable, browser_tools
 from assist.browser import authority as browser_authority
 from assist.egress.client_map import browser_records, configured_directory
 from assist.thread import Thread
@@ -3153,6 +3153,8 @@ def _execute_run_active(run_id: str, tid: str, *, user_priority: bool = False) -
                        for candidate in _runs().list(tid)):
                 RUN_STREAMS.finish(tid, current.work_id)
             _dispatch_pending_after(tid, run_id)
+            if any(browser_reset_owed(item) for item in _runs().list(tid)):
+                _queue_browser_revocation(tid)
     except RunNotFound:
         pass  # thread deletion removes its run store while a dispatcher unwinds.
 
@@ -4185,6 +4187,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # Admission and DELETE take this lock too, so neither can observe an
         # interrupted predecessor without its same-work successor.
         ticket = None
+        handed_off = False
+        handoff_error = None
         try:
             with BrowserManager.bounded_thread_gate(tid), ExitStack() as handoff_scope:
                 if keep_browser and browser_session.human_requested:
@@ -4219,10 +4223,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 if keep_browser and browser_session.human_requested:
                     browser_session.held_runs[(successor.id, tid)] = None
                     browser_session.human_active = True
+                    handed_off = True
                 else:
                     ticket = _RESUME_SCHEDULER.reserve(successor.id, tid)
+        except BrowserUnavailable as error:
+            handoff_error = str(error)
         finally:
-            handed_off = False
             try:
                 if ticket is not None:
                     _RESUME_SCHEDULER.commit(ticket)
@@ -4235,7 +4241,11 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         BrowserManager.cleanup(tid, browser_session)
                     finally:
                         SandboxManager.cleanup(browser_session.work_dir, sandbox_generation)
-        return
+        if handoff_error is None:
+            return
+        # Cleanup above must succeed before ordinary terminal projection settles
+        # this Run and wakes its held reset/followers. Unknown stop still raises.
+        _set_status(tid, "error", error=handoff_error, **pending_kwargs)
     except SandboxContainerLostError as e:
         # Distinct status message: a dead container is recoverable —
         # the user can simply retry — but they should know their
