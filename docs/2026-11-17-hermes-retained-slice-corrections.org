@@ -1,0 +1,52 @@
+#+title: Hermes retained-slice concurrency corrections
+#+date: 2026-11-17
+
+* Corrected behavior
+The paused-generation release proof now holds the existing runtime RLock through
+container inspection and the decision to stop or release. Concurrent retirement
+cannot remove that generation between selecting its handle and inspecting it.
+
+If a release proof fails but the existing exact-work cleanup subsequently proves
+that generation stopped or absent, the host releases only the queue handle that
+invocation acquired, through the existing identity-checked queue method. Unrelated
+work cannot justify release, and failed teardown still leaves admission blocked.
+No retry loop, additional lifecycle owner, or scheduler is introduced.
+
+A pause commits one successor notification and does not also dispatch it from the
+terminal-path finally block. Delayed notifications for older same-work slices do
+not terminalize the current continuation. An existing native handle or active
+same-thread model holder also distinguishes live execution from an abandoned
+restart notification. An abandoned latest slice with no live invocation keeps the
+existing no-replay recovery and accepted-follower notification behavior.
+
+* Verification
+The pre-fix product dispatcher, real ThreadAffinityQueue and RuntimeManager were
+run with an injected container-inspection error. The generation was verified
+stopped and the Run became error, but the global model holder remained. The new
+regression requires that a competitor can acquire after verified cleanup.
+
+A concurrent paused-proof/retirement regression gates the container inspection,
+starts retirement, and checks that retirement waits until the proof finishes.
+The original source fails this and the duplicate pause-notification regression;
+the corrected source passes. Additional cases cover superseded pending, running,
+interrupted and successful successors, a live invocation, and pre-start queue
+ownership. They retain genuine lost-process recovery coverage.
+
+The checked-in native capability keeps the first user prompt "Have a helper create
+a note saying blue, then tell me it is done." It parks at a native child boundary,
+runs the explicit competitor prompt =COMPETITOR_B=, and resumes that child. It parks
+again at the parent model boundary, runs =COMPETITOR_C=, and resumes the same native
+generation. "Change that note to green." is accepted before the first invocation
+finishes and must wait behind its continuation. The final "Remove the scratch
+folder." still checks denial despite a seeded permanent approval. The checker
+retains native-history, exact blue-write, browser/phone history and fail-on-cleanup
+assertions. Two explicit boundary rendezvous, a fake provider and =network:none=
+make this deterministic capability coverage, not real-model quality evidence.
+
+* Historical supersessions
+=2026-11-17-hermes-preview-review-fixes.org=, "Corrected behavior": verified
+same-work stop after failed admission additionally releases an already retained
+exact queue handle; paused proof is serialized with retirement, and duplicate
+slice notifications preserve an existing continuation. "Verification": the native
+checker now uses two competitors and accepts the green turn before completion of
+the first invocation. The earlier dated record remains unchanged.

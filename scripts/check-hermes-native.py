@@ -41,16 +41,18 @@ threads.THREAD_QUEUE=ThreadAffinityQueue(hold_timeout_s=120,wait_timeout_s=30,qu
 threads._recovery_prep=lambda q:None
 threads._RESUME_SCHEDULER=threads._ResumeScheduler()
 threads.MANAGER.root_dir=str(ROOT/'threads')
-for tid in ('hermes-proof-a','hermes-proof-b'):
+for tid in ('hermes-proof-a','hermes-proof-b','hermes-proof-c'):
     threads.MANAGER.reserve_visible('hermes',thread_id=tid)
     Path(threads.MANAGER.thread_default_working_dir(tid)).mkdir(exist_ok=True)
-A='hermes-proof-a';B='hermes-proof-b'
+A='hermes-proof-a';B='hermes-proof-b';C='hermes-proof-c'
 WORK=Path(threads.MANAGER.thread_default_working_dir(A))
 CHILD='Create /workspace/child-note.txt containing blue.'
 PROMPT='Have a helper create a note saying blue, then tell me it is done.'
 requests=[];events=[];errors=[];lock=threading.Lock()
 child_ready=threading.Event();b_done=threading.Event();a_done=threading.Event()
-held_once=False;a_generation=None;write_calls=[]
+parent_ready=threading.Event();c_done=threading.Event()
+first_done=threading.Event();green_done=threading.Event()
+held_once=False;held_parent=False;a_generation=None;write_calls=[]
 
 def text(message):
     content=message.get('content','')
@@ -65,11 +67,12 @@ def answer(p):
     def call(name,args):
         if name=='write_file':write_calls.append(args)
         return {'role':'assistant','content':None,'tool_calls':[{'id':'call-'+str(len(requests)),'type':'function','function':{'name':name,'arguments':json.dumps(args)}}]}
-    if latest=='COMPETITOR_B':
+    if latest in {'COMPETITOR_B','COMPETITOR_C'}:
         container=sm.SandboxManager.current_container(str(WORK));container.reload()
         assert container.attrs['State']['Paused'],'A generation must be frozen before B model'
-        events.append('B-model')
-        return {'role':'assistant','content':'B done.'}
+        name=latest[-1]
+        events.append(name+'-model')
+        return {'role':'assistant','content':name+' done.'}
     if latest=='Remove the scratch folder.':
         tail=[]
         for m in reversed(msgs):
@@ -80,6 +83,7 @@ def answer(p):
         assert any('denied' in text(m).lower() or 'unattended' in text(m).lower() for m in tools),tools
         return {'role':'assistant','content':'That operation requires an unavailable approval.'}
     if latest=='Change that note to green.':
+        assert first_done.is_set(), 'accepted follower overtook the native continuation'
         assert users.count(PROMPT)==1, 'native history lost or replayed first user turn'
         assert any(m.get('role')=='assistant' and text(m)=='The helper created the blue note.' for m in msgs), 'native history lost first reply'
         tail=[]
@@ -127,7 +131,7 @@ threads._HERMES_RUNTIME.stop=stop
 original_boundary=HermesProviderRelay.boundary
 
 def boundary(self,value):
-    global held_once,a_generation
+    global held_once,held_parent,a_generation
     if (not held_once and value.get('kind')=='model' and value.get('session_id')!=A
             and (WORK/'child-note.txt').exists()):
         held_once=True
@@ -136,6 +140,13 @@ def boundary(self,value):
         if not b_done.wait(60):raise RuntimeError('B did not finish')
         assert sm.SandboxManager.current_container(str(WORK)).id==a_generation
         events.append('A-same-child-continues')
+    if (held_once and not held_parent and value.get('kind')=='model'
+            and value.get('session_id')==A and (WORK/'child-note.txt').exists()):
+        held_parent=True
+        events.append('A-parent-boundary');parent_ready.set()
+        if not c_done.wait(60):raise RuntimeError('C did not finish')
+        assert sm.SandboxManager.current_container(str(WORK)).id==a_generation
+        events.append('A-same-parent-continues')
     return original_boundary(self,value)
 HermesProviderRelay.boundary=boundary
 original_status=threads._set_status
@@ -144,9 +155,14 @@ def status(tid,stage,*args,**kwargs):
     result=original_status(tid,stage,*args,**kwargs)
     if stage=='ready':
         if tid==B:events.append('B-completed');b_done.set()
-        if tid==A:a_done.set()
+        if tid==C:events.append('C-completed');c_done.set()
+        if tid==A:
+            completed=sum(run.status=='success' for run in threads._runs().list(A))
+            if completed==1:events.append('A-first-completed');first_done.set()
+            if completed==2:green_done.set()
+            a_done.set()
     if stage=='paused':events.append('A-parked')
-    if stage=='error':errors.append({'tid':tid,'error':kwargs.get('error')});child_ready.set();a_done.set();b_done.set()
+    if stage=='error':errors.append({'tid':tid,'error':kwargs.get('error')});child_ready.set();parent_ready.set();a_done.set();b_done.set();c_done.set();first_done.set();green_done.set()
     return result
 threads._set_status=status
 
@@ -172,17 +188,20 @@ try:
     initial=threading.Thread(target=first_request);initial.start()
     assert child_ready.wait(45),'native child boundary not reached from actual browser submission'
     competitor=threads._create_run(B,'COMPETITOR_B');threads._RESUME_SCHEDULER.submit(competitor.id,B)
-    assert a_done.wait(60),'A did not resume and finish'
-    initial.join(10);assert not initial.is_alive()
-    assert responses[0].status_code==303
-    assert not errors,errors
+    assert parent_ready.wait(60),'native parent did not reach its second parking boundary'
     assert write_calls==[{'path':'/workspace/child-note.txt','content':'blue\n'}], write_calls
     assert (WORK/'child-note.txt').read_text()=='blue\n'
-    a_done.clear()
+    # Accept the next user turn while the first invocation is still paused.
     second=client.post(f'/thread/{A}/message',data={'text':'Change that note to green.'},follow_redirects=False)
     assert second.status_code==303,second.text
-    assert a_done.wait(45)
+    competitor_c=threads._create_run(C,'COMPETITOR_C');threads._RESUME_SCHEDULER.submit(competitor_c.id,C)
+    assert first_done.wait(60),'A did not resume after the second competitor'
+    initial.join(10);assert not initial.is_alive()
+    assert responses[0].status_code==303
+    assert green_done.wait(45),'accepted follower did not run after its continuation'
     assert not errors,errors
+    assert events.count('A-parked')==2, events
+    assert [event for event in events if event in {'B-model','C-model','A-first-completed'}]==['B-model','C-model','A-first-completed']
     browser=client.get(f'/thread/{A}')
     assert browser.status_code==200,browser.text
     assert browser.text.count('The helper created the blue note.')==1
@@ -204,10 +223,10 @@ try:
     assert blocked.status_code==303 and a_done.wait(30)
     assert (WORK/'keep'/'note').read_text()=='retain'
     assert not errors,errors
-    report={'approval_unavailable_preserved_file':True,'status':'PASS','events':events,'http_create':response.status_code,'browser':browser.status_code,'phone':phone.status_code,'public_messages':messages,'limits':'Actual browser create and two message POSTs, real native runtime/queue/container, browser HTML and authenticated phone history. Fake upstream/network:none; one child-boundary rendezvous. Native dangerous-command approval is unavailable and denies without deleting the fixture. This is deterministic capability coverage, not model-quality or live-egress evidence.'}
+    report={'approval_unavailable_preserved_file':True,'status':'PASS','events':events,'http_create':response.status_code,'browser':browser.status_code,'phone':phone.status_code,'public_messages':messages,'limits':'Actual browser create and two message POSTs, real native runtime/queue/container, browser HTML and authenticated phone history. Fake upstream/network:none; two native-boundary rendezvous and two competing threads; the accepted second user turn waits for the original continuation. Native dangerous-command approval is unavailable and denies without deleting the fixture. This is deterministic capability coverage, not model-quality or live-egress evidence.'}
 finally:
-    b_done.set()
-    for tid in (A,B):
+    b_done.set();c_done.set()
+    for tid in (A,B,C):
         try:threads._HERMES_RUNTIME.stop(tid)
         except Exception as error:errors.append(repr(error))
     provider.shutdown();client.close()

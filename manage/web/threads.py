@@ -3149,11 +3149,27 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
     """Dispatch native work and retain its process across same-work successors."""
     tid = run.thread_id
     if run.status != "pending":
-        if run.status in {"running", "interrupted"}:
-            _runs().transition(tid, run.id, "cancelled" if run.status == "interrupted" else "error",
-                               error="Native Hermes process was interrupted; files were not replayed")
-            _set_status(tid, "error", error="Hermes was interrupted; retained files need review")
-            _dispatch_pending_after(tid, run.id)
+        recovered = False
+        with _RUN_ADMISSION_LOCK:
+            runs = _runs().list(tid)
+            current = next(item for item in runs if item.id == run.id)
+            same_work = [item for item in runs if item.work_id == current.work_id]
+            # Dispatch queues can carry a duplicate already-dequeued slice. Only
+            # an abandoned latest slice may recover; a live invocation or later
+            # same-work successor still owns its continuation.
+            holder = THREAD_QUEUE.current_handle()
+            if (same_work[-1].id != current.id
+                    or _HERMES_RUNTIME.retains_work(tid, current.work_id)
+                    or current.status == "running" and holder is not None
+                    and holder.thread_id == tid):
+                return
+            if current.status in {"running", "interrupted"}:
+                _runs().transition(tid, current.id, "cancelled" if current.status == "interrupted" else "error",
+                                   error="Native Hermes process was interrupted; files were not replayed")
+                _set_status(tid, "error", error="Hermes was interrupted; retained files need review")
+                recovered = True
+        if recovered:
+            _dispatch_pending_after(tid, current.id)
         return
     dispatch_followers = True
     handle = None
@@ -3172,6 +3188,7 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
                 with _RUN_ADMISSION_LOCK:
                     current = _runs().get(tid, run.id)
                     if current.status != "pending":
+                        dispatch_followers = False
                         return
                     run = _runs().claim(tid, run.id)
                 thread_dir = MANAGER.thread_dir(tid)
@@ -3219,6 +3236,7 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
                 _HERMES_RUNTIME.stop(tid)
                 raise
     except ThreadPauseRequested:
+        dispatch_followers = False
         carry = THREAD_QUEUE.pop_hold(handle)
         with _RUN_ADMISSION_LOCK:
             _runs().transition(tid, run.id, "interrupted", active_ms=carry)
@@ -3234,7 +3252,12 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
         dispatch_followers = False
         # Queue admission can fail before the context yields its release fence.
         # Stop only this work; an unrelated active turn must retain its authority.
-        _HERMES_RUNTIME.stop_work(tid, run.work_id)
+        stopped = _HERMES_RUNTIME.stop_work(tid, run.work_id)
+        if handle is not None:
+            if stopped:
+                THREAD_QUEUE._release_if_holder(handle)
+            elif THREAD_QUEUE.current_handle() is handle:
+                raise HermesRuntimeError("Unrelated native work still owns the retained model slot")
         logging.error("Hermes run %s failed", run.id, exc_info=True)
         message = str(error) + git_error_notes(error)
         with _RUN_ADMISSION_LOCK:
@@ -6278,9 +6301,9 @@ class _InitializationScheduler:
 class _ResumeScheduler:
     """One dedicated thread that dispatches queued durable work serially.
 
-    A paused turn resumes by re-running ``_process_message(..., resume=True)``, which
-    re-acquires the LLM slot and parks in the queue's ``cond.wait`` until its turn comes
-    up. That park must NOT happen on a ``BackgroundTask``: FastAPI's sync route handlers
+    A paused turn returns through its engine dispatcher: graph work resumes a
+    checkpoint, while native work resumes its retained invocation. Both re-acquire
+    the LLM slot and park in the queue's ``cond.wait`` until their turn comes up. That park must NOT happen on a ``BackgroundTask``: FastAPI's sync route handlers
     and BackgroundTasks all draw from ONE shared anyio threadpool (40 tokens), so N paused
     turns parking N workers — under the exact contention that triggers a pause — would
     starve the pool and stall request handling (a 2026-06-10-class outage). This thread

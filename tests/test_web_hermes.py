@@ -189,3 +189,143 @@ def test_native_claim_between_render_steps_keeps_one_visible_user_message(hermes
     assert page.status_code == 200
     assert page.text.count(text) == 1
     assert len(snapshots) == 1
+
+
+def test_failed_parking_proof_then_verified_stop_releases_model_slot(hermes_threads, monkeypatch, tmp_path):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from assist.hermes_runtime import HermesRuntimeManager
+    from assist.thread_queue import ThreadAffinityQueue, ThreadPauseRequested
+    hermes_threads.set_enabled(True)
+    tid = threads.MANAGER.reserve_visible("hermes")
+    run = threads._create_run(tid, None, resume=True, pending_text="Retained native work")
+    stopped = []
+    def failed_reload():
+        raise OSError("fixture transient Docker inspect failure")
+    container = SimpleNamespace(reload=failed_reload)
+    manager = HermesRuntimeManager(sandbox_manager=SimpleNamespace(
+        cleanup_verified=lambda _work, generation: stopped.append(generation)))
+    control = tmp_path / "private-control"
+    control.mkdir()
+    manager.turns[tid] = SimpleNamespace(work_id=run.work_id, work_dir="fixture", paused=True,
+        backend=SimpleNamespace(container=container), control_dir=control,
+        relay=SimpleNamespace(stop_admission=lambda: None, close=lambda: None))
+    def pause(*_args, **_kwargs):
+        raise ThreadPauseRequested()
+    manager.run_slice = pause
+    queue = ThreadAffinityQueue()
+    @contextmanager
+    def git_scope(*_args, **_kwargs):
+        yield SimpleNamespace()
+    monkeypatch.setattr(threads, "_HERMES_RUNTIME", manager)
+    monkeypatch.setattr(threads, "THREAD_QUEUE", queue)
+    monkeypatch.setattr(threads.GitLifecycle, "acquire", git_scope)
+    threads._execute_hermes_run(run, user_priority=False)
+    assert stopped == [container] and tid not in manager.turns
+    assert threads._runs().get(tid, run.id).status == "error"
+    assert queue.current_handle() is None, "verified teardown left the global model holder stranded"
+    with queue.acquire("competitor", wait_timeout_s=0.01):
+        pass
+
+
+@pytest.mark.parametrize("successor_status", ["pending", "running", "interrupted", "success"])
+def test_superseded_native_slice_notification_cannot_recover_or_dispatch_followers(
+        hermes_threads, monkeypatch, successor_status):
+    tid = threads.MANAGER.reserve_visible("hermes")
+    service = threads._runs()
+    first = threads._create_run(tid, "Keep native work")
+    service.claim(tid, first.id)
+    service.transition(tid, first.id, "interrupted")
+    successor = threads._create_run(tid, None, resume=True, work_id=first.work_id,
+                                    pending_text=first.text)
+    if successor_status != "pending":
+        service.claim(tid, successor.id)
+        service.transition(tid, successor.id, successor_status)
+    threads._create_run(tid, "Accepted next user turn")
+    threads._set_status(tid, "paused")
+    monkeypatch.setattr(threads, "_dispatch_pending_after",
+                        lambda *_args: pytest.fail("A stale notification must not dispatch"))
+    threads._execute_hermes_run(service.get(tid, first.id), user_priority=False)
+    assert service.get(tid, first.id).status == "interrupted"
+    assert service.get(tid, successor.id).status == successor_status
+    assert threads._get_status(tid)["stage"] == "paused"
+
+
+@pytest.mark.parametrize("retained", [False, True])
+def test_duplicate_running_native_notification_does_not_interrupt_live_work(
+        hermes_threads, monkeypatch, retained):
+    from types import SimpleNamespace
+    from assist.hermes_runtime import HermesRuntimeManager
+    from assist.thread_queue import ThreadAffinityQueue
+    tid = threads.MANAGER.reserve_visible("hermes")
+    run = threads._create_run(tid, "Live native work")
+    service = threads._runs()
+    service.claim(tid, run.id)
+    runtime = HermesRuntimeManager()
+    if retained:
+        runtime.turns[tid] = SimpleNamespace(work_id=run.work_id)
+    queue = ThreadAffinityQueue()
+    monkeypatch.setattr(threads, "_HERMES_RUNTIME", runtime)
+    monkeypatch.setattr(threads, "THREAD_QUEUE", queue)
+    monkeypatch.setattr(threads, "_dispatch_pending_after",
+                        lambda *_args: pytest.fail("Live work must not recover"))
+    if retained:
+        threads._execute_hermes_run(service.get(tid, run.id), user_priority=False)
+    else:
+        with queue.acquire(tid):
+            threads._execute_hermes_run(service.get(tid, run.id), user_priority=False)
+    assert service.get(tid, run.id).status == "running"
+
+
+def test_native_pause_commits_one_notification_without_finally_redispatch(hermes_threads, monkeypatch):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from assist.thread_queue import ThreadAffinityQueue, ThreadPauseRequested
+    hermes_threads.set_enabled(True)
+    tid = threads.MANAGER.reserve_visible("hermes")
+    run = threads._create_run(tid, None, resume=True, pending_text="Keep native work")
+    events = []
+    def pause(*_args, **_kwargs):
+        raise ThreadPauseRequested()
+    @contextmanager
+    def git_scope(*_args, **_kwargs):
+        yield SimpleNamespace()
+    monkeypatch.setattr(threads, "THREAD_QUEUE", ThreadAffinityQueue())
+    monkeypatch.setattr(threads._HERMES_RUNTIME, "run_slice", pause)
+    monkeypatch.setattr(threads._HERMES_RUNTIME, "release_slice", lambda _tid: None)
+    monkeypatch.setattr(threads.GitLifecycle, "acquire", git_scope)
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "reserve", lambda *_args: "ticket")
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "commit", lambda ticket: events.append(ticket))
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *_args: events.append("duplicate"))
+    threads._execute_hermes_run(run, user_priority=False)
+    assert events == ["ticket"]
+    assert threads._runs().get(tid, run.id).status == "interrupted"
+
+
+def test_duplicate_recovery_does_not_wait_on_runtime_teardown_lock(hermes_threads, monkeypatch):
+    import threading
+    from types import SimpleNamespace
+    from assist.hermes_runtime import HermesRuntimeManager
+    tid = threads.MANAGER.reserve_visible("hermes")
+    run = threads._create_run(tid, "Still retained")
+    threads._runs().claim(tid, run.id)
+    runtime = HermesRuntimeManager()
+    runtime.turns[tid] = SimpleNamespace(work_id=run.work_id)
+    monkeypatch.setattr(threads, "_HERMES_RUNTIME", runtime)
+    done = threading.Event()
+    errors = []
+    def dispatch():
+        try:
+            threads._execute_hermes_run(threads._runs().get(tid, run.id), user_priority=False)
+        except Exception as error:
+            errors.append(error)
+        finally:
+            done.set()
+    with runtime.lock:
+        duplicate = threading.Thread(target=dispatch)
+        duplicate.start()
+        completed_while_teardown_locked = done.wait(1)
+    duplicate.join(2)
+    assert completed_while_teardown_locked, "admission waited on the runtime teardown lock"
+    assert errors == []
+    assert threads._runs().get(tid, run.id).status == "running"

@@ -265,8 +265,8 @@ python dockerfiles/check-native-model-egress.py --proxy-image assist-egress-prox
 ```
 
 The first uses a fake provider and Docker `network:none`; it checks browser
-creation, two native user turns, a competing thread between park and resume,
-phone history and unattended command denial. The second creates a private
+creation, two native pauses with distinct competitors, a second user turn queued
+behind the first continuation, phone history and unattended command denial. The second creates a private
 internal network and fake model, verifying ordinary mapped access, native denial,
 missing/malformed attribution and legacy no-map denial, with external allowlist
 behavior preserved. Neither proves real-model behavior or live deployment.
@@ -276,7 +276,8 @@ legacy/no-map deployments deliberately lose the permanent host-model exception.
 The existing proxy-policy fingerprint forces replacement of an older running
 proxy at the next sandbox start; rebuild the proxy image before that admission.
 See [the implementation and acceptance record](docs/2026-11-16-hermes-native-implementation.org)
-and [the review corrections](docs/2026-11-17-hermes-preview-review-fixes.org).
+and the [first review corrections](docs/2026-11-17-hermes-preview-review-fixes.org)
+and [retained-slice corrections](docs/2026-11-17-hermes-retained-slice-corrections.org).
 
 ---
 

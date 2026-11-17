@@ -323,8 +323,9 @@ class ThreadAffinityQueue:
     def _release_if_holder(self, handle: _Handle) -> bool:
         """Vacate the slot iff ``handle`` is still the current holder.
 
-        Idempotent across ``acquire``'s ``finally``, :meth:`_on_tick`, and
-        :meth:`_on_cap`; whichever wins the
+        Idempotent across ``acquire``'s ``finally``, :meth:`_on_tick`,
+        :meth:`_on_cap`, and native cleanup after a failed release proof;
+        whichever wins the
         lock first releases, the other sees ``_holder is not handle`` and
         returns False without clobbering a newly-promoted holder.
         """

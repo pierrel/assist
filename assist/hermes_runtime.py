@@ -159,15 +159,15 @@ class HermesRuntimeManager:
         """Prove a retained generation is frozen, or stop it before queue release."""
         with self.lock:
             turn = self.turns.get(thread_id)
-        if turn is None:
-            return
-        if turn.paused:
-            turn.backend.container.reload()
-            if (not turn.backend.container.attrs["State"]["Paused"]
-                    or not turn.relay.parked or turn.relay.connections):
-                raise HermesRuntimeError("Hermes parking is unconfirmed")
-            return
-        self.stop(thread_id)
+            if turn is None:
+                return
+            if turn.paused:
+                turn.backend.container.reload()
+                if (not turn.backend.container.attrs["State"]["Paused"]
+                        or not turn.relay.parked or turn.relay.connections):
+                    raise HermesRuntimeError("Hermes parking is unconfirmed")
+                return
+            self.stop(thread_id)
 
     def paused_owner(self, thread_id: str, work_id: str) -> str | None:
         """Snapshot the retained owner for a durable reset, without granting authority.
@@ -185,12 +185,23 @@ class HermesRuntimeManager:
             self.retired.add(thread_id)
             self.stop(thread_id)
 
-    def stop_work(self, thread_id: str, work_id: str):
-        """Stop only the matching work before a failed admission becomes terminal."""
+    def retains_work(self, thread_id: str, work_id: str) -> bool:
+        """Snapshot live work without reversing admission/runtime/authority locks.
+
+        This only suppresses duplicate recovery; it grants no model authority.
+        """
+        turn = self.turns.get(thread_id)
+        return turn is not None and turn.work_id == work_id
+
+    def stop_work(self, thread_id: str, work_id: str) -> bool:
+        """Prove matching work stopped or absent; never stop unrelated work."""
         with self.lock:
             turn = self.turns.get(thread_id)
-            if turn is not None and turn.work_id == work_id:
+            if turn is not None:
+                if turn.work_id != work_id:
+                    return False
                 self.stop(thread_id)
+            return True
 
     def stop(self, thread_id: str):
         """Fence provider access and verify teardown of the exact managed generation."""
