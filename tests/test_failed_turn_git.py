@@ -215,3 +215,61 @@ def test_hermes_transient_teardown_failure_preserves_git_before_follower_dispatc
     assert git("show", "HEAD:README", cwd=server) == "native draft before failed cleanup"
     assert git("show", "HEAD:draft.txt", cwd=server) == "new native draft"
     assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == original
+
+
+def test_hermes_rejected_dirty_prepare_keeps_existing_edits_uncommitted(
+        worker_workspace, monkeypatch):
+    _owner, source, server, stopped, generation = worker_workspace
+    (server / "README").write_bytes(b"pre-existing tracked edit\n")
+    (server / "unowned.txt").write_bytes(b"pre-existing untracked edit\n")
+    head = git("rev-parse", "HEAD", cwd=server)
+    remote = git("rev-parse", "refs/heads/assist/thread", cwd=source)
+    dirty = git("status", "--porcelain", cwd=server)
+    original_bytes = {name: (server / name).read_bytes() for name in ("README", "unowned.txt")}
+    monkeypatch.setattr(threads, "HERMES_PREVIEW", SimpleNamespace(admits=lambda _engine: True))
+    monkeypatch.setattr(threads, "_HERMES_RUNTIME", SimpleNamespace(
+        run_slice=lambda *_args, **_kwargs: pytest.fail("Dirty checkout must not start Hermes"),
+        stop_work=lambda _tid, _work: (stopped.append(generation), True)[1],
+        release_slice=lambda _tid: None))
+
+    for prompt in ("Update the note", "Try updating the note again"):
+        run = threads._create_run("thread", prompt)
+        threads._execute_hermes_run(run, user_priority=False)
+        saved = threads._runs().get("thread", run.id)
+        assert saved.status == "error"
+        assert "uncommitted" in saved.error.lower()
+        assert git("rev-parse", "HEAD", cwd=server) == head
+        assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == remote
+        assert git("status", "--porcelain", cwd=server) == dirty
+        assert {name: (server / name).read_bytes() for name in original_bytes} == original_bytes
+        assert threads.THREAD_QUEUE.current_handle() is None
+
+
+def test_hermes_resume_setup_failure_still_preserves_retained_native_edits(
+        worker_workspace, monkeypatch):
+    _owner, source, server, stopped, generation = worker_workspace
+    (server / "README").write_bytes(b"retained native tracked edit\n")
+    (server / "draft.txt").write_bytes(b"retained native new file\n")
+    original = git("rev-parse", "HEAD", cwd=server)
+    set_status = threads._set_status
+
+    def failed_projection(tid, stage, **kwargs):
+        if stage == "processing":
+            raise OSError("fixture resume status write failed")
+        return set_status(tid, stage, **kwargs)
+
+    monkeypatch.setattr(threads, "_set_status", failed_projection)
+    monkeypatch.setattr(threads, "HERMES_PREVIEW", SimpleNamespace(admits=lambda _engine: True))
+    monkeypatch.setattr(threads, "_HERMES_RUNTIME", SimpleNamespace(
+        run_slice=lambda *_args, **_kwargs: pytest.fail("Setup failed before native resume"),
+        stop_work=lambda _tid, _work: (stopped.append(generation), True)[1],
+        release_slice=lambda _tid: None))
+    run = threads._create_run("thread", None, resume=True, pending_text="Keep the draft")
+    threads._execute_hermes_run(run, user_priority=False)
+    assert threads._runs().get("thread", run.id).status == "error"
+    assert git("status", "--porcelain", cwd=server) == ""
+    assert git("rev-parse", "HEAD", cwd=server) != original
+    assert git("show", "HEAD:README", cwd=server) == "retained native tracked edit"
+    assert git("show", "HEAD:draft.txt", cwd=server) == "retained native new file"
+    assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == original
+    assert threads.THREAD_QUEUE.current_handle() is None

@@ -3181,12 +3181,16 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
     claimed = False
     failure = None
     failure_preserved = False
+    # A successor already owns native edits; a fresh turn owns none until its
+    # preparation succeeds. Rejected pre-existing dirt must remain uncommitted.
+    preserve_native_edits = bool(run.resume)
     git_lifecycle = None
     git_scope = ExitStack()
 
     def preserve_failure():
         nonlocal failure_preserved
-        if failure is not None and git_lifecycle is not None and not failure_preserved:
+        if (preserve_native_edits and failure is not None
+                and git_lifecycle is not None and not failure_preserved):
             error = failure
             try:
                 with git_lifecycle.preserve_on_error((run.rider or {}).get("tz")):
@@ -3236,6 +3240,7 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
                 # Git resume would stop it through the publication fence.
                 if not run.resume:
                     git_lifecycle.prepare((run.rider or {}).get("tz"))
+                    preserve_native_edits = True
                 _set_status(tid, "processing", pending_message=run.text or run.pending_text,
                             pending_run_id=run.id, started_at=_now_ms())
 
