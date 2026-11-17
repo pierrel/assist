@@ -79,3 +79,64 @@ def test_provider_fence_denies_request_without_native_hook(tmp_path):
         assert not relay.connections
     finally:
         relay.close()
+
+
+def test_waiting_provider_rechecks_admission_after_relay_contention(tmp_path, monkeypatch):
+    prepared = threading.Event()
+    reached = threading.Event()
+    allowed = True
+    responses = []
+
+    class Provider(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            reached.set()
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+
+    def admitted():
+        return allowed
+
+    relay = HermesProviderRelay(tmp_path, f"http://127.0.0.1:{upstream.server_port}/v1",
+                                "fixture", "fixture", 131072, admitted)
+    relay.start()
+    from assist import hermes_provider_relay as module
+    original_connection = module.http.client.HTTPConnection
+
+    def connection(*args, **kwargs):
+        result = original_connection(*args, **kwargs)
+        prepared.set()
+        return result
+
+    monkeypatch.setattr(module.http.client, "HTTPConnection", connection)
+
+    def request():
+        with httpx.Client(transport=httpx.HTTPTransport(uds=str(relay.socket_path)),
+                          timeout=5, trust_env=False) as client:
+            responses.append(client.post("http://relay/v1/chat/completions",
+                                         json={"model": "fixture"}).status_code)
+
+    try:
+        # Simulate a bounded connect/send holding the relay condition. A
+        # request which checked before waiting must not use that cached grant.
+        with relay.condition:
+            worker = threading.Thread(target=request, daemon=True)
+            worker.start()
+            assert prepared.wait(2)
+            allowed = False
+        worker.join(3)
+        assert not worker.is_alive()
+        assert responses == [409]
+        assert not reached.is_set()
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()

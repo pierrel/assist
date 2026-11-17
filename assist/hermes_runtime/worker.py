@@ -168,7 +168,10 @@ def main(request_path: str) -> None:
     database = SessionDB(Path(os.environ["HERMES_HOME"]) / "session.db")
     agent = None
     try:
-        history = database.get_messages_as_conversation(request["session_id"], include_ancestors=True)
+        # Native compression can rotate the persisted session. Resolve its tip
+        # even after close() has ended it, before loading or appending a turn.
+        session_id = database.get_compression_tip(request["session_id"])
+        history = database.get_messages_as_conversation(session_id, include_ancestors=True)
         # The constructor freezes the joined delegate schema. A config.yaml
         # gateway_mode entry alone does not select it for a direct AIAgent.
         with gateway_delegation_inline_scope(True):
@@ -177,7 +180,7 @@ def main(request_path: str) -> None:
                 provider="custom", api_mode="chat_completions", model=request["model"],
                 platform="api_server",
                 fallback_model={},
-                session_id=request["session_id"], session_db=database,
+                session_id=session_id, session_db=database,
                 enabled_toolsets=request["toolsets"], quiet_mode=True, cwd="/workspace")
         result = agent.run_conversation(request["prompt"], conversation_history=history,
                                         system_message=request.get("system_message"))

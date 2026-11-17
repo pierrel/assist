@@ -893,10 +893,12 @@ def render_thread(
                        if diff_pending else '')
     if diffs:
         diff_files_html = _render_inline_diffs(tid, diffs)
+        review_link = (f'<a class="btn btn-secondary review-btn" href="/thread/{tid}/review">Review</a>'
+                       if not is_native else "")
         diff_block_html = f"""
         <div class="diff-container">
           <div class="diff-actions">
-            <a class="btn btn-secondary review-btn" href="/thread/{tid}/review">Review</a>
+            {review_link}
             <form action="/thread/{tid}/merge" method="post" style="margin: 0;">
               <button class="btn merge-btn" type="submit"
                       onclick="return confirm('Merge this branch into main and push to origin? The thread branch remains unchanged.');">

@@ -156,13 +156,12 @@ class HermesProviderRelay:
         value = json.loads(body)
         if not isinstance(value, dict) or value.get("model") != self.model:
             raise HermesRelayError("Native request selected an unavailable model")
-        admitted = self.admitted()
         endpoint = self.endpoint
         connection_type = (http.client.HTTPSConnection if endpoint.scheme == "https"
                            else http.client.HTTPConnection)
         connection = connection_type(endpoint.hostname, endpoint.port, timeout=5)
         with self.condition:
-            if (not admitted or self.stopped or self.parked
+            if (self.stopped or self.parked or not self.admitted()
                     or self.pausing and not self.operations):
                 raise HermesRelayError("Hermes does not own model admission")
             self.connections[connection] = None

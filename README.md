@@ -220,7 +220,9 @@ Snapshot reads and background probes do not clear notifications.
   Assist owns the existing queue, Run authority, sandbox and Git publication.
   When another thread waits, Hermes drains model/tool work and freezes its sandbox;
   the same invocation resumes after the competitor. Native history persists in
-  `/agent/hermes` across user turns. A lost process ends the Run without replay.
+  `/agent/hermes` across user turns, including native compression session rotation.
+  A lost process ends the Run without replay. Git diffs and Merge remain available;
+  the Deep Agents Review action is not offered for native threads.
   Available tools are files, terminal, skills, memory and helpers. Native browser,
   web search and interactive approvals are unavailable; commands requiring approval
   are denied. There is no independent native scheduled or autonomous work.
@@ -262,6 +264,9 @@ Repeat the deterministic capability checks with the project Python environment:
 ```sh
 python scripts/check-hermes-native.py
 python dockerfiles/check-native-model-egress.py --proxy-image assist-egress-proxy
+docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
+  -v "$PWD/scripts/check-hermes-compression.py:/tmp/check.py:ro" \
+  assist-hermes-runtime /tmp/check.py
 ```
 
 The first uses a fake provider and Docker `network:none`; it checks browser
@@ -269,7 +274,11 @@ creation, two native pauses with distinct competitors, a second user turn queued
 behind the first continuation, phone history and unattended command denial. The second creates a private
 internal network and fake model, verifying ordinary mapped access, native denial,
 missing/malformed attribution and legacy no-map denial, with external allowlist
-behavior preserved. Neither proves real-model behavior or live deployment.
+behavior preserved. The third runs inside the pinned runtime image with a private
+scripted provider and scripted summary output. It forces the supported rotating
+compression mode, closes the descendant, and requires the next worker turn and
+provider request to load its summary. It does not exercise host admission or
+summary quality. None of these checks proves real-model behavior or live deployment.
 `ASSIST_HERMES_TEST_IMAGE` can select an isolated native image for the first check.
 The proxy must run with its client map mounted and valid ordinary sandbox records:
 legacy/no-map deployments deliberately lose the permanent host-model exception.

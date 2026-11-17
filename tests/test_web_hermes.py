@@ -329,3 +329,21 @@ def test_duplicate_recovery_does_not_wait_on_runtime_teardown_lock(hermes_thread
     assert completed_while_teardown_locked, "admission waited on the runtime teardown lock"
     assert errors == []
     assert threads._runs().get(tid, run.id).status == "running"
+
+
+def test_native_git_changes_keep_diff_and_merge_without_unsupported_review(
+        hermes_threads, monkeypatch):
+    from assist.domain_manager import Change
+    from types import SimpleNamespace
+
+    tid = threads.MANAGER.reserve_visible("hermes")
+    threads._create_empty_pi_workspace(tid)
+    monkeypatch.setattr(threads, "_review_base", lambda _tid: "fixture-base")
+    monkeypatch.setattr(threads, "_get_domain_manager", lambda _tid: SimpleNamespace(
+        main_diff=lambda _base: [Change(path="note.txt", diff="+blue note")]))
+    page = TestClient(threads.app).get(f"/thread/{tid}")
+    assert page.status_code == 200
+    assert "blue note" in page.text
+    assert f'action="/thread/{tid}/merge"' in page.text
+    assert f'href="/thread/{tid}/review"' not in page.text
+    assert TestClient(threads.app).get(f"/thread/{tid}/review").status_code == 409
