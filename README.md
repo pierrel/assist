@@ -399,6 +399,18 @@ per-turn teardown test from a default `pytest tests/` run. Run
 target builds the sandbox and proxy, runs the shell probes, and selects both
 live Python tests. CI runs this smoke separately from its unit-test invocation.
 
+**Post-deploy HTTP smoke:** `make smoke` keeps the existing Deep Agents greeting
+and follow-up flow. With the Hermes preview enabled, run
+`ASSIST_SMOKE_HERMES=1 make smoke` to add a fresh Hermes thread using the configured
+provider. It asks for a one-line token file in that thread's `/tmp`, waits for a
+completed Run and an assistant reply, and reads the file through the HTTP viewer.
+The token must match after trimming surrounding whitespace. The smoke then deletes
+only its own threads and verifies that the Hermes thread is gone. This proves a
+file write, not a particular native tool choice. It makes real model requests;
+use the deployment environment's production-admission procedure. The offline
+`tests/test_smoke_script.py` fixture checks the shell flow and failure handling,
+not model behavior. No real Hermes smoke result is implied by those fixture tests.
+
 **Agent Evaluations** (`edd/eval/`):
 
 The `edd/eval/` directory contains evaluations that test agent behavior under realistic conditions. These are longer-running tests that validate the agent's ability to handle complex, multi-turn interactions.

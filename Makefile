@@ -262,7 +262,7 @@ help:
 	@echo "  make web            - Run web server locally (uses .dev.env)"
 	@echo "  make test           - Run tests"
 	@echo "  make eval           - Run evals"
-	@echo "  make smoke          - Run smoke test against running server"
+	@echo "  make smoke          - Run Deep smoke (ASSIST_SMOKE_HERMES=1 also checks Hermes)"
 	@echo "  make sandbox-build  - Build Docker sandbox image"
 	@echo "  make browser-build  - Build headless browser image"
 	@echo "  make browser-smoke  - Build and launch sandboxed Chromium once"
