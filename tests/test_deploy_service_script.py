@@ -146,3 +146,34 @@ def test_make_service_export_reaches_archive_relay(tmp_path):
     configuration=capture.read_text().partition('# end configuration')[0]
     result=subprocess.run(['bash','-c',configuration+'printf %s "$ASSIST_SMS_ARCHIVE_DIR"'],check=True,capture_output=True,text=True)
     assert result.stdout=='/var/lib/synthetic-sms-private'
+
+
+def test_make_service_preserves_native_guidance_through_systemd_quoting(tmp_path):
+    import json
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[1]
+    deploy = tmp_path / "deploy"
+    (deploy / "scripts").mkdir(parents=True)
+    (deploy / "scripts" / "assist-web.service.template").write_text("[Service]\n{{ENVIRONMENT_VARS}}\n")
+    data = tmp_path / "threads"
+    data.mkdir()
+    captured = tmp_path / "unit"
+    ssh = tmp_path / "ssh"
+    ssh.write_text("#!/bin/sh\nexec bash -s\n")
+    ssh.chmod(0o755)
+    sudo = tmp_path / "sudo"
+    sudo.write_text('#!/bin/sh\nif [ "$1" = tee ]; then cat > "$CAPTURE"; fi\n')
+    sudo.chmod(0o755)
+    guidance = 'Keep "quoted" words and owner\'s text & pipes | literal $HOME \\ path 100%.\nSecond line.'
+    fixture = tmp_path / "guidance.mk"
+    fixture.write_text(f"DEPLOY_PATH := {deploy}\nASSIST_THREADS_DIR := {data}\n"
+                       + "define ASSIST_HERMES_SYSTEM_MESSAGE\n"
+                       + guidance.replace("$", "$$") + "\nendef\n")
+    subprocess.run(["make", "-s", "-f", "Makefile", "-f", str(fixture),
+                    "deploy-service", "DEPLOY_HOST=synthetic-host"], cwd=repo,
+                   env=os.environ | {"PATH": f"{tmp_path}:{os.environ['PATH']}",
+                                     "CAPTURE": str(captured)}, check=True)
+    line = next(line for line in captured.read_text().splitlines()
+                if line.startswith('Environment="ASSIST_HERMES_SYSTEM_MESSAGE='))
+    assert "100%%" in line
+    assert json.loads(line.split("=", 1)[1]).replace("%%", "%") == "ASSIST_HERMES_SYSTEM_MESSAGE=" + guidance

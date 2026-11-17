@@ -137,6 +137,7 @@ def main(request_path: str) -> None:
     # This client has no native interactive approval transport. Use Hermes's
     # unattended denial policy instead of waiting on an invisible stdin prompt.
     config.setdefault("approvals", {}).update(mode="manual", unattended_mode="deny")
+    config["command_allowlist"] = []
     os.environ["HERMES_SESSION_PLATFORM"] = "api_server"
     # Host admission covers every native model call. Preserve task preferences
     # and deadlines, but select the same host route for children and side work.

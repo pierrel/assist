@@ -247,7 +247,11 @@ NativePreviewPolicy(os.environ.get("ASSIST_THREADS_DIR", "/tmp/assist_threads"),
 ```
 
 `ASSIST_HERMES_SYSTEM_MESSAGE` optionally adds one native system-message block;
-it is empty by default. The host model URL/model selection applies to native
+it is empty by default. Configure it in the service environment with
+`make deploy-service`, then restart; a code-only deployment does not update the
+installed unit environment. In `.deploy.env`, use Make syntax such as
+`ASSIST_HERMES_SYSTEM_MESSAGE := Keep notes safe`; outer quotes are literal, and
+write `$$` for a literal dollar sign. The host model URL/model selection applies to native
 parent, child and auxiliary requests. Built-in and persisted auxiliary routes
 are replaced by the private relay. Additional runtime plugins are not part of
 this preview's validated configuration. Persisted native approval settings cannot
@@ -271,7 +275,8 @@ The proxy must run with its client map mounted and valid ordinary sandbox record
 legacy/no-map deployments deliberately lose the permanent host-model exception.
 The existing proxy-policy fingerprint forces replacement of an older running
 proxy at the next sandbox start; rebuild the proxy image before that admission.
-See [the implementation and acceptance record](docs/2026-11-16-hermes-native-implementation.org).
+See [the implementation and acceptance record](docs/2026-11-16-hermes-native-implementation.org)
+and [the review corrections](docs/2026-11-17-hermes-preview-review-fixes.org).
 
 ---
 

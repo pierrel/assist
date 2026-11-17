@@ -9,6 +9,8 @@ from assist.pi_preview import PiPreviewPolicy
 from assist.thread_engine import read_thread_engine
 from manage.web import phone_api, state, threads
 
+_REAL_DISPATCH_PENDING_AFTER = threads._dispatch_pending_after
+
 
 @pytest.fixture
 def hermes_threads(tmp_path, monkeypatch):
@@ -99,3 +101,91 @@ def test_resume_setup_failure_stops_native_before_slot_release(hermes_threads, m
     threads._execute_hermes_run(run, user_priority=False)
     assert events == ["stopped", "released"]
     assert threads._runs().get(tid, run.id).status == "error"
+
+
+def test_queued_native_turn_is_one_browser_bubble_but_remains_in_phone_history(hermes_threads):
+    tid = threads.MANAGER.reserve_visible("hermes")
+    repeated = "Repeat this exact queued note"
+    first = threads._create_run(tid, repeated)
+    service = threads._runs()
+    service.claim(tid, first.id)
+    service.transition(tid, first.id, "success", result="First note received.")
+    threads._create_run(tid, repeated)
+    page = TestClient(threads.app).get(f"/thread/{tid}")
+    assert page.status_code == 200
+    assert page.text.count(repeated) == 2
+    assert page.text.count('font-weight:normal;">queued</span>') == 1
+    history = phone_api._thread_history(tid, None)[0]
+    assert sum(m["role"] == "user" and m["content"] == repeated for m in history) == 2
+
+
+def test_native_lost_head_notifies_accepted_follower(hermes_threads, monkeypatch):
+    tid = threads.MANAGER.reserve_visible("hermes")
+    head = threads._create_run(tid, "First accepted turn")
+    threads._runs().claim(tid, head.id)
+    follower = threads._create_run(tid, "Next accepted turn")
+    submitted = []
+    monkeypatch.setattr(threads, "_dispatch_pending_after", _REAL_DISPATCH_PENDING_AFTER)
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
+                        lambda run_id, thread_id, **kwargs: submitted.append((run_id, thread_id)))
+    threads._execute_hermes_run(threads._runs().get(tid, head.id), user_priority=False)
+    assert submitted == [(follower.id, tid)]
+    assert threads._runs().get(tid, head.id).status == "error"
+
+
+@pytest.mark.parametrize("same_work,stop_fails", [(True, False), (False, False), (True, True)])
+def test_queue_admission_failure_stops_only_matching_work_before_terminal_or_dispatch(
+        hermes_threads, monkeypatch, same_work, stop_fails):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from assist.hermes_runtime import HermesRuntimeManager
+    from assist.thread_queue import QueueWaitTimeout
+    tid = threads.MANAGER.reserve_visible("hermes")
+    run = threads._create_run(tid, None, resume=True, pending_text="Retained work")
+    runtime = HermesRuntimeManager()
+    runtime.turns[tid] = SimpleNamespace(work_id=run.work_id if same_work else "unrelated-work", paused=True)
+    events = []
+    def stopped(_tid):
+        assert threads._runs().get(tid, run.id).status == "pending"
+        events.append("stop")
+        if stop_fails:
+            raise RuntimeError("fixture teardown unconfirmed")
+        runtime.turns.pop(tid)
+    runtime.stop = stopped
+    @contextmanager
+    def unavailable(*_args, **_kwargs):
+        raise QueueWaitTimeout("fixture queue wait expired")
+        yield
+    monkeypatch.setattr(threads, "_HERMES_RUNTIME", runtime)
+    monkeypatch.setattr(threads, "THREAD_QUEUE", SimpleNamespace(acquire=unavailable))
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *_args: events.append("dispatch"))
+    if stop_fails:
+        with pytest.raises(RuntimeError, match="teardown unconfirmed"):
+            threads._execute_hermes_run(run, user_priority=False)
+        assert threads._runs().get(tid, run.id).status == "pending"
+        assert events == ["stop"]
+    else:
+        threads._execute_hermes_run(run, user_priority=False)
+        assert threads._runs().get(tid, run.id).status == "error"
+        assert events == (["stop", "dispatch"] if same_work else ["dispatch"])
+        assert (tid in runtime.turns) == (not same_work)
+
+
+def test_native_claim_between_render_steps_keeps_one_visible_user_message(hermes_threads, monkeypatch):
+    tid = threads.MANAGER.reserve_visible("hermes")
+    text = "Claim this accepted note during rendering"
+    run = threads._create_run(tid, text)
+    service = threads._runs()
+    original = service.peek
+    snapshots = []
+    def claim_after_snapshot(thread_id):
+        snapshot = original(thread_id)
+        snapshots.append(snapshot)
+        if len(snapshots) == 1:
+            service.claim(tid, run.id)
+        return snapshot
+    monkeypatch.setattr(service, "peek", claim_after_snapshot)
+    page = TestClient(threads.app).get(f"/thread/{tid}")
+    assert page.status_code == 200
+    assert page.text.count(text) == 1
+    assert len(snapshots) == 1

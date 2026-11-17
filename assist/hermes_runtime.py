@@ -185,6 +185,13 @@ class HermesRuntimeManager:
             self.retired.add(thread_id)
             self.stop(thread_id)
 
+    def stop_work(self, thread_id: str, work_id: str):
+        """Stop only the matching work before a failed admission becomes terminal."""
+        with self.lock:
+            turn = self.turns.get(thread_id)
+            if turn is not None and turn.work_id == work_id:
+                self.stop(thread_id)
+
     def stop(self, thread_id: str):
         """Fence provider access and verify teardown of the exact managed generation."""
         with self.lock:

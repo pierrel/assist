@@ -98,6 +98,7 @@ def test_failed_worker_commits_tracked_and_new_files(worker_workspace, monkeypat
         monkeypatch.setattr(threads, "HERMES_PREVIEW", SimpleNamespace(admits=lambda _engine: True))
         monkeypatch.setattr(threads, "_HERMES_RUNTIME", SimpleNamespace(
             run_slice=fail, stop=lambda _tid: stopped.append(generation),
+            stop_work=lambda _tid, _work: None,
             release_slice=lambda _tid: None))
     if engine == "child":
         (server.parent / "sub-task").mkdir()

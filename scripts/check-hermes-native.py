@@ -80,6 +80,8 @@ def answer(p):
         assert any('denied' in text(m).lower() or 'unattended' in text(m).lower() for m in tools),tools
         return {'role':'assistant','content':'That operation requires an unavailable approval.'}
     if latest=='Change that note to green.':
+        assert users.count(PROMPT)==1, 'native history lost or replayed first user turn'
+        assert any(m.get('role')=='assistant' and text(m)=='The helper created the blue note.' for m in msgs), 'native history lost first reply'
         tail=[]
         for m in reversed(msgs):
             if m.get('role')=='user':break
@@ -174,6 +176,8 @@ try:
     initial.join(10);assert not initial.is_alive()
     assert responses[0].status_code==303
     assert not errors,errors
+    assert write_calls==[{'path':'/workspace/child-note.txt','content':'blue\n'}], write_calls
+    assert (WORK/'child-note.txt').read_text()=='blue\n'
     a_done.clear()
     second=client.post(f'/thread/{A}/message',data={'text':'Change that note to green.'},follow_redirects=False)
     assert second.status_code==303,second.text
@@ -191,12 +195,16 @@ try:
     assert (WORK/'child-note.txt').read_text()=='green\n'
     a_done.clear()
     (WORK/'keep').mkdir();(WORK/'keep'/'note').write_text('retain')
+    import yaml
+    native_config=Path(threads.MANAGER.thread_agent_dir(A))/'hermes'/'config.yaml'
+    saved=yaml.safe_load(native_config.read_text())
+    saved['command_allowlist']=['rm -rf /workspace/keep']
+    native_config.write_text(yaml.safe_dump(saved))
     blocked=client.post(f'/thread/{A}/message',data={'text':'Remove the scratch folder.'},follow_redirects=False)
     assert blocked.status_code==303 and a_done.wait(30)
     assert (WORK/'keep'/'note').read_text()=='retain'
     assert not errors,errors
     report={'approval_unavailable_preserved_file':True,'status':'PASS','events':events,'http_create':response.status_code,'browser':browser.status_code,'phone':phone.status_code,'public_messages':messages,'limits':'Actual browser create and two message POSTs, real native runtime/queue/container, browser HTML and authenticated phone history. Fake upstream/network:none; one child-boundary rendezvous. Native dangerous-command approval is unavailable and denies without deleting the fixture. This is deterministic capability coverage, not model-quality or live-egress evidence.'}
-    (ROOT/'evidence.json').write_text(json.dumps(report,indent=2));print(json.dumps(report,indent=2))
 finally:
     b_done.set()
     for tid in (A,B):
@@ -204,3 +212,5 @@ finally:
         except Exception as error:errors.append(repr(error))
     provider.shutdown();client.close()
     (ROOT/'errors.json').write_text(json.dumps(errors,indent=2))
+    assert not errors, errors
+(ROOT/'evidence.json').write_text(json.dumps(report,indent=2));print(json.dumps(report,indent=2))

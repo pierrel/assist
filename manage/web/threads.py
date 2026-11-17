@@ -779,6 +779,14 @@ def render_thread(
     msgs: list[dict] = [] if is_init else (pi_messages if pi_messages is not None
                                             else ([] if chat is None else
                                                   getattr(chat, "get_web_messages", chat.get_messages)()))
+    native_runs = _runs().peek(tid) if is_native and not is_pi else None
+    if native_runs is not None:
+        # Pending accepted native turns render once as queued bubbles below.
+        # Match logical work, so repeated identical user text remains distinct.
+        queued_message_ids = {f"hermes:user:{run.work_id}" for run in native_runs
+                              if run.status in {"pending", "revocation_pending"} and run.text}
+        msgs = [message for message in msgs
+                if message.get("message_id") not in queued_message_ids]
     persisted_msgs = msgs
     msgs, history_cursor = _turn_page(persisted_msgs, history_before)
     trace_by_run = {}
@@ -832,7 +840,7 @@ def render_thread(
     # whitespace the stripped `pending` won't (review submissions from
     # `_format_review_message` end with a newline), and an exact `==` would
     # miss the match and render a duplicate bubble while the turn runs.
-    if history_before is None and busy and pending and not any(
+    if history_before is None and busy and pending and not (is_native and not is_pi) and not any(
         m.get("role") == "user" and (m.get("content") or "").strip() == pending
         for m in msgs
     ):
@@ -1009,7 +1017,7 @@ def render_thread(
     _journal_entries = []
     _visible_runs = []
     if history_before is None:
-        _visible_runs = _runs().peek(tid)
+        _visible_runs = native_runs if native_runs is not None else _runs().peek(tid)
         _journal_entries = [run for run in _visible_runs
                             if run.status in {"pending", "revocation_pending"}
                             and run.text]
@@ -3145,7 +3153,9 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
             _runs().transition(tid, run.id, "cancelled" if run.status == "interrupted" else "error",
                                error="Native Hermes process was interrupted; files were not replayed")
             _set_status(tid, "error", error="Hermes was interrupted; retained files need review")
+            _dispatch_pending_after(tid, run.id)
         return
+    dispatch_followers = True
     handle = None
     try:
         if (run.mode != "turn" or run.assistant_id != "general-agent"
@@ -3221,6 +3231,10 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
         _RESUME_SCHEDULER.commit(ticket)
         return
     except Exception as error:
+        dispatch_followers = False
+        # Queue admission can fail before the context yields its release fence.
+        # Stop only this work; an unrelated active turn must retain its authority.
+        _HERMES_RUNTIME.stop_work(tid, run.work_id)
         logging.error("Hermes run %s failed", run.id, exc_info=True)
         message = str(error) + git_error_notes(error)
         with _RUN_ADMISSION_LOCK:
@@ -3230,8 +3244,10 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
             if current.status == "running":
                 _runs().transition(tid, run.id, "error", error=message)
         _set_status(tid, "error", error=message, pending_message=run.text or run.pending_text)
+        dispatch_followers = True
     finally:
-        _dispatch_pending_after(tid, run.id)
+        if dispatch_followers:
+            _dispatch_pending_after(tid, run.id)
 
 
 def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
