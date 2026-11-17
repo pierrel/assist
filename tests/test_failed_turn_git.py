@@ -98,7 +98,7 @@ def test_failed_worker_commits_tracked_and_new_files(worker_workspace, monkeypat
         monkeypatch.setattr(threads, "HERMES_PREVIEW", SimpleNamespace(admits=lambda _engine: True))
         monkeypatch.setattr(threads, "_HERMES_RUNTIME", SimpleNamespace(
             run_slice=fail, stop=lambda _tid: stopped.append(generation),
-            stop_work=lambda _tid, _work: None,
+            stop_work=lambda _tid, _work: (stopped.append(generation), True)[1],
             release_slice=lambda _tid: None))
     if engine == "child":
         (server.parent / "sub-task").mkdir()
@@ -172,3 +172,46 @@ def test_fair_pause_does_not_finalize_partial_work(worker_workspace):
             raise ThreadPauseRequested()
     assert git("rev-parse", "HEAD", cwd=server) == original
     assert (server / "batch.org").read_text() == "partial work\n"
+
+
+def test_hermes_transient_teardown_failure_preserves_git_before_follower_dispatch(
+        worker_workspace, monkeypatch):
+    owner, source, server, stopped, generation = worker_workspace
+    original = git("rev-parse", "HEAD", cwd=server)
+    attempts = []
+    release = threads.THREAD_QUEUE._release_if_holder
+
+    def release_after_checkout_unlock(handle):
+        with _workspace_lock(str(server.parent / "thread")):
+            return release(handle)
+
+    monkeypatch.setattr(threads.THREAD_QUEUE, "_release_if_holder", release_after_checkout_unlock)
+
+    def stop(_tid):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise RuntimeError("fixture transient native teardown failure")
+        stopped.append(generation)
+
+    def fail(*_args, **_kwargs):
+        (server / "README").write_text("native draft before failed cleanup\n")
+        (server / "draft.txt").write_text("new native draft\n")
+        raise HermesRuntimeError("provider failed")
+
+    def dispatch(*_args):
+        assert generation in stopped
+        assert git("status", "--porcelain", cwd=server) == "", "followers dispatched before failed-turn files were committed"
+        assert git("rev-parse", "HEAD", cwd=server) != original
+
+    monkeypatch.setattr(threads, "HERMES_PREVIEW", SimpleNamespace(admits=lambda _engine: True))
+    monkeypatch.setattr(threads, "_dispatch_pending_after", dispatch)
+    monkeypatch.setattr(threads, "_HERMES_RUNTIME", SimpleNamespace(
+        run_slice=fail, stop=stop,
+        stop_work=lambda tid, _work: (stop(tid), True)[1],
+        release_slice=lambda _tid: None))
+    run = threads._create_run("thread", "Keep the draft")
+    threads._execute_hermes_run(run, user_priority=False)
+    assert threads._runs().get("thread", run.id).status == "error"
+    assert git("show", "HEAD:README", cwd=server) == "native draft before failed cleanup"
+    assert git("show", "HEAD:draft.txt", cwd=server) == "new native draft"
+    assert git("rev-parse", "refs/heads/assist/thread", cwd=source) == original

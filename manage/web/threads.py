@@ -3178,6 +3178,35 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
         return
     dispatch_followers = True
     handle = None
+    claimed = False
+    failure = None
+    failure_preserved = False
+    git_lifecycle = None
+    git_scope = ExitStack()
+
+    def preserve_failure():
+        nonlocal failure_preserved
+        if failure is not None and git_lifecycle is not None and not failure_preserved:
+            error = failure
+            try:
+                with git_lifecycle.preserve_on_error((run.rider or {}).get("tz")):
+                    raise error
+            except Exception as preserved:
+                if preserved is not error:
+                    raise
+            failure_preserved = True
+
+    def release_owned_slice():
+        if not claimed:
+            return
+        if failure is not None:
+            if not _HERMES_RUNTIME.stop_work(tid, run.work_id):
+                raise HermesRuntimeError("Unrelated native work still owns the retained model slot")
+            preserve_failure()
+        else:
+            _HERMES_RUNTIME.release_slice(tid)
+        git_scope.close()
+
     try:
         if (run.mode != "turn" or run.assistant_id != "general-agent"
                 or run.origin is not None or run.sender is not None or run.resume_decision is not None
@@ -3185,60 +3214,53 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
             raise HermesRuntimeError("Hermes accepts manual turns and their scheduler successors")
         with THREAD_QUEUE.acquire(tid, user_priority=user_priority,
                                   accumulated_active_ms=run.active_ms,
-                                  before_release=lambda: _HERMES_RUNTIME.release_slice(tid)) as handle:
+                                  before_release=release_owned_slice) as handle:
             try:
-                if not HERMES_PREVIEW.admits("hermes"):
-                    _HERMES_RUNTIME.stop(tid)
-                    raise HermesRuntimeError("Hermes preview is unavailable")
                 with _RUN_ADMISSION_LOCK:
                     current = _runs().get(tid, run.id)
                     if current.status != "pending":
                         dispatch_followers = False
                         return
                     run = _runs().claim(tid, run.id)
+                    claimed = True
+                if not HERMES_PREVIEW.admits("hermes"):
+                    raise HermesRuntimeError("Hermes preview is unavailable")
                 thread_dir = MANAGER.thread_dir(tid)
                 work_dir = MANAGER.thread_default_working_dir(tid)
-                with GitLifecycle.acquire(thread_dir, work_dir, run.work_id,
-                                          thread_scope=(MANAGER.root_dir, tid),
-                                          owner_run_id=run.id) as git_lifecycle:
-                    # A retained generation still owns the same checkout. Ordinary
-                    # Git resume would stop it through the publication fence.
-                    if not run.resume:
-                        git_lifecycle.prepare((run.rider or {}).get("tz"))
-                    _set_status(tid, "processing", pending_message=run.text or run.pending_text,
-                                pending_run_id=run.id, started_at=_now_ms())
+                # Keep the checkout lock through queue cleanup and any verified
+                # error preservation, including a recovered teardown failure.
+                git_lifecycle = git_scope.enter_context(GitLifecycle.acquire(
+                    thread_dir, work_dir, run.work_id,
+                    thread_scope=(MANAGER.root_dir, tid), owner_run_id=run.id))
+                # A retained generation still owns the same checkout. Ordinary
+                # Git resume would stop it through the publication fence.
+                if not run.resume:
+                    git_lifecycle.prepare((run.rider or {}).get("tz"))
+                _set_status(tid, "processing", pending_message=run.text or run.pending_text,
+                            pending_run_id=run.id, started_at=_now_ms())
 
-                    def admitted():
-                        return (HERMES_PREVIEW.admits("hermes") and not handle.expired
-                                and THREAD_QUEUE.current_handle() is handle
-                                and _runs().get(tid, run.id).status == "running")
+                def admitted():
+                    return (HERMES_PREVIEW.admits("hermes") and not handle.expired
+                            and THREAD_QUEUE.current_handle() is handle
+                            and _runs().get(tid, run.id).status == "running")
 
-                    try:
-                        reply = _HERMES_RUNTIME.run_slice(
-                            run, work_dir=work_dir, agent_dir=MANAGER.thread_agent_dir(tid),
-                            thread_scope=(MANAGER.root_dir, tid), handle=handle, admitted=admitted)
-                    except ThreadPauseRequested:
-                        raise
-                    except Exception:
-                        # Error preservation is a Git write too. Confirm native
-                        # teardown before entering the existing recovery path.
-                        _HERMES_RUNTIME.stop(tid)
-                        with git_lifecycle.preserve_on_error((run.rider or {}).get("tz")):
-                            raise
-                    # run_slice returns only after the native generation is stopped.
-                    branch = git_lifecycle.finish_visible(reply, (run.rider or {}).get("tz"))
-                    notice = _git_result_notice(branch)
-                    with _RUN_ADMISSION_LOCK:
-                        _runs().transition(tid, run.id, "success",
-                                           result=reply + ("\n\n" + notice if notice else ""))
-                    _set_status(tid, "ready", **({"git_notice": notice} if notice else {}))
-                    MANAGER.touch(tid)
+                reply = _HERMES_RUNTIME.run_slice(
+                    run, work_dir=work_dir, agent_dir=MANAGER.thread_agent_dir(tid),
+                    thread_scope=(MANAGER.root_dir, tid), handle=handle, admitted=admitted)
+                # run_slice returns only after the native generation is stopped.
+                branch = git_lifecycle.finish_visible(reply, (run.rider or {}).get("tz"))
+                notice = _git_result_notice(branch)
+                with _RUN_ADMISSION_LOCK:
+                    _runs().transition(tid, run.id, "success",
+                                       result=reply + ("\n\n" + notice if notice else ""))
+                _set_status(tid, "ready", **({"git_notice": notice} if notice else {}))
+                MANAGER.touch(tid)
             except ThreadPauseRequested:
                 raise
-            except Exception:
-                # Setup can fail before run_slice, including on a retained resume.
-                # Terminal failure must retire that generation before slot release.
-                _HERMES_RUNTIME.stop(tid)
+            except Exception as error:
+                # The queue fence stops the exact work and preserves its edits
+                # while this invocation still holds both slot and checkout lock.
+                failure = error
                 raise
     except ThreadPauseRequested:
         dispatch_followers = False
@@ -3255,9 +3277,25 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
         return
     except Exception as error:
         dispatch_followers = False
-        # Queue admission can fail before the context yields its release fence.
-        # Stop only this work; an unrelated active turn must retain its authority.
+        if not claimed:
+            with _RUN_ADMISSION_LOCK:
+                current = _runs().get(tid, run.id)
+                holder = THREAD_QUEUE.current_handle()
+                if (current.status != "pending" or holder is not None
+                        and holder is not handle and holder.thread_id == tid):
+                    return
+                run = _runs().claim(tid, run.id)
+                claimed = True
+        # A parking-proof failure also needs failed-turn Git preservation once
+        # teardown succeeds. Keep the original execution error and its notes.
+        error = failure or error
+        failure = error
+        # A failed release fence retains the captured slot. Retry exact-work
+        # teardown before preserving files and releasing that same handle.
         stopped = _HERMES_RUNTIME.stop_work(tid, run.work_id)
+        if stopped:
+            preserve_failure()
+            git_scope.close()
         if handle is not None:
             if stopped:
                 THREAD_QUEUE._release_if_holder(handle)
@@ -3274,6 +3312,7 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
         _set_status(tid, "error", error=message, pending_message=run.text or run.pending_text)
         dispatch_followers = True
     finally:
+        git_scope.close()
         if dispatch_followers:
             _dispatch_pending_after(tid, run.id)
 

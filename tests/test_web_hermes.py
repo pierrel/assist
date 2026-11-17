@@ -90,7 +90,8 @@ def test_resume_setup_failure_stops_native_before_slot_release(hermes_threads, m
     run = threads._create_run(tid, None, resume=True, pending_text="Keep the note")
     events = []
     monkeypatch.setattr(threads, "THREAD_QUEUE", ThreadAffinityQueue())
-    monkeypatch.setattr(threads._HERMES_RUNTIME, "stop", lambda _tid: events.append("stopped"))
+    monkeypatch.setattr(threads._HERMES_RUNTIME, "stop_work",
+                        lambda _tid, _work: (events.append("stopped"), True)[1])
     def released(_tid):
         assert events == ["stopped"]
         events.append("released")
@@ -99,7 +100,8 @@ def test_resume_setup_failure_stops_native_before_slot_release(hermes_threads, m
         raise OSError("fixture Git acquisition failed")
     monkeypatch.setattr(threads.GitLifecycle, "acquire", broken_git)
     threads._execute_hermes_run(run, user_priority=False)
-    assert events == ["stopped", "released"]
+    assert events == ["stopped", "stopped"]
+    assert threads.THREAD_QUEUE.current_handle() is None
     assert threads._runs().get(tid, run.id).status == "error"
 
 
@@ -146,7 +148,7 @@ def test_queue_admission_failure_stops_only_matching_work_before_terminal_or_dis
     runtime.turns[tid] = SimpleNamespace(work_id=run.work_id if same_work else "unrelated-work", paused=True)
     events = []
     def stopped(_tid):
-        assert threads._runs().get(tid, run.id).status == "pending"
+        assert threads._runs().get(tid, run.id).status == "running"
         events.append("stop")
         if stop_fails:
             raise RuntimeError("fixture teardown unconfirmed")
@@ -157,12 +159,12 @@ def test_queue_admission_failure_stops_only_matching_work_before_terminal_or_dis
         raise QueueWaitTimeout("fixture queue wait expired")
         yield
     monkeypatch.setattr(threads, "_HERMES_RUNTIME", runtime)
-    monkeypatch.setattr(threads, "THREAD_QUEUE", SimpleNamespace(acquire=unavailable))
+    monkeypatch.setattr(threads, "THREAD_QUEUE", SimpleNamespace(acquire=unavailable, current_handle=lambda: None))
     monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *_args: events.append("dispatch"))
     if stop_fails:
         with pytest.raises(RuntimeError, match="teardown unconfirmed"):
             threads._execute_hermes_run(run, user_priority=False)
-        assert threads._runs().get(tid, run.id).status == "pending"
+        assert threads._runs().get(tid, run.id).status == "running"
         assert events == ["stop"]
     else:
         threads._execute_hermes_run(run, user_priority=False)
@@ -216,7 +218,8 @@ def test_failed_parking_proof_then_verified_stop_releases_model_slot(hermes_thre
     queue = ThreadAffinityQueue()
     @contextmanager
     def git_scope(*_args, **_kwargs):
-        yield SimpleNamespace()
+        from contextlib import nullcontext
+        yield SimpleNamespace(preserve_on_error=lambda _tz: nullcontext())
     monkeypatch.setattr(threads, "_HERMES_RUNTIME", manager)
     monkeypatch.setattr(threads, "THREAD_QUEUE", queue)
     monkeypatch.setattr(threads.GitLifecycle, "acquire", git_scope)
@@ -289,7 +292,8 @@ def test_native_pause_commits_one_notification_without_finally_redispatch(hermes
         raise ThreadPauseRequested()
     @contextmanager
     def git_scope(*_args, **_kwargs):
-        yield SimpleNamespace()
+        from contextlib import nullcontext
+        yield SimpleNamespace(preserve_on_error=lambda _tz: nullcontext())
     monkeypatch.setattr(threads, "THREAD_QUEUE", ThreadAffinityQueue())
     monkeypatch.setattr(threads._HERMES_RUNTIME, "run_slice", pause)
     monkeypatch.setattr(threads._HERMES_RUNTIME, "release_slice", lambda _tid: None)
@@ -399,7 +403,8 @@ def test_recovered_relay_drain_failure_releases_exact_model_slot(
 
     @contextmanager
     def git_scope(*_args, **_kwargs):
-        yield SimpleNamespace()
+        from contextlib import nullcontext
+        yield SimpleNamespace(preserve_on_error=lambda _tz: nullcontext())
 
     monkeypatch.setattr(threads, "_HERMES_RUNTIME", manager)
     monkeypatch.setattr(threads, "THREAD_QUEUE", queue)
@@ -472,3 +477,61 @@ def test_first_message_cleanup_failure_preserves_running_head_and_pending_follow
     assert not journal.read(tid, follower.work_id)["terminal"]
     assert threads._get_status(tid)["stage"] == "processing"
     assert not dispatched
+
+
+@pytest.mark.parametrize("original_claimed", [False, True])
+def test_stale_pending_notification_timeout_cannot_stop_claimed_live_work(
+        hermes_threads, monkeypatch, original_claimed):
+    import threading
+    from types import SimpleNamespace
+    from assist.hermes_runtime import HermesRuntimeManager
+    from assist.thread_queue import ThreadAffinityQueue
+
+    hermes_threads.set_enabled(True)
+    tid = threads.MANAGER.reserve_visible("hermes")
+    stale = threads._create_run(tid, "Keep working on the note")
+    queue = ThreadAffinityQueue(wait_timeout_s=0.02)
+    runtime = HermesRuntimeManager()
+    runtime.turns[tid] = SimpleNamespace(work_id=stale.work_id)
+    stops, dispatches, errors = [], [], []
+    runtime.stop = lambda _tid: stops.append(_tid)
+    monkeypatch.setattr(threads, "THREAD_QUEUE", queue)
+    monkeypatch.setattr(threads, "_HERMES_RUNTIME", runtime)
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *_args: dispatches.append(True))
+
+    def duplicate():
+        try:
+            threads._execute_hermes_run(stale, user_priority=False)
+        except Exception as error:
+            errors.append(error)
+
+    with queue.acquire(tid) as original:
+        if original_claimed:
+            threads._runs().claim(tid, stale.id)
+        worker = threading.Thread(target=duplicate)
+        worker.start()
+        worker.join(2)
+        assert not worker.is_alive()
+        assert queue.current_handle() is original
+        assert not stops, "a stale queued notification stopped the live native invocation"
+        assert threads._runs().get(tid, stale.id).status == ("running" if original_claimed else "pending")
+        assert not dispatches and not errors
+
+
+def test_stale_pending_notification_that_acquires_slot_does_not_release_native_work(
+        hermes_threads, monkeypatch):
+    from assist.thread_queue import ThreadAffinityQueue
+    hermes_threads.set_enabled(True)
+    tid = threads.MANAGER.reserve_visible("hermes")
+    stale = threads._create_run(tid, "Original note")
+    threads._runs().claim(tid, stale.id)
+    threads._runs().transition(tid, stale.id, "interrupted")
+    queue = ThreadAffinityQueue()
+    monkeypatch.setattr(threads, "THREAD_QUEUE", queue)
+    monkeypatch.setattr(threads._HERMES_RUNTIME, "release_slice",
+                        lambda _tid: pytest.fail("Unclaimed notification cannot release native work"))
+    monkeypatch.setattr(threads, "_dispatch_pending_after",
+                        lambda *_args: pytest.fail("Unclaimed notification cannot dispatch followers"))
+    threads._execute_hermes_run(stale, user_priority=False)
+    assert threads._runs().get(tid, stale.id).status == "interrupted"
+    assert queue.current_handle() is None
