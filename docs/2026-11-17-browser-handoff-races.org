@@ -1,0 +1,66 @@
+#+title: Settle revoked handoffs and observe empty browser state
+#+date: 2026-11-17
+State: Reviewed host-only successor; deployment pending
+
+* Problem and evidence
+The first viewer candidate passed its synthetic Firefox, Run/queue and actual
+container transport checks. External review then identified two uncovered
+handoff interleavings and an observation dead end. These are deterministic
+counterexamples, not claims that real user work was lost.
+
+A newer direct message can revoke authority after Take over was requested but
+before activation. The old handler raised out of its pause exception path;
+even after confirmed cleanup its Run remained running and blocked reset/follower
+dispatch. Another interleaving returns control immediately after activation
+released the gate but before the pause handler's finally clause. A mutable
+human_active flag then looked like a failed handoff and cleanup destroyed the
+successfully retained browser.
+
+Preflight-only execution can have no pages, and site navigation can close or
+replace all previously observed pages. The old handback barrier demanded a
+successful observation of an already-known page, leaving browser_open blocked
+when no such ID remained. A private deterministic worker/host probe reproduced
+the closed-last-page dead end independently before the external comment was read.
+
+* Correction within existing ownership
+Successful handoff is latched under the thread gate alongside human activation;
+later Return cannot turn success into failed-handoff cleanup. Rejected authority
+is caught within the pause handler. Exact cleanup must finish before ordinary
+error projection and dispatcher Run terminalization occur. The existing reset
+queue is notified after that settlement. Unconfirmed stop still raises and
+retains nonterminal authority; it never promotes the newer work on false proof.
+
+Read-only metadata from the existing worker reports current supported page IDs
+with a blocked action or an obsolete-page observation. Remaining pages still
+require actual page observation before further effects. A verified empty website
+set is fresh state, so the next model response can choose to reopen. Buffered
+mutations remain blocked in the current tool batch, and transport failures never
+release this barrier. No new model tool, worker protocol, image, lifecycle store
+or scheduling mechanism is added.
+
+* Causal checks and review
+The late-admission regression executes real Run admission while the original
+model path is unwinding, then requires old-Run settlement, confirmed generation
+cleanup, actual reset promotion and successful processing of the newer user Run.
+Its failed-stop control requires running/revocation-pending records and retained
+authority, without a runnable successor. The immediate-Return regression forces
+Return at the gate-release boundary before finally cleanup, then requires the
+same retained session to resume successfully. Page-discovery controls cover
+preflight empty state, closed pages, replacement IDs and unrelated transport
+failure, preserving the fresh-model-response requirement.
+
+The prior Firefox and actual-container evidence remains evidence for unchanged
+pixel/input/UID/private-transport behavior. Affected Run, browser, authority,
+queue and documentation review applies to this successor. Physical-phone
+acceptance remains separately pending access. Focused checks passed 104 tests
+with five skips. The Firefox/Chromium path passed 17 tests; the complete mocked
+suite passed 3,105 tests and 15 subtests with 16 skips and one deselection.
+Independent review found no remaining in-scope blocker in the three corrections
+and confirmed affected documentation alignment.
+
+* Historical supersessions
+This corrects =2026-11-17-browser-human-control.org=, section =Existing owners and
+control flow=, where its successful-handoff and fresh-observation descriptions
+did not account for revoked activation, immediate Return before final cleanup,
+or an empty/replaced page set. The same session, controller, native agent files,
+trusted client boundary and owner-aware lifetime remain unchanged.
