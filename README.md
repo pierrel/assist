@@ -269,6 +269,8 @@ behavior preserved. Neither proves real-model behavior or live deployment.
 `ASSIST_HERMES_TEST_IMAGE` can select an isolated native image for the first check.
 The proxy must run with its client map mounted and valid ordinary sandbox records:
 legacy/no-map deployments deliberately lose the permanent host-model exception.
+The existing proxy-policy fingerprint forces replacement of an older running
+proxy at the next sandbox start; rebuild the proxy image before that admission.
 See [the implementation and acceptance record](docs/2026-11-16-hermes-native-implementation.org).
 
 ---

@@ -307,6 +307,26 @@ class TestEnsureEgressProxy(TestCase):
         client.api.create_container.assert_called_once()
         self.assertNotEqual(old_hash, self._allowlist_hash())
 
+    def test_replaces_v11_proxy_before_native_model_admission(self):
+        """A rebuilt image must replace the prior permanent host-model exception."""
+        old_hash = hashlib.sha256((
+            ",".join(_load_egress_allowlist())
+            + "|v11-browser-connection-burst:"
+            + f"{os.getuid()}:{os.getgid()}||"
+            + "|ordinary-network-id:172.30.0.0/16|:"
+        ).encode()).hexdigest()[:16]
+        stale_proxy = MagicMock()
+        stale_proxy.id = "old-native-model-policy"
+        stale_proxy.status = "running"
+        stale_proxy.labels = {"assist.egress-allowlist-hash": old_hash}
+        client = self._make_client(proxy=stale_proxy)
+
+        SandboxManager._ensure_egress_proxy_running(client)
+
+        stale_proxy.remove.assert_called_once_with(force=True)
+        client.api.create_container.assert_called_once()
+        self.assertNotEqual(old_hash, self._allowlist_hash())
+
     def test_recreates_when_proxy_stopped(self):
         stopped_proxy = MagicMock()
         stopped_proxy.id = "stopped"

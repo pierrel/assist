@@ -126,11 +126,11 @@ def _egress_proxy_config_hash(allowlist_csv: str, approvals_dir: str | None,
     """The proxy's config fingerprint (a container label): allowlist content
     plus the approvals-mount schema/path and proxy-policy schema, so a change
     to any of them recreates the proxy on the next sandbox start. The version
-    marker makes containers with an earlier approval, throttle or browser
-    destination policy recreate once and gain the current behavior. The
+    marker makes containers with an earlier approval, throttle, browser
+    destination or native-model attribution policy recreate once and gain the current behavior. The
     service UID/GID binds proxy read access to host-only map mounts."""
     return hashlib.sha256(
-        (allowlist_csv + "|v11-browser-connection-burst:"
+        (allowlist_csv + "|v12-native-model-attribution:"
          + f"{os.getuid()}:{os.getgid()}|" + (approvals_dir or "")
          + "|" + (map_dir or "") + "|" + network_ref).encode()
     ).hexdigest()[:16]
