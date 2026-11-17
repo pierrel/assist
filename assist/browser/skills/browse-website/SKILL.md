@@ -1,6 +1,6 @@
 ---
 name: browse-website
-description: "Use when a named website needs rendered JavaScript, menus, forms, or page interactions that read_url cannot expose. Examples: 'open the dashboard and find the report link', 'use the site's filters to locate the manual', 'check what this interactive page says'. The browser belongs to this visible web turn, not a delegate."
+description: "Use when a named website needs rendered JavaScript, menus, forms, or page interactions that read_url cannot expose, or for privately saving a website login or signing in with a saved login. Examples: 'open the dashboard and find the report link', 'use the site's filters to locate the manual', 'check what this interactive page says'. The browser belongs to this visible web turn, not a delegate."
 allowed-tools: browser_open browser_close browser_observe browser_act browser_wait browser_preflight browser_save_download browser_list_secrets browser_request_secret browser_fill_secret
 ---
 

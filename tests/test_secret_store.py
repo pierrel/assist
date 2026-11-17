@@ -27,6 +27,27 @@ def _store(tmp_path):
     return repo, thread, store, ident
 
 
+def test_new_repo_secret_request_does_not_require_unlock(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    thread = tmp_path / "thread"
+    repo.mkdir()
+    thread.mkdir()
+    session = SimpleNamespace(work_dir=str(repo), threads_root=str(tmp_path),
+                              thread_id="thread")
+    tools = {tool.__name__: tool for tool in browser_tools(session)}
+    assert json.loads(tools["browser_list_secrets"]()) == {
+        "secrets": [], "store_status": "not_created"}
+
+    from assist import git_sync
+    from manage.web import state
+    monkeypatch.setattr(git_sync, "read_state", lambda _directory: {"source": "synthetic"})
+    monkeypatch.setattr(state, "DOMAINS", ["synthetic"])
+    offered = json.loads(tools["browser_request_secret"]("Synthetic site", PAGE))
+    assert offered["private_entry_requested"] is True
+    assert offered["login_page"] == PAGE
+    assert not (repo / FILE).exists()
+
+
 def test_repo_ciphertext_and_independent_thread_unlock(tmp_path):
     repo, thread, store, ident = _store(tmp_path)
     assert PASSWORD.encode() not in (repo / FILE).read_bytes()

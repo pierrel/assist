@@ -950,7 +950,7 @@ def browser_tools(session: BrowserSession):
                                "unlocked": bool(store.key())})
         except SecretStoreError as error:
             if str(error) == "No secret store in this repository":
-                return json.dumps({"secrets": [], "unlocked": False})
+                return json.dumps({"secrets": [], "store_status": "not_created"})
             if str(error) == "Unlock this repository in this thread":
                 return json.dumps({"secrets": store.list_public(), "unlocked": False})
             return "Secret store unavailable."
