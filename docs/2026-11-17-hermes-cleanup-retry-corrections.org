@@ -1,0 +1,54 @@
+#+title: Hermes cleanup completion and merge error corrections
+#+date: 2026-11-17
+
+* Corrected behavior
+Successful sandbox teardown now clears the retained turn's existing backend and
+paused state before closing the relay. If relay drain fails, the existing next
+stop or retirement attempt continues with that pending drain. It does not ask
+the sandbox registry to prove again a generation already removed after verified
+stop. The retained turn is removed only after relay close succeeds.
+
+Verified sandbox cleanup also forgets its proxy attribution before removing its
+registry entry. A client-map failure therefore preserves the existing cleanup
+obligation for a later attempt. The exact-generation check and map-generation
+comparison remain unchanged.
+
+When its invocation still holds the model slot, an unconfirmed stop or drain
+prevents release; publication waits for verified teardown.
+There is no new retry loop, scheduler or lifecycle owner. Existing dispatcher
+error cleanup can complete a recovered drain and release its exact queue handle.
+A later deletion attempt can finish after an earlier cleanup failure resolves.
+
+Merge reads the immutable engine once and maps malformed or unreadable identity
+to the existing HTTP 409 unavailable response. Pi remains read-only; native
+Hermes and Deep Agents keep their respective merge paths.
+
+* Verification and disposition
+The R4 external review supplied an overview without inline details. Inspection
+and deterministic reproductions verified a lost cleanup obligation after
+successful container removal followed by relay-drain failure, and an actual
+merge POST returning 500 for a malformed engine marker.
+
+The cleanup regression uses the actual runtime and SandboxManager registry with
+a private captured container fixture. It requires a later retirement attempt to
+finish after one relay-drain failure, without repeating completed container stop.
+A second case uses an actual invalid private client-map file, repairs it, and
+requires retained cleanup to complete. An actual dispatcher and shared queue
+regression injects one drain failure and requires the existing error cleanup to
+admit a competitor after verified stop and drain. The malformed-engine HTTP test
+requires 409 and the existing unavailable message.
+
+Blocking model admission for an unconfirmed generation remains intentional:
+existing failure-condition tests require retaining that slot until stop or
+parking is proved. If every dispatcher cleanup attempt fails and its owner
+exits, the retained slot still requires operator recovery; unrelated later
+retirement has no captured queue handle to release. This correction preserves
+that existing boundary and adds no background retry.
+The repeated native product capability still covers two pauses, two competitors,
+an early accepted follower, native history, approval denial and final cleanup,
+using a fake provider and network:none. No real-model or device test is claimed.
+
+* Historical supersessions
+=2026-11-17-hermes-retained-slice-corrections.org=, "Corrected behavior": cleanup
+completion survives a later relay-drain failure, and proxy attribution cleanup
+must complete before registry removal. The earlier dated record remains unchanged.

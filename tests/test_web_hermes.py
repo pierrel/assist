@@ -347,3 +347,67 @@ def test_native_git_changes_keep_diff_and_merge_without_unsupported_review(
     assert f'action="/thread/{tid}/merge"' in page.text
     assert f'href="/thread/{tid}/review"' not in page.text
     assert TestClient(threads.app).get(f"/thread/{tid}/review").status_code == 409
+
+
+def test_merge_invalid_engine_keeps_existing_unavailable_response(hermes_threads):
+    tid = threads.MANAGER.reserve_visible("hermes")
+    marker = Path(threads.MANAGER.thread_dir(tid)) / "engine.json"
+    marker.write_text('{"engine":"invalid"}')
+    response = TestClient(threads.app, raise_server_exceptions=False).post(f"/thread/{tid}/merge")
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Thread engine is unavailable"
+
+
+def test_recovered_relay_drain_failure_releases_exact_model_slot(
+        hermes_threads, monkeypatch, tmp_path):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from assist.hermes_runtime import HermesRuntimeManager
+    from assist.sandbox_manager import SandboxManager
+    from assist.thread_queue import ThreadAffinityQueue
+    from assist import sandbox_expiry
+
+    hermes_threads.set_enabled(True)
+    tid = threads.MANAGER.reserve_visible("hermes")
+    run = threads._create_run(tid, None, resume=True, pending_text="Retained native work")
+    work_dir = str(tmp_path / "private-work")
+    control = tmp_path / "private-control"
+    control.mkdir()
+    stopped, drains = [], []
+    container = SimpleNamespace(id="private-generation", kill=lambda: stopped.append(True),
+                                wait=lambda **_kwargs: None)
+    monkeypatch.setattr(SandboxManager, "_containers", {work_dir: container})
+    monkeypatch.setattr(SandboxManager, "_generation_owners", {})
+    monkeypatch.setattr(SandboxManager, "_egress_client_ips", {})
+    monkeypatch.setattr(sandbox_expiry, "cancel", lambda _generation: None)
+
+    def close():
+        drains.append(True)
+        if len(drains) == 1:
+            raise RuntimeError("fixture provider drain unconfirmed")
+
+    manager = HermesRuntimeManager()
+    manager.turns[tid] = SimpleNamespace(work_id=run.work_id, work_dir=work_dir, paused=True,
+        backend=SimpleNamespace(container=container), control_dir=control,
+        relay=SimpleNamespace(stop_admission=lambda: None, close=close))
+
+    def failed_slice(*_args, **_kwargs):
+        raise RuntimeError("fixture native work failed")
+
+    manager.run_slice = failed_slice
+    queue = ThreadAffinityQueue()
+
+    @contextmanager
+    def git_scope(*_args, **_kwargs):
+        yield SimpleNamespace()
+
+    monkeypatch.setattr(threads, "_HERMES_RUNTIME", manager)
+    monkeypatch.setattr(threads, "THREAD_QUEUE", queue)
+    monkeypatch.setattr(threads.GitLifecycle, "acquire", git_scope)
+    threads._execute_hermes_run(run, user_priority=False)
+    assert stopped == [True] and len(drains) == 2
+    assert tid not in manager.turns
+    assert threads._runs().get(tid, run.id).status == "error"
+    assert queue.current_handle() is None
+    with queue.acquire("competitor", wait_timeout_s=0.01):
+        pass

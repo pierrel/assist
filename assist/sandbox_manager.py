@@ -1030,8 +1030,8 @@ class SandboxManager:
                             and state.lease["owner_run_id"] == owner):
                         state.remove_generation(owner, expected_container.id)
                         state.clear(owner)
-        cls._containers.pop(work_dir)
         cls._forget_egress_client(work_dir)
+        cls._containers.pop(work_dir)
         cls._generation_owners.pop(expected_container.id, None)
 
 

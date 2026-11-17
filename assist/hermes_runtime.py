@@ -212,6 +212,9 @@ class HermesRuntimeManager:
             turn.relay.stop_admission()
             if turn.backend is not None:
                 self.sandboxes.cleanup_verified(turn.work_dir, turn.backend.container)
+                # Preserve completed teardown if relay drain needs another attempt.
+                turn.backend = None
+                turn.paused = False
             turn.relay.close()
             self.turns.pop(thread_id, None)
             shutil.rmtree(turn.control_dir)

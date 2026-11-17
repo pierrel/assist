@@ -2,6 +2,8 @@
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from assist.hermes_runtime import HermesRuntimeManager
 from assist.thread_queue import ThreadAffinityQueue
 
@@ -53,3 +55,51 @@ def test_paused_proof_serializes_retirement_before_competitor_admission(tmp_path
     assert queue.current_handle() is None
     with queue.acquire("competitor", wait_timeout_s=0.01):
         pass
+
+
+@pytest.mark.parametrize("failure", ["relay", "map"])
+def test_retirement_retry_keeps_verified_container_stop_after_cleanup_failure(
+        tmp_path, monkeypatch, failure):
+    from assist.sandbox_manager import SandboxManager
+    from assist import sandbox_expiry
+
+    work_dir = str(tmp_path / "workspace")
+    control = tmp_path / "control"
+    control.mkdir()
+    stopped = []
+    container = SimpleNamespace(id="private-generation", kill=lambda: stopped.append("kill"),
+                                wait=lambda **_kwargs: stopped.append("wait"))
+    monkeypatch.setattr(SandboxManager, "_containers", {work_dir: container})
+    monkeypatch.setattr(SandboxManager, "_generation_owners", {})
+    monkeypatch.setattr(SandboxManager, "_egress_client_ips", {})
+    monkeypatch.setattr(sandbox_expiry, "cancel", lambda _generation: None)
+    drain_attempts = []
+
+    def close():
+        drain_attempts.append(True)
+        if failure == "relay" and len(drain_attempts) == 1:
+            raise RuntimeError("fixture cleanup unconfirmed")
+
+    map_path = tmp_path / "maps" / "client-map.json"
+    if failure == "map":
+        map_path.parent.mkdir()
+        map_path.write_text("[]")
+        monkeypatch.setattr(SandboxManager, "_egress_client_ips", {
+            work_dir: (str(map_path.parent), "172.30.0.2", container.id)})
+
+    runtime = HermesRuntimeManager()
+    runtime.turns["native"] = SimpleNamespace(
+        backend=SimpleNamespace(container=container), work_dir=work_dir,
+        control_dir=control, relay=SimpleNamespace(stop_admission=lambda: None, close=close))
+    with pytest.raises(RuntimeError if failure == "relay" else ValueError,
+                       match="cleanup unconfirmed" if failure == "relay" else "invalid proxy client map"):
+        runtime.retire("native")
+    assert "native" in runtime.turns
+    assert (SandboxManager.current_container(work_dir) is container) == (failure == "map")
+    if failure == "map":
+        map_path.write_text("{}")
+    runtime.retire("native")
+    assert "native" not in runtime.turns
+    assert stopped == ["kill", "wait"] * (2 if failure == "map" else 1)
+    assert len(drain_attempts) == (1 if failure == "map" else 2)
+    assert not control.exists()

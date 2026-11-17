@@ -7389,9 +7389,13 @@ def _merge_thread_result(tid: str, expected_thread: str | None = None) -> str:
     requires its displayed published OID; the fetched tip must still match.
     Git subprocesses remain in a worker thread so the event loop is not blocked.
     """
-    if _is_pi_thread(tid):
+    try:
+        engine = read_thread_engine(MANAGER.thread_dir(tid)).name
+    except ThreadEngineError as error:
+        raise HTTPException(status_code=409, detail="Thread engine is unavailable") from error
+    if engine == "pi":
         raise HTTPException(status_code=409, detail="Pi threads are read-only")
-    if read_thread_engine(MANAGER.thread_dir(tid)).name == "hermes":
+    if engine == "hermes":
         _existing_thread_dir(tid)
     else:
         try:

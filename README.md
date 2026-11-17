@@ -221,7 +221,9 @@ Snapshot reads and background probes do not clear notifications.
   When another thread waits, Hermes drains model/tool work and freezes its sandbox;
   the same invocation resumes after the competitor. Native history persists in
   `/agent/hermes` across user turns, including native compression session rotation.
-  A lost process ends the Run without replay. Git diffs and Merge remain available;
+  A lost process ends the Run without replay. A held model slot is released only
+  after verified stop or parking; completed sandbox teardown is retained if relay
+  drain must be retried. Git diffs and Merge remain available;
   the Deep Agents Review action is not offered for native threads.
   Available tools are files, terminal, skills, memory and helpers. Native browser,
   web search and interactive approvals are unavailable; commands requiring approval
