@@ -1370,8 +1370,12 @@ the agent workspace. Their branch is published immediately, even when it first
 points at main. Before each new visible turn the server fetches the branch and
 fast-forwards its clean checkout to include user-pushed commits. Hidden resumes
 and child handoffs retain their admitted base. Successful work is committed in
-the restricted sandbox and published by a private, config-clean host Git
+the restricted sandbox and published by a private, checkout-isolated host Git
 process with a normal non-force push. No-change turns verify publication too.
+For HTTP(S) sources, that private process imports only host-global credential
+helpers, usernames and HTTP-path matching settings. Git retains their URL scopes,
+helper order and resets; checkout configuration and global URL rewrites/hooks
+remain excluded. Configure write-capable host credentials for the approved source.
 Git decides a non-fast-forward refusal; the server verifies the remote ref
 before reporting publication or preserving a divergent result branch.
 When a phone push races a server turn, the completed server commit remains on
