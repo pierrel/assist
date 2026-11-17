@@ -214,15 +214,62 @@ Snapshot reads and background probes do not clear notifications.
 - **Thread descriptions.** The ordinary web assistant can update the current
   thread's description when asked, and the change is saved with the thread.
 
-- **Pi web preview.** A new web thread can explicitly select a bounded Pi
-  preview; Deep Agents remains the default. Pi threads are visibly labelled,
-  run only ordinary manual web turns, and can start a new Deep Agents thread
-  from an optional visible summary without transferring their transcript or
-  workspace. A loaded Pi skill retains its complete host-approved body and its
-  paired disclosed tools for the bounded conversation context; compaction drops
-  both together, and an explicit reload refreshes it. Each Pi turn also retains
-  a collapsed, redacted activity trace for model requests and workspace actions;
-  it never includes prompts, paths, commands, content, or tool results.
+- **Hermes native preview.** An operator can enable Hermes for new manual
+  browser or phone-API threads; Deep Agents remains the default. The pinned whole
+  Hermes runtime owns its prompts, conversation, skills, memory and joined helpers.
+  Assist owns the existing queue, Run authority, sandbox and Git publication.
+  When another thread waits, Hermes drains model/tool work and freezes its sandbox;
+  the same invocation resumes after the competitor. Native history persists in
+  `/agent/hermes` across user turns. A lost process ends the Run without replay.
+  Available tools are files, terminal, skills, memory and helpers. Native browser,
+  web search and interactive approvals are unavailable; commands requiring approval
+  are denied. There is no independent native scheduled or autonomous work.
+  Existing Pi threads remain readable and can create a Deep Agents continuation
+  from a visible summary. Pi execution and new Pi threads are retired.
+
+### Operating the Hermes preview
+
+Build `make hermes-runtime-build` before enabling the preview. The image includes
+Hermes `ec3249919accf7bc51f780dcff663e8f19a0e176` with its frozen dependencies,
+layered on the ordinary sandbox. `make deploy` also builds this image. Code-only
+updates to the native worker require rebuilding it. The archive checksum is
+verified by `dockerfiles/Dockerfile.hermes-runtime`; source download failure must
+be resolved without changing the pin silently.
+
+The preview starts disabled. Run this locally as the server owner, with the same
+`ASSIST_THREADS_DIR` as the server, to enable it (use `False` to disable):
+
+```python
+import os
+from assist.pi_preview import NativePreviewPolicy
+NativePreviewPolicy(os.environ.get("ASSIST_THREADS_DIR", "/tmp/assist_threads"),
+                    engine="hermes").set_enabled(True)
+```
+
+`ASSIST_HERMES_SYSTEM_MESSAGE` optionally adds one native system-message block;
+it is empty by default. The host model URL/model selection applies to native
+parent, child and auxiliary requests. Built-in and persisted auxiliary routes
+are replaced by the private relay. Additional runtime plugins are not part of
+this preview's validated configuration. Persisted native approval settings cannot
+enable unattended dangerous commands.
+
+Repeat the deterministic capability checks with the project Python environment:
+
+```sh
+python scripts/check-hermes-native.py
+python dockerfiles/check-native-model-egress.py --proxy-image assist-egress-proxy
+```
+
+The first uses a fake provider and Docker `network:none`; it checks browser
+creation, two native user turns, a competing thread between park and resume,
+phone history and unattended command denial. The second creates a private
+internal network and fake model, verifying ordinary mapped access, native denial,
+missing/malformed attribution and legacy no-map denial, with external allowlist
+behavior preserved. Neither proves real-model behavior or live deployment.
+`ASSIST_HERMES_TEST_IMAGE` can select an isolated native image for the first check.
+The proxy must run with its client map mounted and valid ordinary sandbox records:
+legacy/no-map deployments deliberately lose the permanent host-model exception.
+See [the implementation and acceptance record](docs/2026-11-16-hermes-native-implementation.org).
 
 ---
 
@@ -491,7 +538,7 @@ that first rollout, deploy with:
 make deploy
 ```
 
-This syncs code, rebuilds the sandbox and proxy and Pi runtime images,
+This syncs code, rebuilds the sandbox, proxy and Hermes runtime images,
 deploys SearXNG, installs dependencies and speech models, then restarts the
 service using the already installed unit and tails its logs (press Ctrl+C
 when satisfied).
@@ -705,7 +752,8 @@ Completion delivery checks the same identity and terminal state and removes only
 the proposal it actually delivered. All store/checkpoint I/O runs off the event
 loop; provisioning and graph execution remain with their existing workers.
 These finite client projections introduce no additional store or server state
-machine. Pi preview retains its existing capability restrictions.
+machine. Hermes has no interactive approval transport; native commands requiring
+approval are denied. Historical Pi threads are read-only.
 
 The reusable fixture has an explicit `--hitl-only` client capability panel;
 see [the fixture instructions](tests/e2e/README.md). It uses synthetic proposals,
@@ -1341,7 +1389,9 @@ the next clean preflight holds an uncommitted checkout for reconciliation rather
 than replaying work. Pi and Git preparation/commit keep their restricted profiles.
 The CLI path remains host-backed.
 
-The sandbox and browser images are built automatically by `make web` (and `make deploy`). To build them manually:
+`make web` and `make deploy` build the sandbox, proxy and Hermes images.
+Build the browser image separately when enabling browser use. To build the
+sandbox and browser images manually:
 ```bash
 make sandbox-build browser-build
 ```

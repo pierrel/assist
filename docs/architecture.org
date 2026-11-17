@@ -1,7 +1,7 @@
 #+title: Assist architecture
 
 This map follows the source in this branch. It shows the ordinary Deep Agents
-web path and the interfaces other clients use. A Pi preview thread,
+web path and the interfaces other clients use. A native Hermes thread,
 voice call, inbound SMS, scheduled prompt, or child task enters through a
 different admission route, then uses the same durable Run service where that
 route creates a Run. The diagrams show ownership and major data
@@ -345,8 +345,34 @@ after the original user turn has ended.
 
 * Conditional paths and limits of this view
 
-The web route can select a Pi preview engine instead of C6's Deep Agents
-graph; its implementation is [[file:../assist/pi_runtime.py][PiRuntimeManager]].
+The browser and authenticated phone API can select the operator-enabled Hermes
+engine instead of C6's Deep Agents graph. Retired Pi threads remain readable;
+their explicit summary handoff creates an independent Deep Agents thread.
+
+- *C25 Native host adapter.* [[file:../assist/hermes_runtime.py][HermesRuntimeManager]]
+  retains the same invocation across C4's same-work Run successors. Existing C8
+  generation authority owns creation, Docker freeze/unfreeze and verified stop.
+  C4 does not release model admission until provider drain and whole-generation
+  freeze or stop are confirmed. Startup loss is reported without replay.
+- *C24 Native provider relay.* [[file:../assist/hermes_provider_relay.py][The private Unix relay]]
+  checks the current Run/queue admission and original generation lease for every
+  parent, child and auxiliary model request. Native hooks coordinate drain;
+  hooks do not grant authority. Native RPC deadlines remain native, while the
+  existing Run bounds total active lifetime. C13 denies the direct host-model
+  exception to native and unattributed clients.
+- *C26 Pinned native Hermes.* [[file:../assist/hermes_runtime/worker.py][The worker]]
+  runs the complete pinned upstream runtime inside C10, with native prompts,
+  file/terminal tools, skills, memory, compression and joined delegation.
+  Native SessionDB and preferences persist in C9's isolated =/agent/hermes=.
+  C2 projects accepted messages and committed replies from existing C3 Runs.
+  No native worker starts another Run. Browser/search/interactive approval
+  transports are not enabled; native unattended command approval denies a
+  gated operation instead of waiting on an invisible prompt.
+
+The native image is built with [[file:../dockerfiles/Dockerfile.hermes-runtime][Dockerfile.hermes-runtime]].
+It inherits the ordinary restricted sandbox and its Git publication boundary.
+The current runtime capability proofs use deterministic providers and isolated
+Docker networks; they do not establish local-model behavioral quality.
 The CLI and embedders can use host-backed or embedder-supplied backends, so
 C10/C11 depict the ordinary sandboxed web path. Inbound SMS, schedules, voice
 and approvals have their own interfaces and rules; this map does not detail

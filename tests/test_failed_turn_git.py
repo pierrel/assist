@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from assist.git_sync import GitSyncError, GitWorkspaceBusyError, _workspace_lock, require_clean
-from assist.pi_runtime import PiRuntimeError
+from assist.hermes_runtime import HermesRuntimeError
 from assist.thread_queue import ThreadAffinityQueue, ThreadPauseRequested
 from manage.web import threads
 from manage.web.thread_git_lifecycle import ThreadGitLifecycle
@@ -66,12 +66,12 @@ def worker_workspace(bound_thread, monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(("engine", "commit_fails"), [
-    ("deep", False), ("pi", False), ("child", False), ("deep", True),
+    ("deep", False), ("hermes", False), ("child", False), ("deep", True),
 ])
 def test_failed_worker_commits_tracked_and_new_files(worker_workspace, monkeypatch, engine, commit_fails):
     owner, source, server, stopped, generation = worker_workspace
     original = git("rev-parse", "HEAD", cwd=server)
-    failure = PiRuntimeError("provider failed") if engine == "pi" else RuntimeError("provider failed")
+    failure = HermesRuntimeError("provider failed") if engine == "hermes" else RuntimeError("provider failed")
 
     continuations = []
 
@@ -92,16 +92,13 @@ def test_failed_worker_commits_tracked_and_new_files(worker_workspace, monkeypat
         message = staticmethod(fail)
 
     monkeypatch.setattr(threads.MANAGER, "get", lambda *_args, **_kwargs: Chat())
-    monkeypatch.setattr(threads, "_is_pi_thread", lambda _tid: engine == "pi")
-    if engine == "pi":
-        monkeypatch.setattr(threads, "PI_PREVIEW", SimpleNamespace(admits=lambda _engine: True))
-        monkeypatch.setattr(threads, "_pi_system_prompt", lambda: "test prompt")
-        def runtime(**kwargs):
-            try:
-                fail()
-            finally:
-                kwargs["sandbox_cleanup"](generation)
-        monkeypatch.setattr(threads, "_PI_RUNTIME", SimpleNamespace(run=runtime))
+    monkeypatch.setattr(threads, "_is_pi_thread", lambda _tid: False)
+    if engine == "hermes":
+        monkeypatch.setattr(threads, "read_thread_engine", lambda _directory: SimpleNamespace(name="hermes"))
+        monkeypatch.setattr(threads, "HERMES_PREVIEW", SimpleNamespace(admits=lambda _engine: True))
+        monkeypatch.setattr(threads, "_HERMES_RUNTIME", SimpleNamespace(
+            run_slice=fail, stop=lambda _tid: stopped.append(generation),
+            release_slice=lambda _tid: None))
     if engine == "child":
         (server.parent / "sub-task").mkdir()
         run = threads._create_run("sub-task", "Do the task", mode="child",

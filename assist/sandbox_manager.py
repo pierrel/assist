@@ -88,6 +88,7 @@ def _sandbox_timezone(override: str | None = None) -> str:
 
 
 SANDBOX_IMAGE = "assist-sandbox"
+HERMES_SANDBOX_IMAGE = "assist-hermes-runtime"
 
 # Egress allowlist layer.  See docs/2026-05-08-sandbox-network-allowlist.org
 # for the threat model and design.
@@ -574,14 +575,15 @@ class SandboxManager:
                              before_start=None, readonly_workspace=False,
                              browser_capable: bool = False,
                              thread_scope: tuple[str, str] | None = None,
-                             owner_run_id: str | None = None):
+                             owner_run_id: str | None = None,
+                             hermes_control_dir: str | None = None):
         if thread_scope is None:
             return cls._create_sandbox_backend(
                 work_dir, tz, agent_dir, include_assist_env,
                 include_egress_approvals, before_start=before_start,
                 readonly_workspace=readonly_workspace,
                 browser_capable=browser_capable, thread_scope=thread_scope,
-                owner_run_id=owner_run_id)
+                owner_run_id=owner_run_id, hermes_control_dir=hermes_control_dir)
         from assist.browser import authority
         from assist.browser.manager import BrowserManager
         threads_root, thread_id = thread_scope
@@ -597,7 +599,7 @@ class SandboxManager:
                 include_egress_approvals, before_start=before_start,
                 readonly_workspace=readonly_workspace,
                 browser_capable=browser_capable, thread_scope=thread_scope,
-                owner_run_id=owner_run_id)
+                owner_run_id=owner_run_id, hermes_control_dir=hermes_control_dir)
 
     @classmethod
     def _create_sandbox_backend(cls, work_dir: str, tz: str | None,
@@ -606,10 +608,11 @@ class SandboxManager:
                                 before_start=None, readonly_workspace=False,
                                 browser_capable: bool = False,
                                 thread_scope: tuple[str, str] | None = None,
-                                owner_run_id: str | None = None):
+                                owner_run_id: str | None = None,
+                                hermes_control_dir: str | None = None):
         """Create one per-turn sandbox from a named authority profile.
 
-        Managed web execution and Pi preview omit generic application
+        Managed web execution and native previews omit generic application
         environment. Ordinary web execution mounts persistent agent state and
         retains egress approvals; Pi has no agent mount or grants. Scoped
         authority records ownership before Docker create;
@@ -617,7 +620,9 @@ class SandboxManager:
         managed generation is reconciled before replacement.
         Read-only Git verification omits persistent scratch/private mounts, so
         configured filters cannot mutate the checked worktree through an alias.
-        ``thread_scope`` binds managed web/Pi callers to their
+        Hermes uses the same authority and persistent mounts with its pinned
+        runtime image and a private, read-only control-socket directory.
+        ``thread_scope`` binds managed web/native callers to their
         exact thread workspace; generic callers never infer authority from a path.
         """
         # This creation path never reuses container generations. The web layer
@@ -631,6 +636,9 @@ class SandboxManager:
         from assist.browser import authority
         from assist.browser.manager import BrowserManager
 
+        if hermes_control_dir is not None and (thread_scope is None or agent_dir is None
+                                               or include_assist_env):
+            raise RuntimeError("Hermes sandbox requires scoped private authority")
         if browser_capable and thread_scope is None:
             raise RuntimeError("browser sandbox requires explicit thread authority")
         if thread_scope is not None:
@@ -740,6 +748,13 @@ class SandboxManager:
                     for k, v in os.environ.items()
                     if k.startswith("ASSIST_") and k != "ASSIST_CAPTURES_DIR"
                 })
+            if hermes_control_dir is not None:
+                sandbox_env.update({"HERMES_HOME": "/agent/hermes",
+                                    "HERMES_DISABLE_LAZY_INSTALLS": "1",
+                                    "PYTHONDONTWRITEBYTECODE": "1",
+                                    "TERMINAL_ENV": "local", "TERMINAL_CWD": "/workspace",
+                                    "NO_PROXY": "127.0.0.1,localhost",
+                                    "no_proxy": "127.0.0.1,localhost"})
             # Persistent /tmp: a host dir SIBLING of work_dir, bind-mounted at the
             # container's /tmp so it survives the per-turn container teardown (the
             # container's own /tmp would be lost with it).  Lets the agent stash a
@@ -777,6 +792,8 @@ class SandboxManager:
                     "mode": "rw",
                 }
 
+            if hermes_control_dir is not None:
+                volumes[hermes_control_dir] = {"bind": "/run/assist-hermes", "mode": "ro"}
             browser_options = {}
             if browser_capable:
                 with open(BROWSER_SECCOMP_PROFILE, encoding="utf-8") as profile:
@@ -805,7 +822,7 @@ class SandboxManager:
                 raise
             timed_execution = thread_scope is not None and include_egress_approvals
             container = client.containers.run(
-                SANDBOX_IMAGE,
+                HERMES_SANDBOX_IMAGE if hermes_control_dir is not None else SANDBOX_IMAGE,
                 # The owning Run ends managed execution. Image PID 1's legacy
                 # sleep deadline must not kill active or fair-paused logical work.
                 **({"command": ["sleep", "infinity"]} if timed_execution else {}),
@@ -837,7 +854,8 @@ class SandboxManager:
                     arm(container.id, thread_id=thread_id, threads_root=threads_root)
                 cls._record_egress_client(
                     client, container, work_dir,
-                    kind="sandbox" if include_egress_approvals else "pi")
+                    kind=("hermes" if hermes_control_dir is not None else
+                          "sandbox" if include_egress_approvals else "pi"))
             except Exception:
                 cls.cleanup(work_dir, container)
                 raise
@@ -861,6 +879,16 @@ class SandboxManager:
             include_egress_approvals=True, before_start=before_start,
             browser_capable=browser_capable,
             thread_scope=thread_scope, owner_run_id=owner_run_id)
+
+    @classmethod
+    def get_hermes_sandbox_backend(cls, work_dir: str, *, agent_dir: str,
+                                  control_dir: str, thread_scope: tuple[str, str],
+                                  owner_run_id: str, tz: str | None = None):
+        """Run native Hermes under the ordinary managed generation authority."""
+        return cls._get_sandbox_backend(
+            work_dir, tz, agent_dir, include_assist_env=False,
+            include_egress_approvals=True, thread_scope=thread_scope,
+            owner_run_id=owner_run_id, hermes_control_dir=control_dir)
 
     @classmethod
     def get_pi_sandbox_backend(cls, work_dir: str, tz: str | None = None, *,

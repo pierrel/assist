@@ -100,14 +100,12 @@ from assist.visible_conversation import (
 )
 from assist.thread_manager import InvalidThreadId
 from assist.thread_engine import ThreadEngineError, read_thread_engine
-from assist.pi_conversation import PI_HISTORY_LIMIT, PiConversationError, PiConversationStore
-from assist.pi_runtime import PiRuntimeError, PiRuntimeManager
+from assist.pi_conversation import PiConversationError, PiConversationStore
 from assist.pi_trace import PiTraceError, PiTraceStore
-from assist.web_main_prompt import (WebMainPromptError, WebMainPromptUnavailable,
-                                    render_pi_web_main_prompt)
 from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
                                  ThreadHoldExpired, ThreadPauseRequested,
                                  active_handle)
+from assist.hermes_runtime import HermesRuntimeError, HermesRuntimeManager
 from edd.live_capture import CaptureStorageFull
 
 from manage.web.app import app
@@ -145,6 +143,7 @@ from manage.web.state import (
     MERGE_LOCK,
     MESSAGE_BACKLOG,
     PI_PREVIEW,
+    HERMES_PREVIEW,
     RUN_SERVICE,
     SCHEDULE_STORE,
     SUBSCRIPTION_STORE,
@@ -389,8 +388,8 @@ def render_index() -> str:
         "\n".join(item_html for _, item_html in items)
         if items else "<li><em>No threads yet</em></li>"
     )
-    pi_option = ('<option value="pi">Pi preview</option>' if PI_PREVIEW.admits("pi")
-                 else '<option value="pi" disabled>Pi preview (unavailable)</option>')
+    pi_option = ('<option value="hermes">Hermes</option>' if HERMES_PREVIEW.admits("hermes")
+                  else '<option value="hermes" disabled>Hermes (unavailable)</option>')
     return f"""
     <html>
       <head>
@@ -741,10 +740,13 @@ def render_thread(
     is_init = stage in INIT_STAGES
     title = _thread_title(tid)
     try:
+        engine = read_thread_engine(MANAGER.thread_dir(tid)).name
         is_pi = _is_pi_thread(tid)
-        engine_title = "Pi preview" if is_pi else "Deep Agents"
+        is_native = is_pi or engine == "hermes"
+        engine_title = "Pi preview" if is_pi else {"hermes": "Hermes", "deepagents": "Deep Agents"}[engine]
     except ThreadEngineError:
         is_pi = True
+        is_native = True
         engine_title = "Engine unavailable"
 
     # Rename is only offered when idle: while busy/initializing the displayed
@@ -1092,7 +1094,7 @@ def render_thread(
         # Pi titles are written when a message is admitted, so use successful
         # Pi Runs rather than description.txt to keep its first-turn error a
         # setup failure. Deep retains its established description-file signal.
-        if is_pi:
+        if is_native:
             had_prior_turn = any(run.status == "success" for run in _runs().list(tid))
         else:
             had_prior_turn = os.path.isfile(
@@ -1205,7 +1207,7 @@ def render_thread(
     # task text quoted + escaped as its unverified words. All of a thread's
     # pending cards render (<=3 by the tool's cap).
     egress_banner = ""
-    if not is_pi and EGRESS_STORE is not None:
+    if not is_native and EGRESS_STORE is not None:
         for _er in sorted((r for r in EGRESS_STORE.peek()
                            if r.origin_tid == tid and r.state == "pending"),
                           key=lambda r: r.created_at):
@@ -1254,7 +1256,7 @@ def render_thread(
                 f'</div></div>')
 
     geo_banner = ""
-    if not is_pi and GEO_PROPOSALS is not None:
+    if not is_native and GEO_PROPOSALS is not None:
         try:
             mine = [p for p in GEO_PROPOSALS.all() if p.origin_tid == tid]
         except Exception:
@@ -1308,16 +1310,18 @@ def render_thread(
                     '<a href="/geo">review them on the regions page</a>.'
                     '</div></div>')
 
-    # Disabled Pi is intentionally readable but cannot accept more work. This
-    # mirrors the server-side operator setting; it is not the authority.
+    # Disabled native previews remain readable. This mirrors admission, which
+    # independently checks the same operator setting before starting a Run.
     try:
-        pi_read_only = is_pi and not PI_PREVIEW.admits("pi")
+        pi_read_only = is_native and not _pi_message_admits(tid)
     except ThreadEngineError:
         pi_read_only = True
     form_disabled = "disabled" if is_init or pi_read_only else ""
     capture_disabled = "disabled" if busy or is_init or pi_read_only else ""
     form_note = ("Thread is being set up, please wait..." if is_init else
-                 "Pi preview is unavailable; this thread is read-only." if pi_read_only else
+                 "Pi is retired; this thread is read-only." if is_pi else
+                 "Native preview is unavailable; this thread is read-only." if pi_read_only else
+                 HERMES_PREVIEW_NOTICE if engine == "hermes" else
                  "If you close or refresh, your message will still be processed.")
     pi_continuation_html = ""
     if is_pi:
@@ -1474,7 +1478,7 @@ def render_thread(
             {rename_button}
           </div>
           {rename_form}
-          {"" if is_pi else _thread_domain_html(tid)}
+          {"" if is_native else _thread_domain_html(tid)}
           {status_banner}
           {geo_banner}
           {egress_banner}
@@ -1491,13 +1495,13 @@ def render_thread(
             {_RIDER_HIDDEN_INPUTS}
             <div class="button-group">
               <button class="btn" type="submit" {form_disabled}>Send</button>
-              {"" if is_pi else f'<button class="btn btn-secondary" type="button" onclick="showCaptureModal()" {capture_disabled}>Capture interaction</button>'}
+              {"" if is_native else f'<button class="btn btn-secondary" type="button" onclick="showCaptureModal()" {capture_disabled}>Capture interaction</button>'}
             </div>
             <div style="font-size:.85rem; color:#6b7280; margin-top:.4rem;">{form_note}</div>
           </form>
           {pi_continuation_html}
 
-          {"" if is_pi else f'''<!-- Capture Modal -->
+          {"" if is_native else f'''<!-- Capture Modal -->
           <div id="captureModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="capture-title" aria-hidden="true">
             <div class="modal-content" tabindex="-1">
               <h3 id="capture-title">Capture interaction</h3>
@@ -2391,26 +2395,17 @@ _RUN_SERVICES_BY_ROOT = {RUN_SERVICE.root_dir: RUN_SERVICE}
 _RUN_SERVICES_LOCK = threading.Lock()
 _PI_CONVERSATIONS = PiConversationStore()
 _PI_TRACES = PiTraceStore()
-_PI_RUNTIME = PiRuntimeManager()
+_HERMES_RUNTIME = HermesRuntimeManager()
 _PI_CONTINUATION_SUMMARY_LIMIT = 8_000
 _PI_DESCRIPTION_LIMIT = 120
+HERMES_PREVIEW_NOTICE = (
+    "Hermes supports file work, terminal commands, skills, memory and helpers. "
+    "Browser, web search and interactive approvals are unavailable in this preview. "
+    "Commands requiring approval are denied.")
 
 
-def _pi_system_prompt() -> str:
-    """Render the host-owned Pi prompt; never use workspace text."""
-    try:
-        return render_pi_web_main_prompt().text
-    except WebMainPromptError as error:
-        state = (
-            "unavailable" if isinstance(error, WebMainPromptUnavailable)
-            else "invalid")
-        raise PiRuntimeError(f"Pi system prompt is {state}") from error
 
 
-def _pi_should_yield() -> bool:
-    """Bridge the queue's current fair-stop request into the Pi worker wait."""
-    handle = active_handle()
-    return bool(handle and (handle.expired or handle.pause_requested))
 
 
 def _is_pi_thread(tid: str) -> bool:
@@ -2418,10 +2413,40 @@ def _is_pi_thread(tid: str) -> bool:
     return read_thread_engine(MANAGER.thread_dir(tid)).name == "pi"
 
 
+def _is_native_thread(tid: str) -> bool:
+    """Classify threads whose history does not come from a Deep checkpoint."""
+    return _is_pi_thread(tid) or read_thread_engine(MANAGER.thread_dir(tid)).name == "hermes"
+
+
+def _hermes_messages(tid: str) -> list[dict]:
+    """Project accepted user turns and committed replies once from host Runs.
+
+    Native SessionDB remains Hermes's conversation state. This projection only
+    renders the existing host acceptance and completion receipts to clients.
+    """
+    work = {}
+    for run in _runs().list(tid):
+        if run.mode == "turn":
+            first, _ = work.get(run.work_id, (run, run))
+            work[run.work_id] = (first, run)
+    messages = []
+    for first, latest in work.values():
+        text = first.text or first.pending_text
+        if text:
+            messages.append({"role": "user", "content": text, "run_id": first.id,
+                             "message_id": f"hermes:user:{first.work_id}"})
+        if latest.status == "success" and latest.result:
+            messages.append({"role": "assistant", "content": latest.result, "run_id": latest.id,
+                             "message_id": f"hermes:assistant:{first.work_id}"})
+    return messages
+
+
 def _pi_message_admits(tid: str) -> bool:
-    """Apply the Pi operator setting, failing closed for an invalid engine marker."""
+    """Apply native operator settings, failing closed for an invalid marker."""
     try:
-        return not _is_pi_thread(tid) or PI_PREVIEW.admits("pi")
+        engine = read_thread_engine(MANAGER.thread_dir(tid)).name
+        return (HERMES_PREVIEW.admits(engine) if engine == "hermes"
+                else engine == "deepagents")
     except ThreadEngineError as error:
         raise HTTPException(status_code=409, detail="Thread engine is unavailable") from error
 
@@ -2457,8 +2482,8 @@ def _backfill_pi_description(tid: str) -> None:
 def _require_deep_thread(tid: str) -> None:
     """Refuse an endpoint whose implementation depends on a Deep graph."""
     try:
-        if _is_pi_thread(tid):
-            raise HTTPException(status_code=409, detail="This action is unavailable in Pi preview")
+        if _is_native_thread(tid):
+            raise HTTPException(status_code=409, detail="This action requires Deep Agents")
     except ThreadEngineError as error:
         raise HTTPException(status_code=409, detail="Thread engine is unavailable") from error
 
@@ -3006,6 +3031,9 @@ def _execute_run_active(run_id: str, tid: str, *, user_priority: bool = False) -
         # Leave the ticket pending; reset completion replays it in order.
         return
     try:
+        if read_thread_engine(MANAGER.thread_dir(tid)).name == "hermes":
+            _execute_hermes_run(run, user_priority=user_priority)
+            return
         if _is_pi_thread(tid):
             _execute_pi_run(run, user_priority=user_priority)
             return
@@ -3109,8 +3137,105 @@ def _execute_run_active(run_id: str, tid: str, *, user_priority: bool = False) -
         pass  # thread deletion removes its run store while a dispatcher unwinds.
 
 
+def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
+    """Dispatch native work and retain its process across same-work successors."""
+    tid = run.thread_id
+    if run.status != "pending":
+        if run.status in {"running", "interrupted"}:
+            _runs().transition(tid, run.id, "cancelled" if run.status == "interrupted" else "error",
+                               error="Native Hermes process was interrupted; files were not replayed")
+            _set_status(tid, "error", error="Hermes was interrupted; retained files need review")
+        return
+    handle = None
+    try:
+        if (run.mode != "turn" or run.assistant_id != "general-agent"
+                or run.origin is not None or run.sender is not None or run.resume_decision is not None
+                or (not run.resume and (not isinstance(run.text, str) or not run.text))):
+            raise HermesRuntimeError("Hermes accepts manual turns and their scheduler successors")
+        with THREAD_QUEUE.acquire(tid, user_priority=user_priority,
+                                  accumulated_active_ms=run.active_ms,
+                                  before_release=lambda: _HERMES_RUNTIME.release_slice(tid)) as handle:
+            try:
+                if not HERMES_PREVIEW.admits("hermes"):
+                    _HERMES_RUNTIME.stop(tid)
+                    raise HermesRuntimeError("Hermes preview is unavailable")
+                with _RUN_ADMISSION_LOCK:
+                    current = _runs().get(tid, run.id)
+                    if current.status != "pending":
+                        return
+                    run = _runs().claim(tid, run.id)
+                thread_dir = MANAGER.thread_dir(tid)
+                work_dir = MANAGER.thread_default_working_dir(tid)
+                with GitLifecycle.acquire(thread_dir, work_dir, run.work_id,
+                                          thread_scope=(MANAGER.root_dir, tid),
+                                          owner_run_id=run.id) as git_lifecycle:
+                    # A retained generation still owns the same checkout. Ordinary
+                    # Git resume would stop it through the publication fence.
+                    if not run.resume:
+                        git_lifecycle.prepare((run.rider or {}).get("tz"))
+                    _set_status(tid, "processing", pending_message=run.text or run.pending_text,
+                                pending_run_id=run.id, started_at=_now_ms())
+
+                    def admitted():
+                        return (HERMES_PREVIEW.admits("hermes") and not handle.expired
+                                and THREAD_QUEUE.current_handle() is handle
+                                and _runs().get(tid, run.id).status == "running")
+
+                    try:
+                        reply = _HERMES_RUNTIME.run_slice(
+                            run, work_dir=work_dir, agent_dir=MANAGER.thread_agent_dir(tid),
+                            thread_scope=(MANAGER.root_dir, tid), handle=handle, admitted=admitted)
+                    except ThreadPauseRequested:
+                        raise
+                    except Exception:
+                        # Error preservation is a Git write too. Confirm native
+                        # teardown before entering the existing recovery path.
+                        _HERMES_RUNTIME.stop(tid)
+                        with git_lifecycle.preserve_on_error((run.rider or {}).get("tz")):
+                            raise
+                    # run_slice returns only after the native generation is stopped.
+                    branch = git_lifecycle.finish_visible(reply, (run.rider or {}).get("tz"))
+                    notice = _git_result_notice(branch)
+                    with _RUN_ADMISSION_LOCK:
+                        _runs().transition(tid, run.id, "success",
+                                           result=reply + ("\n\n" + notice if notice else ""))
+                    _set_status(tid, "ready", **({"git_notice": notice} if notice else {}))
+                    MANAGER.touch(tid)
+            except ThreadPauseRequested:
+                raise
+            except Exception:
+                # Setup can fail before run_slice, including on a retained resume.
+                # Terminal failure must retire that generation before slot release.
+                _HERMES_RUNTIME.stop(tid)
+                raise
+    except ThreadPauseRequested:
+        carry = THREAD_QUEUE.pop_hold(handle)
+        with _RUN_ADMISSION_LOCK:
+            _runs().transition(tid, run.id, "interrupted", active_ms=carry)
+            successor = _create_run(tid, None, resume=True, work_id=run.work_id,
+                                    user_event_id=run.user_event_id, active_ms=carry,
+                                    pending_text=run.text or run.pending_text, rider=run.rider)
+            _set_status(tid, "paused", pending_message=run.text or run.pending_text,
+                        accumulated_active_ms=carry)
+            ticket = _RESUME_SCHEDULER.reserve(successor.id, tid)
+        _RESUME_SCHEDULER.commit(ticket)
+        return
+    except Exception as error:
+        logging.error("Hermes run %s failed", run.id, exc_info=True)
+        message = str(error) + git_error_notes(error)
+        with _RUN_ADMISSION_LOCK:
+            current = _runs().get(tid, run.id)
+            if current.status == "pending":
+                current = _runs().claim(tid, run.id)
+            if current.status == "running":
+                _runs().transition(tid, run.id, "error", error=message)
+        _set_status(tid, "error", error=message, pending_message=run.text or run.pending_text)
+    finally:
+        _dispatch_pending_after(tid, run.id)
+
+
 def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
-    """Execute one manual visible Pi turn without constructing a Deep graph."""
+    """Recover committed Pi replies; refuse new execution on retired threads."""
     tid = run.thread_id
     if (run.mode != "turn" or run.assistant_id != "general-agent" or run.origin is not None
             or run.sender is not None or run.resume or run.resume_decision is not None
@@ -3156,94 +3281,14 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
             _set_status(run.thread_id, "error", error="Pi turn was interrupted; send the message again")
             _dispatch_pending_after(run.thread_id, run.id)
         return
-    try:
-        with THREAD_QUEUE.acquire(tid, user_priority=user_priority), GitLifecycle.acquire(
-                MANAGER.thread_dir(tid), MANAGER.thread_default_working_dir(tid),
-                run.work_id, thread_scope=(MANAGER.root_dir, tid),
-                owner_run_id=run.id) as git_lifecycle, ExitStack() as error_scope:
-            # The selector's earlier check only permits reservation. This
-            # authority-bearing recheck prevents a queued Pi Run from starting
-            # after the operator disables the preview.
-            if not PI_PREVIEW.admits("pi"):
-                with _RUN_ADMISSION_LOCK:
-                    current = _runs().get(tid, run.id)
-                    if current.status == "pending":
-                        current = _runs().claim(tid, run.id)
-                    if current.status == "running":
-                        _runs().transition(tid, run.id, "error", error="Pi preview is unavailable")
-                _set_status(tid, "error", error="Pi preview is unavailable", pending_message=run.text)
-                return
-            with _RUN_ADMISSION_LOCK:
-                current = _runs().get(tid, run.id)
-                if current.status != "pending":
-                    return
-                run = _runs().claim(tid, run.id)
-            _set_status(tid, "starting_sandbox", pending_message=run.text,
-                        pending_run_id=run.id, started_at=_now_ms())
-            thread_dir = MANAGER.thread_dir(tid)
-
-            def terminalize_dirty(error: GitSyncError) -> None:
-                _terminalize_dirty_run(run, error)
-                _set_status(tid, "error", error=str(error), pending_message=run.text,
-                            pending_run_id=run.id)
-
-            git_lifecycle.prepare((run.rider or {}).get("tz"),
-                                  terminalize_dirty=terminalize_dirty)
-            _PI_CONVERSATIONS.append(thread_dir, run.id, "user", run.text)
-            context = _PI_CONVERSATIONS.context(
-                thread_dir, max_messages=PI_HISTORY_LIMIT, exclude_run_id=run.id)
-            history = list(context.messages)
-
-            def complete_pi_run(result) -> None:
-                if not PI_PREVIEW.admits("pi"):
-                    raise PiRuntimeError("Pi preview was stopped")
-                _PI_CONVERSATIONS.complete(
-                    thread_dir, run.id, result.reply, result.promoted_skills,
-                    result.evicted_skills, result.history_summary)
-
-            _set_status(tid, "processing", pending_message=run.text, started_at=_now_ms())
-            error_scope.enter_context(
-                git_lifecycle.preserve_on_error((run.rider or {}).get("tz")))
-            result = _PI_RUNTIME.run(
-                work_dir=MANAGER.thread_default_working_dir(tid), timezone=(run.rider or {}).get("tz"),
-                prompt=run.text, history=history, system_prompt=_pi_system_prompt(),
-                retained_skills=context.loaded_skills, evicted_skills=context.evicted_skills,
-                history_summary=context.summary,
-                compaction_candidate=context.compaction_candidate,
-                skill_run_id=run.id, commit=complete_pi_run,
-                turn_id=tid, admitted=lambda: PI_PREVIEW.admits("pi"),
-                should_yield=_pi_should_yield, trace_dir=thread_dir, trace_run_id=run.id,
-                thread_scope=(MANAGER.root_dir, tid),
-
-                sandbox_cleanup=git_lifecycle.pi_model_cleanup,
-                sandbox_starting=git_lifecycle.model_starting)
-            if git_lifecycle.bound:
-                with _RUN_ADMISSION_LOCK:
-                    _runs().transition(tid, run.id, "running", result=result.reply)
-                result_branch = git_lifecycle.finish_visible(
-                    result.reply, (run.rider or {}).get("tz"))
-            else:
-                result_branch = None
-            notice = _git_result_notice(result_branch)
-            with _RUN_ADMISSION_LOCK:
-                _runs().transition(tid, run.id, "success",
-                                   result=result.reply + ("\n\n" + notice if notice else ""))
-            _set_status(tid, "ready", **({"git_notice": notice} if notice else {}))
-            MANAGER.touch(tid)
-    except (PiConversationError, PiRuntimeError, GitSyncError, ThreadHoldExpired, QueueWaitTimeout) as error:
-        logging.error("Pi run %s failed", run.id, exc_info=True)
-        with _RUN_ADMISSION_LOCK:
-            current = _runs().get(tid, run.id)
-            if current.status == "pending" and isinstance(error, GitSyncError):
-                current = _runs().claim(tid, run.id)
-            if current.status == "running":
-                _runs().transition(tid, run.id, "error", error=str(error) + git_error_notes(error))
-            other_running = any(candidate.id != run.id and candidate.status == "running"
-                                for candidate in _runs().list(tid))
-        if not other_running:
-            _set_status(tid, "error", error=str(error) + git_error_notes(error), pending_message=run.text)
-    finally:
-        _dispatch_pending_after(tid, run.id)
+    with _RUN_ADMISSION_LOCK:
+        current = _runs().get(tid, run.id)
+        if current.status == "pending":
+            current = _runs().claim(tid, run.id)
+        if current.status == "running":
+            _runs().transition(tid, run.id, "error", error="Pi has been retired; this thread is read-only")
+    _set_status(tid, "error", error="Pi has been retired; this thread is read-only")
+    _dispatch_pending_after(tid, run.id)
 
 
 def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
@@ -3295,12 +3340,12 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
     behind that successor. An accepted approval is already such a successor.
     """
     tid = run.thread_id
-    # Pi has no LangGraph checkpoint or resumable session. Classify before
+    # Native engines have no LangGraph checkpoint. Classify before
     # `_recovery_decision`, which legitimately constructs a Deep chat for
-    # legacy threads. An abandoned Pi head is terminal and its ordinary
-    # followers may start as fresh Pi turns.
+    # legacy threads. Lost native work is terminal without replay; Pi
+    # followers also pass through the retired-engine dispatcher.
     try:
-        is_pi = _is_pi_thread(tid)
+        is_pi = _is_native_thread(tid)
     except ThreadEngineError:
         is_pi = True
     if is_pi:
@@ -3309,8 +3354,9 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
             if current.status == "pending":
                 current = _runs().claim(tid, run.id)
             if current.status in {"running", "interrupted"}:
-                _runs().transition(tid, run.id, "error", error="Pi turn was interrupted; send the message again")
-        _set_status(tid, "error", error="Pi turn was interrupted; send the message again")
+                _runs().transition(tid, run.id, "cancelled" if current.status == "interrupted" else "error",
+                                   error="Native turn was interrupted; retained files were not replayed")
+        _set_status(tid, "error", error="Native turn was interrupted; retained files were not replayed")
         _dispatch_pending_after(tid, run.id)
         return
     if run.approval_id is not None:
@@ -4393,10 +4439,12 @@ async def apple_touch_icon() -> Response:
 
 def _require_new_thread_engine(engine: str) -> str:
     """Admit only the immutable server-owned engine choice for a new web thread."""
-    if engine not in {"deepagents", "pi"}:
+    if engine not in {"deepagents", "pi", "hermes"}:
         raise HTTPException(status_code=400, detail="Unknown thread engine")
-    if engine == "pi" and not PI_PREVIEW.admits("pi"):
-        raise HTTPException(status_code=503, detail="Pi preview is unavailable")
+    if engine == "pi":
+        raise HTTPException(status_code=503, detail="Pi has been retired; select Hermes or Deep Agents")
+    if engine == "hermes" and not HERMES_PREVIEW.admits("hermes"):
+        raise HTTPException(status_code=503, detail="Hermes preview is unavailable")
     return engine
 
 
@@ -4417,7 +4465,7 @@ async def create_thread(domain: str | None = Form(None), engine: str = Form("dee
                                MANAGER.thread_default_working_dir(tid))
         await run_in_threadpool(publish_initial_branch, MANAGER.thread_dir(tid),
                                MANAGER.thread_default_working_dir(tid))
-    elif selected_engine == "pi":
+    elif selected_engine in {"pi", "hermes"}:
         await run_in_threadpool(_create_empty_pi_workspace, tid)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
@@ -4468,10 +4516,12 @@ def create_thread_with_message_core(
         tid = MANAGER.reserve_visible(selected_engine, thread_id)
         if selected:
             bind_git(MANAGER.thread_dir(tid), selected)
-        if selected_engine == "pi" and selected is None:
+        if selected_engine in {"pi", "hermes"} and selected is None:
             _create_empty_pi_workspace(tid)
         if selected_engine == "pi":
             _ensure_pi_description(tid, text)
+        elif selected_engine == "hermes":
+            set_description_if_absent(tid, _pi_initial_description(text))
         started_at = _now_ms()
         _set_status(tid, "initializing", pending_message=text, domain=selected or "",
                     started_at=started_at)
@@ -4529,6 +4579,8 @@ async def get_thread(
             except PiTraceError:
                 pi_traces = []
                 pi_trace_unavailable = True
+        elif stage not in INIT_STAGES and read_thread_engine(MANAGER.thread_dir(tid)).name == "hermes":
+            pi_messages = _hermes_messages(tid)
         elif stage not in INIT_STAGES:
             try:
                 chat = MANAGER.get(tid, sandbox_backend=None)
@@ -4549,6 +4601,8 @@ def _thread_messages_for_fragment(tid: str) -> tuple[Thread | None, list[dict] |
     stage = _get_status(tid).get("stage", "ready")
     if stage in INIT_STAGES:
         return None, [], [], False
+    if read_thread_engine(MANAGER.thread_dir(tid)).name == "hermes":
+        return None, _hermes_messages(tid), None, False
     if _is_pi_thread(tid):
         messages = [{"role": message.role, "content": message.text, "run_id": message.run_id,
                      "message_id": f"pi:{message.role}:{message.run_id}"}
@@ -4766,6 +4820,10 @@ def _drain_held_browser_events(tid: str) -> bool:
                              or (state.lease or {}).get("owner_run_id")
                              or (session.run_id if session is not None else None))
                     lease = state.lease
+                # The existing owner reset also retires a parked native worker.
+                # Docker and relay drain run outside the short authority fence.
+                if _HERMES_RUNTIME.paused_owner(tid, run.work_id) == owner and owner is not None:
+                    _HERMES_RUNTIME.stop(tid)
                 if lease is not None:
                     active_owner = any((item.id == lease["owner_run_id"]
                                         or (session is not None
@@ -4886,9 +4944,12 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
     busy = busy or browser_active or bool(older_web) or bool(held)
     pi_thread = False
     try:
-        pi_thread = _is_pi_thread(tid)
+        pi_thread = _is_native_thread(tid)
         if pi_thread:
-            _ensure_pi_description(tid, text)
+            if _is_pi_thread(tid):
+                _ensure_pi_description(tid, text)
+            else:
+                set_description_if_absent(tid, _pi_initial_description(text))
     except ThreadEngineError:
         # Dispatch will make the existing invalid-engine error durable; title
         # best-effort must not change message-admission semantics.
@@ -6394,7 +6455,7 @@ async def post_message(tid: str, background_tasks: BackgroundTasks,
     admitted = await anyio.to_thread.run_sync(
         _pi_message_admits, tid, limiter=_get_run_admission_limiter())
     if not admitted:
-        raise HTTPException(status_code=503, detail="Pi preview is unavailable")
+        raise HTTPException(status_code=503, detail="Selected native preview is unavailable")
     rider = _browser_rider(sent_at, tz, lat, lon, location_token)
     try:
         run, busy = await anyio.to_thread.run_sync(
@@ -7050,7 +7111,7 @@ async def delete_thread(tid: str):
 
 
 def _delete_thread_and_children(tid: str) -> None:
-    """Fence phone Git publication and stop browsers before deleting directories."""
+    """Fence Git publication and stop native workers and browsers before deletion."""
     generation = None
     with _RUN_ADMISSION_LOCK:
         phone_thread = tid.startswith("phone-")
@@ -7063,7 +7124,6 @@ def _delete_thread_and_children(tid: str) -> None:
                 raise HTTPException(status_code=409, detail="Thread changed during deletion") from error
     try:
         with ExitStack() as git_guard:
-            retired = False
             if phone_thread:
                 git_guard.enter_context(git_workspace_lock(directory))
                 try:
@@ -7073,12 +7133,7 @@ def _delete_thread_and_children(tid: str) -> None:
                 pinned = os.fstat(generation)
                 if (actual.st_dev, actual.st_ino) != (pinned.st_dev, pinned.st_ino):
                     raise HTTPException(status_code=409, detail="Thread changed during deletion")
-                with _RUN_ADMISSION_LOCK:
-                    if _get_status(tid).get("stage") in INIT_STAGES:
-                        _PI_RUNTIME.retire(tid)
-                        retired = True
-            if not retired:
-                _PI_RUNTIME.retire(tid)
+            _HERMES_RUNTIME.retire(tid)
             # A deleted Run journal cannot authorize or recover a turn browser.
             # Wait for Docker outside Run admission, keeping the browser and
             # phone Git fences through deletion.
@@ -7293,11 +7348,15 @@ def _merge_thread_result(tid: str, expected_thread: str | None = None) -> str:
     requires its displayed published OID; the fetched tip must still match.
     Git subprocesses remain in a worker thread so the event loop is not blocked.
     """
-    _require_deep_thread(tid)
-    try:
-        thread = MANAGER.get(tid)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Thread not found")
+    if _is_pi_thread(tid):
+        raise HTTPException(status_code=409, detail="Pi threads are read-only")
+    if read_thread_engine(MANAGER.thread_dir(tid)).name == "hermes":
+        _existing_thread_dir(tid)
+    else:
+        try:
+            MANAGER.get(tid)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Thread not found")
 
     if _get_status(tid).get("stage") in BUSY_STAGES:
         raise MergeBusyError(

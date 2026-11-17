@@ -1,4 +1,4 @@
-"""Server-owned availability policy for the bounded Pi web preview."""
+"""Server-owned availability policy for bounded native previews."""
 from __future__ import annotations
 
 import json
@@ -14,22 +14,25 @@ _STATE_FILE = ".pi-preview.json"
 
 
 class PiPreviewUnavailable(RuntimeError):
-    """The Pi preview operator setting cannot be safely changed."""
+    """A native preview operator setting cannot be safely changed."""
 
 
-class PiPreviewPolicy:
-    """Persist the operator setting and admit Pi only when it is enabled.
+class NativePreviewPolicy:
+    """Persist one native engine's operator setting and default it to disabled.
 
-    This class deliberately owns no worker, Run, or cancellation lifecycle.  The
-    later runtime manager will call it while holding its own transition gate.
+    This class owns no worker, Run, or cancellation lifecycle. Dispatch and
+    provider admission check it independently of client rendering.
     """
 
-    def __init__(self, root_dir: str | Path):
+    def __init__(self, root_dir: str | Path, *, engine: str = "pi"):
+        if engine not in {"pi", "hermes"}:
+            raise ValueError("Unknown native preview")
         self.root = Path(root_dir)
+        self.engine = engine
 
     @property
     def path(self) -> Path:
-        return self.root / _STATE_FILE
+        return self.root / (_STATE_FILE if self.engine == "pi" else ".hermes-preview.json")
 
     def _root_is_safe(self) -> bool:
         try:
@@ -45,7 +48,7 @@ class PiPreviewPolicy:
         except FileExistsError:
             pass
         if not self._root_is_safe():
-            raise PiPreviewUnavailable("Pi preview state directory is unavailable or unsafe.")
+            raise PiPreviewUnavailable("Native preview state directory is unavailable or unsafe.")
 
     def enabled(self) -> bool:
         """Return the persisted operator setting; missing or malformed is off."""
@@ -75,10 +78,10 @@ class PiPreviewPolicy:
     def set_enabled(self, enabled: bool) -> None:
         """Durably set the local operator switch, defaulting to disabled."""
         if type(enabled) is not bool:
-            raise TypeError("Pi preview enabled must be a bool")
+            raise TypeError("Native preview enabled must be a bool")
         self._ensure_safe_root()
         temporary = tempfile.NamedTemporaryFile(
-            mode="wb", dir=self.root, prefix=".pi-preview-", delete=False)
+            mode="wb", dir=self.root, prefix=f".{self.engine}-preview-", delete=False)
         try:
             with temporary:
                 os.fchmod(temporary.fileno(), 0o600)
@@ -101,4 +104,8 @@ class PiPreviewPolicy:
         """Return whether the persisted operator setting permits an engine."""
         if engine == "deepagents":
             return True
-        return engine == "pi" and self.enabled()
+        return engine == self.engine and self.enabled()
+
+
+# Keep the operator-setting reader importable for retained Pi state and tools.
+PiPreviewPolicy = NativePreviewPolicy
