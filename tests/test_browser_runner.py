@@ -200,6 +200,47 @@ def test_changed_field_attributes_cannot_be_filled():
     assert not field.filled
 
 
+def test_secret_fill_requires_fresh_observation_before_next_action():
+    worker = BrowserWorker()
+    worker.pages["page"] = _Page()
+    worker.snapshots["page"] = "snapshot"
+    username = _Link(None, "Username", tag="input", kind="email")
+    password = _Link(None, "Password", tag="input", kind="password")
+    worker.targets["page"] = {
+        ref: (field, *worker._target_state(field, _Page.url))
+        for ref, field in (("username", username), ("password", password))}
+
+    result = worker.fill_secret("page", "snapshot", _Page.url,
+                                "username", "password", "person", "synthetic-password")
+
+    assert result == {"filled": True}
+    assert username.filled and password.filled
+    with pytest.raises(BrowserInputError, match="stale page observation"):
+        worker.act("page", "snapshot", "click", {"ref": "password"})
+
+
+def test_username_handler_cannot_move_password_fill_to_another_page():
+    worker = BrowserWorker()
+    page = _Page()
+    worker.pages["page"] = page
+    worker.snapshots["page"] = "snapshot"
+
+    class RedirectingUsername(_Link):
+        def fill(self, *_args, **_kwargs):
+            page.url = "https://example.com/other"
+
+    username = RedirectingUsername(None, "Username", tag="input", kind="email")
+    password = _Link(None, "Password", tag="input", kind="password")
+    worker.targets["page"] = {
+        ref: (field, *worker._target_state(field, page.url))
+        for ref, field in (("username", username), ("password", password))}
+
+    with pytest.raises(BrowserInputError, match="credential page changed"):
+        worker.fill_secret("page", "snapshot", _Page.url,
+                           "username", "password", "person", "synthetic-password")
+    assert not password.filled
+
+
 def test_absent_href_cannot_be_added_to_observed_link():
     worker = BrowserWorker()
     link = _Link(None)
@@ -405,6 +446,9 @@ def test_observation_budget_preserves_targets():
         def count(self):
             return 60
 
+        def evaluate_all(self, _expression):
+            return []
+
         def nth(self, index):
             return _Indexed(index)
 
@@ -424,6 +468,34 @@ def test_observation_budget_preserves_targets():
     assert observed["truncated"] is True
     assert len(json.dumps({"result": observed}).encode()) < runner.MAX_RESULT
     assert len(worker.targets["page"]) == len(observed["targets"])
+
+
+@pytest.mark.parametrize("values", [None, "error"])
+def test_password_field_collection_failure_cannot_return_snapshot(values):
+    class Body:
+        def aria_snapshot(self, **_kwargs):
+            return "Password: synthetic-field-value"
+
+    class Fields:
+        def count(self):
+            return 0
+
+        def evaluate_all(self, _expression):
+            if values == "error":
+                raise RuntimeError("synthetic DOM failure")
+            return values
+
+    class Page(_Page):
+        def wait_for_load_state(self, *_args, **_kwargs):
+            pass
+
+        def locator(self, selector):
+            return Body() if selector == "body" else Fields()
+
+    worker = BrowserWorker()
+    worker.pages["page"] = Page()
+    with pytest.raises(BrowserInputError, match="password field"):
+        worker.observe("page")
 
 
 def test_closed_pages_do_not_consume_concurrent_page_quota():

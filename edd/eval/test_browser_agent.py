@@ -91,6 +91,9 @@ class _BrowserSite:
     def __init__(self, scenario, root):
         self.scenario = scenario
         self.root = Path(root)
+        self.threads_root = str(self.root)
+        self.thread_id = "synthetic"
+        self.work_dir = str(self.root / "domain")
         self.calls = []
         self.approved = False
         self.session_open = False

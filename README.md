@@ -1279,6 +1279,48 @@ ASSIST_DOMAINS=/path/to/repo1.git,/path/to/repo2.git
 
 When enabled, each thread creates a git branch and can merge changes back to main.
 
+### Encrypted repository logins
+
+In an Assist Web repository thread, the Emacs client offers `C-c s` to add a
+login and `C-c u` to unlock an existing store. The client masks the username,
+password and unlock phrase while entering them and sends them over its existing
+authenticated HTTPS phone API. No secret value is placed in a chat message.
+The agent can request a private entry form using only a public label and HTTPS
+login page. Once the requesting Run finishes, an authenticated desktop thread
+snapshot offers an Add requested login button, which opens the masked prompts.
+A stale button cannot
+save to a changed request destination. The agent can list public labels, HTTPS
+login origins and paths, and opaque IDs, then
+use `browser_fill_secret` on current observed login fields. It cannot retrieve
+the stored values through a tool.
+
+The repository tracks `.assist-secrets.json`: public IDs, labels and login
+pages plus AES-256-GCM ciphertext. Argon2id derives its key from the unlock
+phrase with a per-repository random salt (64 MiB, two iterations, one lane).
+The derived key is cached as a mode-0600 file in this thread's host-private
+directory for unattended later turns; that directory is outside the agent's
+workspace, scratch and `/agent` mounts. A different thread needs its own
+private unlock with the same phrase. To make a record available to new threads,
+merge its published thread branch into `main` through the normal Git flow first;
+if Git reports a result branch after divergence, inspect and merge that branch
+instead. The key file and unlock phrase are never committed. The private key
+file also remembers used record IDs so removing a repo record cannot silently
+disable later observation redaction.
+Records are append-only in this first flow; removing a record later would not
+erase ciphertext from Git history.
+
+Browser observations replace exact saved usernames and passwords and their ordinary
+URL encodings with `[private value hidden]`; values of up to 60 password fields
+are also hidden while those fields are present. Observation fails closed if the
+worker cannot read those fields or finds more than 60. The
+host still handles plaintext to fill a form. Login queries and fragments are
+omitted from public metadata;
+credential use matches the recorded HTTPS origin and path.
+A site can transform or reflect a value in a way exact redaction cannot
+recognize, so this is a practical model-output boundary, not a guarantee of
+secrecy against arbitrary page behavior. A thread with an existing locked or
+damaged store must unlock or repair it before browser observations resume.
+
 New Git-backed web threads bind an approved source and non-main branch outside
 the agent workspace. Their branch is published immediately, even when it first
 points at main. Before each new visible turn the server fetches the branch and

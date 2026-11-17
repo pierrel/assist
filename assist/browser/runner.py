@@ -357,6 +357,28 @@ class BrowserWorker:
         self._check_page_url(page)
         self.snapshots[page_id] = snapshot_id
         self.targets[page_id] = kept
+        try:
+            password_values = page.locator('input[type="password"]').evaluate_all(
+                "nodes => nodes.length <= 60 ? nodes.map(node => node.value).filter(Boolean) : null")
+        except Exception as error:
+            raise BrowserInputError("password fields unavailable") from error
+        if password_values is None or not isinstance(password_values, list):
+            raise BrowserInputError("password field limit")
+        if any(not isinstance(value, str) for value in password_values):
+            raise BrowserInputError("password fields unavailable")
+        if password_values:
+            if any(value in result.get("_source_url", "") for value in password_values):
+                result.pop("_source_url", None)
+            def hidden(value):
+                if isinstance(value, str):
+                    for password in password_values:
+                        value = value.replace(password, "[password hidden]")
+                elif isinstance(value, list):
+                    value = [hidden(item) for item in value]
+                elif isinstance(value, dict):
+                    value = {key: hidden(item) for key, item in value.items()}
+                return value
+            result = hidden(result)
         return result
 
     def open(self, url, reuse_page_id=None):
@@ -463,6 +485,57 @@ class BrowserWorker:
                 return self._observe(new_pages[-1])
         return self._observe(page_id)
 
+    def fill_secret(self, page_id, snapshot_id, login_page, username_ref,
+                    password_ref, username, password):
+        """Fill bound login fields without returning a page observation."""
+        page = self._page(page_id)
+        if self.snapshots.get(page_id) != snapshot_id:
+            raise BrowserInputError("stale page observation")
+        def exact_page():
+            parsed = urlsplit(page.url)
+            if parsed.scheme != "https" or not parsed.hostname:
+                return False
+            host = parsed.hostname.encode("idna").decode("ascii").lower()
+            actual = f"https://{host}" + (
+                f":{parsed.port}" if parsed.port not in (None, 443) else "")
+            return actual + (parsed.path or "/") == login_page
+
+        if not exact_page():
+            raise BrowserInputError("credential page changed")
+        if (not isinstance(password, str) or not isinstance(username, str)
+                or not isinstance(password_ref, str) or not password_ref
+                or username and not isinstance(username_ref, str)):
+            raise BrowserInputError("invalid credential fields")
+
+        def field(ref, allowed):
+            selected = self.targets.get(page_id, {}).get(ref)
+            if selected is None:
+                raise BrowserInputError("unknown or stale credential field")
+            locator, role, name, href, raw_href, attrs, button_value = selected
+            if role != "textbox" or attrs[0] not in allowed or href is not None:
+                raise BrowserInputError("credential field changed")
+            if not locator.is_visible():
+                raise BrowserInputError("credential field changed")
+            live = self._target_state(locator, page.url)
+            if live != selected[1:]:
+                raise BrowserInputError("credential field changed")
+            return locator
+
+        password_field = field(password_ref, {"password"})
+        password_state = self._target_state(password_field, page.url)
+        username_field = field(username_ref, {"text", "email", None}) if username else None
+        self.snapshots.pop(page_id, None)
+        self.targets.pop(page_id, None)
+        if username_field is not None:
+            username_field.fill(username, timeout=10000)
+            if not exact_page():
+                raise BrowserInputError("credential page changed")
+            if (not password_field.is_visible()
+                    or self._target_state(password_field, page.url) != password_state):
+                raise BrowserInputError("credential field changed")
+        password_field.fill(password, timeout=10000)
+        return {"filled": True}
+
     def wait(self, page_id, role, name):
         page = self._page(page_id)
         if not isinstance(role, str) or not isinstance(name, str):
@@ -560,6 +633,7 @@ class BrowserWorker:
             raise BrowserInputError("invalid browser arguments")
         methods = {"ready": self.ready, "open": self.open, "close": self.close,
                    "observe": self.observe, "act": self.act,
+                   "fill_secret": self.fill_secret,
                    "wait": self.wait, "download_info": self.download_info,
                    "preflight": self.preflight, "load_storage": self.load_storage,
                    "storage_state": self.storage_state, "revoke": self.revoke}
