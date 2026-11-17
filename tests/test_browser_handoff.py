@@ -273,7 +273,9 @@ def handoff_host(wired,monkeypatch):
         containers[str(root/t)]=container
         run=threads._runs().get(t,kwargs['owner_run_id'])
         with authority.fence(str(root),t) as lease:
-            lease.begin(run.id,run.admission_sequence)
+            sequence=max((r.admission_sequence for r in threads._runs().list(t)
+                          if r.user_event_id==r.id),default=0)
+            lease.begin(run.id,sequence)
             lease.add_generation(run.id,container.id)
         return SimpleNamespace(container=container)
     def start(session):
@@ -375,6 +377,87 @@ def test_immediate_return_after_human_activation_cannot_run_failed_handoff_clean
     threads._execute_run(item['run_id'],item['tid'])
     assert threads._runs().get(tid,item['run_id']).status=='success'
     assert stopped=={'host-'+tid:1}
+
+
+@pytest.mark.parametrize('stop_failure,registry_lost',[(False,False),(True,False),(True,True)])
+def test_failed_return_before_successor_publication_never_queues_destroyed_work(handoff_host,monkeypatch,stop_failure,registry_lost):
+    tid,root,scheduler,stopped,_notifications,faults=handoff_host
+    from tests.test_browser_lifecycle_v12 import _ORIGINAL_DISPATCH_PENDING
+    monkeypatch.setattr(threads,'_dispatch_pending_after',_ORIGINAL_DISPATCH_PENDING)
+    original_gate=browser.BrowserManager.bounded_thread_gate
+    depth=0
+    armed=False
+    fail_pause=False
+    returned=[]
+    failed_sessions=[]
+    follower=[]
+    def control(argv,**_kwargs):
+        if fail_pause and argv[1]=='pause':
+            raise browser.BrowserUnavailable('Return pause outcome unconfirmed')
+        if argv[1]=='inspect':return b'false\n'
+        return b''
+    monkeypatch.setattr(browser,'_bounded_cli',control)
+    @contextmanager
+    def failed_return_between_handlers(t):
+        nonlocal depth,armed,fail_pause
+        with original_gate(t):
+            depth+=1
+            try:yield
+            finally:depth-=1
+        session=browser.BrowserManager.current_session(t)
+        if armed and depth==0 and session and session.paused:
+            armed=False
+            assert not any(r.id!=owner.id and r.work_id==owner.work_id for r in threads._runs().list(tid))
+            session.request_human(session.viewer_token,'a'*32)
+            assert session.human_active and not session.paused
+            fail_pause=True
+            faults['stop']=stop_failure
+            with pytest.raises(browser.BrowserUnavailable) as error:
+                session.return_control(session.viewer_token,'a'*32)
+            returned.append(str(error.value))
+            failed_sessions.append(session)
+            if registry_lost:
+                browser.BrowserManager._sessions.pop(tid)
+                browser.SandboxManager._containers.pop(str(root/tid))
+    monkeypatch.setattr(browser.BrowserManager,'bounded_thread_gate',failed_return_between_handlers)
+    class Chat:
+        agent=None
+        on_queue_state=None
+        pending_reply=lambda self:None
+        get_messages=lambda self:[]
+        get_raw_messages=get_messages
+        def message(self,text):
+            nonlocal armed
+            if follower:return 'Follower completed'
+            session=browser.BrowserManager.current_session(tid)
+            session.command('open',url='https://example.test/')
+            follower.append(threads._create_run(tid,'Accepted follower',origin='continuation'))
+            armed=True
+            raise ThreadPauseRequested('fairness pause before handoff publication')
+    monkeypatch.setattr(web.MANAGER,'get',lambda *_a,**_k:Chat())
+    owner=threads._create_run(tid,'Browser work',user_origin=True)
+    if stop_failure:
+        with pytest.raises(browser.BrowserUnavailable,match='exact stop unconfirmed'):
+            threads._execute_run(owner.id,tid)
+        assert threads._runs().get(tid,owner.id).status=='running'
+        session=failed_sessions[0]
+        assert session.closed and session.identity and session.viewer_error
+        assert threads._runs().get(tid,follower[0].id).status=='pending'
+        with authority.fence(str(root),tid) as state:
+            assert state.lease['generations']==['host-'+tid]
+        assert scheduler._q.empty()
+    else:
+        threads._execute_run(owner.id,tid)
+        assert threads._runs().get(tid,owner.id).status=='error'
+        assert browser.BrowserManager.current_session(tid) is None
+        assert stopped=={'host-'+tid:1}
+        queued=scheduler._q.get_nowait()
+        assert queued['run_id']==follower[0].id
+        fail_pause=False
+        threads._execute_run(queued['run_id'],queued['tid'])
+        assert threads._runs().get(tid,follower[0].id).status=='success'
+    assert returned
+    assert not any(r.id!=owner.id and r.work_id==owner.work_id for r in threads._runs().list(tid))
 
 
 @pytest.mark.parametrize('path',['parent','child'])

@@ -127,7 +127,8 @@ where reliability is harder than with frontier APIs.
   the viewer reconnects its current controller without reopening the website.
   **Return to Assist** ends human input, freezes execution until its same-work
   checkpoint resumes, and requires the agent to observe changed state before
-  further browser effects. Unrelated threads can progress during human control;
+  further browser effects. A failed Return errors the retained work only after
+  cleanup proves the browser stopped. Unrelated threads can progress during human control;
   trusted child work waits. Fairness pause and takeover share one ownership
   decision under the existing locks, so an active viewer has a running container.
   The shared container's background processes keep

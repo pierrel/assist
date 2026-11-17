@@ -4193,6 +4193,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         handoff_error = None
         try:
             with BrowserManager.bounded_thread_gate(tid), ExitStack() as handoff_scope:
+                if keep_browser and browser_session.viewer_error:
+                    raise BrowserUnavailable(browser_session.viewer_error)
                 if keep_browser and browser_session.human_requested:
                     state = handoff_scope.enter_context(
                         browser_authority.fence(MANAGER.root_dir, tid))
@@ -4236,9 +4238,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     _RESUME_SCHEDULER.commit(ticket)
                     handed_off = True
             finally:
-                if (not handed_off and keep_browser and not browser_session.human_active
-                        and (browser_session.paused or browser_session.human_requested)
-                        and BrowserManager.current_session(tid) is browser_session):
+                if (not handed_off and keep_browser and (browser_session.viewer_error
+                        or (not browser_session.human_active
+                            and (browser_session.paused or browser_session.human_requested)
+                            and BrowserManager.current_session(tid) is browser_session))):
                     try:
                         BrowserManager.cleanup(tid, browser_session)
                     finally:
