@@ -133,6 +133,8 @@ in both views. An ID shown in only one view keeps that meaning.
   container and releases the same-work pending continuation. Fresh observation
   followed by a new model response is required before further browser effects,
   so buffered pre-handoff actions cannot silently overwrite human changes.
+  Parent and child fairness pause decisions share the takeover thread gate and
+  session lock, so human activation and container freezing cannot interleave.
   Read-only worker metadata discovers replacement page IDs. A verified empty
   website set is also fresh state for the next model response; an unknown page
   or a failed transport by itself does not authorize effects.

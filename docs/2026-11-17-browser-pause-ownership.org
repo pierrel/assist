@@ -1,0 +1,48 @@
+#+title: Serialize browser takeover with fairness pausing
+#+date: 2026-11-17
+State: Reviewed host-only successor; deployment pending
+
+* Observed counterexamples
+Copilot round two identified the same check/pause race in two execution paths.
+The child refreeze callback read human_requested before acquiring the gate in
+pause(). A competing takeover could set the request in that gap, then the child
+froze the container without activating human control. The child successor waited
+for Return, which could not accept an inactive controller.
+
+The visible parent fairness path had the same unlocked check. Takeover in the
+gap requested control while the container was running, then fairness froze it.
+The outer handler activated human control without a resume, so viewer transport
+would reach a frozen container. Deterministic host-only regressions reproduced
+both failures against immutable candidate 0cd2f742.
+
+* Existing-lock correction
+Both paths now hold the existing parent thread gate followed by the session lock
+across the ownership decision and activation or pause. A request that wins first
+is activated without freezing; a request that arrives during pause waits, then
+sees the paused state and uses the existing verified resume path. Ordinary
+fairness still freezes the same generation. Cleanup, failed-stop proof, Run
+admission, native agent files and the fresh-model observation barrier are
+unchanged. There is no new helper, lifecycle record, worker protocol or image.
+
+* Causal acceptance
+Parent and child controls cover requests before the decision, a competing request
+at the pause boundary, and no takeover. An event proves that the competing
+request reached its gate before pause proceeds. The boundary hook forces the old
+unlocked gap deterministically; lock ownership is only used to arrange that
+interleaving, not as the acceptance assertion. Acceptance requires a running
+container and usable viewer transport under human control, pending successors,
+successful Return, and successful continuation of the same execution. The normal
+fairness controls require a frozen container before resuming.
+
+Focused checks passed 86 tests with five skips. The Firefox/Chromium handoff
+suite passed 23 tests in 11.09 seconds. The full suite passed 3,111 tests and
+15 subtests with 16 skips and one deselection in 121.03 seconds. Independent
+review accepted the lock order and causal controls, found no remaining blocker,
+and confirmed affected documentation alignment. A child-scope comment was
+corrected to describe both fairness pausing and human handoff.
+
+* Historical supersessions
+This corrects =2026-11-17-browser-human-control.org=, section =Existing owners and
+control flow=: retaining the browser on a fairness boundary also requires the
+pause ownership decision to be atomic with takeover. Its continuity, trusted
+client, native agent and owner-aware lifetime contracts remain unchanged.

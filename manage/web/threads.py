@@ -2688,10 +2688,11 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
 
     def refreeze_shared_execution() -> None:
         try:
-            if shared_session.human_requested:
-                shared_session.human_active = True
-            else:
-                shared_session.pause()
+            with BrowserManager.bounded_thread_gate(run.parent_thread_id), shared_session._lock:
+                if shared_session.human_requested:
+                    shared_session.human_active = True
+                else:
+                    shared_session.pause()
         except Exception:
             try:
                 BrowserManager.cleanup(run.parent_thread_id, shared_session)
@@ -2751,7 +2752,7 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                         shared_session = BrowserManager.resume_session(
                             run.parent_thread_id, session.work_id, session.user_request)
                     if shared_session is not None:
-                        # Refreeze before releasing the checkout and model slot.
+                        # Settle browser ownership before releasing the checkout and model slot.
                         child_scope.callback(refreeze_shared_execution)
                     else:
                         git_lifecycle.resume()
@@ -4013,8 +4014,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 keep_browser = browser_session is not None and not browser_session.closed
                 if keep_browser:
                     try:
-                        if not browser_session.human_requested:
-                            browser_session.pause()
+                        with BrowserManager.bounded_thread_gate(tid), browser_session._lock:
+                            if not browser_session.human_requested:
+                                browser_session.pause()
                     except Exception:
                         keep_browser = False
                         raise

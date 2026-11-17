@@ -377,6 +377,108 @@ def test_immediate_return_after_human_activation_cannot_run_failed_handoff_clean
     assert stopped=={'host-'+tid:1}
 
 
+@pytest.mark.parametrize('path',['parent','child'])
+@pytest.mark.parametrize('takeover',['before','during','none'])
+def test_takeover_and_fairness_pause_preserve_usable_controller(handoff_host,monkeypatch,path,takeover):
+    tid,root,scheduler,stopped,_notifications,_faults=handoff_host
+    sessions=[]
+    controls=[]
+    container_paused=False
+    requested,attempting=Event(),Event()
+    errors=[]
+    requester=None
+    original_gate=browser.BrowserManager.bounded_thread_gate
+    @contextmanager
+    def observed_gate(t):
+        if current_thread() is requester:attempting.set()
+        with original_gate(t):yield
+    monkeypatch.setattr(browser.BrowserManager,'bounded_thread_gate',observed_gate)
+    def control(argv,**_kwargs):
+        nonlocal container_paused
+        controls.append(argv[1])
+        if argv[1]=='pause':container_paused=True
+        elif argv[1]=='unpause':container_paused=False
+        return b''
+    monkeypatch.setattr(browser,'_bounded_cli',control)
+    def transport(*_a,**_k):
+        assert not container_paused, 'viewer transport reached a frozen container'
+        return json.dumps({'result':{'pages':[{'page_id':'page','title':'Synthetic form'}]}}).encode()
+    monkeypatch.setattr(browser,'_docker_exec',transport)
+    class Chat:
+        agent=None
+        on_queue_state=None
+        pending_reply=lambda self:None
+        get_messages=lambda self:[]
+        get_raw_messages=get_messages
+        def __init__(self,t):self.thread_id=t
+        def message(self,_text):
+            session=browser.BrowserManager.current_session(tid)
+            if self.thread_id==tid:
+                session.command('open',url='https://example.test/')
+                sessions.append(session)
+            if takeover=='before' and (path=='parent' or self.thread_id!=tid):
+                session.request_human(session.viewer_token,'a'*32)
+            raise ThreadPauseRequested('fairness boundary')
+        def resume(self):return 'same execution resumed'
+    monkeypatch.setattr(web.MANAGER,'get',lambda t,**_k:Chat(t))
+    owner=threads._create_run(tid,'Synthetic browser work',user_origin=True)
+    original_pause=browser.BrowserSession.pause
+    armed=False
+    def request_control():
+        try:sessions[0].request_human(sessions[0].viewer_token,'a'*32)
+        except Exception as error:errors.append(error)
+        finally:requested.set()
+    def pause_at_request(session):
+        nonlocal armed,requester
+        if armed:
+            armed=False
+            requester=Thread(target=request_control,daemon=True)
+            requester.start()
+            assert attempting.wait(3)
+            # Force the old check/pause gap when it is unlocked. With an outer
+            # gate, the competing request instead waits until pause is complete.
+            if not browser.BrowserManager.thread_gate(tid)._is_owned():
+                assert requested.wait(3)
+        original_pause(session)
+    monkeypatch.setattr(browser.BrowserSession,'pause',pause_at_request)
+    if path=='parent':
+        armed=takeover=='during'
+        threads._execute_run(owner.id,tid)
+        pending=next(r for r in threads._runs().list(tid) if r.status=='pending')
+    else:
+        threads._execute_run(owner.id,tid)
+        session=sessions[0]
+        assert session.paused and not session.human_requested
+        child_tid='sub-race'
+        (root/child_tid).mkdir()
+        (root/child_tid/'.subagent').touch()
+        child=threads._runs().create(child_tid,'delegate-agent','Synthetic child work',mode='child',
+            parent_thread_id=tid,parent_run_id=owner.id,dispatch_key='race-child')
+        armed=takeover=='during'
+        threads._execute_child_run(child)
+        pending=next(r for r in threads._runs().list(child_tid) if r.status=='pending')
+    if requester:
+        requester.join(3)
+        assert not requester.is_alive() and not errors
+    session=sessions[0]
+    if takeover=='none':
+        assert session.paused and container_paused and not session.human_active
+    else:
+        assert session.human_active and not session.paused and not container_paused
+        assert session.viewer_command(session.viewer_token,'a'*32,'tabs')['result']['pages']
+        # A queued successor must remain pending while the usable viewer owns it.
+        if path=='parent':threads._execute_run(pending.id,pending.thread_id)
+        else:threads._execute_child_run(pending)
+        assert threads._runs().get(pending.thread_id,pending.id).status=='pending'
+        session.return_control(session.viewer_token,'a'*32)
+        assert session.paused and container_paused and not session.human_active
+    if path=='parent':threads._execute_run(pending.id,pending.thread_id)
+    else:threads._execute_child_run(pending,resume=True)
+    assert threads._runs().get(pending.thread_id,pending.id).status=='success'
+    if path=='parent':assert stopped=={'host-'+tid:1}
+    else:assert session.paused and not session.closed
+
+
 @pytest.mark.skipif(not os.getenv("ASSIST_BROWSER_HANDOFF_CHROMIUM"),
                     reason="explicit disposable local Chromium acceptance")
 def test_same_page_human_edit_handback_and_competing_run(wired, monkeypatch):

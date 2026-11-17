@@ -128,7 +128,9 @@ where reliability is harder than with frontier APIs.
   **Return to Assist** ends human input, freezes execution until its same-work
   checkpoint resumes, and requires the agent to observe changed state before
   further browser effects. Unrelated threads can progress during human control;
-  trusted child work waits. The shared container's background processes keep
+  trusted child work waits. Fairness pause and takeover share one ownership
+  decision under the existing locks, so an active viewer has a running container.
+  The shared container's background processes keep
   running while the human controls it.
   If tabs were closed or replaced, the handback reports current page IDs or an
   empty website set. A fresh empty state permits reopening only after another
