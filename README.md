@@ -118,6 +118,27 @@ where reliability is harder than with frontier APIs.
   On restart, a new managed generation waits for confirmed cleanup. Browser
   and shell share the sandbox's network and mounts.
 
+  **Human browser control.** Open **Browser control** from the thread, choose
+  **Take over**, and wait for the current model/tool step to finish. Firefox
+  displays and controls the same Chromium session, including its live tabs and
+  unsent fields. Select a tab, tap its image to focus a website field, enter text
+  in the masked toolbar and choose **Type**. **Select all**, backspace, Enter,
+  scrolling buttons and swipe scrolling operate on that remote page. Reloading
+  the viewer reconnects its current controller without reopening the website.
+  **Return to Assist** ends human input, freezes execution until its same-work
+  checkpoint resumes, and requires the agent to observe changed state before
+  further browser effects. Unrelated threads can progress during human control;
+  trusted child work waits. The shared container's background processes keep
+  running while the human controls it. Cancellation and newer direct messages
+  retire the old viewer/session through normal exact-stop cleanup. The existing
+  ownership-aware age check retains active human work. A service restart ends
+  live-page continuity; normal stored-login recovery remains available.
+  This is a remote page in Firefox, not a native Firefox site tab: native site
+  autofill, DOM selection, file upload, clipboard and local passkeys are not
+  provided by this first viewer. It uses the existing trusted-network web UI
+  access boundary, a session control token and same-origin input checks; keep
+  the web app on its existing trusted client network.
+
 - **Thread data and source links.** Managed threads keep host-owned text records
   in a SQLite datastore beside their description, outside the workspace. Host code
   writes non-source text records; the agent can get, list, and search records in

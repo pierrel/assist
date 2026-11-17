@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import hmac
 import http.client
 import hashlib
 import json
@@ -123,7 +124,7 @@ def _bounded_cli(argv: list[str], *, payload: bytes = b"",
 
 
 def _docker_exec(container_id: str, payload: bytes, timeout: float = 20,
-                 *, in_sandbox: bool = False) -> bytes:
+                 *, in_sandbox: bool = False, limit: int = 65536) -> bytes:
     executable = "/opt/assist-browser/bin/python" if in_sandbox else "python"
     runtime = (["-e", "BROWSER_RUNTIME_DIR=/run/assist-browser"]
                if in_sandbox else [])
@@ -132,7 +133,7 @@ def _docker_exec(container_id: str, payload: bytes, timeout: float = 20,
          container_id,
          executable,
          "/opt/assist/browser_runner.py", "call"],
-        payload=payload, limit=65536, timeout=timeout)
+        payload=payload, limit=limit, timeout=timeout)
 
 
 def _docker_download(container_id: str, source: str, timeout: float = 20,
@@ -231,6 +232,16 @@ class BrowserSession:
         self.startup_uncertain = False
         self.closed = False
         self.paused = False
+        self.human_requested = False
+        self.human_active = False
+        self.viewer_token = uuid4().hex
+        self.human_client = None
+        self.held_runs = {}
+        self.on_control_end = lambda: None
+        self.needs_observation = False
+        self.handoff_observed = False
+        self._viewer_at = 0.0
+        self.viewer_error = None
         self._lock = threading.RLock()
 
     def _start(self):
@@ -334,12 +345,15 @@ class BrowserSession:
 
     def _fence_command(self) -> None:
         with authority.fence(self.threads_root, self.thread_id) as state:
-            sequence = self._latest_direct_sequence()
-            lease = state.lease
-            if (lease is None or lease["owner_run_id"] != self.run_id
-                    or lease["sequence"] != sequence
-                    or self.sandbox_generation not in lease["generations"]):
-                raise BrowserUnavailable("browser turn generation changed")
+            self._check_fenced_command(state)
+
+    def _check_fenced_command(self, state) -> None:
+        sequence = self._latest_direct_sequence()
+        lease = state.lease
+        if (lease is None or lease["owner_run_id"] != self.run_id
+                or lease["sequence"] != sequence
+                or self.sandbox_generation not in lease["generations"]):
+            raise BrowserUnavailable("browser turn generation changed")
 
     def close(self):
         with self._lock:
@@ -348,6 +362,82 @@ class BrowserSession:
                 self._capture_storage()
             finally:
                 self._stop()
+            self.human_active = self.human_requested = False
+            self.viewer_token = uuid4().hex
+            self.on_control_end()
+
+    def request_human(self, token, client):
+        """Request a cooperative boundary; ownership changes only after unwind."""
+        with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
+            self._viewer_check(token)
+            if self.human_client not in (None, client):
+                raise BrowserUnavailable("another viewer controls this browser")
+            if self.paused:
+                BrowserManager.resume_session(self.thread_id, self.work_id, self.user_request)
+                self.human_active = True
+            self.human_client = client
+            self.human_requested = True
+
+    def _viewer_check(self, token):
+        if self.closed or self.identity is None or not hmac.compare_digest(self.viewer_token, token):
+            raise BrowserUnavailable("browser viewer ended; reopen it from the thread")
+        self._fence_command()
+
+    def viewer_command(self, token, client, action, **args):
+        gate = BrowserManager.thread_gate(self.thread_id)
+        if not gate.acquire(blocking=False):
+            raise BrowserUnavailable("viewer is busy; wait before another request")
+        try:
+            return self._viewer_command_locked(token, client, action, **args)
+        finally:
+            gate.release()
+
+    def _viewer_command_locked(self, token, client, action, **args):
+        with self._lock:
+            self._viewer_check(token)
+            if not self.human_active or self.human_client != client:
+                raise BrowserUnavailable("this viewer does not own browser control")
+            now = time.monotonic()
+            if now - self._viewer_at < 0.05:
+                raise BrowserUnavailable("viewer is busy; wait before another request")
+            self._viewer_at = now
+            payload = json.dumps({"session": self.token, "operation": "viewer",
+                                  "args": {"action": action, **args}}).encode()
+            if len(payload) > 12000:
+                raise BrowserUnavailable("viewer input exceeds limit")
+            response = json.loads(_docker_exec(self.identity.generation, payload,
+                timeout=10, in_sandbox=True, limit=512 * 1024))
+            return response
+
+    def return_control(self, token, client):
+        """Freeze before making the same checkpoint eligible for the model slot."""
+        with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
+            self._viewer_check(token)
+            if not self.human_active or self.human_client != client:
+                raise BrowserUnavailable("this viewer does not own browser control")
+            try:
+                self.pause()
+            except Exception:
+                try:
+                    paused = _bounded_cli(["docker", "inspect", "--format", "{{.State.Paused}}",
+                                           self.sandbox_generation], limit=16, timeout=5) == b"true\n"
+                except Exception:
+                    paused = False
+                if not paused:
+                    self.viewer_error = "Browser handback could not confirm pause. The live session ended; saved files remain."
+                    self.paused = True  # Skip capture against a possibly frozen worker.
+                    try:
+                        BrowserManager.cleanup(self.thread_id, self)
+                    finally:
+                        SandboxManager.cleanup(self.work_dir, self.sandbox_backend.container)
+                    raise BrowserUnavailable(self.viewer_error) from None
+                self.paused = True
+            self.human_active = self.human_requested = False
+            self.human_client = None
+            self.viewer_token = uuid4().hex
+            self.needs_observation = True
+            self.handoff_observed = False
+            self.on_control_end()
 
     def _capture_storage(self):
         if self.identity is None or self.paused:
@@ -415,6 +505,8 @@ class BrowserSession:
 
     def command(self, operation: str, **args):
         with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
+            if self.human_active:
+                raise BrowserUnavailable("browser is controlled by its human viewer")
             if self.closed:
                 raise BrowserUnavailable("browser turn has ended")
             if self.paused:
@@ -423,6 +515,8 @@ class BrowserSession:
                 raise BrowserUnavailable(
                     "browser startup outcome is unconfirmed for this Run")
             self._fence_command()
+            if self.needs_observation and operation != "observe":
+                return {"error": "Human control changed this page. Call browser_observe before further browser actions."}
             if operation in {"open", "preflight"}:
                 _url_target(args["url"])
                 if self.identity is None:
@@ -441,10 +535,19 @@ class BrowserSession:
                     timeout=20, in_sandbox=True))
                 if not isinstance(parsed, dict):
                     raise BrowserUnavailable("browser worker returned invalid data")
+                if operation == "observe" and "result" in parsed:
+                    self.handoff_observed = True
                 return parsed
             except Exception:
                 self._stop()
                 raise
+
+    def model_boundary(self):
+        """Only a new model response after fresh observation can authorize effects."""
+        with self._lock:
+            if self.handoff_observed:
+                self.needs_observation = False
+                self.handoff_observed = False
 
     def save_download(self, download_id: str, filename: str | None = None):
         with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
@@ -538,6 +641,9 @@ class BrowserManager:
             if session is None:
                 return None
             with session._lock:
+                if session.human_requested or session.human_active:
+                    from assist.thread_queue import ThreadPauseRequested
+                    raise ThreadPauseRequested("human browser control owns this execution")
                 if (session.closed
                         or session.sandbox_backend is None
                         or session.work_id != work_id
