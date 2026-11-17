@@ -223,7 +223,8 @@ Snapshot reads and background probes do not clear notifications.
   `/agent/hermes` across user turns, including native compression session rotation.
   A lost process ends the Run without replay. A held model slot is released only
   after verified stop or parking; completed sandbox teardown is retained if relay
-  drain must be retried. Git diffs and Merge remain available;
+  drain must be retried. A first-turn cleanup failure does not discard accepted
+  follow-up messages. Git diffs and Merge remain available;
   the Deep Agents Review action is not offered for native threads.
   Available tools are files, terminal, skills, memory and helpers. Native browser,
   web search and interactive approvals are unavailable; commands requiring approval

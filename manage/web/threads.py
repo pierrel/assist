@@ -1720,7 +1720,7 @@ def _finish_initialization_failure(
     tid: str, run_id: str, pending: str, domain: str | None,
     rider: ContextRider | None,
 ) -> None:
-    """Persist the terminal outcome or retry the same durable initializer."""
+    """Persist setup failure or retry the same durable initializer."""
     try:
         _fail_initialization(tid, run_id, pending)
     except RunNotFound:
@@ -1827,13 +1827,6 @@ def _initialize_thread_active(
                                    lambda: _verify_initializer_owner(tid, run_id))
         if _settle_cancelled_initializer(tid, run_id):
             return
-        _execute_run(run_id, tid)
-        # The same race exists between the post-setup read and the Run claim.
-        # A claim that wins makes DELETE return 409; otherwise settle the exact
-        # durable cancellation before releasing the initialization owner.
-        if _settle_cancelled_initializer(tid, run_id):
-            return
-        _INITIALIZATION_SCHEDULER.complete(run_id, tid)
     except Exception as e:
         logging.error("Initialization failed for thread %s: %s", tid, e, exc_info=True)
         try:
@@ -1841,6 +1834,16 @@ def _initialize_thread_active(
         except Exception:
             pending = ""
         _finish_initialization_failure(tid, run_id, pending, domain, rider)
+        return
+
+    # Setup is complete. The engine owns execution outcomes and cleanup; a
+    # propagated unconfirmed stop must not fail this Run or its accepted followers.
+    _INITIALIZATION_SCHEDULER.complete(run_id, tid)
+    _execute_run(run_id, tid)
+    # The same race exists between the post-setup read and the Run claim.
+    # A claim that wins makes DELETE return 409; otherwise settle the exact
+    # durable cancellation before releasing the initialization owner.
+    _settle_cancelled_initializer(tid, run_id)
 
 
 def _reset_unexecuted_workspace(tid: str) -> None:
@@ -1863,7 +1866,7 @@ def _reset_unexecuted_workspace(tid: str) -> None:
 
 
 def _fail_initialization(tid: str, run_id: str, pending: str) -> None:
-    """Terminalize a Run that failed before or during initialization."""
+    """Terminalize failed setup and its pending followers before execution."""
     message = "Thread setup failed; create a new thread."
     with _RUN_ADMISSION_LOCK:
         failed = _runs().fail_initialization(tid, run_id, message)
@@ -6231,12 +6234,12 @@ class _PriorityRunQueue:
 
 
 class _InitializationScheduler:
-    """One dedicated worker for bounded first-thread setup.
+    """One dedicated worker for first-thread setup and its initial Run.
 
-    A repository clone may block on a remote indefinitely. It must never occupy
-    the serial Run scheduler, whose job is to drain recoveries and turn resumes.
-    The durable Run plus its ``initializing``/``cloning`` status remain the
-    recovery authority; this queue is only a wake-up notification.
+    Repository setup can block on remote I/O. Keep it off the serial Run
+    scheduler, whose job is to drain recoveries and turn resumes. The durable
+    Run plus its ``initializing``/``cloning`` status own setup recovery; after
+    setup, the engine owns execution outcomes. This queue is only a notification.
     """
 
     def __init__(self) -> None:

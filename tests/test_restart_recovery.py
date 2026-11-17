@@ -549,7 +549,7 @@ def test_initialization_failure_retry_repairs_only_the_status_projection(wired, 
     monkeypatch.setattr(scheduler, "retry", lambda *job: retries.append(job))
     monkeypatch.setattr(scheduler, "complete", lambda *job: completions.append(job))
     monkeypatch.setattr(threads, "_set_status", fail_once)
-    monkeypatch.setattr(threads, "_execute_run",
+    monkeypatch.setattr(threads, "_settle_cancelled_initializer",
                         lambda *_args: (_ for _ in ()).throw(RuntimeError("setup failed")))
 
     threads._initialize_thread(tid, run.id, None)
@@ -588,8 +588,8 @@ def test_initialization_failure_requeues_the_same_run_until_one_final_dispatch(
     monkeypatch.setattr(threads, "_INITIALIZATION_SCHEDULER", scheduler)
     monkeypatch.setattr(scheduler, "retry", lambda *job: retries.append(job))
     monkeypatch.setattr(scheduler, "complete", lambda *job: completions.append(job))
-    monkeypatch.setattr(threads, "_execute_run",
-                        lambda *_args: (_ for _ in ()).throw(RuntimeError("clone failed")))
+    monkeypatch.setattr(threads, "_settle_cancelled_initializer",
+                        lambda *_args: (_ for _ in ()).throw(RuntimeError("setup failed")))
 
     threads._initialize_thread(tid, run.id, None)
 
@@ -597,6 +597,7 @@ def test_initialization_failure_requeues_the_same_run_until_one_final_dispatch(
     assert [(item.id, item.work_id, item.status) for item in service.list(tid)] == [
         (run.id, "first-work", "pending")]
 
+    monkeypatch.setattr(threads, "_settle_cancelled_initializer", lambda *_args: False)
     monkeypatch.setattr(threads, "_execute_run", execute)
     threads._initialize_thread(retries[0][1], retries[0][0], retries[0][2])
 
@@ -617,8 +618,8 @@ def test_persistent_initialization_failure_stays_owned_and_requeued(wired, monke
     monkeypatch.setattr(scheduler, "retry", lambda *job: retries.append(job))
     monkeypatch.setattr(service, "_write",
                         lambda *_args: (_ for _ in ()).throw(OSError("store unavailable")))
-    monkeypatch.setattr(threads, "_execute_run",
-                        lambda *_args: (_ for _ in ()).throw(RuntimeError("clone failed")))
+    monkeypatch.setattr(threads, "_settle_cancelled_initializer",
+                        lambda *_args: (_ for _ in ()).throw(RuntimeError("setup failed")))
 
     threads._initialize_thread(tid, run.id, None)
     threads._initialize_thread(tid, run.id, None)
