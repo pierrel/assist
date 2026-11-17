@@ -114,16 +114,18 @@ def test_corrupt_pi_transcript_marks_the_claimed_run_error_and_dispatches_follow
 
 
 
-def test_merge_refuses_pi_before_constructing_a_deep_thread(monkeypatch) -> None:
-    monkeypatch.setattr(threads, "_is_pi_thread", lambda tid: True)
+def test_merge_refuses_pi_before_constructing_a_deep_thread(pi_threads_root, monkeypatch) -> None:
+    tid = threads.MANAGER.reserve_visible("pi", thread_id="pi-thread")
+    assert read_thread_engine(pi_threads_root / tid).name == "pi"
     monkeypatch.setattr(
         threads.MANAGER, "get",
         lambda *args, **kwargs: pytest.fail("Pi must not construct a Deep thread"))
 
     with pytest.raises(HTTPException) as error:
-        threads.merge_thread("pi-thread")
+        threads.merge_thread(tid)
 
     assert error.value.status_code == 409
+    assert error.value.detail == "Pi threads are read-only"
 
 
 def test_invalid_engine_marker_returns_controlled_web_errors(pi_threads_root) -> None:
