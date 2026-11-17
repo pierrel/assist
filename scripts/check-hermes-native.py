@@ -48,6 +48,7 @@ A='hermes-proof-a';B='hermes-proof-b';C='hermes-proof-c'
 WORK=Path(threads.MANAGER.thread_default_working_dir(A))
 CHILD='Create /workspace/child-note.txt containing blue.'
 PROMPT='Have a helper create a note saying blue, then tell me it is done.'
+background_observations=[]; process_results=[]; native_calls=[]; parked_provider_denials=[]
 requests=[];events=[];errors=[];lock=threading.Lock()
 child_ready=threading.Event();b_done=threading.Event();a_done=threading.Event()
 parent_ready=threading.Event();c_done=threading.Event()
@@ -65,14 +66,32 @@ def answer(p):
     users=[text(m) for m in msgs if m.get('role')=='user'];latest=users[-1] if users else ''
     tools=[m for m in msgs if m.get('role')=='tool']
     def call(name,args):
+        native_calls.append({'name':name,'args':args})
         if name=='write_file':write_calls.append(args)
         return {'role':'assistant','content':None,'tool_calls':[{'id':'call-'+str(len(requests)),'type':'function','function':{'name':name,'arguments':json.dumps(args)}}]}
     if latest in {'COMPETITOR_B','COMPETITOR_C'}:
+        import httpx
         container=sm.SandboxManager.current_container(str(WORK));container.reload()
-        assert container.attrs['State']['Paused'],'A generation must be frozen before B model'
-        name=latest[-1]
-        events.append(name+'-model')
+        frozen=False
+        assert container.attrs['State']['Paused']==frozen
+        relay=threads._HERMES_RUNTIME.turns[A].relay
+        assert relay.parked and not relay.connections
+        if latest=='COMPETITOR_B':
+            with httpx.Client(transport=httpx.HTTPTransport(uds=str(relay.socket_path)),timeout=3,trust_env=False) as http:
+                denied=http.post('http://relay/v1/chat/completions',json={'model':'hermes-proof','messages':[{'role':'user','content':'UNADMITTED_PROBE'}]})
+            parked_provider_denials.append(denied.status_code);assert denied.status_code==409
+            (WORK/'background-go').write_text('finish')
+            deadline=time.monotonic()+5
+            while not (WORK/'background-done.txt').exists() and time.monotonic()<deadline:time.sleep(.02)
+            completed=(WORK/'background-done.txt').exists()
+            assert completed != frozen, ('causal completion control',completed,frozen)
+            if completed:assert (WORK/'background-done.txt').read_text()=='RESULT-731\n'
+            background_observations.append({'at':'B-model','completed_while_parked':completed,'docker_paused':frozen})
+        name=latest[-1];events.append(name+'-model')
         return {'role':'assistant','content':name+' done.'}
+    assert latest!='UNADMITTED_PROBE', 'host-denied request reached upstream'
+    if CHILD in latest or latest in {PROMPT,'Change that note to green.'}:
+        assert threads.THREAD_QUEUE.current_handle().thread_id==A, 'A upstream request before readmission'
     if latest=='Remove the scratch folder.':
         tail=[]
         for m in reversed(msgs):
@@ -95,8 +114,20 @@ def answer(p):
         if count==1:return call('write_file',{'path':'/workspace/child-note.txt','content':'green\n'})
         return {'role':'assistant','content':'The note now says green.'}
     if CHILD in latest:
-        if not tools:return call('write_file',{'path':'/workspace/child-note.txt','content':'blue\n'})
-        return {'role':'assistant','content':'The note says blue.'}
+        if not tools:return call('write_file',{'path':'/workspace/background-writer.py','content':'import pathlib,time\np=pathlib.Path("/workspace")\nwith (p/"background-starts.txt").open("a") as f:f.write("START\\n")\nfor n in range(600):\n if (p/"background-go").exists():break\n time.sleep(.05)\nelse:raise RuntimeError("fixture gate timed out")\nwith (p/"background-effects.txt").open("a") as f:f.write("EFFECT-731\\n")\n(p/"background-done.txt").write_text("RESULT-731\\n")\nprint("RESULT-731",flush=True)\n'})
+        if len(tools)==1:return call('terminal',{'command':'python /workspace/background-writer.py','background':True})
+        if len(tools)==2:
+            launched=json.loads(text(tools[-1]));assert launched.get('session_id'),launched
+            return call('write_file',{'path':'/workspace/child-note.txt','content':'blue\n'})
+        if len(tools)==3:return call('tool_describe',{'names':['process_manage']})
+        if len(tools)==4:
+            assert 'process_manage' in text(tools[-1]),tools[-1]
+            launched=json.loads(text(tools[1]))
+            return call('tool_call',{'calls':[{'name':'process_manage','arguments':{'action':'wait','session_id':launched['session_id'],'timeout':5}}]})
+        assert len(tools)==5, tools
+        result=json.loads(text(tools[-1]));process_results.append(result)
+        assert result.get('exit_code')==0 and 'RESULT-731' in json.dumps(result),result
+        return {'role':'assistant','content':'The note says blue; background result RESULT-731 received.'}
     if latest==PROMPT:
         if not tools:return call('delegate_task',{'tasks':[{'goal':CHILD}]})
         return {'role':'assistant','content':'The helper created the blue note.'}
@@ -116,7 +147,7 @@ class Provider(http.server.BaseHTTPRequestHandler):
                 body=('data: '+json.dumps(out)+'\n\ndata: [DONE]\n\n').encode();content_type='text/event-stream'
             else:body=json.dumps(out).encode();content_type='application/json'
             self.send_response(200);self.send_header('Content-Type',content_type);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
-        except BaseException as error:errors.append(repr(error));self.send_error(500)
+        except BaseException as error:(ROOT/'failed-request.json').write_text(json.dumps(p,indent=2));errors.append(repr(error));self.send_error(500)
 
 provider=http.server.ThreadingHTTPServer(('127.0.0.1',0),Provider)
 threading.Thread(target=provider.serve_forever,daemon=True).start()
@@ -189,7 +220,7 @@ try:
     assert child_ready.wait(45),'native child boundary not reached from actual browser submission'
     competitor=threads._create_run(B,'COMPETITOR_B');threads._RESUME_SCHEDULER.submit(competitor.id,B)
     assert parent_ready.wait(60),'native parent did not reach its second parking boundary'
-    assert write_calls==[{'path':'/workspace/child-note.txt','content':'blue\n'}], write_calls
+    assert [call for call in write_calls if call['path']=='/workspace/child-note.txt']==[{'path':'/workspace/child-note.txt','content':'blue\n'}], write_calls
     assert (WORK/'child-note.txt').read_text()=='blue\n'
     # Accept the next user turn while the first invocation is still paused.
     second=client.post(f'/thread/{A}/message',data={'text':'Change that note to green.'},follow_redirects=False)
@@ -223,7 +254,11 @@ try:
     assert blocked.status_code==303 and a_done.wait(30)
     assert (WORK/'keep'/'note').read_text()=='retain'
     assert not errors,errors
-    report={'approval_unavailable_preserved_file':True,'status':'PASS','events':events,'http_create':response.status_code,'browser':browser.status_code,'phone':phone.status_code,'public_messages':messages,'limits':'Actual browser create and two message POSTs, real native runtime/queue/container, browser HTML and authenticated phone history. Fake upstream/network:none; two native-boundary rendezvous and two competing threads; the accepted second user turn waits for the original continuation. Native dangerous-command approval is unavailable and denies without deleting the fixture. This is deterministic capability coverage, not model-quality or live-egress evidence.'}
+    assert len(process_results)==1,process_results
+    assert (WORK/'background-starts.txt').read_text()=='START\n'
+    assert (WORK/'background-effects.txt').read_text()=='EFFECT-731\n'
+    assert len([c for c in native_calls if c['name']=='tool_call' and c['args']['calls'][0]['name']=='process_manage'])==1
+    report={'background_result_once':process_results,'native_calls':native_calls,'provider_request_count':len(requests),'parked_provider_denials':parked_provider_denials,'experiment':'native background completion under cooperative model suspension','background_observations':background_observations,'background_script_execution':'python /workspace/background-writer.py','approval_unavailable_preserved_file':True,'status':'PASS','events':events,'http_create':response.status_code,'browser':browser.status_code,'phone':phone.status_code,'public_messages':messages,'limits':'Actual browser create and two message POSTs, real native runtime/queue/container, browser HTML and authenticated phone history. Fake upstream/network:none; two native-boundary rendezvous and two competing threads; the accepted second user turn waits for the original continuation. A supported native background script completes during B; deferred process_manage returns its exact result once after readmission, with one launch/effect and no admitted A provider request during B. Native dangerous-command approval is unavailable and denies without deleting the fixture. This is deterministic capability coverage, not model-quality or live-egress evidence.'}
 finally:
     b_done.set();c_done.set()
     for tid in (A,B,C):

@@ -113,7 +113,7 @@
 <title>C25&#45;&gt;C26</title>
 <path fill="none" stroke="#49647d" d="M707.14,-709.68C744,-691.66 793.18,-667.62 831.55,-648.86"/>
 <polygon fill="#49647d" stroke="#49647d" points="832.5,-651.13 837.71,-645.85 830.35,-646.73 832.5,-651.13"/>
-<text xml:space="preserve" text-anchor="middle" x="882.54" y="-672.65" font-family="DejaVu Sans" font-size="11.00">start / drain / freeze / resume / verified stop</text>
+<text xml:space="preserve" text-anchor="middle" x="879.16" y="-672.65" font-family="DejaVu Sans" font-size="11.00">start / model drain / resume / verified stop</text>
 </g>
 <!-- C24&#45;&gt;C12 -->
 <g id="edge4" class="edge">

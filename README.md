@@ -218,12 +218,18 @@ Snapshot reads and background probes do not clear notifications.
   browser or phone-API threads; Deep Agents remains the default. The pinned whole
   Hermes runtime owns its prompts, conversation, skills, memory and joined helpers.
   Assist owns the existing queue, Run authority, sandbox and Git publication.
-  When another thread waits, Hermes drains model/tool work and freezes its sandbox;
-  the same invocation resumes after the competitor. Native history persists in
+  When another thread waits, Hermes uses healthy native hooks to wait for active
+  foreground tool/model calls to finish and block new native boundaries. Hook failures cannot grant
+  model access: the host relay independently denies parked requests. Independent background computation
+  may finish while its model admission is parked; the same invocation resumes
+  after the competitor and can retrieve that result. Native history persists in
   `/agent/hermes` across user turns, including native compression session rotation.
   A lost process ends the Run without replay. A held model slot is released only
-  after verified stop or parking; completed sandbox teardown is retained if relay
-  drain must be retried. A first-turn cleanup failure does not discard accepted
+  after verified model parking or provider revocation and drain. Unconfirmed
+  container cleanup retains its nonterminal Run, generation and Git hold without
+  blocking unrelated model work; an unconfirmed provider drain still holds the
+  model slot. Completed sandbox teardown is retained if relay drain must be retried.
+  A first-turn cleanup failure does not discard accepted
   follow-up messages. Git diffs and Merge remain available;
   the Deep Agents Review action is not offered for native threads.
   Available tools are files, terminal, skills, memory and helpers. Native browser,

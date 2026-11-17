@@ -351,9 +351,13 @@ their explicit summary handoff creates an independent Deep Agents thread.
 
 - *C25 Native host adapter.* [[file:../assist/hermes_runtime.py][HermesRuntimeManager]]
   retains the same invocation across C4's same-work Run successors. Existing C8
-  generation authority owns creation, Docker freeze/unfreeze and verified stop.
-  C4 does not release model admission until provider drain and whole-generation
-  freeze or stop are confirmed. Startup loss is reported without replay.
+  generation authority owns creation and verified stop. C4 releases model admission
+  after cooperative model parking or exact-work provider revocation and drain.
+  Independent background tools may finish while parked; the same native process
+  consumes their results after readmission. Failed container cleanup keeps its
+  nonterminal Run and generation/Git ownership while unrelated model work proceeds.
+  Failed provider drain still retains the slot. Startup reaps generations before
+  recovery; lost native work is reported without replay.
 - *C24 Native provider relay.* [[file:../assist/hermes_provider_relay.py][The private Unix relay]]
   checks the current Run/queue admission and original generation lease for every
   parent, child and auxiliary model request. Native hooks coordinate drain;

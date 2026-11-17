@@ -3297,7 +3297,14 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
         failure = error
         # A failed release fence retains the captured slot. Retry exact-work
         # teardown before preserving files and releasing that same handle.
-        stopped = _HERMES_RUNTIME.stop_work(tid, run.work_id)
+        try:
+            stopped = _HERMES_RUNTIME.stop_work(tid, run.work_id)
+        except Exception:
+            # Failed cleanup retains the Run and generation. Other threads need
+            # only this work's relay revoked and drained before model access.
+            if handle is not None and _HERMES_RUNTIME.revoke_model(tid, run.work_id):
+                THREAD_QUEUE._release_if_holder(handle)
+            raise
         if stopped:
             preserve_failure()
             git_scope.close()

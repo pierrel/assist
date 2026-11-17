@@ -31,7 +31,7 @@ digraph Boundaries {
   C21 [label="C21  Host user systemd\nindependent of web worker", fillcolor="#f3f3f3"];
 
   C25 -> C8 [label="existing lifecycle authority"];
-  C25 -> C26 [label="start / drain / freeze / resume / verified stop"];
+  C25 -> C26 [label="start / model drain / resume / verified stop"];
   C26 -> C24 [label="all native model traffic"];
   C24 -> C12 [label="admitted exact generation only"];
   C26 -> C9 [label="native history + workspace", style=dashed];

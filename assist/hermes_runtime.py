@@ -9,7 +9,6 @@ import shutil
 import tempfile
 import threading
 
-from assist.browser.manager import _bounded_cli
 from assist.browser import authority
 from assist.hermes_provider_relay import HermesProviderRelay, HermesRelayError
 from assist.model_manager import current_model_config
@@ -119,7 +118,6 @@ class HermesRuntimeManager:
             turn.relay.admitted = lambda: self._provider_admitted(turn, admitted)
             if self.sandboxes.current_container(work_dir) is not turn.backend.container:
                 raise HermesRuntimeError("Retained Hermes generation changed")
-            _bounded_cli(["docker", "unpause", turn.backend.container.id], limit=4096, timeout=10)
             turn.relay.resume()
             turn.paused = False
         while True:
@@ -133,7 +131,6 @@ class HermesRuntimeManager:
                     raise HermesRuntimeError("Native Hermes turn did not complete") from error
                 return result["reply"]
             if handle.pause_requested and turn.relay.request_pause():
-                _bounded_cli(["docker", "pause", turn.backend.container.id], limit=4096, timeout=10)
                 turn.relay.confirm_parked()
                 turn.paused = True
                 raise ThreadPauseRequested()
@@ -156,15 +153,13 @@ class HermesRuntimeManager:
             return False
 
     def release_slice(self, thread_id: str):
-        """Prove a retained generation is frozen, or stop it before queue release."""
+        """Prove native model admission is parked, or stop before queue release."""
         with self.lock:
             turn = self.turns.get(thread_id)
             if turn is None:
                 return
             if turn.paused:
-                turn.backend.container.reload()
-                if (not turn.backend.container.attrs["State"]["Paused"]
-                        or not turn.relay.parked or turn.relay.connections):
+                if not turn.relay.parked or turn.relay.connections:
                     raise HermesRuntimeError("Hermes parking is unconfirmed")
                 return
             self.stop(thread_id)
@@ -201,6 +196,16 @@ class HermesRuntimeManager:
                 if turn.work_id != work_id:
                     return False
                 self.stop(thread_id)
+            return True
+
+    def revoke_model(self, thread_id: str, work_id: str) -> bool:
+        """Drain this work's provider relay while retaining its cleanup ownership."""
+        with self.lock:
+            turn = self.turns.get(thread_id)
+            if turn is not None:
+                if turn.work_id != work_id:
+                    return False
+                turn.relay.close()
             return True
 
     def stop(self, thread_id: str):

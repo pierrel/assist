@@ -14,19 +14,25 @@ def test_paused_proof_serializes_retirement_before_competitor_admission(tmp_path
     retiring = threading.Event()
     removed = threading.Event()
     errors = []
-    def reload():
+    def parked():
         inspecting.set()
         assert finish_inspection.wait(2)
         if removed.is_set():
             raise RuntimeError("generation disappeared during paused proof")
-    container = SimpleNamespace(reload=reload, attrs={"State": {"Paused": True}})
+        return True
+    class Relay:
+        parked = property(lambda self: parked())
+        connections = {}
+        def stop_admission(self): pass
+        def close(self): pass
+    container = SimpleNamespace()
     manager = HermesRuntimeManager(sandbox_manager=SimpleNamespace(
         cleanup_verified=lambda *_args: removed.set()))
     control = tmp_path / "control"
     control.mkdir()
     manager.turns["native"] = SimpleNamespace(work_id="work", work_dir="workspace", paused=True,
         backend=SimpleNamespace(container=container), control_dir=control,
-        relay=SimpleNamespace(parked=True, connections={}, stop_admission=lambda: None, close=lambda: None))
+        relay=Relay())
     queue = ThreadAffinityQueue()
     def release():
         try:
@@ -103,3 +109,14 @@ def test_retirement_retry_keeps_verified_container_stop_after_cleanup_failure(
     assert stopped == ["kill", "wait"] * (2 if failure == "map" else 1)
     assert len(drain_attempts) == (1 if failure == "map" else 2)
     assert not control.exists()
+
+
+def test_model_revocation_keeps_cleanup_owner_and_rejects_other_work():
+    closed = []
+    runtime = HermesRuntimeManager()
+    turn = SimpleNamespace(work_id="original", relay=SimpleNamespace(close=lambda: closed.append(True)))
+    runtime.turns["native"] = turn
+    assert not runtime.revoke_model("native", "unrelated")
+    assert not closed and runtime.turns["native"] is turn
+    assert runtime.revoke_model("native", "original")
+    assert closed == [True] and runtime.turns["native"] is turn

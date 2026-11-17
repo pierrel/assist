@@ -33,9 +33,10 @@ Failure-fast bounds:
   cancel point in :class:`ThreadQueueMiddleware` raises :class:`ThreadHoldExpired`
   between LLM calls (terminal — a runaway backstop, not resumable), AND the slot
   is vacated immediately for ordinary checkpoint callers. A caller supplying
-  ``before_release`` retains the slot until that callback proves its native
-  work stopped or parked, including after expiry. Honors the rule that threads die on
-  infrastructure failure rather than heal-and-retry. For ordinary checkpoint
+  ``before_release`` retains the slot until that callback succeeds, including
+  after expiry. A native caller may instead revoke and drain its provider relay,
+  then release its exact handle while retaining unresolved cleanup ownership.
+  The queue does not silently retry infrastructure failures. For ordinary checkpoint
   callers the cap timer releases at the active-time limit; cancellation is detected at
   the next middleware boundary. A ``wrap_model_call`` retry inside
   :class:`EmptyResponseRecoveryMiddleware` or
@@ -290,7 +291,8 @@ class ThreadAffinityQueue:
             # ``contextvars.Context.run`` — see `Thread.stream_message`'s
             # `_ContextBoundIterator` for the in-tree pattern.  If the
             # contract is violated, ordinary callers still have a cap timer;
-            # native callers retain their slot until stop is verified.
+            # Native callers retain the slot until their model-release fence
+            # is verified.
             _active_handle.reset(token)
             if handle.before_release is not None:
                 try:

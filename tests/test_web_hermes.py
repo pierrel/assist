@@ -418,8 +418,9 @@ def test_recovered_relay_drain_failure_releases_exact_model_slot(
         pass
 
 
+@pytest.mark.parametrize("drain_fails", [False, True])
 def test_first_message_cleanup_failure_preserves_running_head_and_pending_follower(
-        hermes_threads, monkeypatch, tmp_path):
+        hermes_threads, monkeypatch, tmp_path, drain_fails):
     from contextlib import contextmanager
     from types import SimpleNamespace
     from assist.hermes_runtime import HermesRuntimeManager
@@ -439,12 +440,16 @@ def test_first_message_cleanup_failure_preserves_running_head_and_pending_follow
     def unconfirmed():
         raise RuntimeError("fixture native stop unconfirmed")
 
+    def drain():
+        if drain_fails:
+            raise RuntimeError("fixture provider drain unconfirmed")
+
     container = SimpleNamespace(id="private-generation", kill=unconfirmed)
     monkeypatch.setattr(SandboxManager, "_containers", {work_dir: container})
     manager = HermesRuntimeManager()
     manager.turns[tid] = SimpleNamespace(work_id=first.work_id, work_dir=work_dir, paused=False,
         backend=SimpleNamespace(container=container), control_dir=control,
-        relay=SimpleNamespace(stop_admission=lambda: None, close=lambda: None))
+        relay=SimpleNamespace(stop_admission=lambda: None, close=drain))
     manager.run_slice = lambda *_args, **_kwargs: unconfirmed()
     queue = ThreadAffinityQueue()
     journal = RunStreamJournal()
@@ -467,12 +472,18 @@ def test_first_message_cleanup_failure_preserves_running_head_and_pending_follow
         threads._initialize_thread(tid, first.id, None)
     except RuntimeError as error:
         errors.append(str(error))
-    assert queue.current_handle().thread_id == tid
-    assert queue.current_handle().expired
+    if drain_fails:
+        assert queue.current_handle().thread_id == tid
+        assert queue.current_handle().expired
+    else:
+        assert queue.current_handle() is None
+        with queue.acquire("unrelated", wait_timeout_s=0.01):
+            pass
     assert tid in manager.turns
     assert SandboxManager.current_container(work_dir) is container
     assert [run.status for run in threads._runs().list(tid)] == ["running", "pending"]
-    assert errors == ["fixture native stop unconfirmed"]
+    assert errors == ["fixture provider drain unconfirmed" if drain_fails
+                      else "fixture native stop unconfirmed"]
     assert not journal.read(tid, first.work_id)["terminal"]
     assert not journal.read(tid, follower.work_id)["terminal"]
     assert threads._get_status(tid)["stage"] == "processing"
