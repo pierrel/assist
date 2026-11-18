@@ -13,5 +13,6 @@ RUN pip install --no-cache-dir playwright==1.58.0 \
     && useradd --uid 10001 --create-home browser
 
 COPY assist/browser/runner.py /opt/assist/browser_runner.py
+COPY assist/browser/redaction.py /opt/assist/browser_redaction.py
 USER 10001:10001
 ENTRYPOINT ["python", "/opt/assist/browser_runner.py", "serve"]

@@ -915,8 +915,11 @@ def browser_tools(session: BrowserSession):
             hidden = redactions()
             if hidden is None:
                 return "Download not saved: unlock or repair this repository's secret store."
-            return json.dumps(scrub(
-                session.save_download(download_id, filename or None, hidden), hidden))
+            saved = session.save_download(download_id, filename or None, hidden)
+            if isinstance(saved, dict) and set(saved) == {"path", "bytes"}:
+                # The host generated this path after validating the basename.
+                return json.dumps(saved)
+            return json.dumps(scrub(saved, hidden))
         except BrowserUnavailable as error:
             return f"Download not saved: {error}"
         except FileExistsError:

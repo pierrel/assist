@@ -12,6 +12,7 @@ from assist.git_sync import _initial_binding, _write_state, require_clean
 from fastapi.testclient import TestClient
 
 from assist.secret_store import FILE, KEY_FILE, REQUEST_FILE, SecretStore
+from assist.run_service import RunService
 from manage.web import phone_api
 from manage.web.app import app
 from manage.web.thread_git_lifecycle import ThreadGitLifecycle
@@ -103,6 +104,24 @@ def test_authenticated_private_entry_commits_ciphertext_only(
     assert _git(remote, "rev-parse", "main") == main_tip
     assert client.get(path, headers=headers).json()["unlocked"] is True
     assert len(client.get(path, headers=headers).json()["secrets"]) == 1
+
+    paused_request = SecretStore(repo, thread).request_input(
+        "Paused site", "https://synthetic.example/other")
+    (tmp_path / "synthetic").mkdir()
+    runs = RunService(str(tmp_path))
+    pending_run = runs.create("synthetic", "general-agent", "Finish login",
+                              user_origin=True)
+    runs.claim("synthetic", pending_run.id)
+    runs.transition("synthetic", pending_run.id, "interrupted")
+    monkeypatch.setattr(phone_api.threads, "_runs", lambda: runs)
+    monkeypatch.setattr(ThreadGitLifecycle, "prepare",
+                        lambda *_args: pytest.fail("paused browser must not be retired"))
+    paused = client.post(path, headers=headers, json={
+        **private, "label": "Paused site", "login_url": "https://synthetic.example/other",
+        "request_id": paused_request["id"]})
+    assert paused.status_code == 409
+    assert len(SecretStore(repo, thread).list_public()) == 1
+    assert (thread / REQUEST_FILE).exists()
 
     other = tmp_path / "other-thread"
     other.mkdir()

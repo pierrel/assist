@@ -223,6 +223,40 @@ def test_secret_fill_requires_fresh_observation_before_next_action():
         worker.act("page", "snapshot", "click", {"ref": "password"})
 
 
+@pytest.mark.parametrize("stored, serialized", [
+    ("/café", "/caf%C3%A9"),
+    ("/a%2Fb", "/a%2Fb"),
+    ("/a%252Fb", "/a%252Fb"),
+])
+def test_secret_fill_matches_chromium_serialized_path(stored, serialized):
+    worker = BrowserWorker()
+    page = _Page()
+    page.url = "https://example.com" + serialized
+    worker.pages["page"] = page
+    worker.snapshots["page"] = "snapshot"
+    password = _Link(None, "Password", tag="input", kind="password")
+    worker.targets["page"] = {
+        "password": (password, *worker._target_state(password, page.url))}
+    assert worker.fill_secret("page", "snapshot", "https://example.com" + stored,
+                              "", "password", "", "synthetic-password") == {"filled": True}
+    assert password.filled
+
+
+def test_secret_fill_does_not_decode_reserved_path_separator():
+    worker = BrowserWorker()
+    page = _Page()
+    page.url = "https://example.com/a/b"
+    worker.pages["page"] = page
+    worker.snapshots["page"] = "snapshot"
+    password = _Link(None, "Password", tag="input", kind="password")
+    worker.targets["page"] = {
+        "password": (password, *worker._target_state(password, page.url))}
+    with pytest.raises(BrowserInputError, match="credential page changed"):
+        worker.fill_secret("page", "snapshot", "https://example.com/a%2Fb",
+                           "", "password", "", "synthetic-password")
+    assert not password.filled
+
+
 def test_username_handler_cannot_move_password_fill_to_another_page():
     worker = BrowserWorker()
     page = _Page()
@@ -736,6 +770,9 @@ def test_attached_browser_download_stays_in_existing_private_export_boundary(tmp
                                save_as=lambda target: __import__("shutil").copyfile(artifact, target))
     worker = BrowserWorker()
     worker.downloads["download-id"] = download
-    info = worker.download_info("download-id")
+    monkeypatch.setenv("BROWSER_SESSION_TOKEN", "synthetic-token")
+    info = worker.handle({"session": "synthetic-token", "operation": "download_info",
+                          "args": {"download_id": "download-id"},
+                          "private_values": ["browser", "download-id"]})
     assert info == {"path": str(exports / "download-id"), "name": "fixture.txt", "size": 15}
     assert Path(info["path"]).read_bytes() == b"download-canary"

@@ -421,3 +421,16 @@ def test_download_rejects_known_password_before_workspace_write(
     with pytest.raises(BrowserUnavailable, match="private value"):
         session._save_download_locked("download", None, hidden=(password,))
     assert not (repo / "downloads").exists()
+
+
+def test_successful_download_receipt_keeps_trusted_workspace_path(tmp_path):
+    repo, _thread, store, _ident = _store(tmp_path)
+    store.put("Short", PAGE, "work", "other-synthetic-password")
+    session = SimpleNamespace(
+        work_dir=str(repo), threads_root=str(tmp_path), thread_id="thread",
+        save_download=lambda *_args: {"path": "/workspace/downloads/report.txt",
+                                      "bytes": 12})
+    tool = {item.__name__: item for item in browser_tools(session)}[
+        "browser_save_download"]
+    assert json.loads(tool("download")) == {
+        "path": "/workspace/downloads/report.txt", "bytes": 12}

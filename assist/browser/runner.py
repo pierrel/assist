@@ -11,7 +11,7 @@ import tempfile
 import time
 import sys
 from time import monotonic
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 from uuid import uuid4
 
 from playwright.sync_api import sync_playwright
@@ -480,7 +480,9 @@ class BrowserWorker:
             host = parsed.hostname.encode("idna").decode("ascii").lower()
             actual = f"https://{host}" + (
                 f":{parsed.port}" if parsed.port not in (None, 443) else "")
-            return actual + (parsed.path or "/") == login_page
+            # Chromium percent-encodes Unicode paths without decoding reserved separators.
+            expected = quote(login_page, safe="/%:@!$&'()*+,;=-._~")
+            return actual + (parsed.path or "/") == expected
 
         if not exact_page():
             raise BrowserInputError("credential page changed")
@@ -553,7 +555,7 @@ class BrowserWorker:
                 os.unlink(destination)
                 raise BrowserInputError("download contains a private value")
         return self._finish({"path": destination, "name": download.suggested_filename,
-                             "size": info.st_size})
+                             "size": info.st_size}, trusted_path=True)
 
     @staticmethod
     def _policy(host, port, deadline):
@@ -640,14 +642,18 @@ class BrowserWorker:
                 values.append(value)
         return values
 
-    def _finish(self, result):
+    def _finish(self, result, *, trusted_path=False):
         hidden = tuple(sorted(set(self._private_values + self._current_before
                                   + tuple(self._password_values())),
                               key=len, reverse=True))
         if isinstance(result, dict) and "_source_url" in result:
             if contains_hidden(result["_source_url"], hidden):
                 result.pop("_source_url")
-        return self._limit_result(self._masked_result(result, hidden))
+        path = result.pop("path") if trusted_path else None
+        masked = self._masked_result(result, hidden)
+        if trusted_path:
+            masked["path"] = path
+        return self._limit_result(masked)
 
     @staticmethod
     def _masked_result(result, hidden):

@@ -1518,6 +1518,9 @@ async def create_repo_secret(tid: str, request: Request) -> dict:
                 thread_scope=(state.MANAGER.root_dir, tid)) as git:
             if not git.bound:
                 raise GitSyncError("Repository unavailable")
+            # prepare() retires a retained browser; an unfinished Run still owns it.
+            if threads._git_merge_has_unfinished_work(tid):
+                raise GitWorkspaceBusyError("Thread has unfinished work")
             git.prepare(None)
             with store.selected_request(body.get("request_id"),
                                         body["label"], body["login_url"]):
