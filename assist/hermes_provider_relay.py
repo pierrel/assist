@@ -143,7 +143,13 @@ class HermesProviderRelay:
                     pass
             # The forwarding thread owns close; shutdown wakes its active read.
 
-    def close(self):
+    def close(self, *, drain_egress=True):
+        """Close provider transport; lifecycle closure also drains host writes.
+
+        Native middleware entries may never settle after worker termination.
+        Only host-owned egress operations can delay lifecycle closure; model
+        revocation excludes those writes and retains their cleanup owner.
+        """
         self.stop_admission()
         if self.started:
             self.server.shutdown()
@@ -153,6 +159,9 @@ class HermesProviderRelay:
         with self.condition:
             if not self.condition.wait_for(lambda: not self.connections, timeout=5):
                 raise HermesRelayError("Hermes provider drain is unconfirmed")
+            if drain_egress and not self.condition.wait_for(
+                    lambda: "egress" not in self.operations.values(), timeout=5):
+                raise HermesRelayError("Hermes egress drain is unconfirmed")
         self.socket_path.unlink(missing_ok=True)
 
     def forward(self, handler, body: bytes):
@@ -220,7 +229,7 @@ class HermesProviderRelay:
                     or self.pausing and not self.operations):
                 raise HermesRelayError("Native egress request is no longer admitted")
             operation = uuid.uuid4().hex
-            self.operations[operation] = "tool"
+            self.operations[operation] = "egress"
         try:
             # Track host work independently of native middleware. Store I/O
             # must not hold the lock needed to revoke provider admission.

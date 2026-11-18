@@ -5743,7 +5743,7 @@ def _dispatch_egress_resolution(tid: str) -> None:
     if prompt is None:
         return
     if read_thread_engine(MANAGER.thread_dir(tid)).name == "hermes":
-        # A human's reviewed egress decision admits one native follow-up,
+        # A resolved egress batch admits one native follow-up,
         # not native scheduling or replay of the invocation that requested it.
         with _RUN_ADMISSION_LOCK:
             _create_run(tid, prompt, origin="egress")

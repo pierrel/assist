@@ -3,6 +3,8 @@ from pathlib import Path
 import importlib.util
 import json
 import threading
+from contextlib import nullcontext
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -12,7 +14,8 @@ from fastapi.testclient import TestClient
 from assist.egress.client_map import ClientRecord, record_client
 from assist.egress.store import EgressStore, APPROVALS_SUBDIR
 from assist.egress.tools import egress_tools
-from assist.hermes_provider_relay import HermesProviderRelay
+from assist.hermes_provider_relay import HermesProviderRelay, HermesRelayError
+from assist.hermes_runtime import HermesRuntimeManager
 from assist.pi_preview import PiPreviewPolicy
 from assist.thread_queue import ThreadAffinityQueue
 from manage.web import egress, phone_api, state, threads
@@ -205,3 +208,110 @@ def test_host_egress_operation_drains_without_holding_admission_lock(tmp_path):
         worker.join(2)
         relay.close()
     assert effects == ["pending card only"] and not relay.operations
+
+
+def test_deletion_drains_accepted_egress_before_evicting_records(native_egress, tmp_path, monkeypatch):
+    store, tid, _ = native_egress
+    entered, finish, deleted = threading.Event(), threading.Event(), threading.Event()
+    failures = []
+    original_add = store.add_pending
+    def delayed_add(*args, **kwargs):
+        entered.set()
+        assert finish.wait(3)
+        return original_add(*args, **kwargs)
+    monkeypatch.setattr(store, "add_pending", delayed_add)
+    control = tmp_path / "retire-control"
+    control.mkdir()
+    relay = HermesProviderRelay(control, "http://127.0.0.1:1/v1", "fixture", "fixture", 8192,
+                                lambda: True, egress_tools=egress_tools(store, frozenset(), thread_id=tid))
+    # A stopped worker cannot send a native settled hook. Only accepted host
+    # mutations may delay verified retirement, not this abandoned native entry.
+    relay.boundary({"operation": "stopped-native-tool", "kind": "tool"})
+    manager = HermesRuntimeManager()
+    manager.turns[tid] = SimpleNamespace(relay=relay, backend=None, control_dir=control)
+    monkeypatch.setattr(threads, "_HERMES_RUNTIME", manager)
+    monkeypatch.setattr(threads.BrowserManager, "bounded_thread_gate", lambda _tid: nullcontext())
+    monkeypatch.setattr(threads.BrowserManager, "cleanup", lambda _tid: None)
+    monkeypatch.setattr(threads.browser_authority, "generation_fence", lambda *_a: nullcontext())
+    def evict(deleted_tid):
+        threads._evict_egress(deleted_tid)
+        deleted.set()
+    monkeypatch.setattr(threads, "_delete_thread_after_browser_stop", evict)
+    def request():
+        try:
+            relay.egress({"name": "request_egress", "arguments": {
+                "host": "releases.example.test", "port": 443, "task": "Read release"}})
+        except BaseException as error:
+            failures.append(error)
+    def delete():
+        try:
+            threads._delete_thread_and_children(tid)
+        except BaseException as error:
+            failures.append(error)
+    requester, deleter = threading.Thread(target=request), threading.Thread(target=delete)
+    requester.start()
+    try:
+        assert entered.wait(1)
+        deleter.start()
+        deleted_while_busy = deleted.wait(.1)
+    finally:
+        finish.set()
+        requester.join(3)
+        if deleter.ident is not None:
+            deleter.join(3)
+        relay.close()
+    assert not requester.is_alive() and not deleter.is_alive() and not failures
+    records = store.for_thread(tid)
+    assert not deleted_while_busy and not records, (deleted_while_busy, records)
+    assert deleted.is_set() and tid not in manager.turns
+
+
+def test_egress_drain_timeout_retains_cleanup_but_releases_model_slot(native_egress, tmp_path, monkeypatch):
+    store, tid, _ = native_egress
+    entered, finish = threading.Event(), threading.Event()
+    original_add = store.add_pending
+    failures = []
+    def delayed_add(*args, **kwargs):
+        entered.set()
+        assert finish.wait(12)
+        return original_add(*args, **kwargs)
+    monkeypatch.setattr(store, "add_pending", delayed_add)
+    control = tmp_path / "timeout-control"
+    control.mkdir()
+    queue = ThreadAffinityQueue()
+    relay = HermesProviderRelay(control, "http://127.0.0.1:1/v1", "fixture", "fixture", 8192,
+                                lambda: True, egress_tools=egress_tools(store, frozenset(), thread_id=tid))
+    manager = HermesRuntimeManager()
+    turn = SimpleNamespace(work_id="original", relay=relay, backend=None, control_dir=control)
+    manager.turns[tid] = turn
+    def request():
+        try:
+            relay.egress({"name": "request_egress", "arguments": {
+                "host": "releases.example.test", "port": 443, "task": "Read release"}})
+        except BaseException as error:
+            failures.append(error)
+    requester = threading.Thread(target=request)
+    try:
+        with pytest.raises(HermesRelayError, match="egress drain is unconfirmed"):
+            with queue.acquire(tid, before_release=lambda: manager.stop(tid)) as old:
+                requester.start()
+                assert entered.wait(1)
+        assert manager.turns[tid] is turn and queue.current_handle() is old
+        assert manager.revoke_model(tid, "original")
+        assert manager.turns[tid] is turn and requester.is_alive()
+        assert queue._release_if_holder(old)
+        with queue.acquire("competitor", wait_timeout_s=.1) as competitor:
+            assert queue.current_handle() is competitor
+            finish.set()
+            requester.join(2)
+            assert not requester.is_alive() and not failures
+            manager.retire(tid)
+            store.remove_thread(tid)
+            assert not store.for_thread(tid) and tid not in manager.turns
+            assert not queue._release_if_holder(old)
+            assert queue.current_handle() is competitor
+    finally:
+        finish.set()
+        if requester.ident is not None:
+            requester.join(2)
+        relay.close()

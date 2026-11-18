@@ -238,8 +238,12 @@ Snapshot reads and background probes do not clear notifications.
   Available tools are files, terminal, skills, memory and helpers. When egress
   approvals are configured, native tools can list destinations, request one or
   up to three exact host/port grants, and revoke a thread grant. Requests use the
-  existing browser and phone-API approval cards; only a human decision opens
-  access. Once every pending card is resolved, one host-created Hermes follow-up
+  existing browser and phone-API approval cards. **Deployment of native egress
+  is held:** the existing proxy route can reach the web approval surface, whose
+  tokens lack separate human authentication. A human-only approval boundary has
+  not been established; do not deploy this egress capability until it is corrected
+  and verified. No live self-approval exploit is claimed. Once every pending card
+  is resolved through the decision surface, one host-created Hermes follow-up
   carries the recorded task and decisions. Native helpers share their parent
   thread's cards; they finish rather than waiting on a Deep Agents checkpoint.
   Grants are thread scoped and may be used by later turns of that thread.

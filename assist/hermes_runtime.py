@@ -220,7 +220,7 @@ class HermesRuntimeManager:
             if turn is not None:
                 if turn.work_id != work_id:
                     return False
-                turn.relay.close()
+                turn.relay.close(drain_egress=False)
             return True
 
     def stop(self, thread_id: str):
