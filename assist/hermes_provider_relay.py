@@ -6,6 +6,7 @@ access; a hook failure cannot grant a request while the generation is parked.
 from __future__ import annotations
 
 import http.client
+import inspect
 from http.server import BaseHTTPRequestHandler
 import json
 import os
@@ -13,6 +14,7 @@ from pathlib import Path
 import socket
 import socketserver
 import threading
+import uuid
 from urllib.parse import urlsplit
 
 
@@ -48,10 +50,10 @@ class _Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 
 
 class HermesProviderRelay:
-    """Forward native model bodies to one host-selected local endpoint."""
+    """Fence native provider traffic and host-bound egress tool requests."""
 
     def __init__(self, directory: Path, upstream_url: str, api_key: str,
-                 model: str, context_length: int, admitted):
+                 model: str, context_length: int, admitted, *, egress_tools=()):
         endpoint = urlsplit(upstream_url)
         if (endpoint.scheme not in {"http", "https"}
                 or endpoint.hostname not in {"127.0.0.1", "::1", "localhost"}
@@ -60,6 +62,7 @@ class HermesProviderRelay:
             raise HermesRelayError("Hermes requires the configured local model endpoint")
         self.endpoint, self.api_key, self.model = endpoint, api_key, model
         self.context_length, self.admitted = context_length, admitted
+        self.egress_tools = {tool.__name__: tool for tool in egress_tools}
         self.condition = threading.Condition()
         self.operations: dict[str, str] = {}
         self.connections: dict[http.client.HTTPConnection, socket.socket | None] = {}
@@ -200,6 +203,31 @@ class HermesProviderRelay:
                 self.changed.set()
                 self.condition.notify_all()
 
+    def egress(self, value):
+        """Invoke only host-bound egress tools under the current admission fence."""
+        name, arguments = value.get("name"), value.get("arguments")
+        if not isinstance(name, str) or not isinstance(arguments, dict):
+            raise HermesRelayError("Invalid egress request")
+        tool = self.egress_tools.get(name)
+        if tool is None:
+            raise HermesRelayError("Egress tool is unavailable")
+        try:
+            inspect.signature(tool).bind(**arguments)
+        except TypeError as error:
+            raise HermesRelayError("Invalid egress arguments") from error
+        with self.condition:
+            if (self.stopped or self.parked or not self.admitted()
+                    or self.pausing and not self.operations):
+                raise HermesRelayError("Native egress request is no longer admitted")
+            operation = uuid.uuid4().hex
+            self.operations[operation] = "tool"
+        try:
+            # Track host work independently of native middleware. Store I/O
+            # must not hold the lock needed to revoke provider admission.
+            return {"result": tool(**arguments)}
+        finally:
+            self.settle(operation)
+
 
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
@@ -237,6 +265,9 @@ class _Handler(BaseHTTPRequestHandler):
                 raise HermesRelayError("Invalid native control request")
             if self.path == "/boundary":
                 self.relay.boundary(value)
+            elif self.path == "/egress":
+                self._json(self.relay.egress(value))
+                return
             elif self.path == "/settled":
                 self.relay.settle(value.get("operation"))
             elif self.path == "/result":

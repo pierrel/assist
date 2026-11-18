@@ -48,6 +48,7 @@ A='hermes-proof-a';B='hermes-proof-b';C='hermes-proof-c'
 WORK=Path(threads.MANAGER.thread_default_working_dir(A))
 CHILD='Create /workspace/child-note.txt containing blue.'
 PROMPT='Have a helper create a note saying blue, then tell me it is done.'
+EGRESS_PROMPT='Read the release announcement and save a short note.'
 background_observations=[]; process_results=[]; native_calls=[]; parked_provider_denials=[]
 requests=[];events=[];errors=[];lock=threading.Lock()
 child_ready=threading.Event();b_done=threading.Event();a_done=threading.Event()
@@ -69,6 +70,21 @@ def answer(p):
         native_calls.append({'name':name,'args':args})
         if name=='write_file':write_calls.append(args)
         return {'role':'assistant','content':None,'tool_calls':[{'id':'call-'+str(len(requests)),'type':'function','function':{'name':name,'arguments':json.dumps(args)}}]}
+    if latest == EGRESS_PROMPT or latest.startswith('[Egress requests resolved]'):
+        current=[]
+        for message in reversed(msgs):
+            if message.get('role')=='user':break
+            if message.get('role')=='tool':current.insert(0,message)
+        if latest == EGRESS_PROMPT:
+            if not current:return call('tool_describe',{'names':['request_egress']})
+            if len(current)==1:
+                assert 'request_egress' in text(current[-1]) and 'host' in text(current[-1])
+                return call('tool_call',{'calls':[{'name':'request_egress','arguments':{'host':'releases.example.test','port':443,'task':EGRESS_PROMPT}}]})
+            assert 'awaits' in text(current[-1]),current[-1]
+            return {'role':'assistant','content':'Network approval is needed to read the announcement.'}
+        assert 'releases.example.test:443 APPROVED' in latest,latest
+        if not current:return call('write_file',{'path':'/workspace/egress-note.txt','content':'Approved follow-up ran once.\n'})
+        return {'role':'assistant','content':'The approved follow-up is complete.'}
     if latest in {'COMPETITOR_B','COMPETITOR_C'}:
         import httpx
         container=sm.SandboxManager.current_container(str(WORK));container.reload()
@@ -258,7 +274,27 @@ try:
     assert (WORK/'background-starts.txt').read_text()=='START\n'
     assert (WORK/'background-effects.txt').read_text()=='EFFECT-731\n'
     assert len([c for c in native_calls if c['name']=='tool_call' and c['args']['calls'][0]['name']=='process_manage'])==1
-    report={'background_result_once':process_results,'native_calls':native_calls,'provider_request_count':len(requests),'parked_provider_denials':parked_provider_denials,'experiment':'native background completion under cooperative model suspension','background_observations':background_observations,'background_script_execution':'python /workspace/background-writer.py','approval_unavailable_preserved_file':True,'status':'PASS','events':events,'http_create':response.status_code,'browser':browser.status_code,'phone':phone.status_code,'public_messages':messages,'limits':'Actual browser create and two message POSTs, real native runtime/queue/container, browser HTML and authenticated phone history. Fake upstream/network:none; two native-boundary rendezvous and two competing threads; the accepted second user turn waits for the original continuation. A supported native background script completes during B; deferred process_manage returns its exact result once after readmission, with one launch/effect and no admitted A provider request during B. Native dangerous-command approval is unavailable and denies without deleting the fixture. This is deterministic capability coverage, not model-quality or live-egress evidence.'}
+    # Supported native tool registration reaches the existing human decision
+    # route and dispatcher; network:none does not prove an external fetch.
+    from manage.web import egress
+    a_done.clear()
+    requested=client.post(f'/thread/{A}/message',data={'text':EGRESS_PROMPT},follow_redirects=False)
+    assert requested.status_code==303 and a_done.wait(30)
+    assert not (WORK/'egress-note.txt').exists()
+    proposal,=phone_api._approval_collection(A)['proposals']
+    assert proposal['kind']=='egress' and proposal['state']=='pending'
+    assert 'releases.example.test' in client.get(f'/thread/{A}').text
+    a_done.clear()
+    form={'token':egress.EGRESS_CSRF,'tid':A,'host':'releases.example.test','port':'443','review':proposal['token']}
+    approved=client.post('/egress/hour',data=form,follow_redirects=False)
+    assert approved.status_code==303 and a_done.wait(30)
+    assert (WORK/'egress-note.txt').read_text()=='Approved follow-up ran once.\n'
+    assert len([c for c in write_calls if c['path']=='/workspace/egress-note.txt'])==1
+    assert len([r for r in threads._runs().list(A) if r.origin=='egress'])==1
+    assert client.post('/egress/hour',data=form,follow_redirects=False).status_code==303
+    assert len([r for r in threads._runs().list(A) if r.origin=='egress'])==1
+    assert client.get(f'/thread/{A}').text.count('The approved follow-up is complete.')==1
+    report={'native_egress_request_decision_followup_once':True,'background_result_once':process_results,'native_calls':native_calls,'provider_request_count':len(requests),'parked_provider_denials':parked_provider_denials,'experiment':'native background completion under cooperative model suspension','background_observations':background_observations,'background_script_execution':'python /workspace/background-writer.py','approval_unavailable_preserved_file':True,'status':'PASS','events':events,'http_create':response.status_code,'browser':browser.status_code,'phone':phone.status_code,'public_messages':messages,'limits':'Actual browser create and message POSTs, real native runtime/queue/container, browser HTML and authenticated phone history. Fake upstream/network:none; two native-boundary rendezvous and two competing threads; the accepted second user turn waits for the original continuation. A supported native background script completes during B; deferred process_manage returns its exact result once after readmission, with one launch/effect and no admitted A provider request during B. Native dangerous-command approval is unavailable and denies without deleting the fixture. Native egress tool records a real approval card; the HTTP decision starts one native follow-up with one file effect. This is deterministic capability coverage, not model-quality or live-egress evidence.'}
 finally:
     b_done.set();c_done.set()
     for tid in (A,B,C):

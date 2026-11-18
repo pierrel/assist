@@ -1,14 +1,14 @@
 """The agent's egress management tools — request, inspect, reduce.
 
 Four tools (Pierre's PR #200 review: the agent manages its thread's
-grants, not just requests new ones), all THREAD-scoped via the run config's
-thread id and all returning corrective strings, never raising into the
+grants, not just requests new ones), all THREAD-scoped via the run config or
+a trusted native host binding and all returning corrective strings, never raising into the
 agent loop:
 
 - ``request_egress(host, port, task)`` — records a proposal for the user to
   approve in this thread. Records only; nothing opens on the agent's say-so.
 - ``request_egress_batch(targets, task)`` — records up to three selected
-  host/port proposals before one child checkpoint, using the same cards.
+  host/port proposals using the same cards; a graph child checkpoints once.
 - ``list_allowed_hosts()`` — what this thread can reach: the operator-owned
   base allowlist plus this thread's live grants (Pierre: enumeration is
   yes — it enables voluntary reduction).
@@ -121,17 +121,27 @@ def _parse_host_port(host, port):
         return None, None, ("IP addresses can't be requested — only DNS "
                             "hostnames.")
     if raw in _INFRA_HOSTS or raw.endswith(".internal"):
-        return None, None, (f"{raw} is assist infrastructure and already "
-                            "reachable — no request needed.")
+        return None, None, (f"{raw} is Assist infrastructure; egress approval "
+                            "is unavailable for this host.")
     return raw, port, None
 
 
 def egress_tools(store: EgressStore, base_hosts: frozenset[str],
-                 thread_dir=None) -> list:
+                 thread_dir=None, *, thread_id: str | None = None) -> list:
     """Build the four tools over the store + the committed base allowlist.
     ``thread_dir(tid) -> path`` (optional, the notify_tools factory shape)
     enables the event trail (egress_requested / egress_revoked); absent —
-    CLI/evals — events are skipped."""
+    CLI/evals — events are skipped. Native hosts may bind ``thread_id`` directly;
+    that trusted identity bypasses graph context and never creates child waiters.
+    Native lists omit the ordinary sandbox's direct host-model exception."""
+    if thread_id is not None:
+        base_hosts = base_hosts - {"host.docker.internal"}
+
+    def origin():
+        return thread_id if thread_id is not None else _origin_thread_id()
+
+    def child_waiter():
+        return None if thread_id is not None else _child_waiter()
 
     def _event(tid, kind, **fields):
         if thread_dir is None:
@@ -146,10 +156,11 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
         approves it.
 
         ``task`` must be a complete instruction for an ordinary agent's
-        follow-up turn after approval. An async child instead checkpoints here
+        follow-up turn after approval. A graph async child instead checkpoints here
         and the exact child resumes after the decision. For two or three known
-        needed hosts, use request_egress_batch so a child records every card
-        before its one checkpoint. An ordinary follow-up runs once after the
+        needed hosts, use request_egress_batch so a graph child records every card
+        before its one checkpoint. Native helpers use their parent thread's
+        ordinary follow-up, without a graph checkpoint. A follow-up runs once after the
         user resolves every pending request. After calling this, tell the user
         approval is waiting in this
         thread and do NOT retry the blocked command until approved.
@@ -160,7 +171,7 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
         if h in base_hosts:
             return (f"{h} is already on the base allowlist (any port) — "
                     "no request needed; just retry your command.")
-        tid = _origin_thread_id()
+        tid = origin()
         if not tid:
             return "Couldn't record the request: no active thread."
         existing = {r.key: r for r in store.for_thread(tid)}
@@ -171,7 +182,7 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
             # raw record too, otherwise a resumed child would be told to retry
             # a proxy-denied connection forever.
             rec = None
-        waiter = _child_waiter()
+        waiter = child_waiter()
         if rec is not None:
             if rec.state == "pending":
                 if waiter is None:
@@ -245,8 +256,9 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
     def request_egress_batch(targets: list[dict], task: str) -> str:
         """Ask for at most three observed host/port pairs in one ordinary
         approval batch. Each destination keeps its own approval card and
-        duration; page observations are hints, never authorization. An async
+        duration; page observations are hints, never authorization. A graph async
         child waits once after all its pending cards and waiters are recorded.
+        Native helpers record cards for their parent thread's later follow-up.
         """
         if not isinstance(targets, list) or not 1 <= len(targets) <= 3:
             return "Select one to three exact host and port targets."
@@ -259,10 +271,10 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
                 return err
             if (h, p) not in selected:
                 selected.append((h, p))
-        tid = _origin_thread_id()
+        tid = origin()
         if not tid:
             return "Couldn't record the requests: no active thread."
-        waiter = _child_waiter()
+        waiter = child_waiter()
         brief = " ".join(str(task or "").split())[:500]
         results = []
         pending_keys = []
@@ -309,7 +321,7 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
         """List every host this thread can currently reach: the operator's
         base allowlist (any port; managed only via the committed config) and
         this thread's own approved grants with their remaining lifetime."""
-        tid = _origin_thread_id()
+        tid = origin()
         lines = [f"- {h} (any port; base allowlist, operator-managed)"
                  for h in sorted(base_hosts)]
         if tid:
@@ -331,7 +343,7 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
         if h in base_hosts:
             return (f"{h} is on the operator-managed base allowlist — it "
                     "can't be removed from a thread.")
-        tid = _origin_thread_id()
+        tid = origin()
         if not tid:
             return "No active thread."
         if store.revoke(request_key(tid, h, p)):

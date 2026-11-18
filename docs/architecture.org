@@ -364,12 +364,19 @@ their explicit summary handoff creates an independent Deep Agents thread.
   hooks do not grant authority. Native RPC deadlines remain native, while the
   existing Run bounds total active lifetime. C13 denies the direct host-model
   exception to native and unattributed clients.
+  Supported native egress tools use this same private transport with host-bound
+  thread identity and independent admission checks. C8's existing EgressStore,
+  human approval cards and proxy projection own requests and thread-scoped grants;
+  native tool calls cannot approve access. An accepted egress operation participates
+  in cooperative drain without holding the provider admission lock during store I/O.
 - *C26 Pinned native Hermes.* [[file:../assist/hermes_runtime/worker.py][The worker]]
   runs the complete pinned upstream runtime inside C10, with native prompts,
   file/terminal tools, skills, memory, compression and joined delegation.
   Native SessionDB and preferences persist in C9's isolated =/agent/hermes=.
   C2 projects accepted messages and committed replies from existing C3 Runs.
-  No native worker starts another Run. Browser/search/interactive approval
+  No native worker starts another Run. Human egress decisions may enqueue one
+  host-owned native follow-up through C4; native helpers share the parent thread's
+  cards and do not use Deep Agents checkpoints. Browser/search/interactive command approval
   transports are not enabled; native unattended command approval denies a
   gated operation instead of waiting on an invisible prompt.
 

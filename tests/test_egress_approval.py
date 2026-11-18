@@ -201,7 +201,7 @@ def test_batch_validates_all_targets_before_creating_any_card(tmp_path, monkeypa
     answer = batch([
         {"host": "api.example.com", "port": 443},
         {"host": "host.docker.internal", "port": 80}], "read the page")
-    assert "already reachable" in answer
+    assert "approval is unavailable" in answer
     assert st.all() == []
 
 

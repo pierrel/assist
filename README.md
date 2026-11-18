@@ -235,8 +235,16 @@ Snapshot reads and background probes do not clear notifications.
   A first-turn cleanup failure does not discard accepted
   follow-up messages. Git diffs and Merge remain available;
   the Deep Agents Review action is not offered for native threads.
-  Available tools are files, terminal, skills, memory and helpers. Native browser,
-  web search and interactive approvals are unavailable; commands requiring approval
+  Available tools are files, terminal, skills, memory and helpers. When egress
+  approvals are configured, native tools can list destinations, request one or
+  up to three exact host/port grants, and revoke a thread grant. Requests use the
+  existing browser and phone-API approval cards; only a human decision opens
+  access. Once every pending card is resolved, one host-created Hermes follow-up
+  carries the recorded task and decisions. Native helpers share their parent
+  thread's cards; they finish rather than waiting on a Deep Agents checkpoint.
+  Grants are thread scoped and may be used by later turns of that thread.
+  Internal host-model access remains unavailable. Native browser, web search and
+  interactive command approvals are unavailable; commands requiring approval
   are denied. Turn completion and accepted cancellation stop the entire sandbox before Git
   publication, including still-running background jobs marked `persist_on_release`.
   Those jobs can survive native agent cleanup, but cannot outlive this preview's

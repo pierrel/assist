@@ -66,7 +66,7 @@ from assist.async_subagents import AsyncTaskContext, async_task_context
 from assist.egress.store import EgressWaiter, resolution_prompt
 from assist.egress.tools import (EGRESS_ORIGIN_THREAD_ID,
                                  EGRESS_WAITER_RUN_ID,
-                                 EGRESS_WAITER_THREAD_ID)
+                                 EGRESS_WAITER_THREAD_ID, egress_tools)
 from starlette.concurrency import run_in_threadpool
 from assist.middleware.interjection import (collect_interjection_ids,
                                             register_interjection_callbacks)
@@ -132,6 +132,7 @@ from manage.web.state import (
     DOMAINS,
     EGRESS_CSRF,
     EGRESS_STORE,
+    EGRESS_BASE_HOSTS,
     GEO_CATALOG,
     GEO_CSRF,
     GEO_DIR,
@@ -1217,7 +1218,7 @@ def render_thread(
     # task text quoted + escaped as its unverified words. All of a thread's
     # pending cards render (<=3 by the tool's cap).
     egress_banner = ""
-    if not is_native and EGRESS_STORE is not None:
+    if (not is_native or read_thread_engine(MANAGER.thread_dir(tid)).name == "hermes") and EGRESS_STORE is not None:
         for _er in sorted((r for r in EGRESS_STORE.peek()
                            if r.origin_tid == tid and r.state == "pending"),
                           key=lambda r: r.created_at):
@@ -2413,7 +2414,8 @@ _PI_CONTINUATION_SUMMARY_LIMIT = 8_000
 _PI_DESCRIPTION_LIMIT = 120
 HERMES_PREVIEW_NOTICE = (
     "Hermes supports file work, terminal commands, skills, memory and helpers. "
-    "Browser, web search and interactive approvals are unavailable in this preview. "
+    "Network access uses approval cards where available. "
+    "Browser, web search and interactive command approvals are unavailable in this preview. "
     "Commands requiring approval are denied.")
 
 
@@ -2445,7 +2447,7 @@ def _hermes_messages(tid: str) -> list[dict]:
     messages = []
     for first, latest in work.values():
         text = first.text or first.pending_text
-        if text:
+        if text and first.origin is None:
             messages.append({"role": "user", "content": text, "run_id": first.id,
                              "message_id": f"hermes:user:{first.work_id}"})
         if latest.status == "success" and latest.result:
@@ -3213,9 +3215,9 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
 
     try:
         if (run.mode != "turn" or run.assistant_id != "general-agent"
-                or run.origin is not None or run.sender is not None or run.resume_decision is not None
+                or run.origin not in {None, "egress"} or run.sender is not None or run.resume_decision is not None
                 or (not run.resume and (not isinstance(run.text, str) or not run.text))):
-            raise HermesRuntimeError("Hermes accepts manual turns and their scheduler successors")
+            raise HermesRuntimeError("Hermes accepts user and egress-decision turns and their scheduler successors")
         with THREAD_QUEUE.acquire(tid, user_priority=user_priority,
                                   accumulated_active_ms=run.active_ms,
                                   before_release=release_owned_slice) as handle:
@@ -3251,7 +3253,10 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
 
                 reply = _HERMES_RUNTIME.run_slice(
                     run, work_dir=work_dir, agent_dir=MANAGER.thread_agent_dir(tid),
-                    thread_scope=(MANAGER.root_dir, tid), handle=handle, admitted=admitted)
+                    thread_scope=(MANAGER.root_dir, tid), handle=handle, admitted=admitted,
+                    egress_tools=(egress_tools(EGRESS_STORE, EGRESS_BASE_HOSTS,
+                                              thread_dir=MANAGER.thread_dir, thread_id=tid)
+                                  if EGRESS_STORE is not None else ()))
                 # run_slice returns only after the native generation is stopped.
                 branch = git_lifecycle.finish_visible(reply, (run.rider or {}).get("tz"))
                 notice = _git_result_notice(branch)
@@ -3274,7 +3279,8 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
             _runs().transition(tid, run.id, "interrupted", active_ms=carry)
             successor = _create_run(tid, None, resume=True, work_id=run.work_id,
                                     user_event_id=run.user_event_id, active_ms=carry,
-                                    pending_text=run.text or run.pending_text, rider=run.rider)
+                                    pending_text=run.text or run.pending_text, rider=run.rider,
+                                    origin=run.origin)
             _set_status(tid, "paused", pending_message=run.text or run.pending_text,
                         accumulated_active_ms=carry)
             ticket = _RESUME_SCHEDULER.reserve(successor.id, tid)
@@ -5736,7 +5742,14 @@ def _dispatch_egress_resolution(tid: str) -> None:
     prompt = resolution_prompt(EGRESS_STORE.take_undispatched(tid))
     if prompt is None:
         return
-    _scheduled_dispatch(tid, prompt, _GEO_TZ)
+    if read_thread_engine(MANAGER.thread_dir(tid)).name == "hermes":
+        # A human's reviewed egress decision admits one native follow-up,
+        # not native scheduling or replay of the invocation that requested it.
+        with _RUN_ADMISSION_LOCK:
+            _create_run(tid, prompt, origin="egress")
+        _dispatch_pending_after(tid)
+    else:
+        _scheduled_dispatch(tid, prompt, _GEO_TZ)
     _mark_urgent(tid)
 
 
