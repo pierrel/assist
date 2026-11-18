@@ -369,14 +369,19 @@ class BrowserWorker:
         if password_values:
             if any(value in result.get("_source_url", "") for value in password_values):
                 result.pop("_source_url", None)
+            password_pattern = re.compile("|".join(
+                re.escape(password) for password in
+                sorted(set(password_values), key=len, reverse=True)))
             def hidden(value):
                 if isinstance(value, str):
-                    for password in password_values:
-                        value = value.replace(password, "[password hidden]")
+                    value = password_pattern.sub("[password hidden]", value)
                 elif isinstance(value, list):
                     value = [hidden(item) for item in value]
                 elif isinstance(value, dict):
-                    value = {key: hidden(item) for key, item in value.items()}
+                    value = {key: (item if key in {"page_id", "snapshot_id", "ref",
+                                                  "download_id", "active_page_id",
+                                                  "closed_page_id"}
+                                   else hidden(item)) for key, item in value.items()}
                 return value
             result = hidden(result)
         return result

@@ -860,9 +860,12 @@ def browser_tools(session: BrowserSession):
             return () if not os.path.isdir(store.repository) else None
         except OSError:
             return None
-        return tuple(dict.fromkeys(
+        return tuple(sorted({
             item for value in values for item in
-            (value, quote(value, safe=""), quote_plus(value, safe="")) if item))
+            (value, quote(value, safe=""), quote_plus(value, safe=""),
+             quote(value, safe="!'()*"),
+             quote_plus(value, safe="*").replace("~", "%7E")) if item
+        }, key=len, reverse=True))
 
     def scrub(value, hidden: tuple[str, ...]):
         if isinstance(value, str):
@@ -870,7 +873,10 @@ def browser_tools(session: BrowserSession):
         if isinstance(value, list):
             return [scrub(item, hidden) for item in value]
         if isinstance(value, dict):
-            return {key: scrub(item, hidden) for key, item in value.items()}
+            return {key: (item if key in {"page_id", "snapshot_id", "ref",
+                                         "download_id", "active_page_id",
+                                         "closed_page_id", "source_id"}
+                          else scrub(item, hidden)) for key, item in value.items()}
         return value
 
     def invoke(operation, **args):

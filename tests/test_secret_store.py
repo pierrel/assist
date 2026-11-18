@@ -170,6 +170,39 @@ def test_browser_opaque_fill_and_normal_observations_hide_known_password(tmp_pat
     assert PASSWORD not in restored["browser_open"](PAGE)
 
 
+def test_overlapping_credentials_and_browser_encoding_keep_handles(tmp_path):
+    repo = tmp_path / "repo"
+    thread = tmp_path / "thread"
+    repo.mkdir()
+    thread.mkdir()
+    store = SecretStore(repo, thread)
+    store.unlock(PHRASE, create=True)
+    store.put("Overlap", PAGE, "synthetic", "synthetic*a b")
+    store.put("Other", PAGE, "ed", "synthetic*a b-extra")
+    form_value = "synthetic*a+b"
+    component_value = "synthetic*a%20b"
+    session = SimpleNamespace(
+        work_dir=str(repo), threads_root=str(tmp_path), thread_id="thread",
+        command=lambda *_args, **_kwargs: {"result": {
+            "page_id": "generation-ed-123", "snapshot_id": "ed1234567890",
+            "targets": [{"ref": "ed12345678", "name": "synthetic*a b-extra"}],
+            "snapshot": " / ".join(("synthetic*a b-extra", form_value,
+                                      component_value)),
+            "url": PAGE + "?value=" + form_value,
+            "downloads": [{"download_id": "ed123", "name": "synthetic*a b.txt"}],
+        }})
+    tool = {item.__name__: item for item in browser_tools(session)}["browser_observe"]
+    result = json.loads(tool("generation-ed-123"))["result"]
+    assert result["page_id"] == "generation-ed-123"
+    assert result["snapshot_id"] == "ed1234567890"
+    assert result["targets"][0]["ref"] == "ed12345678"
+    assert result["downloads"][0]["download_id"] == "ed123"
+    assert "synthetic*a b-extra" not in json.dumps(result)
+    assert form_value not in json.dumps(result)
+    assert component_value not in json.dumps(result)
+    assert "-extra" not in result["snapshot"]
+
+
 def test_corrupt_or_unavailable_store_never_disables_existing_password_redaction(tmp_path):
     repo, thread, store, ident = _store(tmp_path)
     store.put("Other site", PAGE, "other-user", "other-password")

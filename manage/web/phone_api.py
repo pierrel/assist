@@ -1525,7 +1525,8 @@ async def create_repo_secret(tid: str, request: Request) -> dict:
                     store.unlock(body["passphrase"], create=True)
                 secret_id = store.put(body["label"], body["login_url"],
                                       body["username"], body["password"])
-                result_branch = git.finish_visible("Store encrypted credential", None)
+                result_branch = git.finish_visible(
+                    "Store encrypted credential", None, include_secret_store=True)
             return {"id": secret_id, "result_branch": result_branch}
     try:
         return await anyio.to_thread.run_sync(create)

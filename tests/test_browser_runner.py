@@ -470,6 +470,43 @@ def test_observation_budget_preserves_targets():
     assert len(worker.targets["page"]) == len(observed["targets"])
 
 
+def test_password_field_redaction_preserves_handles_and_longer_values(monkeypatch):
+    class Body:
+        def aria_snapshot(self, **_kwargs):
+            return "synthetic-base-extra"
+
+    class Fields:
+        def evaluate_all(self, _expression):
+            return ["ed", "synthetic-base", "synthetic-base-extra"]
+
+    class Targets:
+        def count(self):
+            return 1
+
+        def nth(self, _index):
+            return SimpleNamespace(element_handle=lambda: _Link(
+                "/next", name="synthetic-base-extra"))
+
+    class Page(_Page):
+        def wait_for_load_state(self, **_kwargs):
+            pass
+
+        def locator(self, selector):
+            if selector == "body":
+                return Body()
+            return Fields() if selector == 'input[type="password"]' else Targets()
+
+    monkeypatch.setattr(runner, "uuid4", lambda: SimpleNamespace(hex="ed1234567890abcd"))
+    worker = BrowserWorker()
+    worker.pages["page"] = Page()
+    observed = worker.observe("page")
+    assert observed["snapshot_id"] == "ed1234567890"
+    assert observed["targets"][0]["ref"] == "ed12345678"
+    assert observed["targets"][0]["name"] == "[password hidden]"
+    assert observed["snapshot"] == "[password hidden]"
+    assert observed["targets"][0]["ref"] in worker.targets["page"]
+
+
 @pytest.mark.parametrize("values", [None, "error"])
 def test_password_field_collection_failure_cannot_return_snapshot(values):
     class Body:

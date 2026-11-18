@@ -1309,9 +1309,11 @@ disable later observation redaction.
 Records are append-only in this first flow; removing a record later would not
 erase ciphertext from Git history.
 
-Browser observations replace exact saved usernames and passwords and their ordinary
-URL encodings with `[private value hidden]`; values of up to 60 password fields
-are also hidden while those fields are present. Observation fails closed if the
+Browser content and URLs in observations replace exact saved usernames and passwords
+and their ordinary URL encodings with `[private value hidden]`; values of up to 60
+password fields are also hidden while those fields are present. Opaque page, snapshot,
+target, and download handles remain intact so later actions can use them; these IDs
+are generated independently of saved values. Observation fails closed if the
 worker cannot read those fields or finds more than 60. The
 host still handles plaintext to fill a form. Login queries and fragments are
 omitted from public metadata;

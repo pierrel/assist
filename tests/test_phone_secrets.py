@@ -4,6 +4,8 @@ import subprocess
 from contextlib import nullcontext
 from types import SimpleNamespace
 
+import pytest
+
 from assist import git_sync, thread_git
 from assist.git_sync import _initial_binding, _write_state, require_clean
 
@@ -19,7 +21,9 @@ def _git(cwd, *args):
     return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
 
 
-def test_authenticated_private_entry_commits_ciphertext_only(tmp_path, monkeypatch):
+@pytest.mark.parametrize("ignore_secrets", [False, True])
+def test_authenticated_private_entry_commits_ciphertext_only(
+        tmp_path, monkeypatch, ignore_secrets):
     remote = tmp_path / "remote.git"
     repo = tmp_path / "repo"
     thread = tmp_path / "thread"
@@ -30,6 +34,9 @@ def test_authenticated_private_entry_commits_ciphertext_only(tmp_path, monkeypat
     _git(repo, "config", "user.email", "synthetic@example.invalid")
     (repo / "README").write_text("synthetic\n")
     _git(repo, "add", "README")
+    if ignore_secrets:
+        (repo / ".gitignore").write_text("*secrets*\n")
+        _git(repo, "add", ".gitignore")
     _git(repo, "commit", "-m", "base")
     _git(repo, "remote", "add", "origin", str(remote))
     _git(repo, "push", "origin", "main")
