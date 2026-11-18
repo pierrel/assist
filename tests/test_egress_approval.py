@@ -412,6 +412,34 @@ def test_pi_recycled_ip_never_inherits_old_shell_approval(proxy_mod, tmp_path,
     assert proxy_mod.target_policy("api.example.com", 443, ip)[1] == "host_not_approved"
 
 
+@pytest.mark.parametrize("kind", ["hermes", "pi"])
+def test_native_runtime_cannot_bypass_model_relay(proxy_mod, tmp_path, kind):
+    ip = "172.20.0.9"
+    record_client(str(tmp_path), ip, ClientRecord("t1", "native-generation", kind))
+    assert proxy_mod.target_policy("host.docker.internal", 8000, ip)[1] == "host_requires_ordinary_attribution"
+    assert proxy_mod.target_policy("pypi.org", 443, ip) == (None, None)
+
+
+@pytest.mark.parametrize("contents", [None, "broken-json", "{}", '{"172.20.0.9":{"kind":"sandbox"}}'])
+def test_model_host_requires_positive_ordinary_attribution(proxy_mod, tmp_path, contents):
+    if contents is not None:
+        (tmp_path / "client-map.json").write_text(contents)
+    ip = "172.20.0.9"
+    assert proxy_mod.target_policy("host.docker.internal", 8000, ip)[1] == "host_requires_ordinary_attribution"
+    assert proxy_mod.target_policy("pypi.org", 443, ip) == (None, None)
+    (tmp_path / "client-map.json").unlink(missing_ok=True)
+    record_client(str(tmp_path), ip, ClientRecord("t1", "ordinary-generation", "sandbox"))
+    assert proxy_mod.target_policy("host.docker.internal", 8000, ip) == (None, None)
+
+
+def test_hermes_keeps_thread_scoped_external_approval(proxy_mod, tmp_path, monkeypatch):
+    _write_approval(tmp_path)
+    ip = "172.20.0.9"
+    record_client(str(tmp_path), ip, ClientRecord("t1", "hermes-generation", "hermes"))
+    monkeypatch.setattr(proxy_mod, "vet_resolved", lambda *_args, **_kwargs: "93.184.216.34")
+    assert proxy_mod.target_policy("api.example.com", 443, ip) == ("93.184.216.34", None)
+
+
 def test_proxy_duration_fail_closed(proxy_mod, tmp_path):
     live = proxy_mod._grant_live
     assert live(proxy_mod.REVOKED_ONLY)

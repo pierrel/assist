@@ -1,0 +1,21 @@
+ARG SANDBOX_BASE=assist-sandbox:latest
+FROM ${SANDBOX_BASE}
+
+USER root
+WORKDIR /opt/hermes
+ENV HERMES_DISABLE_LAZY_INSTALLS=1 UV_PYTHON_DOWNLOADS=never PYTHONDONTWRITEBYTECODE=1
+
+# Keep the whole upstream runtime and its locked dependencies. The archive
+# checksum is from the selected source pin, not a moving release or branch.
+ADD https://codeload.github.com/NousResearch/hermes-agent/tar.gz/ec3249919accf7bc51f780dcff663e8f19a0e176 /tmp/hermes.tar.gz
+RUN echo '82dd2206a86c1167b54fd6f8aae5d2c87e0b6b278059cf75819c508770ba4116  /tmp/hermes.tar.gz' | sha256sum -c - && \
+    tar -xzf /tmp/hermes.tar.gz --strip-components=1 -C /opt/hermes && \
+    rm /tmp/hermes.tar.gz && \
+    python -m venv /opt/hermes-build && \
+    /opt/hermes-build/bin/pip install --no-cache-dir uv==0.11.11 && \
+    /opt/hermes-build/bin/uv sync --frozen --no-dev --python /usr/bin/python && \
+    rm -rf /opt/hermes-build /root/.cache
+
+COPY assist/hermes_runtime/worker.py /opt/assist/hermes_worker.py
+USER sandbox
+WORKDIR /workspace

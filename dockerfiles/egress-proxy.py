@@ -4,7 +4,9 @@ Exact-match hostname allowlist.  Refuses anything not on the list with
 HTTP 403.  Supports both CONNECT (HTTPS tunnel) and HTTP-via-proxy
 (absolute-URL request line) so HTTPS traffic to pypi and HTTP traffic
 to host.docker.internal:8000 (the local model endpoint) both flow
-through the same gate.
+through the same gate. The local-model host exception requires a valid ordinary
+sandbox attribution record; native Hermes/Pi and unattributed clients cannot
+use it, including legacy deployments without a client map.
 
 Why custom Python instead of tinyproxy / squid:
   - The codebase prefers audit-friendly pieces (see the C git shim that
@@ -35,7 +37,7 @@ User-approved grants (docs/2026-07-21-egress-approval-hitl.org):
   resolve, reject private/loopback/link-local/metadata space, and connect
   to the vetted IP — a user-approved hostname is attacker-influenceable
   (DNS rebinding), unlike the operator-curated base entries, so it must
-  never be able to point into the host or LAN. Operator base hosts retain
+  never be able to point into the host or LAN. Other operator base hosts retain
   their ordinary any-port policy on both listeners. The browser listener
   additionally requires sandbox ingress and an armed exact-generation map
   record. A policy-only preflight returns the current decision without an
@@ -358,6 +360,13 @@ def target_policy(host: str, port: int, client_ip: str,
     if kind == "browser" or browser_listener and kind != "sandbox":
         return None, "browser_attribution_missing"
     record = client_record(client_ip, kind)
+    if kind == "sandbox" and record is None:
+        record = client_record(client_ip, "hermes")
+    # Native model access belongs to the host relay. Requiring positive
+    # ordinary attribution also closes this route when the map is absent,
+    # malformed or unreadable; permanent external allowlist entries are unchanged.
+    if host == "host.docker.internal" and (record is None or record["kind"] != "sandbox"):
+        return None, "host_requires_ordinary_attribution"
     if browser_listener:
         if record is None or record.get("browser_armed") is not True:
             return None, "browser_attribution_missing"

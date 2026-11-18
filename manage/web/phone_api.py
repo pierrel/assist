@@ -470,7 +470,7 @@ def _thread_git_status(tid: str) -> dict[str, Any]:
 
 
 def _thread_messages(tid: str) -> list[dict]:
-    """Legacy full projection for Pi threads and browser-compatible test fixtures."""
+    """Native history projection and browser-compatible test fixtures."""
     chat, pi_messages, _, _ = threads._thread_messages_for_fragment(tid)
     return pi_messages if pi_messages is not None else (
         [] if chat is None else chat.get_web_messages())
@@ -552,10 +552,9 @@ def _checkpoint_history(tid: str, before: tuple[str, str, int, int] | None) -> t
 
 def _thread_history(tid: str, before: str | None) -> tuple[list[dict], bool, bool]:
     """Return chronological phone history plus whether it is checkpoint-backed."""
-    # Pi conversations do not use the LangGraph write store.  They are small,
-    # local records and keep the legacy sealed-hash cursor until their own store
-    # gains the same append reader.
-    if threads._is_pi_thread(tid):
+    # Native conversations do not use the LangGraph write store. They use host
+    # records and retain the existing sealed-hash pagination cursor.
+    if threads._is_native_thread(tid):
         raw_messages = _thread_messages(tid)
         if before is None:
             return raw_messages, False, False
@@ -764,8 +763,9 @@ def _list_threads() -> dict[str, Any]:
             continue
     values.sort(key=lambda item: item[0])
     harnesses = [{"key": "deepagents", "label": "Deep Agents"}]
-    if state.PI_PREVIEW.admits("pi"):
-        harnesses.append({"key": "pi", "label": "Pi preview"})
+    if state.HERMES_PREVIEW.admits("hermes"):
+        harnesses.append({"key": "hermes", "label": "Hermes",
+                          "description": threads.HERMES_PREVIEW_NOTICE})
     return {"threads": [value for _, value in values], "repositories": _domain_choices(),
             "harnesses": harnesses}
 
@@ -819,7 +819,7 @@ def _submit_existing(tid: str, text: str, key: str, *, run_id: str | None = None
                     return replay, False, True
                 try:
                     if not threads._pi_message_admits(tid):
-                        raise HTTPException(status_code=503, detail="Pi preview is unavailable")
+                        raise HTTPException(status_code=503, detail="Selected native preview is unavailable")
                 except ThreadEngineError as error:
                     raise HTTPException(status_code=409, detail="Thread harness is unavailable") from error
                 try:
@@ -1028,7 +1028,7 @@ def _reserve_existing(tid: str, text: str, key: str) -> tuple[Any, bool, bool, b
     run_id = uuid.uuid4().hex
     work_id = uuid.uuid4().hex
     try:
-        is_pi_thread = threads._is_pi_thread(tid)
+        is_pi_thread = threads._is_native_thread(tid)
     except ThreadEngineError as error:
         raise HTTPException(status_code=409,
                             detail="Thread harness is unavailable") from error
@@ -1056,7 +1056,7 @@ def _reserve_create(body: _CreateThread, key: str) -> tuple[str, Any, str | None
     work_id = uuid.uuid4().hex
     # The final deterministic phone thread id is based on the idempotency key.
     tid = _phone_thread_id(key)
-    reserved = body.harness != "pi" and RUN_STREAMS.reserve(tid, work_id)
+    reserved = body.harness == "deepagents" and RUN_STREAMS.reserve(tid, work_id)
     try:
         if reserved:
             RUN_STREAMS.activate(tid, work_id)
@@ -1113,7 +1113,7 @@ def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
             raise HTTPException(status_code=404, detail="Thread not found") from error
         if isinstance(error, (RunStoreUnavailable, GitSyncError)):
             raise
-        raise RunStoreUnavailable("Browser cancellation state is unavailable") from error
+        raise RunStoreUnavailable("Run cancellation state is unavailable") from error
 
 
 def _cancel_logical_run_fenced(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
@@ -1149,6 +1149,8 @@ def _cancel_logical_run_fenced(tid: str, run_id: str) -> tuple[int, dict[str, An
                 session = threads.BrowserManager.current_session(tid)
                 browser_owner = (session.run_id if session is not None
                                  and session.work_id == projection["work_id"] else None)
+                browser_owner = browser_owner or threads._HERMES_RUNTIME.paused_owner(
+                    tid, projection["work_id"])
                 runs = service.cancel_logical(
                     tid, run_id, browser_owner_run_id=browser_owner)
             else:
@@ -1573,7 +1575,7 @@ def _approval_collection(tid: str) -> dict[str, Any]:
 
     proposals = []
     mail = None
-    if not threads._is_pi_thread(tid):
+    if not threads._is_native_thread(tid):
         try:
             mail = _approval_preview(tid)["proposal"]
         except HTTPException as error:

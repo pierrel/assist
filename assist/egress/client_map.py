@@ -1,4 +1,4 @@
-"""Generation-bound proxy attribution for shell, Pi and browser containers."""
+"""Generation-bound proxy attribution for shell, native runtimes and browsers."""
 from __future__ import annotations
 
 import fcntl
@@ -50,20 +50,20 @@ class ClientRecord:
     def __post_init__(self) -> None:
         if (not self.thread_id or len(self.thread_id) > 128
                 or not self.generation or len(self.generation) > 128
-                or self.kind not in {"sandbox", "browser", "pi"}):
+                or self.kind not in {"sandbox", "browser", "pi", "hermes"}):
             raise ValueError("invalid proxy client identity")
         if (type(self.browser_armed) is not bool
                 or self.browser_armed and (self.kind != "sandbox" or self.browser_mode)):
             raise ValueError("invalid browser provenance")
-        if self.kind == "pi" and any((self.browser_mode, self.internal_host,
+        if self.kind in {"pi", "hermes"} and any((self.browser_mode, self.internal_host,
                                       self.internal_port)):
-            raise ValueError("Pi has browser policy fields")
+            raise ValueError("native runtime has browser policy fields")
         if self.kind == "browser" and self.browser_mode is None:
             raise ValueError("browser policy is missing")
         if self.browser_mode is None:
             if self.internal_host is not None or self.internal_port is not None:
                 raise ValueError("invalid browser policy")
-        elif (self.kind == "pi" or self.browser_mode not in {"public", "internal"}
+        elif (self.kind in {"pi", "hermes"} or self.browser_mode not in {"public", "internal"}
               or (self.browser_mode == "public"
                   and (self.internal_host is not None or self.internal_port is not None))
               or (self.browser_mode == "internal"

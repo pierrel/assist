@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-pi-runtime-build deploy-service deploy-install deploy-speech-models restart status logs setup-sudo help sandbox-build browser-build browser-smoke browser-docker-test egress-proxy-build pi-runtime-build pi-preview-enable pi-preview-disable pi-preview-status sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-hermes-runtime-build deploy-service deploy-install deploy-speech-models restart status logs setup-sudo help sandbox-build browser-build browser-smoke browser-docker-test egress-proxy-build hermes-runtime-build pi-runtime-build pi-preview-enable pi-preview-disable pi-preview-status sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
 
 eval:
 	$(call with-dev-env,./scripts/run-evals.sh)
@@ -37,7 +37,7 @@ eval:
 test:
 	$(call with-dev-env,.venv/bin/pytest --junit-xml=tests/history/results-$$(date +%Y%m%d-%H%M).xml tests)
 
-web: sandbox-build pi-runtime-build
+web: sandbox-build hermes-runtime-build
 	$(call with-dev-env,.venv/bin/python -m manage.web)
 
 smoke:
@@ -69,6 +69,10 @@ browser-docker-test:
 egress-proxy-build:
 	docker build -t assist-egress-proxy -f dockerfiles/Dockerfile.egress-proxy .
 
+hermes-runtime-build: sandbox-build
+	docker build -t assist-hermes-runtime -f dockerfiles/Dockerfile.hermes-runtime .
+
+# Historical Pi image tooling; the server no longer admits Pi execution.
 pi-runtime-build:
 	docker build -t assist-pi-runtime -f dockerfiles/Dockerfile.pi-runtime .
 
@@ -106,7 +110,7 @@ sandbox-shell:
 
 # === Deployment Targets ===
 
-deploy: deploy-code deploy-sandbox-build deploy-pi-runtime-build deploy-searxng deploy-install deploy-speech-models restart
+deploy: deploy-code deploy-sandbox-build deploy-hermes-runtime-build deploy-searxng deploy-install deploy-speech-models restart
 	@echo "✓ Deployed everything EXCEPT the systemd service."
 	@echo "  The service unit is left untouched (installing it needs interactive sudo)."
 	@echo "  To apply service/unit changes, run: make deploy-service"
@@ -138,10 +142,10 @@ deploy-sandbox-build:
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && bash dockerfiles/test-sandbox-egress.sh'
 	@echo "✓ Sandbox + egress-proxy images built and smoked"
 
-deploy-pi-runtime-build:
-	@echo "→ Building Pi runtime image on $(DEPLOY_HOST)..."
-	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-pi-runtime -f dockerfiles/Dockerfile.pi-runtime .'
-	@echo "✓ Pi runtime image built"
+deploy-hermes-runtime-build: deploy-sandbox-build
+	@echo "→ Building Hermes runtime image on $(DEPLOY_HOST)..."
+	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-hermes-runtime -f dockerfiles/Dockerfile.hermes-runtime .'
+	@echo "✓ Hermes runtime image built"
 
 # Migrate pre-non-root-sandbox thread workspaces to the deploy
 # user's ownership.  Idempotent.  Required after the first deploy
@@ -155,7 +159,7 @@ deploy-migrate-workspaces:
 	@ssh $(DEPLOY_HOST) 'sudo chown -R $$USER:$$USER $(ASSIST_THREADS_DIR)'
 	@echo "✓ Workspace ownership migrated"
 
-export DEPLOY_PATH SERVICE_NAME ASSIST_THREADS_DIR ASSIST_PORT ASSIST_MODEL_URL ASSIST_DOMAINS ASSIST_SEARCH_URL TAVILY_API_KEY ASSIST_ROUTING_URL ASSIST_GEOCODER_URL TRAVEL_INFRA_DIR ASSIST_EGRESS_APPROVALS_DIR ASSIST_EGRESS_CLIENT_MAP_DIR ASSIST_SSL_CERT ASSIST_SSL_KEY ASSIST_SMS_SECRET ASSIST_SMS_OUTBOUND_URL ASSIST_SMS_ARCHIVE_DIR ASSIST_VOICE_SECRET ASSIST_VOICE_PIN ASSIST_VOICE_CALLERS ASSIST_VOICE_CALL_LOG_DIR ASSIST_VOICE_PIPER_MODEL ASSIST_VOICE_WHISPER_MODEL EMAIL_RESEND_API_KEY_FILE EMAIL_FROM_ADDRESS EMAIL_FROM_NAME EMAIL_ALWAYS_CC ASSIST_THREAD_QUANTUM_S ASSIST_GMAIL_TOKEN_FILE
+export DEPLOY_PATH SERVICE_NAME ASSIST_THREADS_DIR ASSIST_PORT ASSIST_MODEL_URL ASSIST_HERMES_SYSTEM_MESSAGE ASSIST_DOMAINS ASSIST_SEARCH_URL TAVILY_API_KEY ASSIST_ROUTING_URL ASSIST_GEOCODER_URL TRAVEL_INFRA_DIR ASSIST_EGRESS_APPROVALS_DIR ASSIST_EGRESS_CLIENT_MAP_DIR ASSIST_SSL_CERT ASSIST_SSL_KEY ASSIST_SMS_SECRET ASSIST_SMS_OUTBOUND_URL ASSIST_SMS_ARCHIVE_DIR ASSIST_VOICE_SECRET ASSIST_VOICE_PIN ASSIST_VOICE_CALLERS ASSIST_VOICE_CALL_LOG_DIR ASSIST_VOICE_PIPER_MODEL ASSIST_VOICE_WHISPER_MODEL EMAIL_RESEND_API_KEY_FILE EMAIL_FROM_ADDRESS EMAIL_FROM_NAME EMAIL_ALWAYS_CC ASSIST_THREAD_QUANTUM_S ASSIST_GMAIL_TOKEN_FILE
 
 ifneq ($(origin ASSIST_EGRESS_RUNTIME_DIR),undefined)
 export ASSIST_EGRESS_RUNTIME_DIR
@@ -258,7 +262,7 @@ help:
 	@echo "  make web            - Run web server locally (uses .dev.env)"
 	@echo "  make test           - Run tests"
 	@echo "  make eval           - Run evals"
-	@echo "  make smoke          - Run smoke test against running server"
+	@echo "  make smoke          - Run Deep smoke (ASSIST_SMOKE_HERMES=1 also checks Hermes)"
 	@echo "  make sandbox-build  - Build Docker sandbox image"
 	@echo "  make browser-build  - Build headless browser image"
 	@echo "  make browser-smoke  - Build and launch sandboxed Chromium once"

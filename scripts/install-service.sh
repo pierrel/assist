@@ -59,6 +59,19 @@ ENV_VARS=""
 [ -n "$EMAIL_ALWAYS_CC" ] && ENV_VARS="${ENV_VARS}Environment=\"EMAIL_ALWAYS_CC=$EMAIL_ALWAYS_CC\"\n"
 [ -n "$ASSIST_GMAIL_TOKEN_FILE" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_GMAIL_TOKEN_FILE=$ASSIST_GMAIL_TOKEN_FILE\"\n"
 
+# Native guidance is free text: quote for systemd, then for the sed replacement.
+if [ -n "${ASSIST_HERMES_SYSTEM_MESSAGE:-}" ]; then
+    HERMES_ENV=$(python3 - <<'PY_ENV'
+import json
+import os
+value = "ASSIST_HERMES_SYSTEM_MESSAGE=" + os.environ["ASSIST_HERMES_SYSTEM_MESSAGE"]
+line = "Environment=" + json.dumps(value.replace("%", "%%"), ensure_ascii=False)
+print(line.replace("\\", "\\\\").replace("&", "\\&").replace("|", "\\|"))
+PY_ENV
+)
+    ENV_VARS="${ENV_VARS}${HERMES_ENV}\n"
+fi
+
 # Generate service file from template and install it
 cat "$DEPLOY_PATH/scripts/assist-web.service.template" | \
     sed "s|{{USER}}|$USER|g" | \

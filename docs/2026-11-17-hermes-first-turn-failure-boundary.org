@@ -1,0 +1,45 @@
+#+title: Hermes first-turn execution failure ownership
+#+date: 2026-11-17
+
+* Corrected behavior
+First-thread setup now finishes before entering Run execution. The setup failure
+handler still handles cloning, initial Git publication and setup persistence
+errors. Its existing retry bookkeeping is cleared when setup succeeds. Run
+execution and post-dispatch cancellation settlement occur outside that handler.
+
+A native dispatcher can propagate an unconfirmed teardown while retaining its
+running Run, generation and expired model slot. The initialization worker now
+lets that exception reach its existing scheduler logger; it cannot relabel the
+head and accepted followers as setup failures. The scheduler's existing finally
+releases its active notification bookkeeping. No new retry, scheduler, lifecycle
+owner or cleanup policy is introduced. Persistent unconfirmed cleanup still
+requires the existing operator recovery described in the preceding record.
+
+* Verification
+The baseline reproduction uses the actual initializer, engine dispatcher, durable
+Run store, shared model queue and SandboxManager, with a captured private container
+whose stop fails. The accepted prompts are "Create the blue note" and "Make it
+green afterward". It confirms the native generation and expired queue holder
+remain, then observes both Runs incorrectly marked error by the setup handler.
+
+The corrected regression requires the head to remain running, the follower to
+remain pending, both observer streams to remain nonterminal, the same generation
+and expired queue holder to remain retained, and no follower dispatch. The
+unconfirmed-stop error must propagate beyond the initializer; its scheduler's
+existing logger catches that propagated failure.
+This is a failure-injection integration test; it performs no model inference or
+live Docker operation.
+
+Three existing initialization retry tests now inject their synthetic setup error
+at the pre-dispatch setup boundary. Their prior mocked dispatcher exceptions
+incorrectly represented clone/setup failure after execution had been handed off.
+Their durable write retry and status-projection contracts remain unchanged.
+Adjacent Pi, restart, native lifecycle and first-message success paths are kept
+in the affected checks. The separate actual native product capability retains
+its fake-provider/network:none limits and two-pause acceptance sequence.
+
+* Historical supersessions
+=2026-11-17-hermes-cleanup-retry-corrections.org=, "Corrected behavior": the
+unconfirmed-cleanup outcome boundary also holds when the first-message setup
+worker invokes the engine dispatcher; setup failure handling no longer overrides
+that retained execution state. The earlier dated record remains unchanged.

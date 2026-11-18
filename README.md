@@ -214,15 +214,94 @@ Snapshot reads and background probes do not clear notifications.
 - **Thread descriptions.** The ordinary web assistant can update the current
   thread's description when asked, and the change is saved with the thread.
 
-- **Pi web preview.** A new web thread can explicitly select a bounded Pi
-  preview; Deep Agents remains the default. Pi threads are visibly labelled,
-  run only ordinary manual web turns, and can start a new Deep Agents thread
-  from an optional visible summary without transferring their transcript or
-  workspace. A loaded Pi skill retains its complete host-approved body and its
-  paired disclosed tools for the bounded conversation context; compaction drops
-  both together, and an explicit reload refreshes it. Each Pi turn also retains
-  a collapsed, redacted activity trace for model requests and workspace actions;
-  it never includes prompts, paths, commands, content, or tool results.
+- **Hermes native preview.** An operator can enable Hermes for new manual
+  browser or phone-API threads; Deep Agents remains the default. The pinned whole
+  Hermes runtime owns its prompts, conversation, skills, memory and joined helpers.
+  Assist owns the existing queue, Run authority, sandbox and Git publication.
+  When another thread waits, Hermes uses healthy native hooks to wait for active
+  foreground tool/model calls to finish and block new native boundaries. A joined
+  helper's parent wait can span the handoff while the child parks. Hook failures cannot grant
+  model access: the host relay independently denies parked requests. Independent background computation
+  may finish while its model admission is parked; the same invocation resumes
+  after the competitor and can retrieve that result. Native history persists in
+  `/agent/hermes` across user turns, including native compression session rotation.
+  A lost process ends the Run without replay. A held model slot is released only
+  after verified model parking or provider revocation and drain. Unconfirmed
+  container cleanup retains its nonterminal Run and generation; existing Run and
+  generation checks block Git publication after the dispatcher releases its checkout
+  lock. Unrelated model work can proceed; an unconfirmed provider drain still holds
+  the model slot. Drain confirms local transport closure, not remote inference
+  cancellation. Completed sandbox teardown is retained if relay drain must be retried.
+  A first-turn cleanup failure does not discard accepted
+  follow-up messages. Git diffs and Merge remain available;
+  the Deep Agents Review action is not offered for native threads.
+  Available tools are files, terminal, skills, memory and helpers. Native browser,
+  web search and interactive approvals are unavailable; commands requiring approval
+  are denied. Turn completion and accepted cancellation stop the entire sandbox before Git
+  publication, including still-running background jobs marked `persist_on_release`.
+  Those jobs can survive native agent cleanup, but cannot outlive this preview's
+  turn container. There is no independent native scheduled or autonomous work.
+  Existing Pi threads remain readable and can create a Deep Agents continuation
+  from a visible summary. Pi execution and new Pi threads are retired.
+
+### Operating the Hermes preview
+
+Build `make hermes-runtime-build` before enabling the preview. The image includes
+Hermes `ec3249919accf7bc51f780dcff663e8f19a0e176` with its frozen dependencies,
+layered on the ordinary sandbox. `make deploy` also builds this image. Code-only
+updates to the native worker require rebuilding it. The archive checksum is
+verified by `dockerfiles/Dockerfile.hermes-runtime`; source download failure must
+be resolved without changing the pin silently.
+
+The preview starts disabled. Run this locally as the server owner, with the same
+`ASSIST_THREADS_DIR` as the server, to enable it (use `False` to disable):
+
+```python
+import os
+from assist.pi_preview import NativePreviewPolicy
+NativePreviewPolicy(os.environ.get("ASSIST_THREADS_DIR", "/tmp/assist_threads"),
+                    engine="hermes").set_enabled(True)
+```
+
+`ASSIST_HERMES_SYSTEM_MESSAGE` optionally adds one native system-message block;
+it is empty by default. Configure it in the service environment with
+`make deploy-service`, then restart; a code-only deployment does not update the
+installed unit environment. In `.deploy.env`, use Make syntax such as
+`ASSIST_HERMES_SYSTEM_MESSAGE := Keep notes safe`; outer quotes are literal, and
+write `$$` for a literal dollar sign. The host model URL/model selection applies to native
+parent, child and auxiliary requests. Built-in and persisted auxiliary routes
+are replaced by the private relay. Additional runtime plugins are not part of
+this preview's validated configuration. Persisted native approval settings cannot
+enable unattended dangerous commands.
+
+Repeat the deterministic capability checks with the project Python environment:
+
+```sh
+python scripts/check-hermes-native.py
+python dockerfiles/check-native-model-egress.py --proxy-image assist-egress-proxy
+docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
+  -v "$PWD/scripts/check-hermes-compression.py:/tmp/check.py:ro" \
+  assist-hermes-runtime /tmp/check.py
+```
+
+The first uses a fake provider and Docker `network:none`; it checks browser
+creation, two native pauses with distinct competitors, a second user turn queued
+behind the first continuation, phone history and unattended command denial. The second creates a private
+internal network and fake model, verifying ordinary mapped access, native denial,
+missing/malformed attribution and legacy no-map denial, with external allowlist
+behavior preserved. The third runs inside the pinned runtime image with a private
+scripted provider and scripted summary output. It forces the supported rotating
+compression mode, closes the descendant, and requires the next worker turn and
+provider request to load its summary. It does not exercise host admission or
+summary quality. None of these checks proves real-model behavior or live deployment.
+`ASSIST_HERMES_TEST_IMAGE` can select an isolated native image for the first check.
+The proxy must run with its client map mounted and valid ordinary sandbox records:
+legacy/no-map deployments deliberately lose the permanent host-model exception.
+The existing proxy-policy fingerprint forces replacement of an older running
+proxy at the next sandbox start; rebuild the proxy image before that admission.
+See [the implementation and acceptance record](docs/2026-11-16-hermes-native-implementation.org)
+and the [first review corrections](docs/2026-11-17-hermes-preview-review-fixes.org)
+and [retained-slice corrections](docs/2026-11-17-hermes-retained-slice-corrections.org).
 
 ---
 
@@ -331,6 +410,18 @@ per-turn teardown test from a default `pytest tests/` run. Run
 `make sandbox-smoke` only when live Docker testing is authorized; that explicit
 target builds the sandbox and proxy, runs the shell probes, and selects both
 live Python tests. CI runs this smoke separately from its unit-test invocation.
+
+**Post-deploy HTTP smoke:** `make smoke` keeps the existing Deep Agents greeting
+and follow-up flow. With the Hermes preview enabled, run
+`ASSIST_SMOKE_HERMES=1 make smoke` to add a fresh Hermes thread using the configured
+provider. It asks for a one-line token file in that thread's `/tmp`, waits for a
+completed Run and an assistant reply, and reads the file through the HTTP viewer.
+The token must match after trimming surrounding whitespace. The smoke then deletes
+only its own threads and verifies that the Hermes thread is gone. This proves a
+file write, not a particular native tool choice. It makes real model requests;
+use the deployment environment's production-admission procedure. The offline
+`tests/test_smoke_script.py` fixture checks the shell flow and failure handling,
+not model behavior. No real Hermes smoke result is implied by those fixture tests.
 
 **Agent Evaluations** (`edd/eval/`):
 
@@ -491,7 +582,7 @@ that first rollout, deploy with:
 make deploy
 ```
 
-This syncs code, rebuilds the sandbox and proxy and Pi runtime images,
+This syncs code, rebuilds the sandbox, proxy and Hermes runtime images,
 deploys SearXNG, installs dependencies and speech models, then restarts the
 service using the already installed unit and tails its logs (press Ctrl+C
 when satisfied).
@@ -705,7 +796,8 @@ Completion delivery checks the same identity and terminal state and removes only
 the proposal it actually delivered. All store/checkpoint I/O runs off the event
 loop; provisioning and graph execution remain with their existing workers.
 These finite client projections introduce no additional store or server state
-machine. Pi preview retains its existing capability restrictions.
+machine. Hermes has no interactive approval transport; native commands requiring
+approval are denied. Historical Pi threads are read-only.
 
 The reusable fixture has an explicit `--hitl-only` client capability panel;
 see [the fixture instructions](tests/e2e/README.md). It uses synthetic proposals,
@@ -1284,8 +1376,12 @@ the agent workspace. Their branch is published immediately, even when it first
 points at main. Before each new visible turn the server fetches the branch and
 fast-forwards its clean checkout to include user-pushed commits. Hidden resumes
 and child handoffs retain their admitted base. Successful work is committed in
-the restricted sandbox and published by a private, config-clean host Git
+the restricted sandbox and published by a private, checkout-isolated host Git
 process with a normal non-force push. No-change turns verify publication too.
+For HTTP(S) sources, that private process imports only host-global credential
+helpers, usernames and HTTP-path matching settings. Git retains their URL scopes,
+helper order and resets; checkout configuration and global URL rewrites/hooks
+remain excluded. Configure write-capable host credentials for the approved source.
 Git decides a non-fast-forward refusal; the server verifies the remote ref
 before reporting publication or preserving a divergent result branch.
 When a phone push races a server turn, the completed server commit remains on
@@ -1341,7 +1437,9 @@ the next clean preflight holds an uncommitted checkout for reconciliation rather
 than replaying work. Pi and Git preparation/commit keep their restricted profiles.
 The CLI path remains host-backed.
 
-The sandbox and browser images are built automatically by `make web` (and `make deploy`). To build them manually:
+`make web` and `make deploy` build the sandbox, proxy and Hermes images.
+Build the browser image separately when enabling browser use. To build the
+sandbox and browser images manually:
 ```bash
 make sandbox-build browser-build
 ```

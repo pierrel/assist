@@ -25,8 +25,16 @@ digraph Boundaries {
        fillcolor="#f3f3f3"];
   C15 [label="C15  Network destinations\nweb pages · search · travel services",
        fillcolor="#f3f3f3"];
+  C25 [label="C25  Native host adapter\nexisting Run + queue + generation"];
+  C24 [label="C24  Private provider relay\nadmission + exact owner fence"];
+  C26 [label="C26  Whole native Hermes\ninside shared execution container"];
   C21 [label="C21  Host user systemd\nindependent of web worker", fillcolor="#f3f3f3"];
 
+  C25 -> C8 [label="existing lifecycle authority"];
+  C25 -> C26 [label="start / model drain / resume / verified stop"];
+  C26 -> C24 [label="all native model traffic"];
+  C24 -> C12 [label="admitted exact generation only"];
+  C26 -> C9 [label="native history + workspace", style=dashed];
   C6 -> C10 [label="file / shell tool calls"];
   C6 -> C8 [label="browser tool calls", constraint=false];
   C6 -> C12 [label="model requests"];
