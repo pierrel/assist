@@ -17,10 +17,13 @@ import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
-from urllib.parse import quote, quote_plus, urlencode, urlsplit
+from urllib.parse import urlencode, urlsplit
 from uuid import uuid4
 
 from assist.browser import authority
+from assist.browser.redaction import (MAX_PRIVATE_COMMAND,
+                                      contains_hidden as _contains_hidden,
+                                      replace_hidden as _replace_hidden)
 from assist.egress.client_map import (
     ClientRecord, browser_records, configured_directory, disarm_sandbox_browser,
     forget_client, prune_absent_browser_clients)
@@ -31,33 +34,6 @@ from assist.run_service import RunService
 
 logger = logging.getLogger(__name__)
 MAX_DOWNLOAD = 20 * 1024 * 1024
-
-
-def _secret_pattern(word: str):
-    parts = re.split(r"(%[0-9a-fA-F]{2})", word)
-    if len(parts) == 1:
-        return None
-    pattern = "".join(
-        "%" + "".join(f"[{char.lower()}{char.upper()}]" if char.isalpha() else char
-                      for char in part[1:])
-        if re.fullmatch(r"%[0-9a-fA-F]{2}", part) else re.escape(part)
-        for part in parts)
-    return re.compile(pattern)
-
-
-def _contains_hidden(value: str, hidden: tuple[str, ...]) -> bool:
-    return any((pattern.search(value) if (pattern := _secret_pattern(word))
-                else word in value) for word in hidden)
-
-
-def _replace_hidden(value: str, hidden: tuple[str, ...]) -> str:
-    for word in hidden:
-        pattern = _secret_pattern(word)
-        value = (pattern.sub("[private value hidden]", value) if pattern
-                 else value.replace(word, "[private value hidden]"))
-    return value
-
-
 class BrowserUnavailable(Exception):
     pass
 
@@ -438,7 +414,7 @@ class BrowserSession:
                          limit=4096, timeout=10)
             self.paused = True
 
-    def command(self, operation: str, **args):
+    def command(self, operation: str, *, _private_values: tuple[str, ...] = (), **args):
         with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
             if self.closed:
                 raise BrowserUnavailable("browser turn has ended")
@@ -456,10 +432,13 @@ class BrowserSession:
             elif self.identity is None:
                 raise BrowserUnavailable("open a page first")
             identity = self.identity
-            command = json.dumps({"session": self.token, "operation": operation,
-                                  "args": args}, ensure_ascii=False).encode()
-            if len(command) > 32768:
+            public = {"session": self.token, "operation": operation, "args": args}
+            if len(json.dumps(public, ensure_ascii=False).encode()) > 32768:
                 raise BrowserUnavailable("browser command exceeds limit")
+            command = json.dumps({**public, "private_values": _private_values},
+                                 ensure_ascii=False).encode()
+            if len(command) > MAX_PRIVATE_COMMAND:
+                raise BrowserUnavailable("browser private command exceeds limit")
             try:
                 parsed = json.loads(_docker_exec(
                     identity.generation, command,
@@ -478,7 +457,8 @@ class BrowserSession:
 
     def _save_download_locked(self, download_id: str, filename: str | None,
                               hidden: tuple[str, ...] = ()):
-        response = self.command("download_info", download_id=download_id)
+        response = self.command("download_info", _private_values=hidden,
+                                download_id=download_id)
         if "error" in response:
             return response
         info = response["result"]
@@ -501,7 +481,8 @@ class BrowserSession:
         if len(data) != info["size"]:
             raise BrowserUnavailable("download byte count changed")
         if (any(word.encode() in data for word in hidden)
-                or b"%" in data and _contains_hidden(data.decode("latin-1"), hidden)):
+                or (b"%" in data or b"+" in data)
+                and _contains_hidden(data.decode("latin-1"), hidden)):
             raise BrowserUnavailable("download contains a private value")
         downloads = os.path.join(self.work_dir, "downloads")
         try:
@@ -860,12 +841,7 @@ def browser_tools(session: BrowserSession):
             return () if not os.path.isdir(store.repository) else None
         except OSError:
             return None
-        return tuple(sorted({
-            item for value in values for item in
-            (value, quote(value, safe=""), quote_plus(value, safe=""),
-             quote(value, safe="!'()*"),
-             quote_plus(value, safe="*").replace("~", "%7E")) if item
-        }, key=len, reverse=True))
+        return tuple(sorted(set(values), key=len, reverse=True))
 
     def scrub(value, hidden: tuple[str, ...]):
         if isinstance(value, str):
@@ -884,7 +860,7 @@ def browser_tools(session: BrowserSession):
             hidden = redactions()
             if hidden is None:
                 return "Browser unavailable: unlock or repair this repository's secret store."
-            response = session.command(operation, **args)
+            response = session.command(operation, _private_values=hidden, **args)
             observation = response.get("result") if isinstance(response, dict) else None
             if isinstance(observation, dict):
                 source_url = observation.pop("_source_url", None)

@@ -7,7 +7,10 @@ from urllib.parse import quote, quote_plus
 
 import pytest
 
-from assist.browser.manager import BrowserSession, BrowserUnavailable, browser_tools
+from assist.browser.manager import (BrowserSession, BrowserUnavailable,
+                                    _contains_hidden, _replace_hidden, browser_tools)
+from assist.browser.runner import BrowserWorker
+from assist.browser.redaction import MAX_PRIVATE_COMMAND
 from assist.secret_store import FILE, KEY_FILE, REQUEST_FILE, SecretStore, SecretStoreError
 
 
@@ -203,6 +206,163 @@ def test_overlapping_credentials_and_browser_encoding_keep_handles(tmp_path):
     assert "-extra" not in result["snapshot"]
 
 
+def test_browser_url_serialization_hides_hybrid_component_encoding(tmp_path):
+    repo = tmp_path / "repo"
+    thread = tmp_path / "thread"
+    repo.mkdir()
+    thread.mkdir()
+    password = "synthetic!*'()~ /river8642"
+    serialized = quote(password, safe="!*()")
+    assert "%27" in serialized and "!" in serialized and "*" in serialized
+    store = SecretStore(repo, thread)
+    store.unlock(PHRASE, create=True)
+    store.put("Serialized", PAGE, "synthetic-user", password)
+    session = SimpleNamespace(
+        work_dir=str(repo), threads_root=str(tmp_path), thread_id="thread",
+        command=lambda *_args, **_kwargs: {"result": {
+            "page_id": "opaque-page", "snapshot_id": "opaque-snapshot",
+            "url": PAGE + "?echo=" + serialized,
+            "_source_url": PAGE + "?echo=" + serialized,
+            "snapshot": "Account overview; echoed " + serialized,
+            "targets": [{"ref": "opaque-ref", "name": "Account overview"}],
+        }})
+    tool = {item.__name__: item for item in browser_tools(session)}["browser_observe"]
+    observed = json.loads(tool("opaque-page"))["result"]
+    assert "Account overview" in observed["snapshot"]
+    assert serialized not in json.dumps(observed)
+    assert "source_id" not in observed
+    assert observed["targets"][0]["ref"] == "opaque-ref"
+
+
+def test_hybrid_redaction_handles_percent_prefix_unicode_and_overlap():
+    hidden = ("a%25", "a%2fzz", "café", "synthetic-extra", "synthetic", "hi")
+    reflected = "raw a%25; encoded a%2525; a%2Fzz; caf%C3%A9; synthetic-extra; hi"
+    scrubbed = _replace_hidden(reflected, hidden)
+    assert scrubbed.count("[private value hidden]") == 6
+    assert "25" not in scrubbed
+    assert "2Fzz" not in scrubbed
+    assert "-extra" not in scrubbed
+    assert _contains_hidden("caf%c3%a9", hidden)
+    assert _contains_hidden("a%2Fzz", hidden)
+    assert not _contains_hidden("a%2424", hidden)
+    assert _replace_hidden("%" * 8192 + "safe", hidden).endswith("safe")
+
+
+def test_worker_host_observation_masks_before_display_limits(tmp_path, monkeypatch):
+    repo, thread, store, _ident = _store(tmp_path)
+    long_value = "synthetic-base-extra"
+    native_value = "synthetic!*'()~ /river8642"
+    store.put("Long", PAGE, "safe-user", long_value)
+    store.put("Native", PAGE, "safe-user", native_value)
+    encoded = quote(native_value, safe="!*()")
+    url = PAGE + "?pad=" + "a" * 470 + encoded
+    snapshot = "Visible account context; current synthetic-base " + "x" * 15965 + long_value
+
+    class Link:
+        def is_visible(self):
+            return True
+
+        def get_attribute(self, key):
+            return {"aria-label": "L" * 119 + long_value,
+                    "href": "/next?pad=" + "h" * 970 + long_value}.get(key)
+
+        def evaluate(self, _expression):
+            return "a"
+
+        def inner_text(self):
+            return ""
+
+    class Page:
+        def __init__(self):
+            self.url = url
+
+        def is_closed(self):
+            return False
+
+        def wait_for_load_state(self, **_kwargs):
+            pass
+
+        def locator(self, selector):
+            if selector == "body":
+                return SimpleNamespace(aria_snapshot=lambda **_kwargs: snapshot)
+            if selector == 'input[type="password"]':
+                return SimpleNamespace(evaluate_all=lambda _expression: ["synthetic-base"])
+            return SimpleNamespace(count=lambda: 1, nth=lambda _index:
+                                   SimpleNamespace(element_handle=lambda: Link()))
+
+    worker = BrowserWorker()
+    worker.pages["page"] = Page()
+    other = Page()
+    other.url = PAGE + "?pad=" + "b" * 215 + long_value
+    worker.pages["other"] = other
+    worker.downloads["download"] = SimpleNamespace(
+        suggested_filename="D" * 179 + long_value)
+    worker._error("E" * 254 + long_value, "document", "request_failed")
+    monkeypatch.setenv("BROWSER_SESSION_TOKEN", "synthetic-token")
+
+    def command(operation, **args):
+        hidden = list(args.pop("_private_values"))
+        return {"result": worker.handle({"session": "synthetic-token",
+                                          "operation": operation,
+                                          "args": args,
+                                          "private_values": hidden})}
+
+    session = SimpleNamespace(work_dir=str(repo), threads_root=str(tmp_path),
+                              thread_id="thread", command=command)
+    tool = {item.__name__: item for item in browser_tools(session)}["browser_observe"]
+    observed = json.loads(tool("page"))["result"]
+    visible = json.dumps(observed)
+    assert "Visible account context" in visible
+    assert "[password hidden]" in visible
+    assert long_value not in visible and "-extra" not in visible
+    assert "current synthetic-base" not in visible
+    assert encoded not in visible and native_value not in visible
+    assert "[password hidden]" in observed["url"]
+    assert "[password hidden]" in observed["snapshot"]
+    assert "[password hidden]" in observed["targets"][0]["name"]
+    assert "[password hidden]" in observed["targets"][0]["href"]
+    assert "[password hidden]" in observed["pages"][1]["url"]
+    assert "[password hidden]" in observed["downloads"][0]["name"]
+    assert "[password hidden]" in observed["network_errors"][0]["host"]
+    assert observed["page_id"] == "page"
+    assert observed["targets"][0]["ref"] in worker.targets["page"]
+    assert worker.targets["page"][observed["targets"][0]["ref"]][2].endswith(long_value)
+    assert "_source_url" not in observed and "source_id" not in observed
+
+
+def test_private_browser_command_covers_maximum_valid_catalog_values():
+    values = ["\0" * 320, "\0" * 1024] * 64
+    public = {"session": "x" * 32, "operation": "act",
+              "args": {"target": {"text": "x" * 2000},
+                       "url": "https://example.test/" + "x" * 4000}}
+    assert len(json.dumps(public, ensure_ascii=False).encode()) < 32768
+    command = json.dumps({**public, "private_values": values},
+                         ensure_ascii=False).encode()
+    assert len(command) <= MAX_PRIVATE_COMMAND
+
+
+def test_percent_triplet_case_is_not_registered_as_a_source(tmp_path):
+    repo = tmp_path / "repo"
+    thread = tmp_path / "thread"
+    repo.mkdir()
+    thread.mkdir()
+    store = SecretStore(repo, thread)
+    store.unlock(PHRASE, create=True)
+    store.put("Case", PAGE, "synthetic-user", "a%2fzz")
+    session = SimpleNamespace(
+        work_dir=str(repo), threads_root=str(tmp_path), thread_id="thread",
+        command=lambda *_args, **_kwargs: {"result": {
+            "url": PAGE + "?echo=a%2Fzz",
+            "_source_url": PAGE + "?echo=a%2Fzz",
+            "snapshot": "Account overview; a%2Fzz",
+        }})
+    tool = {item.__name__: item for item in browser_tools(session)}["browser_observe"]
+    result = json.loads(tool("page"))["result"]
+    assert "Account overview" in result["snapshot"]
+    assert "2Fzz" not in json.dumps(result)
+    assert "source_id" not in result
+
+
 def test_corrupt_or_unavailable_store_never_disables_existing_password_redaction(tmp_path):
     repo, thread, store, ident = _store(tmp_path)
     store.put("Other site", PAGE, "other-user", "other-password")
@@ -243,15 +403,21 @@ def test_removed_record_or_catalog_cannot_erase_thread_redaction_memory(tmp_path
     assert len(calls) == 1
 
 
-def test_download_rejects_known_password_before_workspace_write(tmp_path, monkeypatch):
+@pytest.mark.parametrize("variant", ["raw", "hybrid", "percent_case"])
+def test_download_rejects_known_password_before_workspace_write(
+        tmp_path, monkeypatch, variant):
     repo, _thread, unused_store, _ident = _store(tmp_path)
+    password = ("synthetic!*'()~ /river8642" if variant == "hybrid"
+                else "a%2fzz" if variant == "percent_case" else PASSWORD)
+    content = (quote(password, safe="!*()") if variant == "hybrid"
+               else "a%2Fzz" if variant == "percent_case" else password).encode()
     session = BrowserSession("thread", "run", str(tmp_path), str(repo), None)
     session.identity = SimpleNamespace(generation="synthetic")
     session.command = lambda *_args, **_kwargs: {"result": {
         "path": "/run/assist-browser/downloads/synthetic", "name": "safe.txt",
-        "size": len(PASSWORD)}}
+        "size": len(content)}}
     monkeypatch.setattr("assist.browser.manager._docker_download",
-                        lambda *_args, **_kwargs: PASSWORD.encode())
+                        lambda *_args, **_kwargs: content)
     with pytest.raises(BrowserUnavailable, match="private value"):
-        session._save_download_locked("download", None, hidden=(PASSWORD,))
+        session._save_download_locked("download", None, hidden=(password,))
     assert not (repo / "downloads").exists()

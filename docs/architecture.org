@@ -110,9 +110,11 @@ in both views. An ID shown in only one view keeps that meaning.
   to the Emacs client as a button. The client masks entry; the phone API receives
   plaintext values and uses the ordinary thread Git lifecycle to publish their
   ciphertext. Browser tools expose public IDs and labels; the host fills
-  observed fields at the recorded HTTPS origin and path, and strips known
-  username and password values from model
-  observations. The key is outside the workspace, scratch and =/agent= mounts.
+  observed fields at the recorded HTTPS origin and path. The host sends all
+  unlocked known values, without the key, through the private browser command
+  transport. The worker combines them with current password-field values and
+  masks raw observations before display limits; the host checks returned
+  observations again. The key is outside the workspace, scratch and =/agent= mounts.
 - *C10 Execution sandbox.* [[file:../assist/sandbox.py][DockerSandboxBackend]]
   sends file and shell tools to one restricted container shared by a logical
   parent turn and its eligible children, with a bound workspace, scratch and

@@ -1,6 +1,7 @@
 """Observed browser targets remain bound to their live DOM semantics."""
 import io
 import json
+from urllib.parse import quote
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -27,6 +28,9 @@ class _Page:
 
     def close(self):
         self.closed = True
+
+    def locator(self, _selector):
+        return SimpleNamespace(evaluate_all=lambda _expression: [])
 
 
 class _Link:
@@ -591,6 +595,63 @@ def test_close_bounds_site_controlled_page_urls():
     assert len(result["pages"]) == 4
     assert all(len(item["url"]) <= 256 for item in result["pages"])
     assert len(json.dumps({"result": result}).encode()) < runner.MAX_RESULT
+
+
+def test_close_recovers_when_password_fields_exceed_observation_limit(monkeypatch):
+    class Crowded(_Page):
+        def locator(self, _selector):
+            return SimpleNamespace(evaluate_all=lambda _expression: None)
+
+    monkeypatch.setenv("BROWSER_SESSION_TOKEN", "synthetic-token")
+    worker = BrowserWorker()
+    page = Crowded()
+    worker.pages["page"] = page
+    result = worker.handle({"session": "synthetic-token", "operation": "close",
+                            "args": {"page_id": "page"}, "private_values": []})
+    assert result == {"closed_page_id": "page"}
+    assert page.is_closed()
+    assert "page" not in worker.pages
+
+
+def test_observation_budget_keeps_masked_context_with_many_targets():
+    worker = BrowserWorker()
+    result = {"page_id": "page", "snapshot": "Visible context [password hidden]",
+              "targets": [{"ref": str(index), "role": "link", "name": "Link",
+                           "href": "https://example.test/" + "x" * 1100}
+                          for index in range(40)]}
+    worker.targets["page"] = {str(index): object() for index in range(40)}
+    limited = worker._limit_result(result)
+    assert limited["snapshot"] == "Visible context [password hidden]"
+    assert len(json.dumps({"result": limited}).encode()) < runner.MAX_RESULT
+    assert set(worker.targets["page"]) == {target["ref"] for target in limited["targets"]}
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+def test_download_blocks_current_password_value_before_export(tmp_path, monkeypatch,
+                                                              encoded):
+    value = "synthetic!*'()~ /river"
+    content = (quote(value, safe="!*()") if encoded else value).encode()
+    original = tmp_path / "artifact"
+    original.write_bytes(content)
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    monkeypatch.setattr(runner, "RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(runner, "DOWNLOAD_DIR", str(downloads))
+    monkeypatch.setenv("BROWSER_SESSION_TOKEN", "synthetic-token")
+
+    class Page(_Page):
+        def locator(self, _selector):
+            return SimpleNamespace(evaluate_all=lambda _expression: [value])
+
+    worker = BrowserWorker()
+    worker.pages["page"] = Page()
+    worker.downloads["download"] = SimpleNamespace(
+        path=lambda: str(original), suggested_filename="safe.txt",
+        save_as=lambda destination: Path(destination).write_bytes(content))
+    with pytest.raises(BrowserInputError, match="private value"):
+        worker.handle({"session": "synthetic-token", "operation": "download_info",
+                       "args": {"download_id": "download"}, "private_values": []})
+    assert not (downloads / "download").exists()
 
 
 def test_unstarted_or_revoked_worker_cannot_launch_implicitly(monkeypatch):
