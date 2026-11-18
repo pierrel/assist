@@ -202,16 +202,15 @@ def test_failed_parking_proof_then_verified_stop_releases_model_slot(hermes_thre
     tid = threads.MANAGER.reserve_visible("hermes")
     run = threads._create_run(tid, None, resume=True, pending_text="Retained native work")
     stopped = []
-    def failed_reload():
-        raise OSError("fixture transient Docker inspect failure")
-    container = SimpleNamespace(reload=failed_reload)
+    container = SimpleNamespace()
     manager = HermesRuntimeManager(sandbox_manager=SimpleNamespace(
         cleanup_verified=lambda _work, generation: stopped.append(generation)))
     control = tmp_path / "private-control"
     control.mkdir()
     manager.turns[tid] = SimpleNamespace(work_id=run.work_id, work_dir="fixture", paused=True,
         backend=SimpleNamespace(container=container), control_dir=control,
-        relay=SimpleNamespace(stop_admission=lambda: None, close=lambda: None))
+        relay=SimpleNamespace(parked=False, connections={},
+                              stop_admission=lambda: None, close=lambda: None))
     def pause(*_args, **_kwargs):
         raise ThreadPauseRequested()
     manager.run_slice = pause
@@ -226,6 +225,7 @@ def test_failed_parking_proof_then_verified_stop_releases_model_slot(hermes_thre
     threads._execute_hermes_run(run, user_priority=False)
     assert stopped == [container] and tid not in manager.turns
     assert threads._runs().get(tid, run.id).status == "error"
+    assert threads._runs().get(tid, run.id).error == "Hermes parking is unconfirmed"
     assert queue.current_handle() is None, "verified teardown left the global model holder stranded"
     with queue.acquire("competitor", wait_timeout_s=0.01):
         pass

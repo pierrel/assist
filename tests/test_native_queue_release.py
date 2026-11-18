@@ -1,4 +1,4 @@
-"""A native worker must stop or park before its model slot can be reused."""
+"""Native queue holders retain their slot until the model-release fence succeeds."""
 import threading
 
 import pytest

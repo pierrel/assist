@@ -219,22 +219,28 @@ Snapshot reads and background probes do not clear notifications.
   Hermes runtime owns its prompts, conversation, skills, memory and joined helpers.
   Assist owns the existing queue, Run authority, sandbox and Git publication.
   When another thread waits, Hermes uses healthy native hooks to wait for active
-  foreground tool/model calls to finish and block new native boundaries. Hook failures cannot grant
+  foreground tool/model calls to finish and block new native boundaries. A joined
+  helper's parent wait can span the handoff while the child parks. Hook failures cannot grant
   model access: the host relay independently denies parked requests. Independent background computation
   may finish while its model admission is parked; the same invocation resumes
   after the competitor and can retrieve that result. Native history persists in
   `/agent/hermes` across user turns, including native compression session rotation.
   A lost process ends the Run without replay. A held model slot is released only
   after verified model parking or provider revocation and drain. Unconfirmed
-  container cleanup retains its nonterminal Run, generation and Git hold without
-  blocking unrelated model work; an unconfirmed provider drain still holds the
-  model slot. Completed sandbox teardown is retained if relay drain must be retried.
+  container cleanup retains its nonterminal Run and generation; existing Run and
+  generation checks block Git publication after the dispatcher releases its checkout
+  lock. Unrelated model work can proceed; an unconfirmed provider drain still holds
+  the model slot. Drain confirms local transport closure, not remote inference
+  cancellation. Completed sandbox teardown is retained if relay drain must be retried.
   A first-turn cleanup failure does not discard accepted
   follow-up messages. Git diffs and Merge remain available;
   the Deep Agents Review action is not offered for native threads.
   Available tools are files, terminal, skills, memory and helpers. Native browser,
   web search and interactive approvals are unavailable; commands requiring approval
-  are denied. There is no independent native scheduled or autonomous work.
+  are denied. Turn completion and accepted cancellation stop the entire sandbox before Git
+  publication, including still-running background jobs marked `persist_on_release`.
+  Those jobs can survive native agent cleanup, but cannot outlive this preview's
+  turn container. There is no independent native scheduled or autonomous work.
   Existing Pi threads remain readable and can create a Deep Agents continuation
   from a visible summary. Pi execution and new Pi threads are retired.
 
