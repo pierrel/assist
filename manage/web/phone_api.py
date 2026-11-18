@@ -666,7 +666,9 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
     if active_run is None:
         from assist.secret_store import SecretStoreError
         try:
-            secret_request = _repo_secrets(tid).pending_request()
+            pending = _repo_secrets(tid).pending_request()
+            if pending is not None and not threads._git_merge_has_unfinished_work(tid):
+                secret_request = pending
         except HTTPException as error:
             if error.status_code != 409:
                 raise

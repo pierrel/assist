@@ -142,6 +142,8 @@ def test_authenticated_thread_snapshot_offers_agent_requested_private_form(
     thread = tmp_path / "thread"
     repo.mkdir()
     thread.mkdir()
+    (tmp_path / "synthetic").mkdir()
+    runs = RunService(str(tmp_path))
     request = SecretStore(repo, thread).request_input(
         "Synthetic site", "https://synthetic.example/login")
     monkeypatch.setenv(phone_api.PHONE_API_TOKEN_ENV, "synthetic-token")
@@ -151,6 +153,7 @@ def test_authenticated_thread_snapshot_offers_agent_requested_private_form(
     monkeypatch.setattr(phone_api, "_workspace_entries", lambda *_args, **_kw: [])
     monkeypatch.setattr(phone_api, "_approval_summary", lambda *_args: (0, False))
     monkeypatch.setattr(phone_api, "_active_thread_run", lambda _tid: None)
+    monkeypatch.setattr(phone_api.threads, "_runs", lambda: runs)
     monkeypatch.setattr(phone_api, "_stored_thread_title", lambda _tid: "Synthetic")
     monkeypatch.setattr(phone_api, "_thread_workspace",
                         lambda _tid: {"repo_label": "Synthetic"})
@@ -171,3 +174,14 @@ def test_authenticated_thread_snapshot_offers_agent_requested_private_form(
     busy = client.get(path, headers={"Authorization": "Bearer synthetic-token"})
     assert busy.status_code == 200
     assert busy.json()["thread"]["private_entry_request"] is None
+
+    monkeypatch.setattr(phone_api, "_active_thread_run", lambda _tid: None)
+    pending_run = runs.create("synthetic", "general-agent", "Finish login",
+                              user_origin=True)
+    runs.claim("synthetic", pending_run.id)
+    runs.transition("synthetic", pending_run.id, "interrupted")
+    monkeypatch.setattr(phone_api.state, "_get_status", lambda _tid: {"stage": "paused"})
+    paused = client.get(path, headers={"Authorization": "Bearer synthetic-token"})
+    assert paused.status_code == 200
+    assert paused.json()["thread"]["private_entry_request"] is None
+    assert (thread / REQUEST_FILE).exists()

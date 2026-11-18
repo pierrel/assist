@@ -1286,7 +1286,7 @@ login and `C-c u` to unlock an existing store. The client masks the username,
 password and unlock phrase while entering them and sends them over its existing
 authenticated HTTPS phone API. No secret value is placed in a chat message.
 The agent can request a private entry form using only a public label and HTTPS
-login page. Once the requesting Run finishes, an authenticated desktop thread
+login page. Once the thread has no unfinished work, an authenticated desktop thread
 snapshot offers an Add requested login button, which opens the masked prompts.
 A stale button cannot
 save to a changed request destination. The agent can list public labels, HTTPS
