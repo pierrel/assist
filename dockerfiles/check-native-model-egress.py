@@ -53,7 +53,8 @@ HTTPServer(('0.0.0.0', 8000), Handler).serve_forever()
 
             def proxy(mapped):
                 return start(args.proxy_image,
-                             environment={"EGRESS_ALLOWLIST": "host.docker.internal,fixture-external.test",
+                             environment={"ASSIST_PORT": "5050",
+                                          "EGRESS_ALLOWLIST": "host.docker.internal,fixture-external.test",
                                           "EGRESS_SANDBOX_CIDR": cidr},
                              extra_hosts={"host.docker.internal": provider_ip,
                                           "fixture-external.test": provider_ip},

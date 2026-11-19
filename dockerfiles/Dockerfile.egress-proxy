@@ -8,6 +8,7 @@
 FROM python:3.13-alpine
 
 COPY dockerfiles/egress-proxy.py /usr/local/bin/egress-proxy.py
+COPY assist/control_api.py /usr/local/bin/assist/control_api.py
 
 EXPOSE 8888
 

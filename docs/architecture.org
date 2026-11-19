@@ -171,8 +171,12 @@ in both views. An ID shown in only one view keeps that meaning.
 - *C13 Egress proxy.* [[file:../assist/sandbox_manager.py][SandboxManager]]
   starts the proxy and isolated networks. [[file:../assist/egress/store.py][EgressStore]]
   projects approved grants; [[file:../assist/egress/client_map.py][client_map.py]]
-  attributes browser traffic. It gates sandbox and browser network traffic,
-  not host Python tool requests. The
+  attributes browser traffic. The proxy resolves and pins every admitted destination;
+  [[file:../assist/control_api.py][the shared control-service boundary]] applies
+  even to destinations admitted by base allowances and thread grants. Both
+  execution networks require isolated gateway mode, so direct host connections
+  do not replace proxy policy. Existing non-isolated networks require a
+  operator-controlled migration after their attached generations stop. The
   [[file:browser-site-compatibility.org][browser view]] describes this branch's
   bounded browser connection burst and the retained destination policy.
 - *C14 Domain Git remote.* [[file:../assist/thread_git.py][ThreadGit]] and
@@ -181,8 +185,12 @@ in both views. An ID shown in only one view keeps that meaning.
 - *C15 Network destinations.* [[file:../assist/tools.py][tools.py]] provides
   search and URL fetching; [[file:../assist/geo/tools.py][geo/tools.py]] and
   related travel tools call configured services. Websites visited by C11 are
-  also destinations. Host Python tools call services directly; sandbox and
-  browser requests cross C13's allowlist and exact-grant boundary first.
+  also destinations. Host HTML/PDF fetching uses
+  [[file:../assist/url_fetch.py][a dedicated checked transport]]: each connection,
+  including redirects, uses the same control-service denial and a pinned dial
+  address while retaining HTTP Host and TLS hostname verification. Configured
+  search and travel services keep their dedicated clients. Sandbox and browser
+  requests cross C13's allowlist and exact-grant boundary first.
 - *C21 Host user systemd.* [[file:../assist/sandbox_expiry.py][sandbox_expiry.py]]
   arms one transient age check for each ordinary managed Docker generation at
   original creation + three hours. The unit outlives the web process and its
@@ -368,8 +376,10 @@ their explicit summary handoff creates an independent Deep Agents thread.
   thread identity and independent admission checks. C8's existing EgressStore,
   approval cards and proxy projection own requests and thread-scoped grants;
   the new egress tool/RPC cannot approve access. Native egress deployment remains held
-  because the existing reachable web surface does not establish a human-only
-  approval boundary. An accepted host egress operation participates in cooperative
+  pending runtime verification and safe ordinary-network migration. The
+  control-service denial covers the configured local port on non-public
+  addresses and ASSIST_BASE_URL's origin/resolved addresses; it does not add
+  human authentication or discover unmanaged public forwards. An accepted host egress operation participates in cooperative
   drain and must settle before lifecycle closure, without holding the provider
   admission lock during store I/O. Provider-only revocation excludes host writes;
   failed host drain retains cleanup ownership and blocks deletion for retry.

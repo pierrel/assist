@@ -37,8 +37,9 @@ User-approved grants (docs/2026-07-21-egress-approval-hitl.org):
   resolve, reject private/loopback/link-local/metadata space, and connect
   to the vetted IP — a user-approved hostname is attacker-influenceable
   (DNS rebinding), unlike the operator-curated base entries, so it must
-  never be able to point into the host or LAN. Other operator base hosts retain
-  their ordinary any-port policy on both listeners. The browser listener
+  never be able to point into the host or LAN. Every admitted target, including base
+  entries, passes the permanent Assist control-service denial and uses its
+  vetted, pinned dial address. Unapproved targets are rejected before DNS. Base entries retain their other ports on both listeners. The browser listener
   additionally requires sandbox ingress and an armed exact-generation map
   record. A policy-only preflight returns the current decision without an
   upstream connection. The 403 body arrives via EGRESS_DENY_BODY in
@@ -70,6 +71,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse
+from assist.control_api import ControlApiDenied, resolve_target
 
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8888"))
 BROWSER_LISTEN_PORT = 8889
@@ -197,12 +199,14 @@ def deny(client: socket.socket, host: str, reason: str) -> None:
     log(f"DENY {host} ({reason})")
     try:
         code = reason if re.fullmatch(r"[a-z_]+", reason) else "proxy_denied"
+        body = (b"Assist control APIs are unavailable to agents; egress approval cannot allow them.\n"
+                if reason == "assist_control_api" else DENY_BODY)
         client.sendall(
             b"HTTP/1.1 403 Forbidden\r\n"
             b"Content-Type: text/plain\r\n"
             + f"X-Assist-Egress-Result: {code}\r\n".encode()
-            + f"Content-Length: {len(DENY_BODY)}\r\n".encode()
-            + b"Connection: close\r\n\r\n" + DENY_BODY
+            + f"Content-Length: {len(body)}\r\n".encode()
+            + b"Connection: close\r\n\r\n" + body
         )
     except OSError:
         pass
@@ -335,20 +339,12 @@ def approved_target(host: str, port: int, tid: str | None) -> bool:
 
 
 def vet_resolved(host: str, port: int, *, global_only: bool = True) -> str | None:
-    """Resolve once and return an address that the caller will actually dial."""
+    """Resolve once, enforce permanent denial, and return the actual dial IP."""
     try:
-        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+        address = resolve_target(host, port, public_only=global_only)
     except OSError:
         return None
-    for info in infos:
-        addr = info[4][0]
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            continue
-        if ip.is_global == global_only:
-            return addr
-    return None
+    return address if not global_only or ipaddress.ip_address(address).is_global else None
 
 
 def target_policy(host: str, port: int, client_ip: str,
@@ -364,7 +360,8 @@ def target_policy(host: str, port: int, client_ip: str,
         record = client_record(client_ip, "hermes")
     # Native model access belongs to the host relay. Requiring positive
     # ordinary attribution also closes this route when the map is absent,
-    # malformed or unreadable; permanent external allowlist entries are unchanged.
+    # malformed or unreadable. The permanent control-service denial below also
+    # applies to ordinary clients and operator base entries.
     if host == "host.docker.internal" and (record is None or record["kind"] != "sandbox"):
         return None, "host_requires_ordinary_attribution"
     if browser_listener:
@@ -373,12 +370,15 @@ def target_policy(host: str, port: int, client_ip: str,
     if host not in ALLOWLIST:
         if not approved_target(host, port, record["thread_id"] if record else None):
             return None, "host_not_approved"
-    if host not in ALLOWLIST:
-        address = vet_resolved(host, port)
-        if address is None:
-            return None, "approved_address_not_public"
-    else:
-        address = None
+    try:
+        address = vet_resolved(host, port, global_only=host not in ALLOWLIST)
+    except ControlApiDenied:
+        return None, "assist_control_api"
+    except (OSError, ValueError):
+        return None, "destination_unavailable"
+    if address is None:
+        return None, ("destination_unavailable" if host in ALLOWLIST
+                      else "approved_address_not_public")
     return address, None
 
 

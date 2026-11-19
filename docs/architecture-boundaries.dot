@@ -13,13 +13,13 @@ digraph Boundaries {
   C8 [label="C8  Host authorities\ncontainer, browser, Git, grants"];
   C9 [label="C9  Durable thread state\nthread files + Git checkout",
       fillcolor="#fff4d7"];
-  C10 [label="C10  Shared execution\ntrusted parent + child · native /agent",
+  C10 [label="C10  Shared execution\nisolated gateway · native /agent",
        fillcolor="#fff0df", color="#a46b36"];
   C11 [label="C11  Browser worker\nChromium · untrusted page content",
        fillcolor="#fff0df", color="#a46b36"];
   C12 [label="C12  Model endpoint\nOpenAI-compatible HTTP",
        fillcolor="#f3f3f3"];
-  C13 [label="C13  Egress proxy\nallowlist and exact grants",
+  C13 [label="C13  Egress proxy\npermanent control denial · pinned IP\nallowlist and exact grants",
        fillcolor="#f3f3f3"];
   C14 [label="C14  Domain Git remote\npublished thread branch",
        fillcolor="#f3f3f3"];
@@ -48,6 +48,6 @@ digraph Boundaries {
   C10 -> C11 [label="hosts worker"];
   C10 -> C13 [label="network requests"];
   C11 -> C13 [label="attributed page requests"];
-  C13 -> C15 [label="allowed sandbox/browser requests"];
+  C13 -> C15 [label="pinned allowed sandbox/browser requests"];
   C10 -> C9 [label="workspace + persistent /agent mounts", style=dashed];
 }
