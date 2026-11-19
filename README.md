@@ -257,7 +257,8 @@ Snapshot reads and background probes do not clear notifications.
   after the competitor and can retrieve that result. Native history persists in
   `/agent/hermes` across user turns, including native compression session rotation.
   Ordinary owner follow-ups can steer that same invocation after its current
-  tool batch. They do not interrupt model generation or cancel tools. Assist
+  tool batch. Intake waits for a native completion from this invocation;
+  older tool history cannot open it. Follow-ups do not interrupt model generation or cancel tools. Assist
   keeps each follow-up's journal identity until native history persistence is
   confirmed; an unread message remains queued for its own later turn. Native
   user-row receipts also recover a lost host acknowledgment after a crash.

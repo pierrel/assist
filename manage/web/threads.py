@@ -2449,13 +2449,18 @@ def _hermes_messages(tid: str) -> list[dict]:
     Native SessionDB remains Hermes's conversation state. This projection only
     renders the existing host acceptance and completion receipts to clients.
     """
+    runs = _runs().list(tid)
     work = {}
-    for run in _runs().list(tid):
+    for run in runs:
         if run.mode == "turn":
             first, _ = work.get(run.work_id, (run, run))
             work[run.work_id] = (first, run)
     messages = []
-    run_work = {run.id: run.work_id for run in _runs().list(tid)}
+    run_work = {run.id: run.work_id for run in runs}
+    followers = {}
+    for first, _ in work.values():
+        if first.consumed_by:
+            followers.setdefault(run_work.get(first.consumed_by), []).append(first)
     for first, latest in work.values():
         if first.consumed_by:
             continue
@@ -2463,9 +2468,8 @@ def _hermes_messages(tid: str) -> list[dict]:
         if text and first.origin is None:
             messages.append({"role": "user", "content": text, "run_id": first.id,
                              "message_id": f"hermes:user:{first.work_id}"})
-        for follower, _ in work.values():
-            if (follower.text and follower.origin is None and follower.consumed_by
-                    and run_work.get(follower.consumed_by) == first.work_id):
+        for follower in followers.get(first.work_id, ()):
+            if follower.text and follower.origin is None:
                 messages.append({"role": "user", "content": follower.text, "run_id": follower.id,
                                  "message_id": f"hermes:user:{follower.work_id}"})
         if latest.status == "success" and latest.result:
@@ -3265,6 +3269,7 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
                 _runs().claim(tid, run.id)
                 _runs().transition(tid, run.id, "error", error=message)
             _set_status(tid, "error", error=message, pending_message=run.text)
+            _dispatch_pending_after(tid, run.id)
             return
         run = _runs().get(tid, run.id)
         if run.status != "pending":

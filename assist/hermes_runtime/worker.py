@@ -35,18 +35,26 @@ def control(path: str, payload: dict) -> dict:
 class _Steering:
     """Transfer journal tickets through native steering, then receipt real flushes.
 
-    The parent step callback runs before Hermes's pre-API steer drain. Joined
-    children retain their own callbacks. Buffer acceptance never claims a Run.
+    A current tool completion enables the parent step callback before Hermes's
+    pre-API steer drain. Loaded history cannot enable intake. Buffer acceptance
+    never claims a Run.
     """
 
     def __init__(self, agent, work_id):
         self.agent, self.work_id = agent, work_id
         self.offered = {}
+        self.completed_tool = False
         self.flush_native = agent._flush_messages_to_session_db
+        agent.tool_complete_callback = self.tool_complete
         agent.step_callback = self.step
         agent._flush_messages_to_session_db = self.flush
 
+    def tool_complete(self, *_args):
+        self.completed_tool = True
+
     def step(self, *_args):
+        if not self.completed_tool:
+            return
         for ticket in control("/steering", {})["messages"]:
             if ticket["id"] not in self.offered:
                 text = ticket["text"].strip()
@@ -91,6 +99,7 @@ class _Steering:
 
     def finish(self):
         self.agent.step_callback = None
+        self.agent.tool_complete_callback = None
         for ticket in self.offered:
             # This removes unread buffer entries. A consumed/unknown fate is
             # never used as a durability receipt; pending journal Runs survive.
