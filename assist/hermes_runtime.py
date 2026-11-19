@@ -45,14 +45,15 @@ class HermesRuntimeManager:
         self.turns: dict[str, _Turn] = {}
         self.retired: set[str] = set()
 
-    def _start(self, run, work_dir, agent_dir, thread_scope, admitted, egress_tools):
+    def _start(self, run, work_dir, agent_dir, thread_scope, admitted, egress_tools, steering=None):
         model = self.model_config()
         # Unix socket paths are limited to 108 bytes. Keep this private,
         # ephemeral mount independent of the user's potentially long root.
         directory = Path(tempfile.mkdtemp(prefix="assist-hermes-"))
         try:
             relay = HermesProviderRelay(directory, model.url, model.api_key, model.model,
-                                        model.context_len, admitted, egress_tools=egress_tools)
+                                        model.context_len, admitted, egress_tools=egress_tools,
+                                        steering=steering)
         except BaseException:
             shutil.rmtree(directory)
             raise
@@ -80,6 +81,7 @@ class HermesRuntimeManager:
                         "continue without that access, not request it again.")
             (directory / "request.json").write_text(json.dumps({
                 "prompt": run.text, "session_id": run.thread_id, "model": model.model,
+                "work_id": run.work_id,
                 "system_message": os.environ.get("ASSIST_HERMES_SYSTEM_MESSAGE", ""),
                 "egress_tools": schemas,
                 "toolsets": ["file", "terminal", "skills", "memory", "delegation"]
@@ -116,7 +118,7 @@ class HermesRuntimeManager:
             raise
 
     def run_slice(self, run, *, work_dir, agent_dir, thread_scope, handle, admitted,
-                  egress_tools=()):
+                  egress_tools=(), steering=None):
         """Execute or resume the same worker under the current queue handle."""
         with self.lock:
             turn = self.turns.get(run.thread_id)
@@ -126,11 +128,13 @@ class HermesRuntimeManager:
                     raise HermesRuntimeError("Native Hermes process was lost; retained files were not replayed")
                 # Serialize registration and Docker creation with retirement;
                 # stop cannot finish while a late generation is still starting.
-                turn = self._start(run, work_dir, agent_dir, thread_scope, admitted, egress_tools)
+                turn = self._start(run, work_dir, agent_dir, thread_scope, admitted, egress_tools,
+                                   steering)
         if not fresh:
             if turn.work_id != run.work_id or not run.resume or not turn.paused:
                 raise HermesRuntimeError("Native Hermes invocation does not match this successor")
             turn.relay.admitted = lambda: self._provider_admitted(turn, admitted)
+            turn.relay.steering = steering
             if self.sandboxes.current_container(work_dir) is not turn.backend.container:
                 raise HermesRuntimeError("Retained Hermes generation changed")
             turn.relay.resume()
