@@ -6,13 +6,13 @@ this eval measures whether the model discovers and requests that capability.
 """
 import tempfile
 from dataclasses import replace
-from unittest import TestCase, mock
+from unittest import TestCase
 
 from assist.agent import AgentHarness, create_agent
 from assist.browser.manager import browser_tools
 from assist.model_manager import select_assistant_model
 from assist.thread_manager import web_main_skill_sources
-from .test_browser_agent import _BrowserSite, _StaticShell, _OfflineBackend, _browser_task_fixture
+from .test_browser_agent import _BrowserSite, _OfflineBackend, _browser_task_fixture, _offline_url_fetch
 from .utils import (create_filesystem, prompt_rewrite_web_main_spec,
                     stub_research_subagent)
 
@@ -57,7 +57,7 @@ class TestBrowserRequestedControl(TestCase):
                            web_main=True, main_guidance_skills=True,
                            default_backend=_OfflineBackend(root),
                            skill_sources=web_main_skill_sources(browser=True))
-            with mock.patch('assist.tools.requests.get', return_value=_StaticShell('static')), \
+            with _offline_url_fetch('static'), \
                  stub_research_subagent(), _browser_task_fixture():
                 agent = AgentHarness(create_agent(self.model, root, spec=spec))
                 agent.message('Open https://static.fern.example/ so I can look around myself.')

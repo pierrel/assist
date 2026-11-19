@@ -1,6 +1,6 @@
 """Natural web-main browser journeys against deterministic offline fixtures.
 
-The browser site, static requests.get response, shell network, and research
+The browser site, HTML fetch sinks, PDF fetching, shell network, and research
 specialist are stubbed; the approval journey uses a real local EgressStore.
 The real main graph chooses whether to load skills, try static navigation,
 and use stateful browser tools. The fairness journey also delivers deterministic
@@ -11,13 +11,14 @@ import os
 import signal
 import tempfile
 from dataclasses import replace
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from pathlib import Path
 from unittest import TestCase, mock
 
 from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
 
+from assist import tools as host_tools
 from assist.agent import AgentHarness, create_agent
 from assist.browser.manager import browser_tools
 from assist.checkpoint_rollback import invoke_with_rollback
@@ -48,6 +49,19 @@ class _StaticShell:
 
     def close(self):
         pass
+
+
+@contextmanager
+def _offline_url_fetch(scenario):
+    """Stub both supported HTML transports and deny the separate PDF child path."""
+    with ExitStack() as stack:
+        response = _StaticShell(scenario)
+        stack.enter_context(mock.patch.object(host_tools.requests, "get", return_value=response))
+        if hasattr(host_tools, "url_fetch"):
+            stack.enter_context(mock.patch.object(host_tools.url_fetch, "get", return_value=response))
+        stack.enter_context(mock.patch.object(
+            host_tools, "_read_pdf_url", side_effect=RuntimeError("PDF fetching is unavailable in this offline fixture.")))
+        yield
 
 
 class _OfflineBackend(FilesystemBackend, SandboxBackendProtocol):
@@ -392,8 +406,7 @@ class TestBrowserAgent(TestCase):
                     tools=() if baseline else tuple(browser_tools(site))),
                 web_main=True, main_guidance_skills=True,
                 skill_sources=web_main_skill_sources(browser=not baseline))
-            with mock.patch("assist.tools.requests.get",
-                            return_value=_StaticShell(scenario)), \
+            with _offline_url_fetch(scenario), \
                  stub_research_subagent():
                 agent = AgentHarness(create_agent(
                     self.model, root, sandbox_backend=_OfflineBackend(root), spec=spec))
@@ -430,8 +443,7 @@ class TestBrowserAgent(TestCase):
                 prompt_rewrite_web_main_spec(tools=tuple(browser_tools(site))),
                 web_main=True, main_guidance_skills=True,
                 skill_sources=web_main_skill_sources(browser=True))
-            with _browser_task_fixture(), mock.patch("assist.tools.requests.get",
-                            return_value=_StaticShell(scenario)), \
+            with _browser_task_fixture(), _offline_url_fetch(scenario), \
                  stub_research_subagent():
                 agent = AgentHarness(create_agent(
                     self.model, root, sandbox_backend=_TurnBackend(root), spec=spec))
@@ -554,7 +566,7 @@ class TestBrowserAgent(TestCase):
                 web_main=True, main_guidance_skills=True,
                 skill_sources=web_main_skill_sources(browser=True))
             with _browser_task_fixture(), \
-                 mock.patch("assist.tools.requests.get", return_value=_StaticShell("v1-form")), \
+                 _offline_url_fetch("v1-form"), \
                  stub_research_subagent():
                 agent = AgentHarness(create_agent(
                     self.model, root, sandbox_backend=_TurnBackend(root), spec=spec))
@@ -685,8 +697,7 @@ class TestBrowserAgent(TestCase):
                 skill_sources=web_main_skill_sources(browser=True))
             with mock.patch("assist.agent._execution_egress_tools", tuple(tools)), \
                  mock.patch.object(egress_tools_module, "_thread_id", lambda: tid), \
-                 mock.patch("assist.tools.requests.get",
-                            return_value=_StaticShell("multi-origin")), \
+                 _offline_url_fetch("multi-origin"), \
                  stub_research_subagent():
                 agent = AgentHarness(create_agent(
                     self.model, root, sandbox_backend=_OfflineBackend(root), spec=spec))
@@ -733,8 +744,7 @@ class TestBrowserAgent(TestCase):
             with _browser_task_fixture(), \
                  mock.patch("assist.agent._execution_egress_tools", tuple(tools)), \
                  mock.patch.object(egress_tools_module, "_thread_id", lambda: tid), \
-                 mock.patch("assist.tools.requests.get",
-                            return_value=_StaticShell("approval")), \
+                 _offline_url_fetch("approval"), \
                  stub_research_subagent():
                 agent = AgentHarness(create_agent(
                     self.model, root, sandbox_backend=_OfflineBackend(root), spec=spec))

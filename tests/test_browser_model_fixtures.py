@@ -3,6 +3,28 @@ from edd.eval.test_browser_agent import _BrowserSite
 import pytest
 
 
+@pytest.mark.parametrize("url_fetch_present", [False, True])
+def test_offline_fetch_fixture_blocks_html_and_pdf_network(monkeypatch, url_fetch_present):
+    import socket
+    from types import SimpleNamespace
+    from unittest import mock
+    from assist import tools
+    from edd.eval.test_browser_agent import _offline_url_fetch
+
+    if url_fetch_present and not hasattr(tools, "url_fetch"):
+        monkeypatch.setattr(tools, "url_fetch", SimpleNamespace(get=mock.Mock()), raising=False)
+    with mock.patch.object(socket.socket, "connect", side_effect=AssertionError("network attempted")), \
+         mock.patch.object(socket.socket, "connect_ex", side_effect=AssertionError("network attempted")), \
+         mock.patch.object(tools.subprocess, "run", side_effect=AssertionError("child attempted")) as child:
+        with _offline_url_fetch("static"):
+            assert "9 a.m. to 5 p.m." in tools.read_url("https://static.fern.example/")
+            assert "9 a.m. to 5 p.m." in tools.requests.get("https://arbitrary.fern.example/").text
+            if hasattr(tools, "url_fetch"):
+                assert "9 a.m. to 5 p.m." in tools.url_fetch.get("https://arbitrary.fern.example/").text
+            assert "offline fixture" in tools.read_url("https://static.fern.example/report.pdf")
+        child.assert_not_called()
+
+
 def test_personal_browsing_eval_uses_its_paired_handoff_capability(monkeypatch):
     from langchain_core.messages import AIMessage
     from tests.middleware.test_skills_kernel import _RecordingModel
