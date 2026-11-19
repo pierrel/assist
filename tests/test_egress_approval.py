@@ -163,7 +163,9 @@ def test_request_flow_correctives(tmp_path, monkeypatch):
     request, list_hosts, remove, _batch = egress_tools(st, frozenset({"pypi.org"}))
     # events flow through the thread_dir seam when wired; unwired here — the
     # tools must still work (CLI/eval shape)
-    assert "already on the base allowlist" in request("pypi.org", 443, "x")
+    base_reply = request("pypi.org", 443, "x")
+    assert "already on the base allowlist" in base_reply
+    assert "egress approval cannot override" in base_reply
     out = request("https://api.github.com/x", None, "fetch releases and summarize")
     assert "awaits the user's approval" in out
     assert "already awaiting" in request("api.github.com", 443, "again")
@@ -179,7 +181,9 @@ def test_request_flow_correctives(tmp_path, monkeypatch):
     assert "already approved" in request("b.example.com", 443, "t")
     # list shows base + grant with lifetime; remove drops the grant
     listing = list_hosts()
-    assert "pypi.org (any port; base allowlist" in listing
+    assert "pypi.org (base allowlist" in listing
+    assert "Assist control APIs remain blocked" in listing
+    assert "any port" not in listing
     assert "b.example.com:443" in listing and "min left" in listing
     assert "Removed" in remove("b.example.com", 443)
     assert "no grant" in remove("b.example.com", 443)

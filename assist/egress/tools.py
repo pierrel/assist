@@ -9,9 +9,9 @@ agent loop:
   approve in this thread. Records only; nothing opens on the agent's say-so.
 - ``request_egress_batch(targets, task)`` — records up to three selected
   host/port proposals using the same cards; a graph child checkpoints once.
-- ``list_allowed_hosts()`` — what this thread can reach: the operator-owned
-  base allowlist plus this thread's live grants (Pierre: enumeration is
-  yes — it enables voluntary reduction).
+- ``list_allowed_hosts()`` — operator base allowances and this thread's live
+  grants, subject to permanent control-API restrictions. Enumeration enables
+  voluntary reduction.
 - ``remove_allowed_host(host, port)`` — drops one of THIS thread's grants.
   Privilege reduction only (it can never widen access), so no HITL; base
   entries are refused (the committed conf is operator-owned).
@@ -169,8 +169,9 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
         if err:
             return err
         if h in base_hosts:
-            return (f"{h} is already on the base allowlist (any port) — "
-                    "no request needed; just retry your command.")
+            return (f"{h} is already on the base allowlist. "
+                    "Permanent Assist control-API restrictions still apply; "
+                    "egress approval cannot override them.")
         tid = origin()
         if not tid:
             return "Couldn't record the request: no active thread."
@@ -281,7 +282,8 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
         for h, p in selected:
             key = request_key(tid, h, p)
             if h in base_hosts:
-                results.append((h, p, "already on the base allowlist"))
+                results.append((h, p, "already on the base allowlist; "
+                                "permanent Assist control-API restrictions still apply"))
                 continue
             current = {r.key: r for r in store.for_thread(tid)}.get(key)
             if current is None:
@@ -318,11 +320,11 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
         return "\n".join(f"- {h}:{p}: {status}" for h, p, status in results)
 
     def list_allowed_hosts() -> str:
-        """List every host this thread can currently reach: the operator's
-        base allowlist (any port; managed only via the committed config) and
-        this thread's own approved grants with their remaining lifetime."""
+        """List operator base allowances and this thread's live grants.
+
+        Permanent Assist control-API restrictions override every entry."""
         tid = origin()
-        lines = [f"- {h} (any port; base allowlist, operator-managed)"
+        lines = [f"- {h} (base allowlist, operator-managed)"
                  for h in sorted(base_hosts)]
         if tid:
             for r in sorted(store.for_thread(tid), key=lambda r: r.key):
@@ -330,7 +332,8 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
                     continue
                 lines.append(f"- {r.host}:{r.port} (this thread's grant, "
                              f"{remaining_lifetime(r)})")
-        return "Hosts reachable from this thread:\n" + "\n".join(lines)
+        return ("Host allowances for this thread (Assist control APIs remain blocked):\n"
+                + "\n".join(lines))
 
     def remove_allowed_host(host: str, port: int) -> str:
         """Remove one of THIS thread's approved egress grants once it is no
