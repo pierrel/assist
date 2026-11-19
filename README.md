@@ -256,6 +256,11 @@ Snapshot reads and background probes do not clear notifications.
   may finish while its model admission is parked; the same invocation resumes
   after the competitor and can retrieve that result. Native history persists in
   `/agent/hermes` across user turns, including native compression session rotation.
+  Ordinary owner follow-ups can steer that same invocation after its current
+  tool batch. They do not interrupt model generation or cancel tools. Assist
+  keeps each follow-up's journal identity until native history persistence is
+  confirmed; an unread message remains queued for its own later turn. Native
+  user-row receipts also recover a lost host acknowledgment after a crash.
   A lost process ends the Run without replay. A held model slot is released only
   after verified model parking or provider revocation and drain. Unconfirmed
   container cleanup retains its nonterminal Run and generation; existing Run and
@@ -335,8 +340,9 @@ docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
 ```
 
 The first uses a fake provider and Docker `network:none`; it checks browser
-creation, two native pauses with distinct competitors, a second user turn queued
-behind the first continuation, phone history and unattended command denial. The second creates a private
+creation, two native pauses with distinct competitors, a follow-up steering the
+same invocation after a joined helper finishes, phone history and unattended
+command denial. The second creates a private
 internal network and fake model, verifying ordinary mapped access, native denial,
 missing/malformed attribution and legacy no-map denial, with external allowlist
 behavior preserved. The third runs inside the pinned runtime image with a private

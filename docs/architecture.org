@@ -425,6 +425,9 @@ their explicit summary handoff creates an independent Deep Agents thread.
   nonterminal Run and generation/Git ownership while unrelated model work proceeds.
   Failed provider drain still retains the slot. Startup reaps generations before
   recovery; lost native work is reported without replay.
+  Ordinary owner follow-ups reuse C3's =interjection_work_id= target and
+  generation sequence. C25 offers only that logical owner's eligible journal
+  tickets through C24. Unread tickets remain ordinary queued work.
 - *C24 Native provider relay.* [[file:../assist/hermes_provider_relay.py][The private Unix relay]]
   checks the current Run/queue admission and original generation lease for every
   parent, child and auxiliary model request. Native hooks coordinate drain;
@@ -447,6 +450,16 @@ their explicit summary handoff creates an independent Deep Agents thread.
   file/terminal tools, skills, memory, compression and joined delegation.
   Native SessionDB and preferences persist in C9's isolated =/agent/hermes=.
   C2 projects accepted messages and committed replies from existing C3 Runs.
+  The parent instance's native step callback receives owner steering before
+  Hermes drains it after complete tool results. Children do not share this
+  intake. Native =steer(text, ticket=Run.id)= accepts a buffer entry only.
+  The pin has no post-persistence hook: a narrow instance flush wrapper adds
+  Run/work identities to the native user row's =display_metadata= before its
+  transaction and acknowledges only a successful durable flush. C3's
+  =consumed_by= is written afterward. [[file:../assist/hermes_steering.py][Receipt reconciliation]]
+  reads those same rows, including compression-archived rows, before a
+  targeted queued fallback can execute after a lost acknowledgment. No
+  separate queue, receipt store or native model loop is introduced.
   No native worker starts another Run. Resolved egress cards may enqueue one
   host-owned native follow-up through C4; native helpers share the parent thread's
   cards and do not use Deep Agents checkpoints. Browser/search/interactive command approval

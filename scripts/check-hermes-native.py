@@ -106,7 +106,7 @@ def answer(p):
         name=latest[-1];events.append(name+'-model')
         return {'role':'assistant','content':name+' done.'}
     assert latest!='UNADMITTED_PROBE', 'host-denied request reached upstream'
-    if CHILD in latest or latest in {PROMPT,'Change that note to green.'}:
+    if CHILD in latest or latest == PROMPT or 'Change that note to green.' in latest:
         assert threads.THREAD_QUEUE.current_handle().thread_id==A, 'A upstream request before readmission'
     if latest=='Remove the scratch folder.':
         tail=[]
@@ -117,10 +117,10 @@ def answer(p):
         if not tools:return call('terminal',{'command':'rm -rf /workspace/keep'})
         assert any('denied' in text(m).lower() or 'unattended' in text(m).lower() for m in tools),tools
         return {'role':'assistant','content':'That operation requires an unavailable approval.'}
-    if latest=='Change that note to green.':
-        assert first_done.is_set(), 'accepted follower overtook the native continuation'
+    if 'Change that note to green.' in latest:
+        assert not first_done.is_set(), 'steering incorrectly started a separate native turn'
         assert users.count(PROMPT)==1, 'native history lost or replayed first user turn'
-        assert any(m.get('role')=='assistant' and text(m)=='The helper created the blue note.' for m in msgs), 'native history lost first reply'
+        assert any(m.get('role')=='tool' and 'blue' in text(m) for m in msgs), 'steering arrived before the complete helper result'
         tail=[]
         for m in reversed(msgs):
             if m.get('role')=='user':break
@@ -234,29 +234,32 @@ try:
         responses.append(client.post(f'/thread/{A}/message',data={'text':PROMPT},follow_redirects=False))
     initial=threading.Thread(target=first_request);initial.start()
     assert child_ready.wait(45),'native child boundary not reached from actual browser submission'
+    second=client.post(f'/thread/{A}/message',data={'text':'Change that note to green.'},follow_redirects=False)
+    assert second.status_code==303,second.text
     competitor=threads._create_run(B,'COMPETITOR_B');threads._RESUME_SCHEDULER.submit(competitor.id,B)
     assert parent_ready.wait(60),'native parent did not reach its second parking boundary'
     assert [call for call in write_calls if call['path']=='/workspace/child-note.txt']==[{'path':'/workspace/child-note.txt','content':'blue\n'}], write_calls
     assert (WORK/'child-note.txt').read_text()=='blue\n'
-    # Accept the next user turn while the first invocation is still paused.
-    second=client.post(f'/thread/{A}/message',data={'text':'Change that note to green.'},follow_redirects=False)
-    assert second.status_code==303,second.text
     competitor_c=threads._create_run(C,'COMPETITOR_C');threads._RESUME_SCHEDULER.submit(competitor_c.id,C)
-    assert first_done.wait(60),'A did not resume after the second competitor'
+    assert green_done.wait(60),'A did not finish its steered invocation after the second competitor'
     initial.join(10);assert not initial.is_alive()
     assert responses[0].status_code==303
-    assert green_done.wait(45),'accepted follower did not run after its continuation'
     assert not errors,errors
     assert events.count('A-parked')==2, events
-    assert [event for event in events if event in {'B-model','C-model','A-first-completed'}]==['B-model','C-model','A-first-completed']
+    assert [event for event in events if event in {'B-model','C-model'}]==['B-model','C-model']
     browser=client.get(f'/thread/{A}')
     assert browser.status_code==200,browser.text
-    assert browser.text.count('The helper created the blue note.')==1
+    assert browser.text.count('The helper created the blue note.')==0
     assert browser.text.count('The note now says green.')==1
     phone=client.get(f'/api/v1/phone/threads/{A}',headers={'authorization':'Bearer private-fixture-token'})
     assert phone.status_code==200,phone.text
     value=phone.json();messages=value['messages']
-    assert len(messages)==4,messages
+    assert len(messages)==3,messages
+    assert [message['role'] for message in messages]==['user','user','assistant'],messages
+    records=threads._runs().list(A)
+    followup=next(run for run in records if run.text=='Change that note to green.')
+    assert followup.status=='success' and followup.consumed_by
+    assert followup.interjection_work_id==next(run for run in records if run.id==followup.consumed_by).work_id
     assert value['thread']['harness']=='hermes',value
     assert (WORK/'child-note.txt').read_text()=='green\n'
     a_done.clear()
@@ -294,7 +297,7 @@ try:
     assert client.post('/egress/hour',data=form,follow_redirects=False).status_code==303
     assert len([r for r in threads._runs().list(A) if r.origin=='egress'])==1
     assert client.get(f'/thread/{A}').text.count('The approved follow-up is complete.')==1
-    report={'native_egress_request_decision_followup_once':True,'background_result_once':process_results,'native_calls':native_calls,'provider_request_count':len(requests),'parked_provider_denials':parked_provider_denials,'experiment':'native background completion under cooperative model suspension','background_observations':background_observations,'background_script_execution':'python /workspace/background-writer.py','approval_unavailable_preserved_file':True,'status':'PASS','events':events,'http_create':response.status_code,'browser':browser.status_code,'phone':phone.status_code,'public_messages':messages,'limits':'Actual browser create and message POSTs, real native runtime/queue/container, browser HTML and authenticated phone history. Fake upstream/network:none; two native-boundary rendezvous and two competing threads; the accepted second user turn waits for the original continuation. A supported native background script completes during B; deferred process_manage returns its exact result once after readmission, with one launch/effect and no admitted A provider request during B. Native dangerous-command approval is unavailable and denies without deleting the fixture. Native egress tool records a real approval card; the HTTP decision starts one native follow-up with one file effect. This is deterministic capability coverage, not model-quality or live-egress evidence.'}
+    report={'native_egress_request_decision_followup_once':True,'background_result_once':process_results,'native_calls':native_calls,'provider_request_count':len(requests),'parked_provider_denials':parked_provider_denials,'experiment':'native background completion under cooperative model suspension','background_observations':background_observations,'background_script_execution':'python /workspace/background-writer.py','approval_unavailable_preserved_file':True,'status':'PASS','events':events,'http_create':response.status_code,'browser':browser.status_code,'phone':phone.status_code,'public_messages':messages,'limits':'Actual browser create and message POSTs, real native runtime/queue/container, browser HTML and authenticated phone history. Fake upstream/network:none; two native-boundary rendezvous and two competing threads; the accepted owner follow-up steers the same native invocation after its joined tool batch and remains attached across both fairness handoffs. A supported native background script completes during B; deferred process_manage returns its exact result once after readmission, with one launch/effect and no admitted A provider request during B. Native dangerous-command approval is unavailable and denies without deleting the fixture. Native egress tool records a real approval card; the HTTP decision starts one native follow-up with one file effect. This is deterministic capability coverage, not model-quality or live-egress evidence.'}
 finally:
     b_done.set();c_done.set()
     for tid in (A,B,C):
