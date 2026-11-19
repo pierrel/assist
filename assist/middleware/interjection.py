@@ -4,6 +4,10 @@ An ordinary owner follow-up to active DeepAgents work lands as ``pending``
 with a host-assigned ``interjection_work_id``. That target preserves the active
 browser's execution authority through startup, tool completion and fairness
 resumes; ``consumed_by`` is still written only after checkpoint delivery.
+If their target finishes first, unconsumed siblings keep journal order as
+separate fallback executions, without becoming one another's replacement.
+Further steering during a fallback also keeps its own position and target;
+it does not revoke older queued fallback work.
 Human-controlled and approval-paused work retain their existing admission
 contracts. A genuine replacement still waits as ``revocation_pending`` until
 the old browser is confirmed safe; explicit cancellation keeps its reset receipt.

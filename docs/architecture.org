@@ -135,6 +135,12 @@ in both views. An ID shown in only one view keeps that meaning.
   that snapshot in sandbox startup, browser session and worker launch;
   terminal owners, cancellation receipts, replacement reset debt and changed
   generations remain denied. No new delivery channel or component is added.
+  Unconsumed follow-ups aimed at the same completed owner retain separate
+  fallback executions in journal order. A later sibling cannot revoke the
+  earlier fallback's startup snapshot; unrelated replacements still can.
+  Steering admitted during a fallback likewise stays queued for its own
+  target. Only host-assigned targets referring to an earlier known work are
+  exempt from replacement ordering; missing or forward targets remain denied.
   A requested human takeover uses the same cooperative boundary but retains
   the container running after releasing the model slot. Parent/child dispatch
   defers in that existing session. Return revokes human input, freezes the
