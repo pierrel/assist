@@ -728,6 +728,9 @@ def test_synthetic_follower_waits_for_cancelled_browser_receipt(
         monkeypatch, admitted, source):
     root, runs, held, _, dispatched, _ = _phone_held_context(
         monkeypatch, admitted)
+    monkeypatch.setattr(threads, "_dispatch_pending_after", _ORIGINAL_DISPATCH_PENDING)
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
+                        lambda run_id, _tid, **_kw: dispatched.append(run_id))
     kills = []
 
     def kill(generation):
@@ -756,13 +759,15 @@ def test_synthetic_follower_waits_for_cancelled_browser_receipt(
         monkeypatch.setattr(threads, "_mark_urgent", lambda _tid: None)
         threads._dispatch_egress_resolution("t")
     follower = runs.list("t")[-1]
-    assert follower.origin == "system" and follower.status == "pending"
-    assert dispatched == []
+    assert follower.origin == ("system" if source == "schedule" else "egress")
+    assert follower.status == "pending"
+    assert follower.id not in dispatched
     with pytest.raises(InvalidRunTransition, match="browser safety reset"):
         runs.claim("t", follower.id)
     assert threads._drain_held_browser_events("t") is True
     assert runs.get("t", held.id).cancel_cleanup == "complete"
     assert dispatched
+    assert runs.claim("t", follower.id).status == "running"
     assert runs.claim("t", follower.id).status == "running"
 
 
@@ -899,6 +904,6 @@ def test_real_approval_resolution_creates_no_direct_user_provenance(
     monkeypatch.setattr(threads, "_mark_urgent", lambda _tid: None)
     threads._dispatch_egress_resolution("t")
     synthetic = runs.list("t")[-1]
-    assert synthetic.origin == "system"
+    assert synthetic.origin == "egress"
     assert "host.docker.internal" in synthetic.text
     assert threads._browser_user_request(synthetic, runs.list("t")) is None

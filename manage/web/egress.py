@@ -106,8 +106,8 @@ async def egress_view():
 def resolve_request(tid: str, host: str, port: int, decision: str, *, expected=None):
     """The FAST half of approve/decline, awaited so the redirect renders the
     card already gone: resolve the STORED record (never re-derived state) +
-    the event. Returns the resolved record and whether the thread's pending
-    set has emptied. The caller then dispatches the resolution TURN as a BackgroundTask (the
+    the event. Returns the resolved record and whether a new decision needs
+    delivery. The caller dispatches it as a BackgroundTask (the
     reply_decision precedent): a full agent turn must never run where the
     HTTP response waits (it acquires THREAD_QUEUE — behind a running turn
     that's up to the 2h hold before the browser would get its 303)."""
@@ -124,7 +124,7 @@ def resolve_request(tid: str, host: str, port: int, decision: str, *, expected=N
     from assist.events.thread_log import append_event
     kind = ("egress_declined" if decision == "decline" else "egress_approved")
     append_event(MANAGER.thread_dir(tid), kind, host=host, port=port)
-    return rec, not any(r.state == "pending" for r in EGRESS_STORE.for_thread(tid))
+    return rec, True
 
 
 def _resolve_record(tid: str, host: str, port: int, decision: str) -> bool:

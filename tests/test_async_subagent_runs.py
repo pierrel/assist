@@ -135,6 +135,29 @@ def test_child_egress_wait_releases_then_resumes_only_its_run(monkeypatch, tmp_p
                 if run.dispatch_key == f"egress-resume:{child.id}"]) == 1
 
 
+def test_child_resumes_once_after_its_own_group_while_another_card_stays_pending(monkeypatch, tmp_path):
+    submitted, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run("sub-stable", "research-agent", "Read synthetic pages", metadata=metadata)
+    threads._runs().claim(child.thread_id, child.id)
+    threads._runs().transition(child.thread_id, child.id, "awaiting_approval")
+    store = EgressStore(str(tmp_path / "egress"))
+    waiter = EgressWaiter(child.thread_id, child.id)
+    for host, waiters in [("a.example.test", (waiter,)), ("b.example.test", (waiter,)),
+                          ("unrelated.example.test", ())]:
+        store.add_pending(EgressRequest(host, 443, "Read synthetic pages", "parent", waiters=waiters))
+    monkeypatch.setattr(threads, "EGRESS_STORE", store)
+    store.resolve(request_key("parent", "a.example.test", 443), "hour")
+    threads._resume_egress_waiters("parent")
+    assert len(threads._runs().list(child.thread_id)) == 1
+    store.resolve(request_key("parent", "b.example.test", 443), "decline")
+    threads._resume_egress_waiters("parent")
+    threads._resume_egress_waiters("parent")
+    successor, = [run for run in threads._runs().list(child.thread_id) if run.id != child.id]
+    assert successor.work_id == child.work_id and successor.dispatch_key == f"egress-resume:{child.id}"
+    assert submitted[-1][:2] == (successor.id, child.thread_id)
+    assert store.get(request_key("parent", "unrelated.example.test", 443)).state == "pending"
+
+
 def test_resolved_egress_never_resumes_cancelled_child(monkeypatch, tmp_path):
     submitted, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
     child = SERVICE.create_run(

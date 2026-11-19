@@ -160,8 +160,9 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str],
         and the exact child resumes after the decision. For two or three known
         needed hosts, use request_egress_batch so a graph child records every card
         before its one checkpoint. Native helpers use their parent thread's
-        ordinary follow-up, without a graph checkpoint. A follow-up runs once after the
-        user resolves every pending request. After calling this, tell the user
+        ordinary follow-up, without a graph checkpoint. Each resolved main request is
+        delivered independently to the main agent; graph children wait only for
+        their own required requests. After calling this, tell the user
         approval is waiting in this
         thread and do NOT retry the blocked command until approved.
         """

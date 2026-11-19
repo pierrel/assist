@@ -68,7 +68,7 @@ from assist.egress.tools import (EGRESS_ORIGIN_THREAD_ID,
                                  EGRESS_WAITER_RUN_ID,
                                  EGRESS_WAITER_THREAD_ID, egress_tools)
 from starlette.concurrency import run_in_threadpool
-from assist.middleware.interjection import (collect_interjection_ids,
+from assist.middleware.interjection import (INTERJECTION_IDS_KEY, collect_interjection_ids,
                                             register_interjection_callbacks)
 from assist.middleware.url_provenance import DELEGATE_USER_URLS_KEY
 from assist.events.thread_log import append_event
@@ -90,6 +90,7 @@ from assist.thread import Thread
 from assist.safe_markdown import render_markdown
 from assist.visible_conversation import (
     CONTINUATION_RIDER as _CONTINUATION_RIDER,
+    EGRESS_DECISION_RIDER as _EGRESS_DECISION_RIDER,
     INTERJECTION_FRAME as _INTERJECTION_FRAME,
     INTERJECTION_GUIDE as _INTERJECTION_GUIDE,
     TASK_COMPLETION_RIDER as _TASK_COMPLETION_RIDER,
@@ -1987,9 +1988,13 @@ def _consume_interjections(tid: str, ids: set) -> None:
 
 
 def _frame_interjection(rec: "PendingMessage") -> str:
-    """Build the injected message: frame + the user's text + the behavioral
-    guidance.  A user message never cancels outstanding work implicitly; the
-    main agent inspects and manages its durable tasks after receiving it."""
+    """Keep host decisions distinct from user steering and its guidance.
+
+    User messages do not implicitly cancel durable work. Host decisions are
+    already framed when journaled, so idle and boundary delivery agree.
+    """
+    if rec.origin == "egress":
+        return rec.text
     guide = _INTERJECTION_GUIDE
     if rec.sender is None:
         guide += (" Review your outstanding subagent tasks with list_async_tasks, "
@@ -2038,6 +2043,8 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
     A fresh id matches nothing stale; owner retries run as their own follow-ups.
     Owner retries target their consumed work in the host journal, preserving
     queued-follow-up authority instead of superseding earlier sibling retries.
+    Already-claimed host egress facts are settled delivery, so they are not
+    re-journaled as new intent after a consumer failure.
     The dead framed copy itself is duplicate EXPOSURE when the follow-up runs
     — benign, named in the design. Returns how many, so the error text can
     say so. BEST-EFFORT by contract: runs inside turn error handlers (a raise
@@ -2046,11 +2053,14 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
     try:
         claimed = (_TURN_INTERJECTION.pop(tid, None) or {}).get("claimed", [])
         for rec in claimed:
+            if rec.origin == "egress":
+                continue  # A persisted host fact has already been delivered.
             source = _runs().get(rec.thread_id, rec.id)
             fresh = _create_run(
                 rec.thread_id, rec.text,
                 rider=_rider_from_fields(rec.rider), sender=rec.sender,
-                user_origin=rec.sender is None,
+                origin=rec.origin,
+                user_origin=rec.sender is None and rec.origin is None,
                 interjection_work_id=source.work_id if rec.sender is None else None)
             # The retried turn keeps the ORIGINAL message's context rider
             # (sent_at/tz/lat/lon from the journal entry — recovery fidelity,
@@ -2086,6 +2096,8 @@ def _pending_run_records(tid: str) -> list[PendingMessage]:
         for run in eligible
         if (run.status == "pending" and run.mode == "turn" and run.text
             and run.review_snapshot is None
+            and (run.origin != "egress" or
+                 owner is not None and run.interjection_work_id == owner.work_id)
             and (run.interjection_work_id is None
                  or (owner is not None and run.interjection_work_id == owner.work_id))
             and run.assistant_id == "general-agent")]
@@ -2468,11 +2480,14 @@ def _hermes_messages(tid: str) -> list[dict]:
             continue
         text = first.text or first.pending_text
         if text and first.origin is None:
+            text = " " + text if text.startswith(_EGRESS_DECISION_RIDER) else text
             messages.append({"role": "user", "content": text, "run_id": first.id,
                              "message_id": f"hermes:user:{first.work_id}"})
         for follower in followers.get(first.work_id, ()):
             if follower.text and follower.origin is None:
-                messages.append({"role": "user", "content": follower.text, "run_id": follower.id,
+                text = follower.text
+                text = " " + text if text.startswith(_EGRESS_DECISION_RIDER) else text
+                messages.append({"role": "user", "content": text, "run_id": follower.id,
                                  "message_id": f"hermes:user:{follower.work_id}"})
         if latest.status == "success" and latest.result:
             messages.append({"role": "assistant", "content": latest.result, "run_id": latest.id,
@@ -3233,13 +3248,18 @@ def _hermes_steering(run: Run, consumed=()) -> list[dict]:
         browser_authority.execution_sequence(runs, run.id)
         eligible = [item for item in _runs_before_browser_reset(runs)
                     if item.status == "pending" and item.interjection_work_id == run.work_id
-                    and item.sender is None and item.origin is None and item.user_event_id == item.id
+                    and item.sender is None
+                    and (item.origin is None and item.user_event_id == item.id
+                         or item.origin == "egress" and item.user_event_id is None)
                     and item.mode == "turn" and item.assistant_id == "general-agent"
                     and item.text and item.review_snapshot is None and item.approval_id is None]
         for item in eligible:
             if item.id in consumed:
                 _runs().transition(run.thread_id, item.id, "success", consumed_by=run.id)
-        return [{"id": item.id, "text": frame_hermes_steering(item)} for item in eligible
+        return [{"id": item.id, "text": frame_hermes_steering(item)
+                 if item.origin is None else
+                 f"[Assist follow-up id={item.id}]\n{_frame_interjection(item)}"}
+                for item in eligible
                 if item.id not in consumed]
 
 
@@ -3643,7 +3663,7 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
         return
 
     decision = _recovery_decision(
-        tid, pending_text or "",
+        tid, pending_text or "", owner=run,
         **({"continuation": True} if run.resume or run.resume_decision is not None else {}))
     logging.info("recovery: run %s on %s -> %s", run.id, tid, decision)
     if decision == "finalize":
@@ -3758,6 +3778,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # them to graph state directly), so frame-prefixed text is always
         # user-authored — same misattribution break as the rider above (it
         # would otherwise render stripped + "seen mid-turn"-badged).
+        text = " " + text
+    if origin != "egress" and text and text.startswith(_EGRESS_DECISION_RIDER):
         text = " " + text
     _pending_msg = text if text else pending_text
     pending_kwargs = {"pending_message": _pending_msg} if _pending_msg else {}
@@ -3956,7 +3978,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 _TURN_INTERJECTION[tid] = {
                     "claimed": [],
                     "run_id": _run.id if _run is not None else None}
-            if origin == "continuation" and not resume and resume_decision is None:
+            if origin in {"continuation", "egress"} and not resume and resume_decision is None:
                 # A HITL action awaiting approval must keep its interrupted graph
                 # intact. A continuation must never supersede that action or run on the
                 # interrupted graph (langgraph would drop its message). Return
@@ -5171,6 +5193,35 @@ class _EmailApprovalPending(Exception):
     """A web submission tried to bypass a displayed outbound-send or mailbox approval."""
 
 
+def _steering_owner(tid: str, previous: list[Run], held, session, prior_stage):
+    """Select eligible main work under the admission lock and browser fence."""
+    try:
+        engine = read_thread_engine(MANAGER.thread_dir(tid)).name
+    except ThreadEngineError:
+        return None  # The ordinary dispatcher reports this thread's error.
+    if engine not in {"deepagents", "hermes"}:
+        return None
+    active = next((item for item in reversed(previous)
+                   if (item.status == "running" or
+                       (item.status == "pending" and item.resume
+                        and any(prior.work_id == item.work_id and prior.status == "interrupted"
+                                for prior in previous)))), None)
+    if active is None:
+        return None
+    try:
+        browser_authority.execution_sequence(previous, active.id)
+    except RuntimeError:
+        return None
+    if (not held and active.mode == "turn" and active.assistant_id == "general-agent"
+            and active.sender is None and active.approval_id is None
+            and prior_stage != "awaiting_approval" and _runs().pending_approval(tid) is None
+            and (session is None or (session.work_id == active.work_id
+                 and not session.closed and not session.human_requested
+                 and not session.human_active))):
+        return active
+    return None
+
+
 def _accept_message_run_locked(tid: str, text: str, rider=None,
                                location: LocationSnapshot | None = None,
                                dispatch_key: str | None = None,
@@ -5213,25 +5264,8 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
         # Dispatch will make the existing invalid-engine error durable; title
         # best-effort must not change message-admission semantics.
         pass
-    active = next((item for item in reversed(previous)
-                   if (item.status == "running" or
-                        (item.status == "pending" and item.resume
-                         and any(prior.work_id == item.work_id
-                                 and prior.status == "interrupted" for prior in previous)))), None)
-    if active is not None:
-        try:
-            browser_authority.execution_sequence(previous, active.id)
-        except RuntimeError:
-            active = None
-    steering = (active is not None and steering_engine and not held
-                and active.mode == "turn" and active.assistant_id == "general-agent"
-                and active.sender is None and active.approval_id is None
-                and prior_stage != "awaiting_approval"
-                and _runs().pending_approval(tid) is None
-                and review_snapshot is None
-                and (session is None or (session.work_id == active.work_id
-                     and not session.closed and not session.human_requested
-                     and not session.human_active)))
+    active = _steering_owner(tid, previous, held, session, prior_stage) if steering_engine else None
+    steering = active is not None and review_snapshot is None
     run = _create_run(tid, text, rider=rider, location=location,
                       run_id=run_id, work_id=work_id,
                       dispatch_key=dispatch_key,
@@ -5905,30 +5939,28 @@ def _evict_egress(tid: str) -> None:
 
 
 def _dispatch_egress_resolution(tid: str) -> None:
-    """One resolution turn once a thread's pending egress requests have ALL
-    been resolved (last approve or decline) — not per-approval, so the user
-    can approve A and B before a single retry burns the slot. The prompt
-    enumerates the thread's grants and declines with the agent's own recorded
-    task text (self-injection at continuation trust, the geo completion-turn
-    shape). Runs as a post-response BackgroundTask on a threadpool thread
-    (the reply_decision precedent) — never the event loop, and never where
-    the HTTP response waits."""
+    """Journal each resolved decision before acknowledging notification delivery.
+
+    Eligible active work consumes the host event at its existing safe boundary;
+    otherwise the same Run is queued. Request-generation dispatch keys survive
+    a crash between Run admission and the store acknowledgment.
+    """
     if EGRESS_STORE is None:
         return
-    # take_undispatched: exactly THIS batch's resolutions, never re-announcing
-    # an old decline or re-running a long-lived grant's task on later batches.
-    prompt = resolution_prompt(EGRESS_STORE.take_undispatched(tid))
-    if prompt is None:
-        return
-    if read_thread_engine(MANAGER.thread_dir(tid)).name == "hermes":
-        # A resolved egress batch admits one native follow-up,
-        # not native scheduling or replay of the invocation that requested it.
-        with _RUN_ADMISSION_LOCK:
-            _create_run(tid, prompt, origin="egress")
+    for rec in EGRESS_STORE.undispatched(tid):
+        prompt = resolution_prompt([rec])
+        dispatch_key = "egress:" + hashlib.sha256(json.dumps(rec.review_identity).encode()).hexdigest()
+        with browser_authority.fence(MANAGER.root_dir, tid):
+            with _RUN_ADMISSION_LOCK:
+                previous = _runs().list(tid)
+                owner = _steering_owner(tid, previous,
+                    [item for item in previous if browser_reset_owed(item)],
+                    BrowserManager.current_session(tid), _get_status(tid).get("stage"))
+                _create_run(tid, prompt, origin="egress", dispatch_key=dispatch_key,
+                            interjection_work_id=owner.work_id if owner else None)
+        EGRESS_STORE.mark_dispatched(rec)
         _dispatch_pending_after(tid)
-    else:
-        _scheduled_dispatch(tid, prompt, _GEO_TZ)
-    _mark_urgent(tid)
+        _mark_urgent(tid)
 
 
 def _resume_egress_waiters(tid: str) -> None:
@@ -6077,18 +6109,23 @@ def _location_to_fields(location: LocationSnapshot) -> dict:
             "observed_at": location.observed_at.isoformat()}
 
 
-def _recovery_decision(tid: str, pending_message: str, *, continuation: bool = False) -> str:
+def _recovery_decision(tid: str, pending_message: str, *, continuation: bool = False,
+                       owner: Run | None = None) -> str:
     """Resume-vs-redispatch for one recovered thread, decided by GRAPH STATE (not
     text equality — a re-sent duplicate text or the supersede prefix would fool a
     text compare in both directions):
     - ``snap.next`` or ``snap.interrupts`` non-empty → the turn is mid-flight in
       the checkpoint → "resume" (input=None re-runs only the unpersisted work).
-    - otherwise, if the latest checkpointed human message EXACTLY equals
+    - otherwise, if the latest checkpointed human input EXACTLY equals
       ``pending_message`` (as sent, or as the supersede fold checkpoints it —
       ``_SUPERSEDE_RIDER`` + text) → the turn COMPLETED before the kill (the
       crash landed in post-invoke bookkeeping) → "finalize". Exact only:
       containment/suffix would misread a short pending found inside the
       PREVIOUS turn's message as completed and silently drop it.
+      Host interjections are skipped only when their exact message and journal
+      identity belong to the explicit recovered owner. Pending receipts are
+      settled before finalization; user messages and unverifiable markers remain
+      ordinary input. Legacy status-only recovery has no owner to authorize this.
     - a continuation (including an accepted approval) with no pending checkpoint
       work is complete even when it carries no new human message.
     - otherwise the message never reached the checkpoint → "redispatch" it fresh.
@@ -6103,22 +6140,45 @@ def _recovery_decision(tid: str, pending_message: str, *, continuation: bool = F
         return "error"
     if (getattr(snap, "next", None) or ()) or (getattr(snap, "interrupts", None) or ()):
         return "resume"
-    if continuation:
-        return "finalize"
-    latest_human = ""
-    for m in reversed((snap.values or {}).get("messages", [])):
-        if isinstance(m, HumanMessage):
-            latest_human = m.content if isinstance(m.content, str) else str(m.content)
-            break
-    # EXACT match only — against the message as sent, or as the supersede fold
-    # checkpoints it (_SUPERSEDE_RIDER + text; status keeps the unfolded text).
-    # Anything looser silently drops messages: containment/suffix would read a
-    # short pending ("ok" / "book it") found inside or at the end of the
-    # PREVIOUS turn's message (here after a crash pre-input-checkpoint) as "this
-    # turn completed" and finalize it away.
-    if pending_message and latest_human in (pending_message,
-                                            _SUPERSEDE_RIDER + pending_message):
-        return "finalize"
+    latest_human = None
+    delivered = []
+    try:
+        history = {run.id: run for run in _runs().list(tid)} if owner else {}
+        for m in reversed((snap.values or {}).get("messages", [])):
+            if not isinstance(m, HumanMessage):
+                continue
+            ids = (m.additional_kwargs or {}).get(INTERJECTION_IDS_KEY)
+            rec = (history.get(ids[0]) if isinstance(ids, list) and len(ids) == 1
+                   and isinstance(ids[0], str) else None)
+            consumer = history.get(rec.consumed_by) if rec else None
+            if (owner is not None and owner.thread_id == tid and rec is not None
+                    and rec.origin == "egress" and rec.thread_id == tid
+                    and rec.mode == "turn" and rec.sender is None
+                    and rec.assistant_id == "general-agent"
+                    and rec.user_event_id is None and rec.admission_sequence == 0
+                    and rec.review_snapshot is None and rec.approval_id is None
+                    and not rec.resume and rec.resume_decision is None
+                    and rec.interjection_work_id == owner.work_id
+                    and m.content == rec.text
+                    and ((rec.status == "pending" and rec.consumed_by is None)
+                         or (rec.status == "success" and consumer is not None
+                             and consumer.work_id == owner.work_id))):
+                delivered.append(rec)
+                continue
+            if latest_human is None:
+                latest_human = m.content if isinstance(m.content, str) else str(m.content)
+        # EXACT original/supersede match only. Containment would mistake "ok"
+        # in a previous turn for completed input and silently drop new work.
+        if continuation or (pending_message and latest_human in (
+                pending_message, _SUPERSEDE_RIDER + pending_message)):
+            for rec in delivered:
+                if rec.status == "pending":
+                    _runs().transition(tid, rec.id, "success", consumed_by=owner.id)
+            return "finalize"
+    except Exception:
+        logging.error("recovery: host receipt reconciliation failed for %s", tid,
+                      exc_info=True)
+        return "error"
     return "redispatch"
 
 
@@ -6268,6 +6328,7 @@ def queue_recovery_runs() -> None:
             _complete_child_handoff(child)
 
     for tid in visible:
+        _dispatch_egress_resolution(tid)
         _resume_egress_waiters(tid)
 
     for tid in visible:

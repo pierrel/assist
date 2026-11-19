@@ -70,19 +70,36 @@ def answer(p):
         native_calls.append({'name':name,'args':args})
         if name=='write_file':write_calls.append(args)
         return {'role':'assistant','content':None,'tool_calls':[{'id':'call-'+str(len(requests)),'type':'function','function':{'name':name,'arguments':json.dumps(args)}}]}
-    if latest == EGRESS_PROMPT or latest.startswith('[Egress requests resolved]'):
+    if latest == EGRESS_PROMPT or '[Host network decision]' in latest:
         current=[]
         for message in reversed(msgs):
             if message.get('role')=='user':break
             if message.get('role')=='tool':current.insert(0,message)
         if latest == EGRESS_PROMPT:
+            if current and 'blocked' in text(current[-1]).lower():
+                return {'role':'assistant','content':'The synthetic fixture tool was blocked; no approval was granted.'}
             if not current:return call('tool_describe',{'names':['request_egress']})
             if len(current)==1:
                 assert 'request_egress' in text(current[-1]) and 'host' in text(current[-1])
                 return call('tool_call',{'calls':[{'name':'request_egress','arguments':{'host':'releases.example.test','port':443,'task':EGRESS_PROMPT}}]})
-            assert 'awaits' in text(current[-1]),current[-1]
-            return {'role':'assistant','content':'Network approval is needed to read the announcement.'}
+            if len(current)==2:
+                assert 'awaits' in text(current[-1]),current[-1]
+                code=("from pathlib import Path\nimport time\np=Path('/workspace')\n"
+                      "(p/'egress-tool-started').write_text('ready')\n"
+                      "deadline=time.monotonic()+30\n"
+                      "while not (p/'egress-go').exists():\n"
+                      " if time.monotonic()>deadline: raise RuntimeError('synthetic tool gate timed out')\n"
+                      " time.sleep(.02)\nprint('EGRESS_TOOL_COMPLETE')\n")
+                return call('write_file',{'path':'/workspace/egress-tool-gate.py','content':code})
+            if len(current)==3:
+                return call('terminal',{'command':'python /workspace/egress-tool-gate.py'})
+            return {'role':'assistant','content':'The synthetic gate ended without receiving a network decision.'}
         assert 'releases.example.test:443 APPROVED' in latest,latest
+        assert 'optional.example.test:443 DECLINED' in latest,latest
+        assert not a_done.is_set(), 'decision incorrectly started another invocation'
+        assert users.count(EGRESS_PROMPT)==1
+        assert sm.SandboxManager.current_container(str(WORK)).id==egress_generation
+        assert any(m.get('role')=='tool' and 'EGRESS_TOOL_COMPLETE' in text(m) for m in msgs)
         if not current:return call('write_file',{'path':'/workspace/egress-note.txt','content':'Approved follow-up ran once.\n'})
         return {'role':'assistant','content':'The approved follow-up is complete.'}
     if latest in {'COMPETITOR_B','COMPETITOR_C'}:
@@ -224,6 +241,7 @@ if not any(route.path.startswith('/api/v1/phone') for route in threads.app.route
 threads.DOMAINS=[];state.DOMAINS=[]
 client=TestClient(threads.app)
 signal.signal(signal.SIGTERM, lambda *_args: sys.exit(124))
+egress_submission=None
 try:
     response=client.post('/threads',data={'engine':'hermes'},follow_redirects=False)
     assert response.status_code==303,response.text
@@ -280,29 +298,60 @@ try:
     # Supported native tool registration reaches the existing human decision
     # route and dispatcher; network:none does not prove an external fetch.
     from manage.web import egress
+    from assist.egress.store import EgressRequest
+    from datetime import datetime,timezone
     a_done.clear()
-    requested=client.post(f'/thread/{A}/message',data={'text':EGRESS_PROMPT},follow_redirects=False)
-    assert requested.status_code==303 and a_done.wait(30)
+    egress_responses=[]
+    def egress_request():
+        try:
+            egress_responses.append(client.post(f'/thread/{A}/message',data={'text':EGRESS_PROMPT},follow_redirects=False))
+        except BaseException as error:
+            errors.append(repr(error))
+    egress_submission=threading.Thread(target=egress_request,daemon=True)
+    egress_submission.start()
+    deadline=time.monotonic()+30
+    while not (WORK/'egress-tool-started').exists() and not a_done.is_set() and time.monotonic()<deadline:time.sleep(.02)
+    assert (WORK/'egress-tool-started').exists() and not a_done.is_set()
+    egress_owner=next(r for r in threads._runs().list(A) if r.status=='running')
+    egress_generation=sm.SandboxManager.current_container(str(WORK)).id
     assert not (WORK/'egress-note.txt').exists()
-    proposal,=phone_api._approval_collection(A)['proposals']
+    for host in ('optional.example.test','unrelated.example.test'):
+        threads.EGRESS_STORE.add_pending(EgressRequest(host,443,'Read synthetic optional context',A,
+            created_at=datetime.now(timezone.utc).isoformat()))
+    proposals=phone_api._approval_collection(A)['proposals']
+    proposal=next(p for p in proposals if p['host']=='releases.example.test')
     assert proposal['kind']=='egress' and proposal['state']=='pending'
     assert 'releases.example.test' in client.get(f'/thread/{A}').text
     a_done.clear()
     form={'token':egress.EGRESS_CSRF,'tid':A,'host':'releases.example.test','port':'443','review':proposal['token']}
     approved=client.post('/egress/hour',data=form,follow_redirects=False)
-    assert approved.status_code==303 and a_done.wait(30)
+    declined=client.post('/egress/decline',data={**form,'host':'optional.example.test',
+        'review':next(p['token'] for p in proposals if p['host']=='optional.example.test')},follow_redirects=False)
+    assert approved.status_code==declined.status_code==303 and not a_done.is_set()
+    assert not (WORK/'egress-note.txt').exists()
+    assert len([r for r in threads._runs().list(A) if r.origin=='egress' and r.status=='pending'])==2
+    (WORK/'egress-go').write_text('finish')
+    assert a_done.wait(30)
+    egress_submission.join(10);assert not egress_submission.is_alive()
+    assert len(egress_responses)==1 and egress_responses[0].status_code==303
     assert (WORK/'egress-note.txt').read_text()=='Approved follow-up ran once.\n'
     assert len([c for c in write_calls if c['path']=='/workspace/egress-note.txt'])==1
-    assert len([r for r in threads._runs().list(A) if r.origin=='egress'])==1
+    decisions=[r for r in threads._runs().list(A) if r.origin=='egress']
+    assert len(decisions)==2 and all(r.consumed_by==egress_owner.id for r in decisions)
+    assert all(r.user_event_id is None and r.admission_sequence==0 for r in decisions)
+    assert any(r.host=='unrelated.example.test' and r.state=='pending' for r in threads.EGRESS_STORE.for_thread(A))
     assert client.post('/egress/hour',data=form,follow_redirects=False).status_code==303
-    assert len([r for r in threads._runs().list(A) if r.origin=='egress'])==1
+    assert len([r for r in threads._runs().list(A) if r.origin=='egress'])==2
     assert client.get(f'/thread/{A}').text.count('The approved follow-up is complete.')==1
-    report={'native_egress_request_decision_followup_once':True,'background_result_once':process_results,'native_calls':native_calls,'provider_request_count':len(requests),'parked_provider_denials':parked_provider_denials,'experiment':'native background completion under cooperative model suspension','background_observations':background_observations,'background_script_execution':'python /workspace/background-writer.py','approval_unavailable_preserved_file':True,'status':'PASS','events':events,'http_create':response.status_code,'browser':browser.status_code,'phone':phone.status_code,'public_messages':messages,'limits':'Actual browser create and message POSTs, real native runtime/queue/container, browser HTML and authenticated phone history. Fake upstream/network:none; two native-boundary rendezvous and two competing threads; the accepted owner follow-up steers the same native invocation after its joined tool batch and remains attached across both fairness handoffs. A supported native background script completes during B; deferred process_manage returns its exact result once after readmission, with one launch/effect and no admitted A provider request during B. Native dangerous-command approval is unavailable and denies without deleting the fixture. Native egress tool records a real approval card; the HTTP decision starts one native follow-up with one file effect. This is deterministic capability coverage, not model-quality or live-egress evidence.'}
+    report={'native_egress_request_decision_followup_once':True,'native_egress_partial_decisions_steer_after_tool':True,'background_result_once':process_results,'native_calls':native_calls,'provider_request_count':len(requests),'parked_provider_denials':parked_provider_denials,'experiment':'native background completion under cooperative model suspension','background_observations':background_observations,'background_script_execution':'python /workspace/background-writer.py','approval_unavailable_preserved_file':True,'status':'PASS','events':events,'http_create':response.status_code,'browser':browser.status_code,'phone':phone.status_code,'public_messages':messages,'limits':'Actual browser create and message POSTs, real native runtime/queue/container, browser HTML and authenticated phone history. Fake upstream/network:none; two native-boundary rendezvous and two competing threads; the accepted owner follow-up steers the same native invocation after its joined tool batch and remains attached across both fairness handoffs. A supported native background script completes during B; deferred process_manage returns its exact result once after readmission, with one launch/effect and no admitted A provider request during B. Native dangerous-command approval is unavailable and denies without deleting the fixture. Native egress creates an owned synthetic card; approve and decline decisions are admitted while a terminal tool is blocked, then both are durably consumed in that same invocation after completion, with one file effect and an unrelated card still pending. This is deterministic capability coverage, not model-quality or live-egress evidence.'}
 finally:
     b_done.set();c_done.set()
     for tid in (A,B,C):
         try:threads._HERMES_RUNTIME.stop(tid)
         except Exception as error:errors.append(repr(error))
+    if egress_submission is not None:
+        egress_submission.join(5)
+        if egress_submission.is_alive():errors.append('Owned egress request thread did not finish after native stop')
     provider.shutdown();client.close()
     (ROOT/'errors.json').write_text(json.dumps(errors,indent=2))
     assert not errors, errors
