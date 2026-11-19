@@ -302,6 +302,169 @@ def handoff_host(wired,monkeypatch):
     return tid,root,scheduler,stopped,notifications,faults
 
 
+@pytest.mark.parametrize('phase',['startup','tool','fairness'])
+@pytest.mark.parametrize('system',[False,True])
+def test_active_browser_followup_reaches_existing_model_boundary(handoff_host,monkeypatch,phase,system):
+    tid,root,scheduler,stopped,_notifications,_faults=handoff_host
+    from assist.middleware import interjection
+    monkeypatch.setattr(interjection,'_turn_sender',lambda _runtime:None)
+    hook=interjection.InterjectionMiddleware()
+    backend=threads._get_sandbox_backend
+    messages=[]
+    followups=[]
+    generations=[]
+    def followup():
+        followups.append(threads._accept_message_run(tid,'Keep the current page and adjust the task')[0])
+    def starting(t,**kwargs):
+        result=backend(t,**kwargs)
+        if phase=='startup' and not followups:followup()
+        return result
+    monkeypatch.setattr(threads,'_get_sandbox_backend',starting)
+    transport=browser._docker_exec
+    def during_tool(*args,**kwargs):
+        if phase=='tool' and not followups:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(followup).result(timeout=2)
+        return transport(*args,**kwargs)
+    monkeypatch.setattr(browser,'_docker_exec',during_tool)
+    class Chat:
+        agent=None
+        pending_reply=lambda self:None
+        get_messages=lambda self:messages
+        get_raw_messages=get_messages
+        def boundary(self):
+            session=browser.BrowserManager.current_session(tid)
+            generations.append(session.sandbox_backend.container)
+            result=hook.before_model({'messages':messages},None)
+            assert result and followups[0].id in interjection.collect_interjection_ids(result['messages'])
+            messages.extend(result['messages'])
+            hook.before_model({'messages':messages},None)
+            session.command('open',url='https://example.test/after')
+            return 'Steering handled in the same execution'
+        def message(self,text):
+            session=browser.BrowserManager.current_session(tid)
+            session.command('open',url='https://example.test/before')
+            if phase=='fairness':
+                generations.append(session.sandbox_backend.container)
+                raise ThreadPauseRequested('ordinary fairness slice')
+            return self.boundary()
+        def resume(self):return self.boundary()
+    monkeypatch.setattr(web.MANAGER,'get',lambda *_a,**_k:Chat())
+    if system:
+        previous=threads._create_run(tid,'Earlier owner request',user_origin=True)
+        threads._runs().claim(tid,previous.id)
+        threads._runs().transition(tid,previous.id,'success')
+    owner=threads._create_run(tid,'Continue the browser task',origin='system' if system else None,user_origin=not system)
+    threads._execute_run(owner.id,tid)
+    target=owner
+    if phase=='fairness':
+        target=next(r for r in threads._runs().list(tid) if r.resume)
+        followup()
+        threads._execute_run(target.id,tid)
+    assert threads._runs().get(tid,target.id).status=='success'
+    assert len(followups)==1
+    admitted=threads._runs().get(tid,followups[0].id)
+    assert admitted.status=='success' and admitted.consumed_by==owner.id
+    assert admitted.interjection_work_id==owner.work_id
+    assert admitted.work_id!=owner.work_id
+    assert len({id(container) for container in generations})==1
+    assert stopped=={'host-'+tid:1}
+
+
+def test_unconsumed_browser_steering_runs_once_as_fallback(handoff_host,monkeypatch):
+    tid,_root,scheduler,_stopped,_notifications,_faults=handoff_host
+    from tests.test_browser_lifecycle_v12 import _ORIGINAL_DISPATCH_PENDING
+    monkeypatch.setattr(threads,'_dispatch_pending_after',_ORIGINAL_DISPATCH_PENDING)
+    calls=[]
+    followups=[]
+    class Chat:
+        agent=None
+        pending_reply=lambda self:None
+        get_messages=lambda self:[]
+        get_raw_messages=get_messages
+        def message(self,text):
+            calls.append(text)
+            if not followups:
+                followups.append(threads._accept_message_run(tid,'Follow-up not consumed')[0])
+            return 'Completed this execution'
+    monkeypatch.setattr(web.MANAGER,'get',lambda *_a,**_k:Chat())
+    owner=threads._create_run(tid,'Original browser work',user_origin=True)
+    threads._execute_run(owner.id,tid)
+    assert threads._runs().get(tid,owner.id).status=='success'
+    assert threads._runs().get(tid,followups[0].id).status=='pending'
+    item=scheduler._q.get_nowait()
+    assert item['run_id']==followups[0].id
+    threads._execute_run(item['run_id'],tid)
+    threads._execute_run(item['run_id'],tid)
+    assert calls==['Original browser work','Follow-up not consumed']
+    assert threads._runs().get(tid,followups[0].id).status=='success'
+
+
+def test_targeted_steering_cannot_enter_another_execution(handoff_host,monkeypatch):
+    tid,_root,_scheduler,_stopped,_notifications,_faults=handoff_host
+    owner=threads._create_run(tid,'Active owner',user_origin=True)
+    threads._runs().claim(tid,owner.id)
+    followup,_=threads._accept_message_run(tid,'Steer the active owner')
+    assert followup.interjection_work_id==owner.work_id
+    threads._runs().transition(tid,owner.id,'success')
+    other=threads._create_run(tid,'Independent background work',origin='system')
+    threads._runs().claim(tid,other.id)
+    monkeypatch.setitem(threads._TURN_INTERJECTION,tid,{'run_id':other.id,'claimed':[]})
+    assert followup.id not in {record.id for record in threads._pending_run_records(tid)}
+    assert threads._runs().get(tid,followup.id).status=='pending'
+
+
+def test_owner_message_cannot_steer_sender_scoped_execution(handoff_host):
+    tid,_root,_scheduler,_stopped,_notifications,_faults=handoff_host
+    triage=threads._create_run(tid,'Sender-scoped work',sender='+15550001111')
+    threads._runs().claim(tid,triage.id)
+    followup,_=threads._accept_message_run(tid,'Owner instruction')
+    assert followup.interjection_work_id is None
+    assert followup.status=='revocation_pending'
+
+
+def test_visible_approval_pause_is_not_active_steering(handoff_host):
+    tid,_root,_scheduler,_stopped,_notifications,_faults=handoff_host
+    owner=threads._create_run(tid,'Work reaching a reply approval',user_origin=True)
+    threads._runs().claim(tid,owner.id)
+    threads._set_status(tid,'awaiting_approval',pending_reply='Proposed reply')
+    followup,_=threads._accept_message_run(tid,'New instruction at approval')
+    assert followup.interjection_work_id is None
+    assert followup.status=='revocation_pending'
+
+
+@pytest.mark.parametrize('terminal',['success','error','cancelled'])
+def test_terminal_logical_owner_cannot_keep_browser_authority(controlled,terminal):
+    _root,runs,_owner,successor,session,_stopped=controlled
+    runs.claim('t',successor.id)
+    runs.transition('t',successor.id,terminal)
+    with pytest.raises(browser.BrowserUnavailable,match='terminal|cancelled'):
+        session._fence_command()
+
+
+@pytest.mark.parametrize('boundary',['steering','replacement','terminal','generation','cancel'])
+def test_runtime_and_session_share_execution_owner_fences(controlled,boundary):
+    root,runs,owner,successor,session,_stopped=controlled
+    from assist.browser.turn_runtime import _check_lease
+    if boundary in {'steering','replacement'}:
+        runs.create('t','general-agent','New direct message',user_origin=True,
+                    interjection_work_id=owner.work_id if boundary=='steering' else None)
+    if boundary=='terminal':
+        runs.claim('t',successor.id)
+        runs.transition('t',successor.id,'success')
+    if boundary=='cancel':runs.cancel_logical('t',owner.id)
+    request={'threads_root':str(root),'thread_id':'t','run_id':owner.id,
+             'generation':'wrong-generation' if boundary=='generation' else session.sandbox_generation}
+    if boundary=='generation':
+        session.sandbox_generation='wrong-generation'
+    if boundary=='steering':
+        _check_lease(request)
+        session._fence_command()
+    else:
+        with pytest.raises(RuntimeError):_check_lease(request)
+        with pytest.raises(browser.BrowserUnavailable):session._fence_command()
+
+
 @pytest.mark.parametrize('stop_failure',[False,True])
 def test_takeover_fence_rejection_settles_only_after_exact_stop_and_dispatches_new_user(handoff_host,monkeypatch,stop_failure):
     tid,root,scheduler,stopped,notifications,faults=handoff_host

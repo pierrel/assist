@@ -39,7 +39,7 @@ def test_later_same_work_slice_cannot_revive_explicit_cancellation_or_old_sequen
         state.begin(owner.id, owner.admission_sequence)
         state.add_generation(owner.id, "generation")
     with pytest.raises(browser.BrowserUnavailable,
-                       match="generation changed" if boundary == "new_user" else "cancelled"):
+                       match="newer user message" if boundary == "new_user" else "cancelled"):
         session._fence_command()
 
 

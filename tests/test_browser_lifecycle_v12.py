@@ -147,7 +147,7 @@ def test_map_disabled_old_browser_requires_exact_kill_and_base_only_proxy(
         assert state.lease is None
 
 
-def test_held_message_disarms_active_browser_without_killing_shell(
+def test_ordinary_steering_preserves_active_browser_and_shell(
         monkeypatch, admitted):
     root, runs = admitted
     old = runs.create("t", "general-agent", "Read a public page", user_origin=True)
@@ -181,12 +181,13 @@ def test_held_message_disarms_active_browser_without_killing_shell(
                         lambda *_args: pytest.fail("active shell was stopped"))
     try:
         held, _ = threads._accept_message_run("t", "Follow up")
-        assert threads._drain_held_browser_events("t") is False
+        assert threads._drain_held_browser_events("t") is True
         assert read_client(str(root), "172.20.0.2") == ClientRecord(
-            "t", generation, "sandbox")
-        assert captured == revoked == [True]
+            "t", generation, "sandbox", browser_armed=True)
+        assert captured == revoked == []
         assert SandboxManager.current_container(work_dir) is sandbox
-        assert runs.get("t", held.id).status == "revocation_pending"
+        assert runs.get("t", held.id).status == "pending"
+        assert held.interjection_work_id == old.work_id
     finally:
         SandboxManager._containers.pop(work_dir, None)
 
@@ -259,7 +260,10 @@ def test_paused_browser_reset_proves_stop_before_releasing_work(
 
     monkeypatch.setattr(browser, "_kill_container_confirmed", stop)
     if boundary == "new_user":
-        held, _ = threads._accept_message_run("t", "A different request")
+        # A standalone replacement retains reset debt. Ordinary owner steering
+        # uses the boundary-delivery path covered in test_browser_handoff.
+        held = threads._create_run("t", "A different request", user_origin=True,
+                                   revocation_pending=True, browser_reset_run_id=source.id)
         assert held.status == "revocation_pending"
         with pytest.raises(browser.BrowserUnavailable, match="newer user"):
             browser.BrowserManager.resume_session("t", source.work_id, session.user_request)

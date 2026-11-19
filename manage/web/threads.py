@@ -2055,13 +2055,18 @@ def _runs_before_browser_reset(runs: list[Run]) -> list[Run]:
 
 def _pending_run_records(tid: str) -> list[PendingMessage]:
     """Interjection adapter; never expose a follower across a reset debt."""
-    eligible = _runs_before_browser_reset(_runs().list(tid))
+    runs = _runs().list(tid)
+    owner_id = _TURN_INTERJECTION.get(tid, {}).get("run_id")
+    owner = next((run for run in runs if run.id == owner_id), None)
+    eligible = _runs_before_browser_reset(runs)
     return [PendingMessage(
         thread_id=run.thread_id, text=run.text or "", sender=run.sender,
         rider=run.rider, enqueued_at=run.created_at, origin=run.origin, id=run.id)
         for run in eligible
         if (run.status == "pending" and run.mode == "turn" and run.text
             and run.review_snapshot is None
+            and (run.interjection_work_id is None
+                 or (owner is not None and run.interjection_work_id == owner.work_id))
             and run.assistant_id == "general-agent")]
 
 
@@ -2532,7 +2537,8 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 user_origin: bool = False, user_event_id: str | None = None,
                 revocation_pending: bool = False,
                 browser_reset_run_id: str | None = None,
-                review_snapshot: dict | None = None) -> Run:
+                review_snapshot: dict | None = None,
+                interjection_work_id: str | None = None) -> Run:
     """Commit one web turn before placing its id on a dispatch queue."""
     with RUN_GATE.active() as accepted:
         if not accepted:
@@ -2551,6 +2557,7 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
             user_origin=user_origin, user_event_id=user_event_id,
             revocation_pending=revocation_pending,
             browser_reset_run_id=browser_reset_run_id,
+            interjection_work_id=interjection_work_id,
             review_snapshot=review_snapshot)
 
 
@@ -4969,19 +4976,41 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
                     or browser_active or bool(held) or bool(older_web))
     busy = busy or browser_active or bool(older_web) or bool(held)
     pi_thread = False
+    deep_thread = False
     try:
         pi_thread = _is_pi_thread(tid)
+        deep_thread = read_thread_engine(MANAGER.thread_dir(tid)).name == "deepagents"
         if pi_thread:
             _ensure_pi_description(tid, text)
     except ThreadEngineError:
         # Dispatch will make the existing invalid-engine error durable; title
         # best-effort must not change message-admission semantics.
         pass
+    active = next((item for item in reversed(previous)
+                   if (item.status == "running" or
+                        (item.status == "pending" and item.resume
+                         and any(prior.work_id == item.work_id
+                                 and prior.status == "interrupted" for prior in previous)))), None)
+    if active is not None:
+        try:
+            browser_authority.execution_sequence(previous, active.id)
+        except RuntimeError:
+            active = None
+    steering = (active is not None and deep_thread and not pi_thread and not held
+                and active.mode == "turn" and active.assistant_id == "general-agent"
+                and active.sender is None and active.approval_id is None
+                and prior_stage != "awaiting_approval"
+                and _runs().pending_approval(tid) is None
+                and review_snapshot is None
+                and (session is None or (session.work_id == active.work_id
+                     and not session.closed and not session.human_requested
+                     and not session.human_active)))
     run = _create_run(tid, text, rider=rider, location=location,
                       run_id=run_id, work_id=work_id,
                       dispatch_key=dispatch_key,
                       max_pending=max_pending, user_origin=True,
-                      revocation_pending=browser_hold and not pi_thread,
+                      revocation_pending=browser_hold and not pi_thread and not steering,
+                      interjection_work_id=active.work_id if steering else None,
                       review_snapshot=review_snapshot,
                       browser_reset_run_id=(
                           lease["owner_run_id"] if lease is not None else

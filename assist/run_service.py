@@ -170,6 +170,9 @@ class Run:
     # Direct-owner events have a durable per-thread ordering sequence. Historical
     # Runs without this field retain zero and cannot outrank a new event.
     admission_sequence: int = 0
+    # Host-admitted steering targets an existing logical execution. Unlike
+    # consumed_by, this is recorded before a model/checkpoint receives it.
+    interjection_work_id: str | None = None
     revocation_retry_at: str | None = None
     browser_reset_notice: bool = False
     browser_reset_run_id: str | None = None
@@ -242,6 +245,8 @@ class Run:
             value.pop("user_event_id")
         if self.admission_sequence == 0:
             value.pop("admission_sequence")
+        if self.interjection_work_id is None:
+            value.pop("interjection_work_id")
         if self.revocation_retry_at is None:
             value.pop("revocation_retry_at")
         if not self.browser_reset_notice:
@@ -329,6 +334,8 @@ class Run:
             user_event_id=Run._optional_opaque_id(
                 value.get("user_event_id"), "user event id"),
             admission_sequence=sequence,
+            interjection_work_id=Run._optional_opaque_id(
+                value.get("interjection_work_id"), "interjection work id"),
             revocation_retry_at=Run._optional_text(
                 value.get("revocation_retry_at"), "revocation retry at"),
             browser_reset_notice=browser_reset_notice,
@@ -512,6 +519,7 @@ class RunService(PerThreadJsonStore[Run]):
         browser_reset_run_id: str | None = None,
         approval_id: str | None = None,
         review_snapshot: dict | None = None,
+        interjection_work_id: str | None = None,
     ) -> Run:
         """Persist a direct held event or a dispatchable pending Run."""
         if not assistant_id:
@@ -534,6 +542,8 @@ class RunService(PerThreadJsonStore[Run]):
             user_event_id = rid
         if revocation_pending and not user_origin:
             raise ValueError("only a direct owner event can await browser revocation")
+        if interjection_work_id is not None and (not user_origin or revocation_pending):
+            raise ValueError("only a pending direct owner event can steer active work")
         now = _now()
         run = Run(
             thread_id=thread_id, assistant_id=assistant_id, text=text, id=rid,
@@ -551,6 +561,7 @@ class RunService(PerThreadJsonStore[Run]):
             delegate_user_urls=tuple(delegate_user_urls),
             location=dict(location) if location else None,
             user_event_id=user_event_id,
+            interjection_work_id=interjection_work_id,
             browser_reset_run_id=browser_reset_run_id,
             approval_id=approval_id,
             review_snapshot=(Run._validated_review_snapshot(review_snapshot)

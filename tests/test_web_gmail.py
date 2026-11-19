@@ -189,7 +189,8 @@ def test_worker_gmail_proposal_and_approval_resume(client,monkeypatch,preview_wr
             release_preview.set()
         assert request.result(2).status_code==303
         continuation.result(2)
-    assert threads._runs().get("mail-thread",chat.follower.id).status=="revocation_pending"
+    # This message arrived during active processing, before the approval pause.
+    assert threads._runs().get("mail-thread",chat.follower.id).status=="pending"
     assert threads._drain_held_browser_events("mail-thread")
     status=_get_status("mail-thread")
     assert status["stage"]=="awaiting_approval"

@@ -62,8 +62,10 @@ where reliability is harder than with frontier APIs.
   turn to finish. A duplicate resume timeout cannot retire another dispatcher's
   ticket or the generation currently borrowed by a child.
   Trusted children share persistent `/agent` files; the separate browser-worker
-  UID cannot traverse that directory. A newer user event or
-  cancellation revokes the old browser before later work can proceed.
+  UID cannot traverse that directory. Ordinary owner follow-ups reach an active
+  DeepAgents turn at its next model boundary after the current tool finishes,
+  preserving its browser through startup and fairness resumes. Explicit
+  cancellation or replacement work revokes the old browser before later work proceeds.
   See the [shared-execution design](docs/2026-11-12-browser-shared-execution.org)
   with its [trusted-state amendment](docs/2026-11-13-trusted-agent-state.org)
   and [current architecture](docs/architecture.org).
@@ -136,7 +138,7 @@ where reliability is harder than with frontier APIs.
   If tabs were closed or replaced, the handback reports current page IDs or an
   empty website set. A fresh empty state permits reopening only after another
   model response; transport failure does not count as an observation.
-  Cancellation and newer direct messages
+  Cancellation and direct messages during human control
   retire the old viewer/session through normal exact-stop cleanup. The existing
   ownership-aware age check retains active human work. A service restart ends
   live-page continuity; normal stored-login recovery remains available.

@@ -18,6 +18,29 @@ LOCK_FILE = ".browser-authority.lock"
 GENERATION_LOCK_FILE = ".sandbox-generation.lock"
 
 
+def execution_sequence(runs, owner_run_id: str) -> int:
+    """Fence one live logical owner without revoking its journaled steering."""
+    owner = next((run for run in runs if run.id == owner_run_id), None)
+    if owner is None:
+        raise RuntimeError("browser execution owner is unavailable")
+    work = [run for run in runs if run.work_id == owner.work_id]
+    if (owner.status not in {"pending", "running", "interrupted"}
+            or work[-1].status not in {"pending", "running", "interrupted"}
+            or any(run.cancel_cleanup is not None for run in work)):
+        raise RuntimeError("browser execution owner is terminal or cancelled")
+    if any(run.status == "revocation_pending" for run in runs):
+        raise RuntimeError("newer user message revoked browser startup")
+    first = next(index for index, run in enumerate(runs) if run.work_id == owner.work_id)
+    sequence = max((run.admission_sequence for run in runs[:first + 1]
+                    if run.user_event_id == run.id), default=0)
+    latest = max((run.admission_sequence for run in runs
+                  if run.user_event_id == run.id
+                  and run.interjection_work_id != owner.work_id), default=0)
+    if latest != sequence:
+        raise RuntimeError("newer user message revoked browser startup")
+    return sequence
+
+
 def _thread_dir(root: str, thread_id: str) -> str:
     if (not isinstance(thread_id, str) or not thread_id
             or thread_id in {".", ".."} or "/" in thread_id

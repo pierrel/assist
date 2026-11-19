@@ -126,7 +126,15 @@ in both views. An ID shown in only one view keeps that meaning.
   [[file:browser-site-compatibility.org][browser compatibility view]].
   A fairness successor reuses its exact session/backend after C8 freezes the
   container with Docker pause. C8 unpauses only the same logical work, direct
-  user event and generation after checking the current admission sequence.
+  user event and generation against its stable execution admission snapshot.
+  Ordinary owner follow-ups to active DeepAgents work are pending journal
+  entries targeted by =interjection_work_id=, distinct from the later
+  =consumed_by= checkpoint claim. C2 admission and C8's existing =before_model=
+  interjection path preserve the current tool, owner and browser generation
+  through startup and fairness resumes. One host authority predicate checks
+  that snapshot in sandbox startup, browser session and worker launch;
+  terminal owners, cancellation receipts, replacement reset debt and changed
+  generations remain denied. No new delivery channel or component is added.
   A requested human takeover uses the same cooperative boundary but retains
   the container running after releasing the model slot. Parent/child dispatch
   defers in that existing session. Return revokes human input, freezes the
@@ -153,7 +161,7 @@ in both views. An ID shown in only one view keeps that meaning.
   accepted-approval execution and task-completion continuations. A retained
   completion slice skips the initial Git handoff rather than stopping its writer.
   Entering an approval wait, terminal and error boundaries close the browser;
-  new-user and cancellation
+  replacement-user and cancellation
   resets prove the retained generation stopped before releasing held work,
   including an unpaused human wait with no executing model worker.
   Checkpoint-verified approval repair may replace a cancelled physical slice;

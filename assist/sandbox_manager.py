@@ -789,8 +789,10 @@ class SandboxManager:
             if thread_scope is not None:
                 from assist.run_service import RunService
                 runs = RunService(threads_root).list(thread_id)
-                sequence = max((run.admission_sequence for run in runs
-                                if run.user_event_id == run.id), default=0)
+                sequence = (authority.execution_sequence(runs, owner)
+                            if browser_capable or any(run.id == owner for run in runs)
+                            else max((run.admission_sequence for run in runs
+                                      if run.user_event_id == run.id), default=0))
                 with authority.fence(threads_root, thread_id) as state:
                     state.begin(owner, sequence)
             try:
