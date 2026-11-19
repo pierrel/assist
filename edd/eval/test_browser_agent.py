@@ -688,8 +688,12 @@ class TestBrowserAgent(TestCase):
                 skill_sources=web_main_skill_sources(browser=True))
             with mock.patch("assist.agent._execution_egress_tools", tuple(tools)), \
                  mock.patch.object(egress_tools_module, "_thread_id", lambda: tid), \
-                 mock.patch("assist.tools.requests.get",
+                 mock.patch("assist.tools.url_fetch.get",
                             return_value=_StaticShell("multi-origin")), \
+                 mock.patch("assist.tools._read_pdf_url",
+                            side_effect=AssertionError("PDF network access is outside this offline fixture")), \
+                 mock.patch("requests.sessions.Session.request",
+                            side_effect=AssertionError("Host network access is outside this offline fixture")), \
                  stub_research_subagent():
                 agent = AgentHarness(create_agent(
                     self.model, root, sandbox_backend=_OfflineBackend(root), spec=spec))

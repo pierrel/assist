@@ -11,7 +11,11 @@ turn completes the recorded task. The sandbox is a stub backend so no real
 network or docker is involved.
 """
 import tempfile
+import shlex
+from urllib.parse import urlsplit
 from unittest import TestCase, mock
+
+import requests
 
 from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
@@ -30,13 +34,22 @@ _DENIAL = (EGRESS_DENIED_GUIDANCE
            + "curl: (56) Received HTTP code 403 from proxy after CONNECT\n")
 
 _NET_TOKENS = ("curl", "wget", "pip install", "git clone", "http")
+_RELEASE = '{"tag_name": "v9.3.1", "name": "Release 9.3.1"}'
+
+
+def _fixture_release(url):
+    target = urlsplit(url)
+    return (target.scheme == "https" and target.hostname == "api.github.com"
+            and target.port in {None, 443}
+            and target.path == "/repos/acme/widget/releases")
 
 
 class _DenyNetBackend(FilesystemBackend, SandboxBackendProtocol):
     """Filesystem-backed sandbox whose execute denies network commands the
     way the egress proxy does (guidance prepended, the prod execute shape)
     and no-ops everything else. Flip ``allow`` to simulate an approved
-    grant: network fetches then return canned content."""
+    grant for the exact synthetic release endpoint. Other destinations remain
+    denied, including through host HTML/PDF and requests-based tools."""
 
     def __init__(self, root_dir):
         super().__init__(root_dir=root_dir, virtual_mode=False)
@@ -47,12 +60,26 @@ class _DenyNetBackend(FilesystemBackend, SandboxBackendProtocol):
     def execute(self, command, timeout=None):
         if any(t in command for t in _NET_TOKENS):
             self.net_attempts.append(command)
-            if self.allow:
+            targets = [part for part in shlex.split(command)
+                       if part.startswith(("http://", "https://"))]
+            if self.allow and targets and all(_fixture_release(url) for url in targets):
                 return ExecuteResponse(
-                    output='{"tag_name": "v9.3.1", "name": "Release 9.3.1"}',
+                    output=_RELEASE,
                     exit_code=0)
             return ExecuteResponse(output=_DENIAL, exit_code=56)
         return ExecuteResponse(output="", exit_code=0)
+
+    def fetch(self, url, **_kwargs):
+        """The host HTML path observes the same synthetic grant as execute."""
+        if not self.allow or not _fixture_release(url):
+            raise AssertionError(_DENIAL)
+        response = requests.Response()
+        response.status_code = 200
+        response.url = url
+        response.headers["Content-Type"] = "application/json"
+        response._content = _RELEASE.encode()
+        response._content_consumed = True
+        return response
 
 
 class TestEgressApproval(TestCase):
@@ -72,6 +99,16 @@ class TestEgressApproval(TestCase):
         root = tempfile.mkdtemp()
         create_filesystem(root, files or {})
         backend = _DenyNetBackend(root)
+        # Guard the actual HTML/PDF sinks before DNS or subprocess creation.
+        # Other requests-based tools (search, travel, routing) stay offline too;
+        # the configured model uses its independent HTTPX client.
+        for target in ("requests.sessions.Session.request", "assist.tools._read_pdf_url"):
+            guard = mock.patch(target, side_effect=AssertionError(_DENIAL))
+            guard.start()
+            self.addCleanup(guard.stop)
+        fetch = mock.patch("assist.tools.url_fetch.get", side_effect=backend.fetch)
+        fetch.start()
+        self.addCleanup(fetch.stop)
         tools = egress_tools(self.store, frozenset({"pypi.org"}))
         with stub_research_subagent():
             agent = AgentHarness(create_agent(self.model, root,
@@ -84,7 +121,7 @@ class TestEgressApproval(TestCase):
         """The flagship flow: denial → request_egress for the right host +
         tell the user + no retry-loop."""
         agent, backend = self._agent()
-        with mock.patch("assist.tools.requests.get",
+        with mock.patch("assist.tools.url_fetch.get",
                         side_effect=AssertionError("egress eval must use the denied sandbox path")) as get, \
              stub_research_subagent():
             agent.message(
