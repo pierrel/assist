@@ -436,6 +436,133 @@ def test_failed_turn_claimed_steering_retries_both_messages(handoff_host,monkeyp
     assert calls==['Original browser work','First rescue','Second rescue']
 
 
+def test_requested_control_has_a_resumable_checkpoint_and_held_followup(handoff_host,monkeypatch):
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from assist.middleware.interjection import InterjectionMiddleware
+    from manage.web.state import _get_status
+
+    tid,_root,scheduler,stopped,_notifications,_faults=handoff_host
+    monkeypatch.setenv('ASSIST_BASE_URL','https://assist.example')
+    draft={'text':'An unsent draft'}
+    model_calls=[]
+    def transport(_generation,payload,**_kwargs):
+        command=json.loads(payload)
+        args=command.get('args',{})
+        if command['operation']=='viewer':
+            if args['action']=='text':draft['text']=args['text']
+            result={'pages':[{'page_id':'page','url':'https://example.test/exhibit'}]}
+        else:
+            result={'page_id':'page','snapshot_id':'fresh','snapshot':draft['text']}
+        return json.dumps({'result':result}).encode()
+    monkeypatch.setattr(browser,'_docker_exec',transport)
+    graph_config={'configurable':{'thread_id':tid}}
+    def handoff(_state):
+        session=browser.BrowserManager.current_session(tid)
+        tools={tool.__name__:tool for tool in browser.browser_tools(session)}
+        json.loads(tools['browser_open']('https://example.test/exhibit'))
+        offered=json.loads(tools['browser_handoff']())
+        assert offered['handoff_url']==f'https://assist.example/thread/{tid}/browser'
+        return {'messages':[AIMessage(content='',tool_calls=[{'name':'browser_handoff','args':{},'id':'offer'}]),
+                            ToolMessage(content=json.dumps(offered),tool_call_id='offer')]}
+    def model(state):
+        ThreadQueueMiddleware().before_model(state,None)
+        model_calls.append('resumed')
+        injected=InterjectionMiddleware().before_model(state,None)
+        assert injected and 'Continue using my edit' in injected['messages'][0].content
+        session=browser.BrowserManager.current_session(tid)
+        assert session.needs_observation
+        assert 'error' in session.command('open',url='https://example.test/next')
+        observed=session.command('observe',page_id='page')
+        assert observed['result']['snapshot']=='Human changed the draft'
+        assert 'error' in session.command('open',url='https://example.test/next')
+        ThreadQueueMiddleware().after_model(state,None)
+        assert 'error' not in session.command('open',url='https://example.test/next')
+        return {'messages':[*injected['messages'],AIMessage(content='Continued after observing the edit.')]}
+    builder=StateGraph(MessagesState)
+    builder.add_node('handoff',handoff)
+    builder.add_node('model',model)
+    builder.add_edge(START,'handoff')
+    builder.add_edge('handoff','model')
+    builder.add_edge('model',END)
+    graph=builder.compile(checkpointer=MemorySaver())
+    class Chat:
+        agent=None
+        pending_reply=lambda self:None
+        def get_raw_messages(self):return graph.get_state(graph_config).values.get('messages',[])
+        def get_messages(self):
+            return [{'role':'assistant' if isinstance(m,AIMessage) else 'user' if isinstance(m,HumanMessage) else 'tool',
+                     'content':m.content} for m in self.get_raw_messages()]
+        def message(self,text):return graph.invoke({'messages':[HumanMessage(content=text)]},graph_config)['messages'][-1].content
+        def resume(self):return graph.invoke(None,graph_config)['messages'][-1].content
+    monkeypatch.setattr(web.MANAGER,'get',lambda *_a,**_k:Chat())
+    owner=threads._create_run(tid,'Open the exhibit page so I can look around myself.',user_origin=True)
+    threads._execute_run(owner.id,tid)
+    session=browser.BrowserManager.current_session(tid)
+    assert session is not None and session.human_active and not session.paused
+    assert graph.get_state(graph_config).next==('model',) and model_calls==[]
+    assert threads._runs().get(tid,owner.id).status=='interrupted' and stopped=={}
+    assert threads.THREAD_QUEUE.peek_holder() is None
+    link=f'https://assist.example/thread/{tid}/browser'
+    assert _get_status(tid)['browser_control_url']==link
+    client=TestClient(web.app)
+    assert client.get(link).status_code==200
+    assert f'href="{link}"' in client.get(f'/thread/{tid}').text
+    token=session.viewer_token
+    headers={'Origin':'http://testserver','X-Browser-Token':token}
+    control=f'/thread/{tid}/browser/control'
+    assert client.post(control,json={'client':'a'*32,'action':'status'},headers=headers).json()['unclaimed']
+    assert client.post(control,json={'client':'a'*32,'action':'takeover'},headers=headers).status_code==200
+    session.viewer_command(token,'a'*32,'text',page_id='page',text='Human changed the draft')
+    followup,_=threads._accept_message_run(tid,'Continue using my edit')
+    assert followup.status=='pending' and followup.interjection_work_id==owner.work_id
+    threads._execute_run(followup.id,tid)
+    assert threads._runs().get(tid,followup.id).status=='pending'
+    assert client.post(control,json={'client':'a'*32,'action':'return'},headers=headers).status_code==200
+    # Even a fresh dispatcher racing ahead of the released resume cannot steal it.
+    threads._execute_run(followup.id,tid)
+    assert threads._runs().get(tid,followup.id).status=='pending'
+    item=scheduler._q.get_nowait()
+    resumed=threads._runs().get(tid,item['run_id'])
+    assert resumed.resume and resumed.work_id==owner.work_id
+    threads._execute_run(resumed.id,tid)
+    assert threads._runs().get(tid,resumed.id).status=='success'
+    assert threads._runs().get(tid,followup.id).status=='success' and model_calls==['resumed']
+    threads._execute_run(followup.id,tid)
+    assert model_calls==['resumed'] and browser.BrowserManager.current_session(tid) is None
+
+
+@pytest.mark.parametrize('base',['','https://user:password@assist.example','https://assist.example/path',
+                               'https://assist.example/?token=x','javascript:alert(1)','https://assist.example\n'])
+def test_invalid_control_address_never_offers_a_session(controlled,monkeypatch,base):
+    _root,_runs,_owner,_successor,session,_stopped=controlled
+    session.human_requested=session.human_active=False
+    session.human_client=None
+    monkeypatch.setenv('ASSIST_BASE_URL',base)
+    with pytest.raises(browser.BrowserUnavailable,match='not configured'):
+        session.offer_control()
+    assert session.handoff_url is None and not session.human_requested
+
+
+def test_offer_needs_a_live_page_and_freezes_agent_effects_immediately(controlled,monkeypatch):
+    _root,_runs,_owner,_successor,session,_stopped=controlled
+    session.human_requested=session.human_active=False
+    session.human_client=None
+    monkeypatch.setenv('ASSIST_BASE_URL','https://assist.example/')
+    monkeypatch.setattr(session,'_handoff_pages',lambda:[])
+    with pytest.raises(browser.BrowserUnavailable,match='no live website'):
+        session.offer_control()
+    assert not session.human_requested
+    monkeypatch.setattr(session,'_handoff_pages',lambda:[{'page_id':'page','url':'https://site.example/?private-canary'}])
+    offered=session.offer_control()
+    assert offered['handoff_url']=='https://assist.example/thread/t/browser'
+    assert session.human_requested and session.human_client is None
+    assert 'private-canary' not in json.dumps(offered) and session.viewer_token not in json.dumps(offered)
+    with pytest.raises(browser.BrowserUnavailable,match='reserved'):
+        session.command('close',page_id='page')
+
+
 def test_targeted_steering_cannot_enter_another_execution(handoff_host,monkeypatch):
     tid,_root,_scheduler,_stopped,_notifications,_faults=handoff_host
     owner=threads._create_run(tid,'Active owner',user_origin=True)

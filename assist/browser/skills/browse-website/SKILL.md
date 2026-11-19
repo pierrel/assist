@@ -1,17 +1,17 @@
 ---
 name: browse-website
-description: "Use when a named website needs rendered JavaScript, menus, forms, or page interactions that read_url cannot expose. Examples: 'open the dashboard and find the report link', 'use the site's filters to locate the manual', 'check what this interactive page says'. The browser belongs to this visible web turn, not a delegate."
-allowed-tools: browser_open browser_close browser_observe browser_act browser_wait browser_preflight browser_save_download
+description: "Use when a named website needs rendered JavaScript, menus, forms, or page interactions that read_url cannot expose, or the user needs to interact with the live page personally. Examples: 'open the dashboard and find the report link', 'use the site's filters to locate the manual', 'check what this interactive page says'. The browser belongs to this visible web turn, not a delegate."
+allowed-tools: browser_open browser_close browser_observe browser_act browser_wait browser_preflight browser_save_download browser_handoff
 ---
 
 # Browse a website
 
-Start with `read_url` for a simple static page. If it omits the needed content
+For an information request, start with `read_url` for a simple static page. If it omits the needed content
 or controls, use this turn's browser tools yourself. Do not delegate browser
 navigation to a child agent. Live pages and targets survive fair-scheduler
 yields within this logical user turn, including eligible child work in its
 shared execution container. Reopen a page after a later turn or approval pause.
-The browser process and its live pages end with this turn's sandbox. Before
+Ordinary completion ends the browser process and live pages with this turn's sandbox. Before
 yielding for an approval or clarification, write a short `/agent/browser-recovery.md`
 with the user's goal, the safe site origin, the completed step, and the next
 intended step. Read that note on the next turn as a hint, then reopen the site
@@ -25,6 +25,15 @@ resume a partial form. Browser cookies and local storage may be restored
 privately. Live DOM inputs and tabs
 are destroyed, but a site's stored values may reappear; reconstruct only safe
 inputs from the user's request and current page. Do not replay submissions.
+
+When the user wants to interact with a page personally, open it and call
+`browser_handoff()`. The host publishes its actual control link and pauses at
+the tool checkpoint, retaining the same live browser without holding the model
+slot. Keep its pages open. This is remote control in the user's browser, not
+a transfer into a native website tab. On Return to Assist, execution resumes
+after that tool result: observe the current page before continuing with the
+user's instructions. If the handoff tool reports an error, report that actual
+limitation; do not invent a link or claim the page will remain available.
 
 `browser_open(url)` renders one HTTP(S) page and returns a page ID, URL,
 snapshot ID, readable accessibility snapshot, link/control targets, popup page

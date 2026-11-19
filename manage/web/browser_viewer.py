@@ -55,7 +55,8 @@ def _control(tid, token, body):
     with BrowserManager.bounded_thread_gate(tid), session._lock:
         session._viewer_check(token)
         return {"requested": session.human_requested, "active": session.human_active,
-                "owner": session.human_client == client}
+                "owner": session.human_client == client,
+                "unclaimed": bool(session.handoff_url and session.human_client is None)}
 
 
 @app.post("/thread/{tid}/browser/control")
@@ -129,7 +130,7 @@ function retireFrame(){viewRevision++;renderedPage=null;let old=screen.src;scree
 async function frame(){if(!active||busy||!tabs.value)return;busy=true;const page=tabs.value,revision=viewRevision;try{let r=await send('frame',{page_id:page}),blob=await r.blob();if(revision!==viewRevision||tabs.value!==page||ended)return;let old=screen.src,url=URL.createObjectURL(blob);screen.src=url;await screen.decode();if(revision===viewRevision&&tabs.value===page&&!ended){pageWidth=Number(r.headers.get('X-Page-Width'));pageHeight=Number(r.headers.get('X-Page-Height'));renderedPage=page;screen.dataset.page=page}if(old)URL.revokeObjectURL(old)}catch(e){problem(e)}finally{busy=false}}
 async function loadTabs(){let data=await(await send('tabs')).json(),old=tabs.value||sessionStorage.getItem(key+':tab');tabs.replaceChildren();for(let p of data.pages){let o=document.createElement('option');o.value=p.page_id;o.textContent=p.url;tabs.append(o)}if([...tabs.options].some(o=>o.value===old))tabs.value=old;if(renderedPage!==tabs.value)retireFrame()}
 async function fit(){if(tabs.value)await send('viewport',{page_id:tabs.value,width:Math.max(320,Math.min(1024,innerWidth)),height:Math.max(240,Math.min(1024,innerHeight-$('toolbar').offsetHeight))})}
-async function update(){if(ended)return;try{let state=await(await send('status')).json();let was=active;active=state.active&&state.owner;$('take').disabled=state.requested;$('return').disabled=!active;
+async function update(){if(ended)return;try{let state=await(await send('status')).json();let was=active;active=state.active&&state.owner;$('take').disabled=state.requested&&!state.unclaimed;$('return').disabled=!active;
 status.textContent=active?'You control this browser.':state.requested?'Waiting for the current operation to finish.':'Assist controls this browser.';
 if(active){await loadTabs();if(!was)await fit();await frame()}}catch(e){problem(e)}finally{if(!ended)setTimeout(update,750)}}
 $('take').onclick=()=>send('takeover').catch(problem);

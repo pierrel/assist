@@ -1070,7 +1070,9 @@ def render_thread(
         label = STAGE_LABELS.get(stage, "Working...")
         viewer_session = BrowserManager.current_session(tid)
         if viewer_session is not None and viewer_session.human_active:
-            label = "You control the browser. Return to Assist in Browser control to continue."
+            label = ("The live browser is ready. Open Browser control and choose Take over."
+                     if viewer_session.handoff_url and viewer_session.human_client is None else
+                     "You control the browser. Return to Assist in Browser control to continue.")
         if status.get("origin") == "continuation" and stage == "processing":
             # Not the user's message — say what's actually happening.
             task_txt = " ".join(pending[len(_CONTINUATION_RIDER):].split())[:120] \
@@ -1086,6 +1088,8 @@ def render_thread(
             f'<div class="status-banner">'
             f'<span class="spinner"></span>'
             f'<span>{html.escape(label)}</span>'
+            + (f'<a href="{html.escape(status["browser_control_url"], quote=True)}" target="_blank" rel="noopener">Control the live browser</a>'
+               if status.get("browser_control_url") else "") +
             f'{elapsed_span}'
             f'</div>'
             f'{_ELAPSED_TICKER_SCRIPT if elapsed_span else ""}'
@@ -3598,7 +3602,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
 
     def waits_for_retained_work() -> bool:
         retained = BrowserManager.current_session(tid)
-        return (_run is not None and not _run.resume and _run.user_event_id != _run.id
+        return (_run is not None and not _run.resume
+                and (_run.user_event_id != _run.id
+                     or _run.interjection_work_id == getattr(retained, "work_id", None))
                 and retained is not None and not retained.closed
                 and retained.work_id != _run.work_id)
 
@@ -4232,7 +4238,13 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # the process; sender/rider are already in pending_kwargs). A crash of a
                 # PROCESSING turn has no carry to persist — its resumed slice restarts the
                 # cap at 0, accepted (the cap is a runaway backstop, not billing).
-                _set_status(tid, "paused", accumulated_active_ms=carry, **pending_kwargs)
+                handoff_url = browser_session.handoff_url if keep_browser else None
+                _set_status(tid, "paused", accumulated_active_ms=carry,
+                            **({"browser_control_url": handoff_url} if handoff_url else {}),
+                            **pending_kwargs)
+                if handoff_url and _run is not None:
+                    _publish_phone_text(tid, _run.work_id,
+                                        f"\n\n[Control the live browser]({handoff_url})\n")
                 # Reserve a promotable queue item while this durable handoff is atomic,
                 # but do not notify or execute it until admission is released below.
                 if keep_browser and browser_session.human_requested:
@@ -5005,8 +5017,9 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
                 and _runs().pending_approval(tid) is None
                 and review_snapshot is None
                 and (session is None or (session.work_id == active.work_id
-                     and not session.closed and not session.human_requested
-                     and not session.human_active)))
+                     and not session.closed
+                     and (session.handoff_url or (not session.human_requested
+                          and not session.human_active)))))
     run = _create_run(tid, text, rider=rider, location=location,
                       run_id=run_id, work_id=work_id,
                       dispatch_key=dispatch_key,

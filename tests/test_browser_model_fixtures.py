@@ -3,6 +3,23 @@ from edd.eval.test_browser_agent import _BrowserSite
 import pytest
 
 
+def test_personal_browsing_eval_uses_its_paired_handoff_capability(monkeypatch):
+    from langchain_core.messages import AIMessage
+    from tests.middleware.test_skills_kernel import _RecordingModel
+    from edd.eval.test_browser_requested_control import TestBrowserRequestedControl
+    responses=[]
+    for index,(name,args) in enumerate([
+        ('load_skill',{'name':'browse-website'}),
+        ('browser_open',{'url':'https://static.fern.example/'}),
+        ('browser_handoff',{}),
+    ]):
+        responses.append(AIMessage(content='',tool_calls=[{'name':name,'args':args,'id':str(index)}]))
+    responses.append(AIMessage(content='The live browser is ready for you.'))
+    monkeypatch.setattr(TestBrowserRequestedControl,'model',_RecordingModel(responses=responses),raising=False)
+    case=TestBrowserRequestedControl('test_personal_browsing_opens_and_hands_over_a_static_page')
+    case.test_personal_browsing_opens_and_hands_over_a_static_page()
+
+
 @pytest.mark.parametrize("journey", ["auth", "approval_before", "approval_after"])
 def test_selected_journey_completes_legal_context_work(monkeypatch, journey):
     import hashlib

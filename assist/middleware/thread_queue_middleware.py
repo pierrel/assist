@@ -1,5 +1,7 @@
 """Cooperative cancellation + fair-scheduling pause for :class:`ThreadAffinityQueue`.
 
+An explicit browser offer pauses in ``before_model`` after its tool checkpoint,
+leaving a pending model node for Return. The host publishes its control link.
 The queue timer or a browser takeover request flags the holder handle, which this middleware
 reads in ``after_model`` (fired between LLM calls, so it yields at a superstep
 boundary without corrupting an in-flight slot):
@@ -30,6 +32,19 @@ logger = logging.getLogger(__name__)
 
 
 class ThreadQueueMiddleware(AgentMiddleware):
+    def before_model(self, state: AgentState, runtime: Runtime):
+        """Park an explicit offer after its tool result checkpoint, before model END."""
+        handle = active_handle()
+        if handle is None:
+            return None
+        from assist.browser.manager import BrowserManager
+        session = BrowserManager.current_session(handle.thread_id)
+        if session is not None and session.handoff_url and session.human_requested:
+            if handle.expired:
+                raise ThreadHoldExpired("thread exceeded its active model hold cap")
+            raise ThreadPauseRequested("user requested live browser control")
+        return None
+
     def after_model(
         self, state: AgentState, runtime: Runtime
     ) -> dict[str, Any] | None:

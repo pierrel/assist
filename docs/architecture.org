@@ -149,6 +149,18 @@ in both views. An ID shown in only one view keeps that meaning.
   container and releases the same-work pending continuation. Fresh observation
   followed by a new model response is required before further browser effects,
   so buffered pre-handoff actions cannot silently overwrite human changes.
+  An explicit agent-offered handoff uses =browser_handoff= and a trusted
+  =ASSIST_BASE_URL= to generate the control link. C8 yields before the next
+  model node after the tool result checkpoint, and C2 publishes the link through
+  paused status and the existing phone Run stream. The owner stays interrupted
+  with its same-work successor held; the offered generation stays running with
+  the model slot released. The unclaimed viewer remains claimable. Only ordinary
+  owner follow-ups to this explicit offer retain their steering target while
+  human control is active; a racing follower cannot start before the retained
+  resume. Return clears the offer and resumes the pending model node through
+  the existing fresh-observation barrier. Cancel, deletion, restart and exact
+  generation/authority fences retain their responsibilities. There is no new
+  lifecycle store, timer or native-engine browser path.
   Failed Return before successor publication settles the original Run only
   after captured-generation cleanup; closed flags or registry absence alone
   never prove stop. Independent accepted followers remain dispatchable afterward.

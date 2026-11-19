@@ -141,7 +141,7 @@ where reliability is harder than with frontier APIs.
   If tabs were closed or replaced, the handback reports current page IDs or an
   empty website set. A fresh empty state permits reopening only after another
   model response; transport failure does not count as an observation.
-  Cancellation and direct messages during human control
+  Cancellation and replacement requests
   retire the old viewer/session through normal exact-stop cleanup. The existing
   ownership-aware age check retains active human work. A service restart ends
   live-page continuity; normal stored-login recovery remains available.
@@ -150,6 +150,19 @@ where reliability is harder than with frontier APIs.
   provided by this first viewer. It uses the existing trusted-network web UI
   access boundary, a session control token and same-origin input checks; keep
   the web app on its existing trusted client network.
+
+  You can also ask Assist to open a page for you to use. Its `browser_handoff`
+  tool offers the live control link, then parks at a checkpoint before the next
+  model step. Set `ASSIST_BASE_URL` to the client-reachable HTTP(S) origin for
+  that link. The server publishes it while the model slot is free; choose
+  **Take over** to claim the offered browser. Ordinary follow-ups to this
+  explicit offer stay queued for the same work until **Return to Assist**,
+  then enter its resumed model step. The agent must observe the changed page
+  before further effects. The offer retains its generation until Return,
+  cancellation, deletion or service restart; the ownership-aware age check
+  does not impose a separate offer timeout. A manual viewer takeover keeps its
+  existing direct-message reset behavior. This capability is available on the
+  DeepAgents web path; it does not add browser tools to native engines.
 
 - **Thread data and source links.** Managed threads keep host-owned text records
   in a SQLite datastore beside their description, outside the workspace. Host code
