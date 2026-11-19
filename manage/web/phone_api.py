@@ -470,7 +470,7 @@ def _thread_git_status(tid: str) -> dict[str, Any]:
 
 
 def _thread_messages(tid: str) -> list[dict]:
-    """Legacy full projection for Pi threads and browser-compatible test fixtures."""
+    """Native history projection and browser-compatible test fixtures."""
     chat, pi_messages, _, _ = threads._thread_messages_for_fragment(tid)
     return pi_messages if pi_messages is not None else (
         [] if chat is None else chat.get_web_messages())
@@ -552,10 +552,9 @@ def _checkpoint_history(tid: str, before: tuple[str, str, int, int] | None) -> t
 
 def _thread_history(tid: str, before: str | None) -> tuple[list[dict], bool, bool]:
     """Return chronological phone history plus whether it is checkpoint-backed."""
-    # Pi conversations do not use the LangGraph write store.  They are small,
-    # local records and keep the legacy sealed-hash cursor until their own store
-    # gains the same append reader.
-    if threads._is_pi_thread(tid):
+    # Native conversations do not use the LangGraph write store. They use host
+    # records and retain the existing sealed-hash pagination cursor.
+    if threads._is_native_thread(tid):
         raw_messages = _thread_messages(tid)
         if before is None:
             return raw_messages, False, False
@@ -661,15 +660,29 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
             else _message_id(tid, cursor_raw, cursor_ordinal)
         )
     approval_count, approval_results = _approval_summary(tid, status)
+    active_run = _active_thread_run(tid)
+    secret_request = None
+    if active_run is None:
+        from assist.secret_store import SecretStoreError
+        try:
+            pending = _repo_secrets(tid).pending_request()
+            if pending is not None and not threads._git_merge_has_unfinished_work(tid):
+                secret_request = pending
+        except HTTPException as error:
+            if error.status_code != 409:
+                raise
+        except (SecretStoreError, GitSyncError, OSError):
+            pass
     return {
         "thread": {
             "id": tid,
             "description": _stored_thread_title(tid),
             "harness": read_thread_engine(_thread_dir(tid)).name,
             "status": status.get("stage", "ready"),
-            "active_run": _active_thread_run(tid),
+            "active_run": active_run,
             "approval_count": approval_count,
             "approval_results": approval_results,
+            "private_entry_request": secret_request,
             "error": ("Thread failed; inspect Assist Web for details."
                       if status.get("error") else None),
             "publication_notice": status.get("git_notice"),
@@ -764,8 +777,9 @@ def _list_threads() -> dict[str, Any]:
             continue
     values.sort(key=lambda item: item[0])
     harnesses = [{"key": "deepagents", "label": "Deep Agents"}]
-    if state.PI_PREVIEW.admits("pi"):
-        harnesses.append({"key": "pi", "label": "Pi preview"})
+    if state.HERMES_PREVIEW.admits("hermes"):
+        harnesses.append({"key": "hermes", "label": "Hermes",
+                          "description": threads.HERMES_PREVIEW_NOTICE})
     return {"threads": [value for _, value in values], "repositories": _domain_choices(),
             "harnesses": harnesses}
 
@@ -819,7 +833,7 @@ def _submit_existing(tid: str, text: str, key: str, *, run_id: str | None = None
                     return replay, False, True
                 try:
                     if not threads._pi_message_admits(tid):
-                        raise HTTPException(status_code=503, detail="Pi preview is unavailable")
+                        raise HTTPException(status_code=503, detail="Selected native preview is unavailable")
                 except ThreadEngineError as error:
                     raise HTTPException(status_code=409, detail="Thread harness is unavailable") from error
                 try:
@@ -1028,7 +1042,7 @@ def _reserve_existing(tid: str, text: str, key: str) -> tuple[Any, bool, bool, b
     run_id = uuid.uuid4().hex
     work_id = uuid.uuid4().hex
     try:
-        is_pi_thread = threads._is_pi_thread(tid)
+        is_pi_thread = threads._is_native_thread(tid)
     except ThreadEngineError as error:
         raise HTTPException(status_code=409,
                             detail="Thread harness is unavailable") from error
@@ -1056,7 +1070,7 @@ def _reserve_create(body: _CreateThread, key: str) -> tuple[str, Any, str | None
     work_id = uuid.uuid4().hex
     # The final deterministic phone thread id is based on the idempotency key.
     tid = _phone_thread_id(key)
-    reserved = body.harness != "pi" and RUN_STREAMS.reserve(tid, work_id)
+    reserved = body.harness == "deepagents" and RUN_STREAMS.reserve(tid, work_id)
     try:
         if reserved:
             RUN_STREAMS.activate(tid, work_id)
@@ -1113,7 +1127,7 @@ def _cancel_logical_run(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
             raise HTTPException(status_code=404, detail="Thread not found") from error
         if isinstance(error, (RunStoreUnavailable, GitSyncError)):
             raise
-        raise RunStoreUnavailable("Browser cancellation state is unavailable") from error
+        raise RunStoreUnavailable("Run cancellation state is unavailable") from error
 
 
 def _cancel_logical_run_fenced(tid: str, run_id: str) -> tuple[int, dict[str, Any]]:
@@ -1149,6 +1163,8 @@ def _cancel_logical_run_fenced(tid: str, run_id: str) -> tuple[int, dict[str, An
                 session = threads.BrowserManager.current_session(tid)
                 browser_owner = (session.run_id if session is not None
                                  and session.work_id == projection["work_id"] else None)
+                browser_owner = browser_owner or threads._HERMES_RUNTIME.paused_owner(
+                    tid, projection["work_id"])
                 runs = service.cancel_logical(
                     tid, run_id, browser_owner_run_id=browser_owner)
             else:
@@ -1415,6 +1431,120 @@ def _workspace_archive(tid: str) -> bytes:
 router = APIRouter(prefix=PHONE_API_PREFIX, dependencies=[Depends(_authenticate)])
 
 
+async def _private_secret_body(request: Request, fields: set[str]) -> dict:
+    """Read a private body without Pydantic's input-bearing validation errors."""
+    length = request.headers.get("content-length")
+    if length is not None:
+        try:
+            if not 0 <= int(length) <= 4096:
+                raise ValueError
+        except ValueError:
+            raise HTTPException(413, "Secret request exceeds limit") from None
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > 4096:
+            raise HTTPException(413, "Secret request exceeds limit")
+        data.extend(chunk)
+    try:
+        body = json.loads(data)
+        if not isinstance(body, dict) or not set(body) <= fields:
+            raise ValueError
+        return body
+    except (ValueError, UnicodeError, TypeError):
+        raise HTTPException(422, "Invalid secret request") from None
+
+
+def _repo_secrets(tid: str):
+    from assist.secret_store import SecretStore
+    directory = _thread_dir(tid)
+    binding = read_git_binding(directory)
+    if (binding is None or binding["source"] not in state.DOMAINS):
+        raise HTTPException(409, "This thread has no configured repository")
+    return SecretStore(state.MANAGER.thread_default_working_dir(tid), directory)
+
+
+@router.get("/threads/{tid}/secrets")
+async def list_repo_secrets(tid: str) -> dict:
+    from assist.secret_store import SecretStoreError
+    def listing():
+        store = _repo_secrets(tid)
+        secrets = store.list_public()
+        try:
+            store.key()
+            unlocked = True
+        except SecretStoreError:
+            unlocked = False
+        return {"secrets": secrets, "unlocked": unlocked}
+    try:
+        return await anyio.to_thread.run_sync(listing)
+    except (SecretStoreError, OSError):
+        raise HTTPException(503, "Secret store unavailable") from None
+
+
+@router.post("/threads/{tid}/secrets/unlock")
+async def unlock_repo_secrets(tid: str, request: Request) -> dict:
+    from assist.secret_store import SecretStoreError
+    from assist.git_sync import _workspace_lock, GitWorkspaceBusyError
+    body = await _private_secret_body(request, {"passphrase"})
+    if set(body) != {"passphrase"}:
+        raise HTTPException(422, "Invalid secret request")
+    def unlock():
+        store = _repo_secrets(tid)
+        with _workspace_lock(str(store.thread_dir)):
+            store.unlock(body["passphrase"])
+        return {"unlocked": True}
+    try:
+        return await anyio.to_thread.run_sync(unlock)
+    except GitWorkspaceBusyError:
+        raise HTTPException(409, "Thread repository is busy") from None
+    except SecretStoreError as error:
+        raise HTTPException(409, str(error)) from None
+    except (GitSyncError, OSError):
+        raise HTTPException(503, "Secret store unavailable") from None
+
+
+@router.post("/threads/{tid}/secrets")
+async def create_repo_secret(tid: str, request: Request) -> dict:
+    from assist.secret_store import SecretStoreError
+    from assist.git_sync import GitWorkspaceBusyError
+    from manage.web.thread_git_lifecycle import ThreadGitLifecycle
+    body = await _private_secret_body(
+        request, {"label", "login_url", "username", "password", "passphrase",
+                  "request_id"})
+    if not {"label", "login_url", "username", "password"} <= set(body):
+        raise HTTPException(422, "Invalid secret request")
+    def create():
+        store = _repo_secrets(tid)
+        store.validate_entry(body["label"], body["login_url"],
+                             body["username"], body["password"])
+        with ThreadGitLifecycle.acquire(
+                str(store.thread_dir), str(store.repository),
+                thread_scope=(state.MANAGER.root_dir, tid)) as git:
+            if not git.bound:
+                raise GitSyncError("Repository unavailable")
+            # prepare() retires a retained browser; an unfinished Run still owns it.
+            if threads._git_merge_has_unfinished_work(tid):
+                raise GitWorkspaceBusyError("Thread has unfinished work")
+            git.prepare(None)
+            with store.selected_request(body.get("request_id"),
+                                        body["label"], body["login_url"]):
+                if "passphrase" in body:
+                    store.unlock(body["passphrase"], create=True)
+                secret_id = store.put(body["label"], body["login_url"],
+                                      body["username"], body["password"])
+                result_branch = git.finish_visible(
+                    "Store encrypted credential", None, include_secret_store=True)
+            return {"id": secret_id, "result_branch": result_branch}
+    try:
+        return await anyio.to_thread.run_sync(create)
+    except GitWorkspaceBusyError:
+        raise HTTPException(409, "Thread repository is busy") from None
+    except SecretStoreError as error:
+        raise HTTPException(409, str(error)) from None
+    except (GitSyncError, OSError):
+        raise HTTPException(503, "Secret store publication needs verification") from None
+
+
 @router.get('/notifications')
 async def phone_notifications() -> dict[str, Any]:
     return await anyio.to_thread.run_sync(state._phone_notifications)
@@ -1573,7 +1703,7 @@ def _approval_collection(tid: str) -> dict[str, Any]:
 
     proposals = []
     mail = None
-    if not threads._is_pi_thread(tid):
+    if not threads._is_native_thread(tid):
         try:
             mail = _approval_preview(tid)["proposal"]
         except HTTPException as error:
@@ -1584,9 +1714,10 @@ def _approval_collection(tid: str) -> dict[str, Any]:
             proposals.append({"state": "pending", **mail})
         elif (reply := threads.reply_approval_preview(tid)) is not None:
             proposals.append(reply)
-        proposals.extend(egress.approval_previews(tid))
         proposals.extend(geo.approval_previews(tid))
         proposals.extend(_sms_previews(tid))
+    if read_thread_engine(threads.MANAGER.thread_dir(tid)).name != "pi":
+        proposals.extend(egress.approval_previews(tid))
     value = {"thread_id": tid, "proposals": proposals}
     # Results are disposable projections; preserve complete active SMS drafts.
     for result in [proposal for proposal in proposals if proposal.get("kind") == "send_sms"
@@ -1891,3 +2022,35 @@ async def get_asset(tid: str, path: str, request: Request) -> Response:
     """Serve only one authorized, bounded file; never inventory or synchronize."""
     return await anyio.to_thread.run_sync(
         _asset_response, tid, path, request.headers.get("if-none-match"))
+
+
+class _CallEvent(_StrictModel):
+    event_id: Annotated[str, Field(pattern=r'^[A-Za-z0-9_-]{1,128}$')]
+    number: Annotated[str, Field(max_length=128)] | None = None
+    outcome: Literal['terminated_before_active', 'terminated_after_active']
+    reason: Annotated[int, Field(ge=0, le=65535)] | None = None
+
+
+@router.post('/events/call')
+async def receive_call_event(request: Request, background_tasks: BackgroundTasks):
+    """Admit one phone-observed outcome, without implying voicemail or caller intent."""
+    _authenticate(request)
+    try:
+        with anyio.fail_after(5):
+            event = await _validated_body(request, _CallEvent, 4096)
+    except TimeoutError as error:
+        raise HTTPException(status_code=408, detail='Call event body timed out') from error
+    def admit():
+        from assist.events.calls import admit_call
+        try:
+            with threads._RUN_ADMISSION_LOCK:
+                return admit_call(state.MANAGER.root_dir, event.model_dump(),
+                                  state.SUBSCRIPTION_STORE, threads._create_run)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail='Conflicting or invalid call event') from error
+        except (OSError, sqlite3.Error, RunStoreUnavailable) as error:
+            raise HTTPException(status_code=503, detail='Call event storage unavailable') from error
+    run = await anyio.to_thread.run_sync(admit)
+    if run is not None:
+        background_tasks.add_task(threads._dispatch_admitted_event_run, run.id, run.thread_id)
+    return {'status': 'accepted'}

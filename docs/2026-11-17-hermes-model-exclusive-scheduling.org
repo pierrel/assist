@@ -1,0 +1,143 @@
+#+title: Hermes model-exclusive scheduling
+#+date: 2026-11-17
+
+* Contract and historical supersessions
+
+Fairness grants exclusive host model admission, not exclusive CPU or file activity.
+An already-started independent background process may finish while its Hermes
+conversation is suspended. With healthy native hooks, active foreground tool calls finish before yielding
+and new native boundaries wait for readmission. A hook failure may allow an
+native tool to proceed; it cannot bypass the host model gate. The same native invocation
+then resumes without replay. Host authorization remains independent of native
+middleware, whose failures can fall through to the underlying operation.
+
+This replaces the conclusion in =2026-11-17-hermes-simplification-investigation.org=,
+“Outcome and scope” and “Supported native background writer”: background progress
+alone is not a correctness failure under Pierre's clarified contract. That dated
+report remains unchanged. It also replaces the physical parking description in
+=2026-11-16-hermes-native-implementation.org=, “Outcome and boundary”; model
+authorization and verified
+teardown before Git publication remain in force.
+
+* Small code change
+
+Remove Docker pause/unpause and the physical Paused assertion from the Hermes
+adapter. Keep its existing native execution middleware, operation drain, private
+provider relay, Run/queue/generation admission and same-process successors.
+No native runtime/image upgrade, replacement loop, relay service, scheduler,
+permission layer or persistent lifecycle store is introduced.
+
+If exact-work teardown still fails after the existing retry, close and drain
+that work's provider, then release only the captured queue handle. The runtime
+entry, nonterminal Run and remaining generation/cleanup obligations stay intact;
+accepted same-thread followers do not dispatch. A failed provider drain still
+retains the model slot. A later unrelated holder cannot be released by the old
+handle. The failed dispatch stack may unwind: the existing unfinished-Run Merge
+gate and generation authority continue protecting Git, rather than pretending
+that the old checkout flock remains held. Unknown cleanup is not converted into
+success, a reply, committed edits or completed cancellation.
+
+The existing startup path reaps deployment-scoped generations before listener
+admission and recovery. A failed reap aborts startup. After verified teardown,
+recovery reports lost native work without model replay; a dirty checkout still
+requires reconciliation before a new user turn. There is no new background
+cleanup retry. A retained failed Run may still need operator recovery, but no
+longer monopolizes unrelated model admission once its relay is revoked/drained.
+
+* Matched native background-completion proof
+
+Both frozen baseline and cooperative candidate use the exact pinned native
+runtime =ec3249919accf7bc51f780dcff663e8f19a0e176= and existing v7 image. They run
+real native children, tools and persistence through the actual Assist dispatcher,
+queue and private SandboxManager container with a scripted provider and no network.
+
+The full user prompt sequence is “Have a helper create a note saying blue, then
+tell me it is done.”, “Change that note to green.”, and “Remove the scratch folder.”
+The provider directs native delegation with “Create /workspace/child-note.txt
+containing blue.” The child writes a bounded background script and starts it
+through native =terminal(background=true)=. The script records one START, waits
+for the fixture's B signal, records one EFFECT-731, writes and prints RESULT-731,
+and exits. The child writes blue, then yields at its next model boundary.
+
+Competitor B has the explicit fixture prompt =COMPETITOR_B=. While A is parked,
+B signals the background process. In the cooperative candidate the process
+finishes during B; in the frozen baseline it cannot finish until A resumes.
+A synthetic direct request to A's parked relay receives 409 and never reaches
+the fake upstream. After readmission the native child uses its supported deferred
+tool interface, =tool_describe= then =tool_call(process_manage, action=wait)=,
+to retrieve exit code 0 and exactly RESULT-731 once. Both runs retain the same
+container/native invocation, one START/effect and one process-result retrieval.
+
+At the parent boundary, the green user turn is accepted before A finishes and
+competitor C (=COMPETITOR_C=) runs first. Both runs require two parks, B/C before
+A's first completion, no history replay, one blue/green write, and the expected
+four public user/assistant messages in browser and authenticated phone history.
+The final removal prompt exercises unavailable dangerous-command approval with
+a preseeded persisted allowance; the protected file survives. Both matched v3
+runs pass with 18 scripted provider requests and no cleanup errors. Initial
+fixtures called a deferred tool directly; their decoding failures are rejected
+as harness errors, not evidence against cooperative suspension.
+
+The existing =scripts/check-hermes-native.py= now contains this completion case.
+It is explicit deterministic capability coverage, not a natural model behavior
+score. The independent native fail-open probe previously forced a registered
+middleware callback failure before its downstream call: the host rejected both
+parked model attempts. Those relay admission paths are unchanged.
+
+* Failed-cleanup handoff and restart proof
+
+Two private actual-dispatcher cases use a native child writing blue in a bound
+private Git checkout. A's prompt is the first helper prompt above; its pending
+follower is =FOLLOWER= and unrelated B is =COMPETITOR_B=. The fixture holds A's
+next provider response, expires its existing queue hold, and injects teardown
+failure. The candidate dispatcher itself revokes/drains and releases A's exact
+model handle, then exits. There is no experimental waiting callback retaining
+that stack.
+
+With B admitted normally, both cases require A running, follower pending, native
+runtime/generation authority retained, dirty files and unchanged checkout HEAD
+and private remote. The checkout flock is now available, but the actual Merge
+path refuses unfinished work. A's old provider is closed and its host admission
+predicate is false under B. Cancellation returns the existing 409/running result,
+not completed cleanup. Repeated exact-work cleanup failure and stale exact-handle
+release cannot disturb B, which completes successfully.
+
+In the first case a privately retained Docker object is stopped; in the second
+it is still running. Hermes =cleanup_verified= itself uses kill/wait and authority/
+map cleanup, not explicit Docker removal. These injected pre-authority failures
+therefore test that boundary, not a purported production =rm= failure.
+
+A fresh Python process then runs the existing startup reap. Injected stop failure
+must leave A running and the follower pending. A successful retry reaps the exact
+private generations before Run recovery. The abandoned native Run becomes error
+without another model call, and the follower's fresh Git preparation rejects the
+dirty checkout. File bytes, porcelain status, HEAD and remote remain unchanged.
+This uses existing recovery gates and proves no new replay/publication path.
+
+The fake upstream may continue its handler after client transport shutdown and
+reports an expected BrokenPipe when it later writes. Neither HTTP drain nor
+container removal acknowledges remote inference termination. The proofs establish
+host admission/transport and ownership ordering, not physical GPU exclusivity or
+real provider cancellation. No real model, production state, phone device or
+external Git remote is used.
+
+* Validation and review scope
+
+Affected offline tests cover the existing release/retirement lock race with a
+cooperative relay state, exact-work revocation identity, first-message cleanup
+failure with either confirmed or failed provider drain, durable follower/observer
+state, failed-turn Git preservation, and cross-thread HTTP admission/drain. The
+first-message fixture uses “Create the blue note” and “Make it green afterward”;
+unconfirmed cleanup keeps these Runs running/pending. An unrelated queue holder
+is admitted only when provider drain succeeds. Drain failure retains the slot.
+
+The private artifact root is =/tmp/hermes-simplification-20261117/=, including
+=completion-cooperative-v3-evidence= and =completion-frozen-v3-evidence= for the
+causal comparison, and =owner-exit-stopped-evidence= / =owner-exit-unconfirmed-evidence=
+for dispatcher/restart checks. The stopped case's first finalizer encountered an
+already-removed private container after successful restart reap; its actual
+assertions passed, and the fixture cleanup now treats that exact NotFound as
+already complete. These limits stay separate from product acceptance.
+
+Streaming and egress-request integration remain preview follow-ups. They do not
+block this scheduling change and are not implemented here.

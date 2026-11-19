@@ -16,7 +16,7 @@ def main() -> int:
         return 0
     if (len(sys.argv) == 5 and sys.argv[1] == "record"
             and re.fullmatch(r"[0-9a-f]{64}", sys.argv[2])
-            and sys.argv[4] in {"sandbox", "pi"}):
+            and sys.argv[4] in {"sandbox", "pi", "hermes"}):
         container = client.containers.get(sys.argv[2])
         identity = SandboxManager._record_egress_client_direct(
             client, container, sys.argv[3], kind=sys.argv[4])

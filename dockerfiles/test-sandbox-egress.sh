@@ -86,7 +86,8 @@ cleanup() {
 trap cleanup EXIT
 
 echo "→ Creating internal network $NETWORK"
-docker network create --internal --driver bridge "$NETWORK" >/dev/null || {
+docker network create --internal --driver bridge \
+    --opt com.docker.network.bridge.gateway_mode_ipv4=isolated "$NETWORK" >/dev/null || {
     echo "FAIL: could not create test network"; exit 1
 }
 SANDBOX_CIDR=$(docker network inspect -f '{{(index .IPAM.Config 0).Subnet}}' "$NETWORK") || {

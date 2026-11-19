@@ -1,0 +1,209 @@
+#+title: Hermes cooperative parking investigation and HTTP smoke
+#+date: 2026-11-17
+
+* Outcome and scope
+
+Removing Docker pause/unpause preserves the ordinary native two-pause example,
+but is not equivalent for the currently enabled native tools. A real native
+=terminal(background=true)= process continues writing after its tool call has
+returned and the relay reports the generation parked. Docker freeze stops that
+writer. Keep the deployed parking policy for this toolset.
+
+The host can fence new provider calls and drain transport before container
+removal is verified. The experiment then forces a model-slot handoff, but this
+alone does not justify a product handoff. It is a narrower guarantee than writer termination,
+Git preservation/publication, cancellation completion, or safe follower dispatch.
+The experiment does not justify changing the current cleanup-failure policy.
+
+The only proposed product-source change is an opt-in extension of the existing
+HTTP smoke. Runtime alternatives stayed in disposable experiment copies. No
+real model inference, live deployment, image replacement, physical phone device
+operation, merge,
+review-round reset, streaming feature, or network-approval change was performed.
+
+* Historical supersessions
+
+No earlier design decision is replaced. This investigation tests the necessity
+of physical parking described in =2026-11-16-hermes-native-implementation.org=.
+Its ordinary cooperative result is insufficient to replace that section because
+the supported background-tool counterexample violates the same contract.
+
+* Exact source and experimental difference
+
+Accepted source: =e194c74fb481e92a1fcea9c73353eca04081588d=.
+Native pin: =ec3249919accf7bc51f780dcff663e8f19a0e176=; archive SHA256
+=82dd2206a86c1167b54fd6f8aae5d2c87e0b6b278059cf75819c508770ba4116=.
+The existing v7 image digest was
+=sha256:dcb680b99f8f1aeeed085ee14cbd6b8dbd62ff9b5a56a296b08b0cddfd67a3c3=;
+worker SHA256 =d9d058b657fa6541ab20074d0485f92ffcfcbd5a75f66b863d4e4d4c92da2315=.
+No upstream upgrade was substituted.
+
+The baseline and cooperative copies both use the existing registered native
+=llm_execution= and =tool_execution= middleware, auxiliary hooks, whole native
+runtime, real Assist dispatcher/Run/queue, native children, SandboxManager,
+private containers, browser HTTP handlers, and phone-history projection.
+The cooperative copy removes only Docker pause/unpause and the corresponding
+physical-Paused release assertion. It retains relay operation tracking,
+cooperative blocking, independent provider admission and original generation
+checks. This is not a replacement native loop or a toy callback scheduler.
+
+All native experiments use a scripted private provider and =network:none=.
+They establish capability and ordering, not natural model reliability, real
+inference cancellation, or live egress behavior. Auxiliary title traffic is
+included in the counted requests. Post-response native work remains bounded by
+the existing worker's joining and host lifetime; these runs do not enumerate
+every possible native skill-review action.
+
+* Experiments and validations
+
+** Ordinary matched two-pause continuation
+
+Both runs use =scripts/check-hermes-native.py=. The first user prompt is
+“Have a helper create a note saying blue, then tell me it is done.” The scripted
+provider delegates “Create /workspace/child-note.txt containing blue.” At the
+child boundary, competitor B receives =COMPETITOR_B=. The next user prompt,
+“Change that note to green.”, is accepted before the first invocation finishes.
+At a later parent boundary, competitor C receives =COMPETITOR_C=. Finally,
+“Remove the scratch folder.” exercises unavailable dangerous-command approval
+with a preseeded persisted allowance and a file that must survive.
+
+Both runs pass: B and C get the model between A's native boundaries; the same
+child and parent continue; the early follow-up waits; native history contains
+the first turn once; browser and phone projections contain the expected replies;
+the denied dangerous command preserves its fixture; cleanup completes. Each
+records 14 provider requests and exactly one blue write and one green write.
+Neither run shows replay or duplicated writes. This is deterministic capability
+coverage with a provider-directed native tool sequence.
+
+** Supported native background writer
+
+The same full prompt sequence and continuation checks run with an additional
+scripted native child sequence: =write_file= creates a bounded Python script in
+=/workspace=; =terminal= executes =python /workspace/background-writer.py= with
+=background=true=; the child writes blue and reaches its model boundary. The
+script appends one line every 0.1 seconds for at most 60 seconds. During B's model
+request the fixture reads its length, waits 0.5 seconds, and reads it again.
+
+Frozen baseline: 61 to 61 lines at B, 62 to 62 at C, with physical Paused true.
+Cooperative candidate: 99 to 104 lines at B, physical Paused false. C observes
+115 to 115 after the delegated child's cleanup. Both full runs finish the
+remaining continuation/history/approval checks. The cooperative experiment's
+PASS means it successfully observed the counterexample, not safe parking.
+
+This is reachable through the enabled native terminal tool and ordinary script
+execution. An initial =python -c= fixture was correctly denied by unattended
+approval policy; that failed fixture is rejected as evidence. An intermediate
+cooperative fixture incorrectly required the writer to survive child completion
+at C; its later assertion failure is also not used as a full passing run.
+
+** Native middleware failure with independent authorization
+
+The actual registered native execution middleware receives an injected control
+HTTP failure before =next_call= while A is parked and B owns admission. Pinned
+Hermes falls through to its underlying model call. Both resulting parked
+provider attempts receive HTTP 409 from the independent host relay. Neither
+reaches the upstream provider. The proof ends after this denial and competitor
+completion; it explicitly does not prove successful native continuation after
+this injected failure. No arbitrary third-party plugin is needed.
+
+** Model admission versus cleanup
+
+A private streaming HTTP provider holds A's response open. Admission is revoked; A's existing stream returns a partial HTTP 200 before
+transport shutdown, its reader drains, a late request receives 409, and an
+experimental existing-queue release callback permits B despite injected cleanup
+failure. A private Docker writer modifies a tracked file in a private Git repo.
+There are two distinct cases:
+
+- Removal after verified stop fails: B receives the model, the container remains
+  recorded but stopped, the writer does not advance, and Git is still dirty.
+- Kill cannot be confirmed: B receives the model, the container is still running,
+  its writer advances during B, and Git is still dirty.
+
+Both upstream logs contain exactly A then B, with no late revoked request.
+This deliberately forced release proves the narrower transport/admission claim.
+It does not exercise or authorize Run terminalization, publication, follower
+completion, or cancellation success. Socket closure is not an acknowledgement
+that a remote inference engine stopped computation. Existing relay regressions
+also cover active response reads, pre-response waits, missing-hook denial and
+admission rechecking after relay-condition contention.
+
+* Native extension contracts
+
+Current official [[https://hermes-agent.nousresearch.com/docs/developer-guide/middleware][middleware documentation]] describes fail-open execution and
+preservation of an already-produced downstream result after a post-next error.
+The pinned [[https://github.com/NousResearch/hermes-agent/blob/ec3249919accf7bc51f780dcff663e8f19a0e176/hermes_cli/middleware.py][middleware implementation]] confirms this behavior. The pinned
+[[https://github.com/NousResearch/hermes-agent/blob/ec3249919accf7bc51f780dcff663e8f19a0e176/hermes_cli/plugins_context.py][PluginContext]] exposes =register_middleware=, already used by the worker.
+Current documentation was consulted as of this investigation, not treated as
+proof that every newer API exists in the pin.
+
+Pinned [[https://github.com/NousResearch/hermes-agent/blob/ec3249919accf7bc51f780dcff663e8f19a0e176/tools/terminal_tool.py][terminal execution]] calls the [[https://github.com/NousResearch/hermes-agent/blob/ec3249919accf7bc51f780dcff663e8f19a0e176/tools/terminal_tool_background.py][background process implementation]], which returns
+while the subprocess remains alive. Execution middleware surrounds the tool
+call, not the returned process's lifetime. The current [[https://hermes-agent.nousresearch.com/docs/developer-guide/subagent-lifecycle-api][subagent lifecycle API]]
+provides orchestration and cooperative cancellation, not a whole-process
+freeze/resume primitive. Pinned [[https://github.com/NousResearch/hermes-agent/blob/ec3249919accf7bc51f780dcff663e8f19a0e176/agent/subagent_lifecycle.py][subagent lifecycle]] and
+[[https://github.com/NousResearch/hermes-agent/blob/ec3249919accf7bc51f780dcff663e8f19a0e176/agent/interrupt_control.py][interrupt control]] support cancellation, which interrupts work rather than
+retaining the same invocation as a fair scheduling yield. [[https://hermes-agent.nousresearch.com/docs/developer-guide/observer-hooks][Observer hooks]] are
+useful instrumentation, not independent admission authority.
+
+* Model-routing comparison
+
+| Concern | Current Assist host model client | Historical Pi relay | Hermes relay |
+|---------+----------------------------------+---------------------+--------------|
+| Binding | Host ChatOpenAI from OpenAIConfig | Private UDS plus capability header | Private generation UDS; exact Run/queue handle/generation closure |
+| Admission | Host execution owns queue before invocation | Per-turn capability and bounded call count | Every forwarded request checks current host admission |
+| Revocation | Host execution/cancellation path | stop_admission closes clients/connections | stop_admission denies new calls and shuts active transports |
+| Forwarding | Host framework constructs requests | Host validates/rewrites tool and completion policy | Native body retained; selected local model required |
+| Transport | Host HTTP client | Serial UDS server; bounded buffered response | Bounded concurrent UDS handlers; incremental response forwarding |
+| Drain | No reusable per-native-generation grant/drain API in model_manager | Connection close on stop | Actual reader completion tracked under condition |
+| Errors/recovery | Model-not-found config cache invalidation | Pi errors/caps/summary fallback; yield aborts invocation | Existing Run successor resumes retained work; unconfirmed cleanup stays held |
+| Parking-specific | None | No retained native parking | Operation tracking, pause/park/resume, physical freeze checks |
+
+Actual reusable pieces are already present: =OpenAIConfig= and
+=current_model_config()=, the existing exact queue handle, Run admission and
+successor machinery, SandboxManager generation authority and verified cleanup.
+Pi supplies a related private-UDS pattern, not a compatible general model relay:
+its serial transport, request rewriting, skill mediation and turn-abort contract
+would need changes. Importing its forwarding method would not remove Hermes's
+required concurrent request admission and drain semantics. Physical Docker pause
+is not why the native process needs a host-local provider route.
+
+* Minimal smoke extension
+
+Default =make smoke= retains both Deep Agents prompts: “This is an automated
+smoke test. Please respond with a short greeting.” followed by “Thanks! Can you
+repeat what you just said in one sentence?” It checks assistant bubbles,
+deletes its created thread, and checks the listing.
+
+=ASSIST_SMOKE_HERMES=1 make smoke= adds a fresh Hermes thread. Its full prompt is
+“Create a one-line text file at /tmp/<random-token>.txt containing <random-token>.
+Then tell me it is saved.” The actual token is a fresh =hermes-smoke-= UUID.
+It requires completed status, an HTTP assistant reply, and the file viewed
+through the existing HTTP show route with token content after surrounding
+whitespace normalization. It deletes only its own thread and requires status
+404 afterward. This proves a file write, not a particular native tool choice.
+Curl requests and response polling are bounded. The file lives in that thread's
+persistent temporary mount, not a domain checkout.
+
+Offline shell tests run the actual script and curl against a private HTTP
+fixture. They cover unchanged Deep flow, successful optional Hermes flow,
+missing file, failed Run, and disabled preview. They assert only created IDs are
+deleted and that a reply without a file fails. These tests do not call a model.
+The real deployed smoke is pending the deployment owner's execution through
+production admission; no real-provider success is claimed here.
+
+* Evidence and bounded next action
+
+Local evidence bundle: =/tmp/hermes-simplification-20261117/=, with
+=baseline-counted-evidence=, =cooperative-counted-evidence=,
+=background-frozen-v2-evidence=, =background-cooperative-v3-evidence=,
+=failopen-evidence= and =model-release-evidence=, each containing =evidence.json=.
+Private scripts and exact diffs remain alongside those receipts. They use no
+production thread state or user data.
+
+Keep the current runtime while reviewing these results. A future simplification
+could investigate proven-stopped container-removal failure separately from
+unconfirmed stop, but would still need a concrete Git/follower/cancellation
+contract; this experiment is not its implementation. Alternatively, changing
+the supported native background-tool contract could make cooperative-only
+parking viable, but that is a capability decision and remains untested. Neither
+option requires a new scheduler, lifecycle owner, permission system or store.

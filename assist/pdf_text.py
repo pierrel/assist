@@ -5,6 +5,7 @@ import resource
 import sys
 
 import requests
+from assist import url_fetch
 
 
 _MAX_INPUT = 25 * 1024 * 1024
@@ -39,7 +40,7 @@ def extract_pdf(data: bytes) -> str:
 
 
 def _fetch_pdf(url: str) -> bytes:
-    response = requests.get(
+    response = url_fetch.get(
         url,
         headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"},
         timeout=(5, 5), stream=True,

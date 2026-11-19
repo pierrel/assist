@@ -59,6 +59,29 @@ def test_delegate_user_urls_round_trip_only_on_the_child_slice(service, tmp_path
         "https://owner.example/page",)
 
 
+def test_withdrawn_checker_history_remains_readable_without_rewriting(service, tmp_path):
+    child = service.create(
+        "sub-check", "fact-check-agent", "Check the saved report",
+        mode="child", parent_thread_id="t1", parent_run_id="parent-run",
+        dispatch_key="parent-work:checker",
+    )
+    path = tmp_path / "sub-check" / "runs.json"
+    stored = json.loads(path.read_text())
+    stored[0]["output_evidence"] = {
+        "observations": [{"source_url": "https://example.test/page"}],
+        "access_outcomes": [],
+    }
+    path.write_text(json.dumps(stored))
+    before = path.read_bytes()
+
+    loaded = service.get(child.thread_id, child.id)
+
+    assert loaded.assistant_id == "fact-check-agent"
+    assert loaded.text == "Check the saved report"
+    assert service.list(child.thread_id)[0].id == child.id
+    assert path.read_bytes() == before
+
+
 def test_child_shape_is_validated(service, tmp_path):
     with pytest.raises(ValueError, match="requires parent"):
         service.create("t1", "research-agent", "go", mode="child")

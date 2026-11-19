@@ -39,9 +39,9 @@ def test_deploy_service_preserves_approved_sms_configuration(tmp_path):
     environment = os.environ | {
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "INSTALL_SERVICE_SCRIPT": str(installer),
+        "ASSIST_SMS_ARCHIVE_DIR": "/var/lib/assist-sms-private",
         "ASSIST_SMS_SECRET": "synthetic-shared-secret",
         "ASSIST_SMS_OUTBOUND_URL": "https://phone.example.test/outbound/sms/v1",
-        "ASSIST_SMS_ARCHIVE_DIR": "/var/lib/assist-sms-private",
     }
 
     subprocess.run(["bash", "scripts/deploy-service.sh", "test-host"],
@@ -69,6 +69,7 @@ def test_deploy_service_transports_egress_host_paths(tmp_path):
     environment = os.environ | {
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "INSTALL_SERVICE_SCRIPT": str(installer),
+        "ASSIST_BASE_URL": "https://control.example.test:5050",
         "ASSIST_EGRESS_CLIENT_MAP_DIR": "/var/lib/assist/proxy-map",
         "ASSIST_EGRESS_RUNTIME_DIR": "/var/lib/assist/egress-runtime",
     }
@@ -81,6 +82,9 @@ def test_deploy_service_transports_egress_host_paths(tmp_path):
          'printf "%s|%s" "$ASSIST_EGRESS_CLIENT_MAP_DIR" "$ASSIST_EGRESS_RUNTIME_DIR"'],
         check=True, capture_output=True, text=True)
     assert result.stdout == "/var/lib/assist/proxy-map|/var/lib/assist/egress-runtime"
+    origin = subprocess.run(["bash", "-c", configuration + 'printf %s "$ASSIST_BASE_URL"'],
+                            check=True, capture_output=True, text=True)
+    assert origin.stdout == "https://control.example.test:5050"
 
 
 def test_make_exports_egress_host_paths_to_deploy_recipe():
@@ -127,12 +131,13 @@ def test_make_deployment_preserves_gmail_token_path_in_service_unit(tmp_path):
     sudo.chmod(0o755)
     token_path = str(tmp_path / "private" / "gmail-token.json")
     configuration = tmp_path / "gmail.mk"
-    configuration.write_text(f"ASSIST_GMAIL_TOKEN_FILE := {token_path}\nDEPLOY_PATH := {deploy}\nASSIST_THREADS_DIR := {data}\nDEPLOY_HOST := synthetic-host\nSERVICE_NAME := synthetic-assist\n")
+    configuration.write_text(f"ASSIST_GMAIL_TOKEN_FILE := {token_path}\nASSIST_BASE_URL := https://control.example.test:5050\nDEPLOY_PATH := {deploy}\nASSIST_THREADS_DIR := {data}\nDEPLOY_HOST := synthetic-host\nSERVICE_NAME := synthetic-assist\n")
     subprocess.run(["make", "-f", "Makefile", "-f", str(configuration), "deploy-service"],
                    check=True, cwd=repo,
                    env=os.environ | {"PATH": f"{tmp_path}:{os.environ['PATH']}",
                                      "GMAIL_TEST_UNIT": str(captured)})
     assert f'Environment="ASSIST_GMAIL_TOKEN_FILE={token_path}"' in captured.read_text()
+    assert 'Environment="ASSIST_BASE_URL=https://control.example.test:5050"' in captured.read_text()
 
 
 def test_make_service_export_reaches_archive_relay(tmp_path):
@@ -146,3 +151,34 @@ def test_make_service_export_reaches_archive_relay(tmp_path):
     configuration=capture.read_text().partition('# end configuration')[0]
     result=subprocess.run(['bash','-c',configuration+'printf %s "$ASSIST_SMS_ARCHIVE_DIR"'],check=True,capture_output=True,text=True)
     assert result.stdout=='/var/lib/synthetic-sms-private'
+
+
+def test_make_service_preserves_native_guidance_through_systemd_quoting(tmp_path):
+    import json
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[1]
+    deploy = tmp_path / "deploy"
+    (deploy / "scripts").mkdir(parents=True)
+    (deploy / "scripts" / "assist-web.service.template").write_text("[Service]\n{{ENVIRONMENT_VARS}}\n")
+    data = tmp_path / "threads"
+    data.mkdir()
+    captured = tmp_path / "unit"
+    ssh = tmp_path / "ssh"
+    ssh.write_text("#!/bin/sh\nexec bash -s\n")
+    ssh.chmod(0o755)
+    sudo = tmp_path / "sudo"
+    sudo.write_text('#!/bin/sh\nif [ "$1" = tee ]; then cat > "$CAPTURE"; fi\n')
+    sudo.chmod(0o755)
+    guidance = 'Keep "quoted" words and owner\'s text & pipes | literal $HOME \\ path 100%.\nSecond line.'
+    fixture = tmp_path / "guidance.mk"
+    fixture.write_text(f"DEPLOY_PATH := {deploy}\nASSIST_THREADS_DIR := {data}\n"
+                       + "define ASSIST_HERMES_SYSTEM_MESSAGE\n"
+                       + guidance.replace("$", "$$") + "\nendef\n")
+    subprocess.run(["make", "-s", "-f", "Makefile", "-f", str(fixture),
+                    "deploy-service", "DEPLOY_HOST=synthetic-host"], cwd=repo,
+                   env=os.environ | {"PATH": f"{tmp_path}:{os.environ['PATH']}",
+                                     "CAPTURE": str(captured)}, check=True)
+    line = next(line for line in captured.read_text().splitlines()
+                if line.startswith('Environment="ASSIST_HERMES_SYSTEM_MESSAGE='))
+    assert "100%%" in line
+    assert json.loads(line.split("=", 1)[1]).replace("%%", "%") == "ASSIST_HERMES_SYSTEM_MESSAGE=" + guidance

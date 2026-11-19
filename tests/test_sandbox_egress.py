@@ -81,6 +81,7 @@ class TestEnsureEgressProxy(TestCase):
         net.attrs = {
             "Id": "ordinary-network-id", "Driver": "bridge", "Internal": True,
             "EnableIPv6": False,
+            "Options": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
             "IPAM": {"Config": [{"Subnet": "172.30.0.0/16"}]},
         }
         if network_exists:
@@ -136,6 +137,22 @@ class TestEnsureEgressProxy(TestCase):
         return _egress_proxy_config_hash(
             ",".join(_load_egress_allowlist()),
             None, "ordinary-network-id:172.30.0.0/16|:")
+
+    def test_control_config_changes_proxy_fingerprint(self):
+        with patch.dict(os.environ, {"ASSIST_PORT": "5050", "ASSIST_BASE_URL": ""}):
+            original = self._allowlist_hash()
+            with patch.dict(os.environ, {"ASSIST_PORT": "5051"}):
+                assert self._allowlist_hash() != original
+            with patch.dict(os.environ, {"ASSIST_BASE_URL": "https://control.example.test"}):
+                assert self._allowlist_hash() != original
+
+    def test_old_nonisolated_network_refused_before_proxy_mutation(self):
+        client = self._make_client(proxy=MagicMock())
+        client.networks.get.return_value.attrs["Options"] = {}
+        with self.assertRaisesRegex(RuntimeError, "isolated gateway"):
+            SandboxManager._ensure_egress_proxy_running(client)
+        client.api.create_container.assert_not_called()
+        client.containers.get.return_value.remove.assert_not_called()
 
     def test_creates_network_if_missing(self):
         client = self._make_client(network_exists=False)
@@ -307,6 +324,26 @@ class TestEnsureEgressProxy(TestCase):
         client.api.create_container.assert_called_once()
         self.assertNotEqual(old_hash, self._allowlist_hash())
 
+    def test_replaces_v11_proxy_before_native_model_admission(self):
+        """A rebuilt image must replace the prior permanent host-model exception."""
+        old_hash = hashlib.sha256((
+            ",".join(_load_egress_allowlist())
+            + "|v11-browser-connection-burst:"
+            + f"{os.getuid()}:{os.getgid()}||"
+            + "|ordinary-network-id:172.30.0.0/16|:"
+        ).encode()).hexdigest()[:16]
+        stale_proxy = MagicMock()
+        stale_proxy.id = "old-native-model-policy"
+        stale_proxy.status = "running"
+        stale_proxy.labels = {"assist.egress-allowlist-hash": old_hash}
+        client = self._make_client(proxy=stale_proxy)
+
+        SandboxManager._ensure_egress_proxy_running(client)
+
+        stale_proxy.remove.assert_called_once_with(force=True)
+        client.api.create_container.assert_called_once()
+        self.assertNotEqual(old_hash, self._allowlist_hash())
+
     def test_recreates_when_proxy_stopped(self):
         stopped_proxy = MagicMock()
         stopped_proxy.id = "stopped"
@@ -445,6 +482,7 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
         client.networks.get.return_value.attrs = {
             "Id": "ordinary-network-id", "Driver": "bridge", "Internal": True,
             "EnableIPv6": False,
+            "Options": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
             "IPAM": {"Config": [{"Subnet": "172.30.0.0/16"}]},
         }
         proxy = MagicMock()
@@ -495,6 +533,7 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
         client.networks.get.return_value.attrs = {
             "Id": "ordinary-network-id", "Driver": "bridge", "Internal": True,
             "EnableIPv6": False,
+            "Options": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
             "IPAM": {"Config": [{"Subnet": "172.30.0.0/16"}]},
         }
         proxy = MagicMock()

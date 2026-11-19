@@ -1,0 +1,54 @@
+#+TITLE: Research product withdrawal
+#+DATE: 2026-11-14
+State: Prepared for deployment
+
+* Problem
+
+The context evidence handoff, terminal checker workflow, research evidence
+packet, and research-child URL policy did not establish reliable final source
+accuracy. Pierre cancelled these product changes while keeping reproduction
+and opt-in judge calibration open.
+
+* Current behavior after withdrawal
+
+The web main still has the original asynchronous context, research, critique,
+and delegate tasks. The research leaf returns a task result through the durable
+parent wake. The legacy research lead still has its synchronous specialists.
+Neither path now creates a terminal checker task or a host-projected research
+evidence packet. Research child navigation again follows the policy that
+preceded the withdrawn URL-brief guard; the delegate retains its separate,
+stricter owner-URL policy.
+This restores the earlier limitation that a research child's model-written
+brief or some tool-result echoes can qualify a URL. The earlier corrective
+message also calls an unattempted URL a dead link; it does not establish
+reachability. The cancellation preserves that historical behavior rather than
+shipping an unreviewed replacement during withdrawal.
+
+Source-reference binding and PDF text extraction remain. The browser's shared
+native =/agent= mount, retained execution, and its safety boundaries remain.
+Old Run JSON may still contain =output_evidence= or a completed
+=fact-check-agent= row. Reading those records does not rewrite or reinterpret
+them; old private thread data and files are not deleted by this source change.
+
+* Verification boundary
+
+The removal is checked against the exact live parent =80409f4a=, with affected
+async task, URL/offload, prompt census, Run-history, source-binding, and browser
+controls. The saved historical reports and eval traces remain point-in-time
+records of the earlier product. New research-quality work uses separate
+eval-only reproduction and judge calibration; this withdrawal is not evidence
+that source accuracy has improved.
+
+* Historical supersessions
+
+- [[file:2026-11-10-context-evidence-handoff.org][Context evidence handoff]],
+  current implementation section: its projection middleware is withdrawn.
+- [[file:2026-11-10-terminal-research-verification.org][Terminal research verification]],
+  current implementation section: the terminal web checker and main procedure
+  are withdrawn.
+- [[file:2026-11-12-research-evidence-handoff.org][Research evidence handoff]],
+  current implementation section: Run evidence packet and checker admission
+  appendix are withdrawn.
+- [[file:2026-11-10-context-evidence-url-authority.org][Context evidence URL authority]],
+  current implementation section: its context packet-specific navigation
+  policy is withdrawn with the projection.

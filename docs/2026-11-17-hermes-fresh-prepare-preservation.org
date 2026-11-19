@@ -1,0 +1,45 @@
+#+title: Hermes fresh preparation and failed-turn file ownership
+#+date: 2026-11-17
+
+* Corrected behavior
+A fresh Hermes turn cannot commit files that its Git preparation rejected as
+already dirty. Failed-turn preservation becomes eligible only after fresh
+preparation succeeds. Until then, failure cleanup still stops matching work and
+releases its own queue slot, but leaves existing file bytes, checkout HEAD and
+uncommitted status unchanged. A later fresh turn encounters the same required
+reconciliation instead of publishing an automatically created recovery commit.
+
+A durable same-work resume already represents native work that may have edited
+the checkout. It remains eligible for failed-turn preservation, including setup
+failure before the native invocation resumes. This uses the existing Run resume
+marker, checkout scope and verified exact-work stop. No new runtime attribution
+predicate, ownership record, retry or lifecycle mechanism is introduced.
+
+The prior cleanup ordering remains: verified stop precedes preservation, the
+checkout lock stays held during preservation, and it is released before exact
+model-slot handoff. Persistent unconfirmed teardown still retains the slot and
+nonterminal Run; the existing operator-recovery limit is unchanged.
+
+* Verification
+The regression uses the real dispatcher, queue and Git lifecycle with a private
+bound repository. Before prompt "Update the note", it modifies tracked README
+and creates untracked unowned.txt. The native worker must never start. After the
+rejected preparation, checkout HEAD, source ref, both byte sequences and Git
+porcelain status must be unchanged, while the Run reports the reconciliation
+error and the queue slot is released. Prompt "Try updating the note again" repeats
+those assertions, proving the hold persists across turns. The pre-fix check
+fails because cleanup creates a commit despite rejected preparation.
+
+A second regression uses retained tracked and new native edits and the durable
+resume marker for prompt "Keep the draft". A processing-status write fails before
+native resume. After verified stop, the existing failure path must commit those
+files locally, leave the source ref unchanged, report the error and release the
+slot. The earlier transient-cleanup, once-only preservation, checkout-unlock,
+dispatch-ownership, first-message and Pi-retirement checks remain in the affected
+panel. These are private deterministic fixtures, not real-model or device evals.
+
+* Historical supersessions
+=2026-11-17-hermes-dispatch-ownership-and-error-files.org=, "Corrected behavior":
+failed-turn preservation applies to an eligible native work owner, not a fresh
+turn whose preparation rejected pre-existing changes. The held-scope and
+stop-before-preservation ordering remains unchanged.

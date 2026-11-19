@@ -18,15 +18,18 @@ digraph Assist {
   C4 [label="C4  Dispatch + affinity\nwake queue · fairness probe · one model slot"];
   C5 [label="C5  Thread runtime\nmanager · checkpointed Thread"];
   C6 [label="C6  Agent assembly\nDeep Agents · tools · skills · middleware"];
-  C7 [label="C7  Child task handoff\nprivate ASGI · child → follow-up Run"];
+  C7 [label="C7  Child task handoff\nprivate ASGI · task result"];
   C8 [label="C8  Host authorities\nGit · sandbox · browser · egress"];
-  C9 [label="C9  Durable thread state\nRun JSON · checkpoints · status · files",
+  C9 [label="C9  Durable thread state\nRun JSON · checkpoints · source records · files",
       fillcolor="#fff4d7"];
   C10 [label="C10  Execution sandbox\nfile and shell tools", fillcolor="#fff0df",
        color="#a46b36"];
   C12 [label="C12  Model endpoint\nOpenAI-compatible HTTP",
        fillcolor="#f3f3f3"];
   C21 [label="C21  Host user systemd\nownerless-generation age check", fillcolor="#f3f3f3"];
+  C25 [label="C25  Native host adapter\nretained invocation · model park/drain"];
+  C24 [label="C24  Native provider relay\nRun + queue + exact-generation fence"];
+  C26 [label="C26  Native Hermes in C10\npinned runtime · joined children", fillcolor="#fff0df"];
 
   C1a -> C2 [label="HTTP requests"];
   C2 -> C3 [label="admit before dispatch"];
@@ -46,4 +49,11 @@ digraph Assist {
   C5 -> C9 [label="checkpoints + files", style=dashed];
   C6 -> C10 [label="tool calls"];
   C6 -> C12 [label="model requests"];
+  C4 -> C25 [label="native Run / same-work successor"];
+  C25 -> C8 [label="existing generation authority"];
+  C25 -> C26 [label="start once · park / resume · verified stop"];
+  C26 -> C24 [label="provider + bound egress requests"];
+  C24 -> C8 [label="existing egress tools / cards / grants"];
+  C24 -> C12 [label="admitted model request"];
+  C26 -> C9 [label="native SessionDB · skills · memory", style=dashed];
 }

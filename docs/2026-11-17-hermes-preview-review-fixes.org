@@ -1,0 +1,61 @@
+#+title: Hermes preview review corrections
+#+date: 2026-11-17
+
+* Corrected behavior
+The preview continues to use the same pinned whole Hermes runtime, Run queue,
+retained generation and host authorities. Review found gaps in implementation
+and acceptance checks, not a need for another scheduler or permission system.
+
+Native =command_allowlist= is cleared before importing native approval state.
+The pinned runtime consults permanent approvals before unattended denial, so
+setting =unattended_mode= alone did not enforce the disclosed behavior. An actual
+private native terminal fixture with a saved =rm -rf /workspace/keep= allowance
+deleted its file on the previous worker. The corrected worker denies that same
+operation and preserves the file. This handles inherited approvals; the runtime
+and its tools remain one trusted execution actor, not separate privilege domains.
+
+When queue acquisition fails before a retained successor starts, the host stops
+only the matching logical work under the existing runtime lock. It records a
+terminal error and notifies followers only after verified teardown. A failed stop
+leaves the Run nonterminal and does not dispatch followers. Lost-process recovery
+also notifies already accepted followers after recording the terminal outcome;
+it never replays the lost native invocation.
+
+Browser rendering identifies pending native messages by logical-work message ID
+and shows one queued bubble. Phone accepted-message history remains unchanged.
+Identical text in separate turns remains separate user work.
+
+Optional =ASSIST_HERMES_SYSTEM_MESSAGE= now passes through Make export, the existing
+SSH relay and service-unit generation. Free text is quoted for systemd and for the
+existing template replacement, including spaces, quotes, literal shell text,
+backslashes, percent signs and internal newlines. Changing this setting requires
+=make deploy-service= and a restart; a code-only deployment does not replace the
+installed service environment. The default remains an empty native guidance block.
+
+* Verification
+The checked-in native capability fixture retains the same three user prompts:
+"Have a helper create a note saying blue, then tell me it is done.", "Change that
+note to green.", and "Remove the scratch folder." The queued competitor uses
+the explicit diagnostic prompt =COMPETITOR_B=.
+
+Before the second turn, the checker requires exactly one blue write and the blue
+file. The second-turn provider messages must contain the first native user turn
+and its final assistant reply. Before the third turn, the fixture seeds a permanent
+approval for its destructive command; the new worker must deny it and retain the
+file. Both cleanup attempts run before PASS is published, and cleanup errors fail
+the command. These are deterministic capability checks with a fake provider and
+=network:none=, not real-model behavior or physical-device acceptance.
+
+Focused host regressions cover matching and unrelated work on queue failure,
+no terminalization/dispatch after unconfirmed stop, accepted-follower notification,
+identical-text browser deduplication without phone-history loss, and the complete
+mocked Make-to-service-unit guidance transport. Existing native parking, provider
+fencing and Git publication contracts are unchanged.
+
+* Historical supersessions
+=2026-11-16-hermes-native-implementation.org=, "Source and configuration":
+unattended denial additionally requires removing inherited permanent command
+approvals. "Acceptance scenarios / Repeatable native client check": the original
+checked-in checker did not enforce its claimed native-history and one-write
+conditions or fail on teardown errors; the explicit assertions above replace
+those incomplete acceptance checks. The original record remains unchanged.

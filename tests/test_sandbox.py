@@ -612,6 +612,21 @@ class TestSandboxManager(TestCase):
         client.api._version = "1.43"
         client.api.create_container.return_value = {"Id": container.id}
         client.containers.get.return_value = container
+        networks = {}
+        for name, identity, subnet in (
+                ("assist-egress-network", "ordinary-net", "172.30.0.0/16"),
+                ("assist-browser-network", "browser-net", "172.31.0.0/16")):
+            network = MagicMock()
+            network.attrs = {
+                "Id": identity, "Driver": "bridge", "Internal": True,
+                "EnableIPv6": False,
+                "Options": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
+                "IPAM": {"Config": [{"Subnet": subnet}]}}
+            def connect(proxy, *, _name=name, _identity=identity):
+                proxy.attrs["NetworkSettings"]["Networks"][_name] = {"NetworkID": _identity}
+            network.connect.side_effect = connect
+            networks[name] = network
+        client.networks.get.side_effect = networks.__getitem__
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -619,20 +634,15 @@ class TestSandboxManager(TestCase):
         SandboxManager._docker_client = None
         SandboxManager._containers.clear()
         SandboxManager._generation_owners.clear()
-        # These lifecycle mocks have no Docker network attributes; live
-        # routing validation is covered by the real browser Docker tests.
-        self.network_identity = patch(
-            'assist.sandbox_manager._network_identity',
-            side_effect=lambda _network, *, isolated:
-                ('browser-net', '172.31.0.0/16') if isolated
-                else ('ordinary-net', '172.30.0.0/16'))
-        self.network_identity.start()
+        self.runtime_environment = patch.dict(os.environ, {
+            "ASSIST_EGRESS_RUNTIME_DIR": os.path.join(self.temp_dir, "egress-runtime")})
+        self.runtime_environment.start()
         self.expiry_patch = patch('assist.sandbox_expiry.arm')
         self.arm_expiry = self.expiry_patch.start()
 
     def tearDown(self):
         self.expiry_patch.stop()
-        self.network_identity.stop()
+        self.runtime_environment.stop()
         SandboxManager._docker_client = None
         SandboxManager._containers.clear()
         SandboxManager._generation_owners.clear()
@@ -676,6 +686,10 @@ class TestSandboxManager(TestCase):
         from assist.run_service import RunService
         test_path = os.path.join(self.temp_dir, "browser-turn", "domain")
         os.makedirs(test_path)
+        agent_dir = os.path.join(self.temp_dir, "browser-turn", "agent")
+        private_key = os.path.join(self.temp_dir, "browser-turn", "secret-unlock.json")
+        with open(private_key, "w", encoding="ascii") as output:
+            output.write("synthetic key fixture")
         mark_new_thread(self.temp_dir, "browser-turn")
         runs = RunService(self.temp_dir)
         owner = runs.create("browser-turn", "general-agent", "Open a page", user_origin=True)
@@ -696,7 +710,7 @@ class TestSandboxManager(TestCase):
              patch.object(BrowserManager, 'confirm_owner_stopped', return_value=False), \
              patch('assist.sandbox_expiry.arm') as arm_expiry:
             SandboxManager.get_sandbox_backend(
-                test_path, browser_capable=True,
+                test_path, browser_capable=True, agent_dir=agent_dir,
                 thread_scope=(self.temp_dir, "browser-turn"), owner_run_id=owner.id)
         from assist.browser.authority import fence
         with fence(self.temp_dir, "browser-turn") as state:
@@ -708,6 +722,9 @@ class TestSandboxManager(TestCase):
         assert options["tmpfs"]["/run/assist-browser"].endswith(
             "uid=10001,gid=10001,mode=0700")
         assert options["security_opt"][0].startswith("seccomp={")
+        assert set(options["volumes"]) == {
+            test_path, os.path.join(self.temp_dir, "browser-turn", "tmp"), agent_dir}
+        assert private_key not in options["volumes"]
 
     @patch('assist.sandbox.DockerSandboxBackend')
     def test_managed_shell_generation_is_journaled_and_cleared(self, _backend):
@@ -1147,7 +1164,7 @@ class TestSandboxManager(TestCase):
         mock_client = MagicMock()
         # Has to be a DockerException subclass now that the catch is
         # narrowed; a bare Exception would propagate (correctly).
-        mock_client.api.create_container.side_effect = DockerException("Docker not running")
+        mock_client.networks.get.side_effect = DockerException("Docker not running")
 
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
             sandbox = SandboxManager.get_sandbox_backend(test_path)

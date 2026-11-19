@@ -1,4 +1,4 @@
-"""The message-event subscription record.
+"""SMS and call-event subscription records.
 
 A subscription matches an inbound message's *sender* by regexp and, on a match, fires an
 agent turn in the subscription's thread using ``template`` — the whole self-instruction the
@@ -25,6 +25,7 @@ class Subscription:
     sender_regexp: str
     template: str
     created_at: str | None = None   # ISO-8601 UTC; also the routing tie-break order
+    event_kind: str = "sms"
 
     def matches(self, sender: str) -> bool:
         """True iff this subscription's regexp is found in ``sender``. A bad regexp never
@@ -42,13 +43,13 @@ class Subscription:
     def to_dict(self) -> dict:
         return {"id": self.id, "thread_id": self.thread_id,
                 "sender_regexp": self.sender_regexp, "template": self.template,
-                "created_at": self.created_at}
+                "created_at": self.created_at, "event_kind": self.event_kind}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Subscription":
         return cls(id=d["id"], thread_id=d["thread_id"],
                    sender_regexp=d["sender_regexp"], template=d["template"],
-                   created_at=d.get("created_at"))
+                   created_at=d.get("created_at"), event_kind=d.get("event_kind", "sms"))
 
 
 def validate_regexp(pattern: str) -> None:

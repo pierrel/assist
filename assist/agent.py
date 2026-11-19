@@ -817,7 +817,7 @@ def create_research_agent(model: BaseChatModel,
     its synchronous search and fact-check specialists.
 
     Returns a RollbackRunnable-wrapped agent — on BadRequestError the agent
-    rolls back to a previous checkpoint.  Research agents only write additive
+    rolls back to a previous checkpoint. Research agents only write additive
     report files, so rollback is low-risk.
     """
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
@@ -1019,8 +1019,8 @@ def create_research_agent(model: BaseChatModel,
                            "deepagents/research_instructions.txt.j2",
                            workspace_dir=workspace_dir)),
         backend=backend,
-        # No _read_url_guards here: the orchestrator has no read_url to guard.
-        # The searcher + fact-check sub-agents carry those guards themselves.
+        # The manager has no read_url. Leaf retrieval gets its own URL guards;
+        # nested search and fact-check subagents carry guards in their specs.
         # logging_mw stays innermost/last.
         middleware=([BoundedSummarizationMiddleware(model, backend)] + base_mw + middleware
                     # Offload wraps binding here so a failed fetch's raw error

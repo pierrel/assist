@@ -9,7 +9,7 @@
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(18 457.64)">
 <title>Agents</title>
 <polygon fill="white" stroke="none" points="-18,18 -18,-457.64 845.11,-457.64 845.11,18 -18,18"/>
-<text xml:space="preserve" text-anchor="middle" x="413.56" y="-413.79" font-family="DejaVu Sans" font-size="23.00">Assist · ordinary web agent and guidance</text>
+<text xml:space="preserve" text-anchor="middle" x="413.56" y="-413.79" font-family="DejaVu Sans" font-size="23.00">Assist · web agent and guidance · current task profiles</text>
 <!-- C19&#45;&gt;C6 -->
 <g id="edge1" class="edge">
 <title>C19&#45;&gt;C6</title>
@@ -48,16 +48,16 @@
 <!-- C7&#45;&gt;C20 -->
 <g id="edge6" class="edge">
 <title>C7&#45;&gt;C20</title>
-<path fill="none" stroke="#49647d" d="M398.93,-149.79C398.93,-137.56 398.93,-122.32 398.93,-107.49"/>
-<polygon fill="#49647d" stroke="#49647d" points="401.38,-107.82 398.93,-100.82 396.48,-107.82 401.38,-107.82"/>
-<text xml:space="preserve" text-anchor="middle" x="444.31" y="-119.71" font-family="DejaVu Sans" font-size="11.00">self&#45;contained brief</text>
+<path fill="none" stroke="#49647d" d="M397.38,-149.69C396.75,-139.52 396.18,-130.16 396.18,-130.16 396.18,-130.16 396.18,-118.91 396.18,-118.91 396.18,-118.91 396.37,-114.25 396.64,-107.35"/>
+<polygon fill="#49647d" stroke="#49647d" points="399.08,-107.72 396.91,-100.62 394.19,-107.52 399.08,-107.72"/>
+<text xml:space="preserve" text-anchor="middle" x="441.56" y="-119.71" font-family="DejaVu Sans" font-size="11.00">self&#45;contained brief</text>
 </g>
 <!-- C20&#45;&gt;C7 -->
 <g id="edge7" class="edge">
 <title>C20:e&#45;&gt;C7:e</title>
-<path fill="none" stroke="#49647d" d="M472.11,-49.45C472.11,-49.45 533.74,-150.16 533.74,-150.16 533.74,-150.16 534.12,-160 534.41,-167.53"/>
-<polygon fill="#49647d" stroke="#49647d" points="531.96,-167.58 534.68,-174.48 536.85,-167.39 531.96,-167.58"/>
-<text xml:space="preserve" text-anchor="middle" x="554.17" y="-119.71" font-family="DejaVu Sans" font-size="11.00">terminal result</text>
+<path fill="none" stroke="#49647d" d="M472.11,-49.45C472.11,-49.45 525.86,-150.16 525.86,-150.16 525.86,-150.16 526.24,-160 526.53,-167.53"/>
+<polygon fill="#49647d" stroke="#49647d" points="524.08,-167.58 526.8,-174.48 528.98,-167.39 524.08,-167.58"/>
+<text xml:space="preserve" text-anchor="middle" x="548" y="-119.71" font-family="DejaVu Sans" font-size="11.00">terminal result</text>
 </g>
 <!-- C19 -->
 <g id="node1" class="node">
@@ -97,9 +97,9 @@
 <!-- C7 -->
 <g id="node6" class="node">
 <title>C7</title>
-<path fill="#f2f7fc" stroke="#34506a" d="M521.74,-201.82C521.74,-201.82 276.12,-201.82 276.12,-201.82 270.12,-201.82 264.12,-195.82 264.12,-189.82 264.12,-189.82 264.12,-162.16 264.12,-162.16 264.12,-156.16 270.12,-150.16 276.12,-150.16 276.12,-150.16 521.74,-150.16 521.74,-150.16 527.74,-150.16 533.74,-156.16 533.74,-162.16 533.74,-162.16 533.74,-189.82 533.74,-189.82 533.74,-195.82 527.74,-201.82 521.74,-201.82"/>
+<path fill="#f2f7fc" stroke="#34506a" d="M513.86,-201.82C513.86,-201.82 284,-201.82 284,-201.82 278,-201.82 272,-195.82 272,-189.82 272,-189.82 272,-162.16 272,-162.16 272,-156.16 278,-150.16 284,-150.16 284,-150.16 513.86,-150.16 513.86,-150.16 519.86,-150.16 525.86,-156.16 525.86,-162.16 525.86,-162.16 525.86,-189.82 525.86,-189.82 525.86,-195.82 519.86,-201.82 513.86,-201.82"/>
 <text xml:space="preserve" text-anchor="middle" x="398.93" y="-177.49" font-family="DejaVu Sans" font-size="15.00">C7 &#160;Child task handoff</text>
-<text xml:space="preserve" text-anchor="middle" x="398.93" y="-161.74" font-family="DejaVu Sans" font-size="15.00">brief → durable child → parent wake</text>
+<text xml:space="preserve" text-anchor="middle" x="398.93" y="-161.74" font-family="DejaVu Sans" font-size="15.00">brief → task result → parent wake</text>
 </g>
 <!-- C20 -->
 <g id="node7" class="node">

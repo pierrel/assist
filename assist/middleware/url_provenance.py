@@ -5,13 +5,18 @@ never saw — building ``casio.com/.../product.<model>/`` and store-search paths
 from memory and fetching them (the 2026-06-24 threads.db dead-URL flood; one
 thread held 101 GB of such a runaway). Guidance reduces this a lot (a worked
 example + read-cap took guessing from ~86 to 0-3 per turn) but cannot guarantee
-zero — the small model still slips. This middleware makes a fabricated fetch
-*unreachable*: ``read_url`` is refused unless the URL is provenanced by a trusted
-message or an admission-frozen delegate seed.
+zero — the small model still slips. This middleware refuses ``read_url`` unless
+the URL appears in a message or result trusted by the current caller policy,
+or in an admission-frozen delegate seed. The web research child again treats its
+model-authored task brief as a HumanMessage, so this guard does not establish
+that every admitted research URL came from the original user or a retrieved source.
 
 A provenanced URL is one the agent could have *copied* rather than *invented*:
 one textually present in a SEARCH RESULT, a successful non-offloaded
-``read_file``/``grep`` result outside delegate mode, or the USER's message. A delegate is the exception: its HumanMessage is
+``read_file``/``grep`` result outside delegate mode, or a trusted HumanMessage.
+Other tool results, including a successful file write or edit, can also be
+counted under the pre-withdrawal caller policy; they do not by themselves prove
+an original-user or fetched-page origin. A delegate is the exception: its HumanMessage is
 the main model's brief, so the web host supplies only brief-form URLs canonically
 matched to owner-authored Runs already accepted when the child Run is admitted;
 the brief may remove owner userinfo but cannot add or change it.
@@ -44,13 +49,14 @@ page content can prove a path, never credentials. These conditions let ``read_ur
 WITHIN a site the user pointed at (the "explore a website, find and download a file"
 flow) without re-searching every next page, while keeping the two attacks the guard
 exists for blocked: (1) a FABRICATED same-host path (the searcher inventing
-``casio.com/products/<model>`` — the dead-URL flood) never appears on any page, so
-the page-content requirement refuses it; (2) a CROSS-HOST jump from page content
+``casio.com/products/<model>`` — the dead-URL flood) is refused when absent
+from content classified as a page; (2) a CROSS-HOST jump from page content
 (SSRF to 169.254.169.254 / an internal service, or a secret-bearing exfil URL to
 ``evil.example/leak?d=…``) has no matching trusted host, so the same-host requirement
 refuses it — and the attacker can't statically author a link carrying the victim's
-runtime secret anyway. Only *more pages a trusted site actually links to* become
-reachable. A URL that is neither trusted-sourced nor a same-host page link is still
+runtime secret anyway. The page-offload path is a convention rather than an
+authenticated origin record: a model-written file at that path can be mistaken
+for page content. A URL that is neither trusted-sourced nor a same-host page link is still
 rejected. This keeps the guard a coarse,
 unambiguous bound (a substring/membership check on trusted text, not a fuzzy "looks
 invented/malicious" heuristic), and it does not end the turn: it returns a corrective
@@ -252,7 +258,7 @@ def _reads_offloaded(tool_call: dict, content: str) -> bool:
 
 
 def _reads_page_offload(tool_call: dict) -> bool:
-    """True only for a reread of content originally returned by ``read_url``."""
+    """Whether a reread targets the page-offload path convention, without origin proof."""
     args = tool_call.get("args") or {}
     return any(_is_offload_path(args.get(k, ""), _PAGE_OFFLOAD_MARK)
                for k in _OFFLOAD_PATH_KEYS)
@@ -298,8 +304,8 @@ def _is_page_content(m: ToolMessage, calls_by_id: dict) -> bool:
     """Content allowed to contribute same-host navigation paths.
 
     Successful ``read_url`` output qualifies. A successful ``read_file``/``grep`` qualifies only
-    when its target has the page-specific offload marker written by the ``read_url``
-    middleware. Shell and child-task results never qualify. This classifier is separate from
+    when its target has the page-specific offload path marker. The marker alone
+    does not prove who wrote the file. Shell and child-task results never qualify. This classifier is separate from
     ``_is_untrusted_result``: `_seen_urls` uses that broader predicate to exclude trust
     sources, while `_page_content_urls` uses only this predicate for navigation paths."""
     if m.status != "success":
@@ -323,7 +329,7 @@ def _record_url(urls: dict[str, list[str]], raw: str) -> None:
 def _seen_urls(messages: list, *, trust_human_messages: bool = True,
                trust_task_results: bool = True,
                ) -> dict[str, list[str]]:
-    """Every URL in a TRUSTED tool result or the USER's message: a map from the
+    """Every URL in a result or HumanMessage trusted by the caller policy: a map from the
     normalized form (the membership key) to every ORIGINAL credential variant seen.
     The normalized keys are the sources the model cannot fabricate; the originals
     feed the correction message so it never surfaces a normalize_url-truncated form
@@ -389,8 +395,8 @@ def _page_content_urls(messages: list) -> dict[str, list[str]]:
     ``read_url`` output or a page-marked read_url offload reread (see
     ``_is_page_content``). NOT the exact inverse of ``_seen_urls``: shell and child-task
     output, direct or offloaded, are in NEITHER set.
-    These are the links a page actually surfaced; a fabricated path never appears
-    here. Credentialless same-host members are navigable (see wrap_tool_call);
+    These are links in content classified as page output; a model-written file
+    under the page-offload path may also qualify. Credentialless same-host members are navigable (see wrap_tool_call);
     credentialed requests also need exact trusted same-origin userinfo. This admits
     following a real link on an already-trusted site while still blocking a
     fabricated same-host path (the dead-URL flood), page-introduced credentials,
@@ -423,11 +429,10 @@ def _display_url(raw: str) -> str:
 
 
 def _correction(allowed: dict[str, list[str]]) -> str:
-    # No sourced URLs in context yet. Shared by both read_url agents: the searcher HAS
-    # search_internet (so "search first" is the right nudge if it simply hasn't searched),
-    # while the fact-checker does NOT (an empty list there means search already came back
-    # empty/unavailable, so stop). Cover both without inspecting tool availability:
-    # search-if-you-can, otherwise stop — never keep guessing.
+    # Shared by every read_url-bearing profile. This existing corrective text
+    # predates the withdrawal and calls an unfetched URL a dead link; denial
+    # establishes missing provenance, not reachability. Keep runtime wording
+    # unchanged while restoring the requested pre-311 behavior.
     if not allowed:
         return (
             "That URL was a guess: it appears in no search result, the question, or any "

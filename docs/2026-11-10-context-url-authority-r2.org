@@ -1,0 +1,35 @@
+#+title: Context packets and conversation-history URL authority
+#+date: 2026-11-10
+
+* Historical supersessions
+
+This document supersedes the inline-context-file authority statement in the
+Boundary section of =2026-11-10-context-native-offload-authority.org=. The
+context packet mixes recorded observations with model-chosen requests, and
+its source authorship is not an URL-admission contract.
+
+* Boundary
+
+A synchronous context =task= result never grants a URL fetch, whether it is
+inline or offloaded. It remains readable as factual context. A legacy parent
+that needs to follow a URL found in a local file can read that actual file
+through its existing direct-file path. Owner URLs, ordinary successful direct
+file reads, search results, and non-context research task citations retain
+their prior policy. Strict async and delegate children remain stricter.
+
+DeepAgents also stores pre-summary conversation messages under
+=/conversation_history/=. That file can contain assistant-authored URLs. A
+successful =read_file= or =grep= of it, including normalized path aliases and
+broad grep hits, cannot mint URL authority. The file stays readable for
+context; a new-host fetch needs an independent trusted source.
+
+* Evidence and checks
+
+Copilot R2 identified the history path. A context read of
+=/conversation_history/recent.txt= containing an assistant-only URL was
+projected into a legacy =task= result; the previous guard authorized that URL
+on both Main-based PR source and the installed composition. The regression
+requires denial for that packet, direct history reads, path aliases, and grep
+hits. A successful original-file reread, owner URL, search result, and
+ordinary research-task citation remain positive controls. No new store or
+provenance parser is introduced.

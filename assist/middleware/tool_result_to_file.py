@@ -118,9 +118,9 @@ class ToolResultToFileMiddleware(AgentMiddleware):
     (see ``UNTRUSTED_OFFLOAD_MARK``); the default writes
     ``.../large_tool_results/<id>``. ``UrlProvenanceMiddleware`` excludes rereads
     of either path from URL provenance.
-    ``page_navigation=True`` gives a read_url offload a narrower page marker so its
-    links can support same-host navigation without granting that property to shell or
-    child output. ``offload_root``
+    ``page_navigation=True`` gives a read_url offload a narrower page-path marker
+    used for same-host navigation. The path alone does not authenticate the file's
+    writer; a model-written file at the same path is a known limitation. ``offload_root``
     (per-instantiation) sets the parent: ``""`` (default) → StateBackend-routed
     ``/large_tool_results/…``; ``"/tmp"`` → the sandbox's real per-turn fs so shell +
     file tools share one path (see the module docstring).
@@ -165,9 +165,9 @@ class ToolResultToFileMiddleware(AgentMiddleware):
         # ANSI/control bytes (the BadRequest-outage class) from the offloaded file.
         content = _sanitize(content)
         fname = sanitize_tool_call_id(result.tool_call_id)
-        # Separate data and page markers retain their origin after offload.
-        # The provenance guard excludes either from URL authority, while the
-        # page marker still permits same-host link evidence.
+        # Separate data and page path conventions distinguish offload uses, but
+        # do not authenticate a later file read's origin. The provenance guard
+        # excludes either from URL authority; the page path permits same-host links.
         if self._untrusted:
             marker = (UNTRUSTED_PAGE_OFFLOAD_MARK if self._page_navigation
                       else UNTRUSTED_OFFLOAD_MARK)
