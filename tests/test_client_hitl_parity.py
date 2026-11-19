@@ -104,7 +104,7 @@ def test_stale_egress_card_cannot_approve_recreated_same_destination(parity):
     assert store.get(original.key).state == "pending" and callbacks == []
 
 
-def test_independent_pending_requests_dispatch_only_after_last_decision(parity):
+def test_independent_pending_requests_dispatch_each_decision(parity):
     client, store, _, callbacks = parity
     request(store, "one.example.test")
     request(store, "two.example.test")
@@ -113,7 +113,7 @@ def test_independent_pending_requests_dispatch_only_after_last_decision(parity):
         response = client.post(BASE + "/approval", headers=HEADERS, json={
             "kind": "egress", "token": proposal["token"], "decision": "decline"})
         assert response.status_code == 200
-        assert len(callbacks) == (0 if index == 0 else 2)
+        assert len(callbacks) == 2 * (index + 1)
 
 
 def test_geo_proposal_is_discoverable_on_ready_thread(parity, tmp_path, monkeypatch):
@@ -175,6 +175,21 @@ def sqlite_reply(parity, tmp_path, monkeypatch, request):
         yield client, runs, owner, effects, graph, config
     finally:
         connection.close()
+
+
+def test_egress_notification_cannot_replace_an_exact_pending_reply(sqlite_reply, parity, monkeypatch):
+    _client, runs, owner, effects, graph, config = sqlite_reply
+    _client, store, _runs, _callbacks = parity
+    rec = request(store)
+    store.resolve(rec.key, "hour")
+    threads._dispatch_egress_resolution("parity-thread")
+    event, = [run for run in runs.list("parity-thread") if run.origin == "egress"]
+    before = graph.get_state(config)
+    threads._execute_run(event.id, "parity-thread")
+    after = graph.get_state(config)
+    assert runs.get("parity-thread", event.id).status == "pending"
+    assert runs.get("parity-thread", owner.id).status == "awaiting_approval"
+    assert effects == [] and before.config == after.config and before.values == after.values
 
 
 @pytest.mark.parametrize("decision", ["approve", "reject", "edit"])
@@ -354,15 +369,15 @@ def test_geo_replacement_and_decline_preserve_exact_origin(download):
     assert props.get(original.slug) is None and jobs == []
 
 
-def test_delayed_egress_batch_cannot_skip_a_new_pending_card(parity):
+def test_delayed_egress_resolution_is_not_blocked_by_a_new_pending_card(parity):
     _, store, _, _ = parity
     first = request(store)
     store.resolve(first.key, "hour")
     second = request(store, "next.example.test")
-    assert store.take_undispatched("parity-thread") == []
-    assert not store.get(first.key).dispatched
+    assert [rec.key for rec in store.take_undispatched("parity-thread")] == [first.key]
+    assert store.get(first.key).dispatched
     store.resolve(second.key, "decline")
-    assert len(store.take_undispatched("parity-thread")) == 2
+    assert len(store.take_undispatched("parity-thread")) == 1
     assert store.take_undispatched("parity-thread") == []
 
 

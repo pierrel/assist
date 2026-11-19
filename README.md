@@ -279,9 +279,8 @@ Snapshot reads and background probes do not clear notifications.
   Available tools are files, terminal, skills, memory and helpers. When egress
   approvals are configured, native tools can list destinations, request one or
   up to three exact host/port grants, and revoke a thread grant. Requests use the
-  existing browser and phone-API approval cards. **Deployment of native egress
-  is held** pending runtime verification of the control-service boundary and
-  safe migration of the existing ordinary Docker network. Agent proxy and host
+  existing browser and phone-API approval cards. Managed native execution uses
+  the existing internal ordinary Docker network. Agent proxy and host
   HTML/PDF connections now permanently deny the configured Assist port on
   non-public addresses, and the configured `ASSIST_BASE_URL` origin and its
   resolved addresses. Base allowances and thread grants cannot override this.
@@ -290,9 +289,11 @@ Snapshot reads and background probes do not clear notifications.
   Public services on the same port, docs on their existing ports and the private
   model relay remain usable. This is destination isolation; review tokens do
   not provide separate human authentication. Unconfigured public forwards are
-  outside the known-origin inventory. No live self-approval exploit is claimed. Once every pending card
-  is resolved through the decision surface, one host-created Hermes follow-up
-  carries the recorded task and decisions. Native helpers share their parent
+  outside the known-origin inventory. No live self-approval exploit is claimed. Each resolved network card
+  creates one durable host notification independently of unrelated pending cards.
+  Eligible active Hermes work consumes it after its current tool batch; otherwise
+  the same notification remains queued for a later turn. Recorded task text is
+  context rather than new user authority. Native helpers share their parent
   thread's cards; they finish rather than waiting on a Deep Agents checkpoint.
   Grants are thread scoped and may be used by later turns of that thread.
   Internal host-model access remains unavailable. Native browser, web search and
@@ -846,9 +847,15 @@ legacy worker path.
 
 Network review tokens bind the exact request generation and reasons. Resolving
 or revoking compares that binding under the existing store lock; adding another
-waiter does not change the grant scope. Main resolution and child resumes wait
-for the pending set to empty. Existing egress announcement delivery remains
-at-most-once across a crash, rather than a durable exactly-once effect promise.
+waiter does not change the grant scope. Each resolved main request admits a
+host-origin Run before marking that request generation dispatched. Its stable
+dispatch key prevents duplicate Runs after a lost acknowledgment or restart.
+Eligible Deep Agents and Hermes main work receive it after the current tool
+batch through their existing durable intake; unread notifications remain queued.
+The notification has no direct-user admission sequence and grants no authority.
+A child resumes once all cards attached to that exact parked Run resolve;
+unrelated thread cards do not block it. Declines remain declines on resume.
+Pending mail/reply actions retain their exact approval and checkpoint binding.
 
 Download admission and proposal publication share the existing proposal lock.
 The registry records the admitted proposal identity, so failure replay cannot

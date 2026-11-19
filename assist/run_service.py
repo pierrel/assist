@@ -542,8 +542,11 @@ class RunService(PerThreadJsonStore[Run]):
             user_event_id = rid
         if revocation_pending and not user_origin:
             raise ValueError("only a direct owner event can await browser revocation")
-        if interjection_work_id is not None and (not user_origin or revocation_pending):
-            raise ValueError("only a pending direct owner event can steer active work")
+        host_decision = (origin == "egress" and mode == "turn" and sender is None
+                         and not resume and resume_decision is None
+                         and text is not None and user_event_id is None)
+        if interjection_work_id is not None and (not (user_origin or host_decision) or revocation_pending):
+            raise ValueError("only a pending owner message or host egress decision can steer active work")
         now = _now()
         run = Run(
             thread_id=thread_id, assistant_id=assistant_id, text=text, id=rid,

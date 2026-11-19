@@ -16,6 +16,7 @@ from langchain.messages import AIMessage, HumanMessage
 
 CONTINUATION_RIDER = "[Continuing my earlier work — background follow-up] "
 TASK_COMPLETION_RIDER = "[Background task finished] "
+EGRESS_DECISION_RIDER = "[Host network decision] "
 INTERJECTION_FRAME = "[Mid-turn message from the user — sent while you were working] "
 INTERJECTION_GUIDE = (
     "\n\n(This message arrived mid-turn. The user's latest word wins: if it "
@@ -62,6 +63,8 @@ def visible_user_source_kind(message: Mapping[str, object]) -> str | None:
         return "continuation"
     if text.startswith(TASK_COMPLETION_RIDER):
         return "task"
+    if text.startswith(EGRESS_DECISION_RIDER):
+        return "egress"
     if text.startswith(INTERJECTION_FRAME):
         return "interjection"
     return "user"
@@ -91,6 +94,8 @@ def visible_records(raw: Iterable[object]) -> list[VisibleRecord]:
                 add("assistant", text[len(CONTINUATION_RIDER):], "continuation", False)
             elif text.startswith(TASK_COMPLETION_RIDER):
                 add("assistant", text[len(TASK_COMPLETION_RIDER):], "task", False)
+            elif text.startswith(EGRESS_DECISION_RIDER):
+                add("assistant", text[len(EGRESS_DECISION_RIDER):], "egress", False)
             elif text.startswith(INTERJECTION_FRAME):
                 add("user", _interjection_text(text), "interjection", True)
             else:
@@ -123,6 +128,8 @@ def visible_records_from_dicts(
             role, text, kind, eligible = "assistant", text[len(CONTINUATION_RIDER):], "continuation", False
         elif user_kind == "task":
             role, text, kind, eligible = "assistant", text[len(TASK_COMPLETION_RIDER):], "task", False
+        elif user_kind == "egress":
+            role, text, kind, eligible = "assistant", text[len(EGRESS_DECISION_RIDER):], "egress", False
         elif user_kind == "interjection":
             text, kind, eligible = _interjection_text(text), "interjection", True
         elif role == "assistant":

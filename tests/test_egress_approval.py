@@ -301,7 +301,7 @@ def test_main_request_joining_child_card_keeps_main_resolution(tmp_path, monkeyp
     assert "fetch the public API" not in resolution_prompt(batch)
 
 
-def test_resolved_waiters_wait_for_the_thread_card_batch(tmp_path):
+def test_resolved_waiter_ignores_unrelated_thread_card(tmp_path):
     st = _store(tmp_path)
     waiter = EgressWaiter("sub-research", "run-123")
     first = request_key("parent", "a.example.com", 443)
@@ -312,7 +312,7 @@ def test_resolved_waiters_wait_for_the_thread_card_batch(tmp_path):
         host="b.example.com", port=443, task="second", origin_tid="parent"))
 
     st.resolve(first, "hour")
-    assert st.resolved_waiters("parent") == []
+    assert st.resolved_waiters("parent") == [waiter]
     st.resolve(request_key("parent", "b.example.com", 443), "decline")
     assert st.resolved_waiters("parent") == [waiter]
 
@@ -748,8 +748,8 @@ def wired_web(tmp_path, monkeypatch):
     monkeypatch.setattr(egress_routes, "EGRESS_STORE", st)
     monkeypatch.setattr(threads_mod, "EGRESS_STORE", st)
     dispatched = []
-    monkeypatch.setattr(threads_mod, "_scheduled_dispatch",
-                        lambda t, prompt, tz: dispatched.append((t, prompt)))
+    monkeypatch.setattr(threads_mod, "_dispatch_pending_after",
+                        lambda t: dispatched.append((t, threads_mod._runs().list(t)[-1].text)))
     monkeypatch.setattr(threads_mod, "_mark_urgent", lambda t: None)
     return st, tid, dispatched
 
@@ -763,7 +763,7 @@ def test_routes_404_when_unconfigured():
     assert TestClient(web.app).get("/egress").status_code == 404
 
 
-def test_approve_batch_dispatches_once(wired_web, monkeypatch):
+def test_each_resolved_request_dispatches_without_waiting_for_other_cards(wired_web, monkeypatch):
     from fastapi.testclient import TestClient
     from manage import web
     from manage.web import egress as egress_routes
@@ -778,16 +778,18 @@ def test_approve_batch_dispatches_once(wired_web, monkeypatch):
                                      "redirect": f"/thread/{tid}"},
                follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"] == f"/thread/{tid}"
-    assert dispatched == []                     # b still pending — no dispatch
+    assert len(dispatched) == 1
+    assert "a.example.com:443 APPROVED" in dispatched[0][1]
+    assert "b.example.com" not in dispatched[0][1]
     c.post("/egress/decline", data={"token": tok, "tid": tid,
                                     "review": next(p["token"] for p in egress_routes.approval_previews(tid)
                                                    if p["host"] == "b.example.com"),
                                     "host": "b.example.com", "port": "443"},
            follow_redirects=False)
-    assert len(dispatched) == 1                 # pending set emptied → ONE turn
-    _, prompt = dispatched[0]
-    assert "a.example.com:443 APPROVED" in prompt and "task A" in prompt
-    assert "b.example.com:443 DECLINED" in prompt
+    assert len(dispatched) == 2
+    assert "task A" in dispatched[0][1]
+    assert "b.example.com:443 DECLINED" in dispatched[1][1]
+    assert "a.example.com" not in dispatched[1][1]
 
 
 def test_approve_requires_csrf_and_live_thread(wired_web):

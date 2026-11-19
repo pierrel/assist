@@ -1987,9 +1987,13 @@ def _consume_interjections(tid: str, ids: set) -> None:
 
 
 def _frame_interjection(rec: "PendingMessage") -> str:
-    """Build the injected message: frame + the user's text + the behavioral
-    guidance.  A user message never cancels outstanding work implicitly; the
-    main agent inspects and manages its durable tasks after receiving it."""
+    """Keep host decisions distinct from user steering and its guidance.
+
+    User messages do not implicitly cancel durable work. Host decisions are
+    already framed when journaled, so idle and boundary delivery agree.
+    """
+    if rec.origin == "egress":
+        return rec.text
     guide = _INTERJECTION_GUIDE
     if rec.sender is None:
         guide += (" Review your outstanding subagent tasks with list_async_tasks, "
@@ -2050,7 +2054,8 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
             fresh = _create_run(
                 rec.thread_id, rec.text,
                 rider=_rider_from_fields(rec.rider), sender=rec.sender,
-                user_origin=rec.sender is None,
+                origin=rec.origin,
+                user_origin=rec.sender is None and rec.origin is None,
                 interjection_work_id=source.work_id if rec.sender is None else None)
             # The retried turn keeps the ORIGINAL message's context rider
             # (sent_at/tz/lat/lon from the journal entry — recovery fidelity,
@@ -2086,6 +2091,8 @@ def _pending_run_records(tid: str) -> list[PendingMessage]:
         for run in eligible
         if (run.status == "pending" and run.mode == "turn" and run.text
             and run.review_snapshot is None
+            and (run.origin != "egress" or
+                 owner is not None and run.interjection_work_id == owner.work_id)
             and (run.interjection_work_id is None
                  or (owner is not None and run.interjection_work_id == owner.work_id))
             and run.assistant_id == "general-agent")]
@@ -3233,13 +3240,18 @@ def _hermes_steering(run: Run, consumed=()) -> list[dict]:
         browser_authority.execution_sequence(runs, run.id)
         eligible = [item for item in _runs_before_browser_reset(runs)
                     if item.status == "pending" and item.interjection_work_id == run.work_id
-                    and item.sender is None and item.origin is None and item.user_event_id == item.id
+                    and item.sender is None
+                    and (item.origin is None and item.user_event_id == item.id
+                         or item.origin == "egress" and item.user_event_id is None)
                     and item.mode == "turn" and item.assistant_id == "general-agent"
                     and item.text and item.review_snapshot is None and item.approval_id is None]
         for item in eligible:
             if item.id in consumed:
                 _runs().transition(run.thread_id, item.id, "success", consumed_by=run.id)
-        return [{"id": item.id, "text": frame_hermes_steering(item)} for item in eligible
+        return [{"id": item.id, "text": frame_hermes_steering(item)
+                 if item.origin is None else
+                 f"[Assist follow-up id={item.id}]\n{_frame_interjection(item)}"}
+                for item in eligible
                 if item.id not in consumed]
 
 
@@ -3956,7 +3968,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 _TURN_INTERJECTION[tid] = {
                     "claimed": [],
                     "run_id": _run.id if _run is not None else None}
-            if origin == "continuation" and not resume and resume_decision is None:
+            if origin in {"continuation", "egress"} and not resume and resume_decision is None:
                 # A HITL action awaiting approval must keep its interrupted graph
                 # intact. A continuation must never supersede that action or run on the
                 # interrupted graph (langgraph would drop its message). Return
@@ -5171,6 +5183,31 @@ class _EmailApprovalPending(Exception):
     """A web submission tried to bypass a displayed outbound-send or mailbox approval."""
 
 
+def _steering_owner(tid: str, previous: list[Run], held, session, prior_stage):
+    """Select eligible main work under the admission lock and browser fence."""
+    if read_thread_engine(MANAGER.thread_dir(tid)).name not in {"deepagents", "hermes"}:
+        return None
+    active = next((item for item in reversed(previous)
+                   if (item.status == "running" or
+                       (item.status == "pending" and item.resume
+                        and any(prior.work_id == item.work_id and prior.status == "interrupted"
+                                for prior in previous)))), None)
+    if active is None:
+        return None
+    try:
+        browser_authority.execution_sequence(previous, active.id)
+    except RuntimeError:
+        return None
+    if (not held and active.mode == "turn" and active.assistant_id == "general-agent"
+            and active.sender is None and active.approval_id is None
+            and prior_stage != "awaiting_approval" and _runs().pending_approval(tid) is None
+            and (session is None or (session.work_id == active.work_id
+                 and not session.closed and not session.human_requested
+                 and not session.human_active))):
+        return active
+    return None
+
+
 def _accept_message_run_locked(tid: str, text: str, rider=None,
                                location: LocationSnapshot | None = None,
                                dispatch_key: str | None = None,
@@ -5213,25 +5250,8 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
         # Dispatch will make the existing invalid-engine error durable; title
         # best-effort must not change message-admission semantics.
         pass
-    active = next((item for item in reversed(previous)
-                   if (item.status == "running" or
-                        (item.status == "pending" and item.resume
-                         and any(prior.work_id == item.work_id
-                                 and prior.status == "interrupted" for prior in previous)))), None)
-    if active is not None:
-        try:
-            browser_authority.execution_sequence(previous, active.id)
-        except RuntimeError:
-            active = None
-    steering = (active is not None and steering_engine and not held
-                and active.mode == "turn" and active.assistant_id == "general-agent"
-                and active.sender is None and active.approval_id is None
-                and prior_stage != "awaiting_approval"
-                and _runs().pending_approval(tid) is None
-                and review_snapshot is None
-                and (session is None or (session.work_id == active.work_id
-                     and not session.closed and not session.human_requested
-                     and not session.human_active)))
+    active = _steering_owner(tid, previous, held, session, prior_stage) if steering_engine else None
+    steering = active is not None and review_snapshot is None
     run = _create_run(tid, text, rider=rider, location=location,
                       run_id=run_id, work_id=work_id,
                       dispatch_key=dispatch_key,
@@ -5905,30 +5925,28 @@ def _evict_egress(tid: str) -> None:
 
 
 def _dispatch_egress_resolution(tid: str) -> None:
-    """One resolution turn once a thread's pending egress requests have ALL
-    been resolved (last approve or decline) — not per-approval, so the user
-    can approve A and B before a single retry burns the slot. The prompt
-    enumerates the thread's grants and declines with the agent's own recorded
-    task text (self-injection at continuation trust, the geo completion-turn
-    shape). Runs as a post-response BackgroundTask on a threadpool thread
-    (the reply_decision precedent) — never the event loop, and never where
-    the HTTP response waits."""
+    """Journal each resolved decision before acknowledging notification delivery.
+
+    Eligible active work consumes the host event at its existing safe boundary;
+    otherwise the same Run is queued. Request-generation dispatch keys survive
+    a crash between Run admission and the store acknowledgment.
+    """
     if EGRESS_STORE is None:
         return
-    # take_undispatched: exactly THIS batch's resolutions, never re-announcing
-    # an old decline or re-running a long-lived grant's task on later batches.
-    prompt = resolution_prompt(EGRESS_STORE.take_undispatched(tid))
-    if prompt is None:
-        return
-    if read_thread_engine(MANAGER.thread_dir(tid)).name == "hermes":
-        # A resolved egress batch admits one native follow-up,
-        # not native scheduling or replay of the invocation that requested it.
-        with _RUN_ADMISSION_LOCK:
-            _create_run(tid, prompt, origin="egress")
+    for rec in EGRESS_STORE.undispatched(tid):
+        prompt = resolution_prompt([rec])
+        dispatch_key = "egress:" + hashlib.sha256(json.dumps(rec.review_identity).encode()).hexdigest()
+        with browser_authority.fence(MANAGER.root_dir, tid):
+            with _RUN_ADMISSION_LOCK:
+                previous = _runs().list(tid)
+                owner = _steering_owner(tid, previous,
+                    [item for item in previous if browser_reset_owed(item)],
+                    BrowserManager.current_session(tid), _get_status(tid).get("stage"))
+                _create_run(tid, prompt, origin="egress", dispatch_key=dispatch_key,
+                            interjection_work_id=owner.work_id if owner else None)
+        EGRESS_STORE.mark_dispatched(rec)
         _dispatch_pending_after(tid)
-    else:
-        _scheduled_dispatch(tid, prompt, _GEO_TZ)
-    _mark_urgent(tid)
+        _mark_urgent(tid)
 
 
 def _resume_egress_waiters(tid: str) -> None:
@@ -6268,6 +6286,7 @@ def queue_recovery_runs() -> None:
             _complete_child_handoff(child)
 
     for tid in visible:
+        _dispatch_egress_resolution(tid)
         _resume_egress_waiters(tid)
 
     for tid in visible:

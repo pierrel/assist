@@ -445,8 +445,8 @@ their explicit summary handoff creates an independent Deep Agents thread.
   Supported native egress tools use this same private transport with host-bound
   thread identity and independent admission checks. C8's existing EgressStore,
   approval cards and proxy projection own requests and thread-scoped grants;
-  the new egress tool/RPC cannot approve access. Native egress deployment remains held
-  pending runtime verification and safe ordinary-network migration. The
+  the egress tool/RPC cannot approve access. Managed native execution uses
+  the internal ordinary network. The
   control-service denial covers the configured local port on non-public
   addresses and ASSIST_BASE_URL's origin/resolved addresses; it does not add
   human authentication or discover unmanaged public forwards. An accepted host egress operation participates in cooperative
@@ -470,8 +470,14 @@ their explicit summary handoff creates an independent Deep Agents thread.
   reads those same rows, including compression-archived rows, before a
   targeted queued fallback can execute after a lost acknowledgment. No
   separate queue, receipt store or native model loop is introduced.
-  No native worker starts another Run. Resolved egress cards may enqueue one
-  host-owned native follow-up through C4; native helpers share the parent thread's
+  No native worker starts another Run. Each resolved main egress card admits one
+  host-origin Run under a request-generation dispatch key before C8 acknowledges
+  delivery. It reuses C3's logical target and the existing Deep/native intake
+  when current work is eligible; otherwise C4 keeps its durable fallback. No
+  direct-user sequence is minted. Startup repairs either admission/ack crash
+  window without duplicating a Run. Child resumes wait only for their exact
+  attached request set, preserving grouped dependencies and declines. Unrelated
+  pending cards do not hold notifications or ready children. Native helpers share the parent thread's
   cards and do not use Deep Agents checkpoints. Browser/search/interactive command approval
   transports are not enabled; native unattended command approval denies a
   gated operation instead of waiting on an invisible prompt.

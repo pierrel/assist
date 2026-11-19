@@ -1,59 +1,22 @@
-"""Mid-turn interjection — deliver journaled user messages to the RUNNING turn.
+"""Deliver journaled messages at the running Deep turn's model boundary.
 
-An ordinary owner follow-up to active DeepAgents work lands as ``pending``
-with a host-assigned ``interjection_work_id``. That target preserves the active
-browser's execution authority through startup, tool completion and fairness
-resumes; ``consumed_by`` is still written only after checkpoint delivery.
-If their target finishes first, unconsumed siblings keep journal order as
-separate fallback executions, without becoming one another's replacement.
-Further steering during a fallback also keeps its own position and target;
-it does not revoke older queued fallback work.
-Human-controlled and approval-paused work retain their existing admission
-contracts. A genuine replacement still waits as ``revocation_pending`` until
-the old browser is confirmed safe; explicit cancellation keeps its reset receipt.
-This middleware's ``before_model`` hook reads the pending run projection at every
-main-loop model-call boundary and, when unconsumed eligible
-entries exist, appends them to graph state as individually framed
-``HumanMessage``s — the model's very next call sees them and chooses redirect /
-incorporate / defer / stop in its own voice (the four outcomes are DESCRIPTIVE,
-never an interface; docs/2026-07-20-mid-turn-interjection-design.org).
+The web adapter scopes owner follow-ups and host egress decisions to their
+logical-work target, preserving browser execution authority through tool
+completion and fairness. Ordinary matching-sender messages retain their existing
+scope; a host event can enter only an owner turn. Scheduled continuations stay
+separate work. Framing distinguishes user intent from a host decision and its
+untrusted recorded task; notification does not grant permissions.
 
-This is a DELIVERY CHANNEL, not a behavior guard: no prompt can make the model
-see a message that is not in its context (the guidance-first rule's "provably
-can't" case). Everything behavioral lives in the injected framing.
+Before-model delivery follows completed tool results. Injection carries each
+Run ID but does not claim it until a subsequent checkpoint contains that ID.
+The terminal sweep covers a last injection with no later model boundary. Claimed
+Runs cannot execute again as queued fallback. Unread entries keep FIFO fallback;
+terminal-error retries preserve origin and logical target. Checkpoint kwargs
+must remain available to collect_interjection_ids, including after summaries.
 
-Mechanics (all verified empirically at design time):
-- ``before_model`` ONLY: at that boundary every prior tool call has its
-  ToolMessage in state, so the appended user message lands after complete
-  AI/Tool pairs — a sequence the live Qwen template accepts and honors.
-- CLAIM IS DEFERRED: the hook never claims what it just injected — the message
-  is only in memory until its superstep checkpoint commits. It claims entry
-  ids found in messages ALREADY IN STATE (a prior superstep ⇒ durably
-  checkpointed), via ``additional_kwargs["interjection_ids"]``; a second sweep
-  runs at the turn's terminal exits. The shipped entry-gone gate then makes the
-  queued fallback dispatcher skip a terminalized entry — exactly-once, no new
-  dedup machinery. An entry the turn never consumes runs as today's follow-up
-  turn: nothing is ever lost.
-- SCOPING is two gates: ``entry.origin is None`` (a user follow-up — an
-  agent-scheduled continuation entry is work, not steering) and
-  ``entry.sender == turn sender`` — the security posture: an untrusted SMS
-  entry can never enter a full-privilege owner turn, an owner entry never
-  lands inside a reply-to-stranger triage context, and owner entries
-  naturally steer scheduled/continuation turns.
-- CLAIM-SCAN INVARIANT (Pierre, PR #199): the journal id must be recoverable
-  from the durable checkpoint at every claim site. This assumes message
-  history is NON-MUTATING for kwargs: deepagents' summarization is (it
-  summarizes via wrap_model_call without rewriting state); langchain's own
-  SummarizationMiddleware rewrites history with RemoveMessage and would break
-  the scan — do not swap it in without redesigning the claim.
-
-Wired like ContextRider/notify: callbacks injected by the web layer
-(``register_interjection_callbacks``); unregistered (CLI/emacsos/evals/
-subagents) ⇒ inert by construction. The web layer owns the framing text (which
-for an owner entry also enumerates + snapshots the pending continuations), the
-claim side effects (clearing the snapshotted continuations — deferred to claim
-so the clear is fate-shared with the message's durability), and the turn-scoped
-claim tracking that feeds its fate-sharing re-journal on terminal error.
+The web embedder registers peek, consume and frame callbacks. Without callbacks
+this middleware is inert. Durable journal, browser admission and native Hermes
+receipt handling remain owned by their existing components.
 """
 from __future__ import annotations
 
@@ -127,7 +90,8 @@ class InterjectionMiddleware(AgentMiddleware):
             # 2. INJECT unconsumed, sender-eligible entries not already in state.
             sender = _turn_sender(runtime)
             pending = [r for r in _CALLBACKS["peek"](tid)
-                       if r.origin is None and r.sender == sender
+                       if (r.origin is None or r.origin == "egress" and sender is None)
+                       and r.sender == sender
                        and r.id not in in_state]
             if not pending:
                 return None
