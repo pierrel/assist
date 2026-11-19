@@ -11,6 +11,8 @@ import pytest
 
 from assist.hermes_provider_relay import HermesProviderRelay, HermesRelayError
 from assist.hermes_steering import committed_receipts
+from assist.hermes_runtime import HermesRuntimeManager
+from assist.thread_queue import ThreadAffinityQueue
 from manage.web import threads
 from tests.test_web_hermes import hermes_threads
 
@@ -90,6 +92,33 @@ def test_missing_native_state_keeps_queued_fallback(hermes_threads):
     tid, _owner, followers = owner_and_followers(hermes_threads, count=1)
     threads._reconcile_hermes_steering(tid)
     assert threads._runs().get(tid, followers[0].id).status == "pending"
+
+
+def test_unconsumed_followup_executes_once_through_real_run_dispatch(hermes_threads, monkeypatch):
+    hermes_threads.set_enabled(True)
+    tid, owner, followers = owner_and_followers(hermes_threads, count=1)
+    threads._runs().transition(tid, owner.id, "success", result="Original work finished")
+    calls = []
+    runtime = HermesRuntimeManager()
+    def native(run, **_kwargs):
+        calls.append(run.id)
+        return "Queued follow-up completed"
+    monkeypatch.setattr(runtime, "run_slice", native)
+    monkeypatch.setattr(threads, "_HERMES_RUNTIME", runtime)
+    monkeypatch.setattr(threads, "THREAD_QUEUE", ThreadAffinityQueue())
+    threads._execute_run(followers[0].id, tid)
+    threads._execute_run(followers[0].id, tid)
+    result = threads._runs().get(tid, followers[0].id)
+    assert calls == [followers[0].id]
+    assert result.status == "success" and result.consumed_by is None
+    assert result.result == "Queued follow-up completed"
+
+
+def test_no_active_owner_creates_an_ordinary_queued_turn(hermes_threads):
+    tid = threads.MANAGER.reserve_visible("hermes")
+    threads._create_empty_pi_workspace(tid)
+    run, _busy = threads._accept_message_run(tid, "Create a note")
+    assert run.interjection_work_id is None and run.status == "pending"
 
 
 def test_unreadable_native_receipt_is_visible_without_replay(hermes_threads, monkeypatch):
