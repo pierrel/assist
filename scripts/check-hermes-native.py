@@ -241,6 +241,7 @@ if not any(route.path.startswith('/api/v1/phone') for route in threads.app.route
 threads.DOMAINS=[];state.DOMAINS=[]
 client=TestClient(threads.app)
 signal.signal(signal.SIGTERM, lambda *_args: sys.exit(124))
+egress_submission=None
 try:
     response=client.post('/threads',data={'engine':'hermes'},follow_redirects=False)
     assert response.status_code==303,response.text
@@ -300,8 +301,14 @@ try:
     from assist.egress.store import EgressRequest
     from datetime import datetime,timezone
     a_done.clear()
-    requested=client.post(f'/thread/{A}/message',data={'text':EGRESS_PROMPT},follow_redirects=False)
-    assert requested.status_code==303
+    egress_responses=[]
+    def egress_request():
+        try:
+            egress_responses.append(client.post(f'/thread/{A}/message',data={'text':EGRESS_PROMPT},follow_redirects=False))
+        except BaseException as error:
+            errors.append(repr(error))
+    egress_submission=threading.Thread(target=egress_request,daemon=True)
+    egress_submission.start()
     deadline=time.monotonic()+30
     while not (WORK/'egress-tool-started').exists() and not a_done.is_set() and time.monotonic()<deadline:time.sleep(.02)
     assert (WORK/'egress-tool-started').exists() and not a_done.is_set()
@@ -325,6 +332,8 @@ try:
     assert len([r for r in threads._runs().list(A) if r.origin=='egress' and r.status=='pending'])==2
     (WORK/'egress-go').write_text('finish')
     assert a_done.wait(30)
+    egress_submission.join(10);assert not egress_submission.is_alive()
+    assert len(egress_responses)==1 and egress_responses[0].status_code==303
     assert (WORK/'egress-note.txt').read_text()=='Approved follow-up ran once.\n'
     assert len([c for c in write_calls if c['path']=='/workspace/egress-note.txt'])==1
     decisions=[r for r in threads._runs().list(A) if r.origin=='egress']
@@ -340,6 +349,9 @@ finally:
     for tid in (A,B,C):
         try:threads._HERMES_RUNTIME.stop(tid)
         except Exception as error:errors.append(repr(error))
+    if egress_submission is not None:
+        egress_submission.join(5)
+        if egress_submission.is_alive():errors.append('Owned egress request thread did not finish after native stop')
     provider.shutdown();client.close()
     (ROOT/'errors.json').write_text(json.dumps(errors,indent=2))
     assert not errors, errors
