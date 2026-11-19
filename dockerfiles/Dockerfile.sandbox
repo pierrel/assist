@@ -30,6 +30,7 @@ RUN python -m venv /opt/assist-browser && \
       /opt/assist-browser/bin/python -m playwright install --only-shell chromium && \
     groupadd -g 10001 browser && useradd -u 10001 -g 10001 -M browser
 COPY assist/browser/runner.py /opt/assist/browser_runner.py
+COPY assist/browser/redaction.py /opt/assist/browser_redaction.py
 COPY dockerfiles/install-browser-fence.py /opt/assist/install-browser-fence.py
 COPY dockerfiles/launch-turn-browser.py /opt/assist/launch-turn-browser.py
 

@@ -204,7 +204,9 @@ def test_viewer_pixels_cross_private_transport_without_widening_agent_results(tm
 @pytest.mark.parametrize('state',['empty','closed','remaining','transport'])
 def test_handback_discovers_current_pages_without_admitting_stale_effects(controlled,monkeypatch,state):
     _root,_runs,_owner,_successor,session,_stopped=controlled
-    pages=[] if state in {'empty','closed'} else [{'page_id':'current','url':'https://example.test/'}]
+    password='synthetic-dom-only-pass-8642'
+    pages=[] if state in {'empty','closed'} else [{'page_id':'current','url':'https://example.test/?echo='+password}]
+    public_pages=[{'page_id':page['page_id']} for page in pages]
     effects=[]
     def transport(_generation,payload,**_kwargs):
         command=json.loads(payload)
@@ -231,12 +233,18 @@ def test_handback_discovers_current_pages_without_admitting_stale_effects(contro
     if state=='closed':
         assert session.command('observe',page_id='gone')['result']['pages']==[]
     else:
-        assert session.command('open',url='https://example.test/')['pages']==pages
+        handoff=session.command('open',url='https://example.test/')
+        assert handoff['pages']==public_pages
+        assert password not in json.dumps(handoff)
     assert 'error' in session.command('open',url='https://example.test/')
     if state=='remaining':
         session.model_boundary()
         assert session.needs_observation
-        assert session.command('observe',page_id='gone')['pages']==pages
+        handoff=session.command('observe',page_id='gone')
+        assert handoff['pages']==public_pages
+        assert password not in json.dumps(handoff)
+        model_observe={tool.__name__:tool for tool in browser.browser_tools(session)}['browser_observe']
+        assert password not in model_observe('gone')
         assert session.command('observe',page_id='current')['result']['snapshot']=='Current human page'
         assert 'error' in session.command('open',url='https://example.test/')
     session.model_boundary()

@@ -22,6 +22,9 @@ from urllib.parse import urlencode, urlsplit
 from uuid import uuid4
 
 from assist.browser import authority
+from assist.browser.redaction import (MAX_PRIVATE_COMMAND,
+                                      contains_hidden as _contains_hidden,
+                                      replace_hidden as _replace_hidden)
 from assist.egress.client_map import (
     ClientRecord, browser_records, configured_directory, disarm_sandbox_browser,
     forget_client, prune_absent_browser_clients)
@@ -32,8 +35,6 @@ from assist.run_service import RunService
 
 logger = logging.getLogger(__name__)
 MAX_DOWNLOAD = 20 * 1024 * 1024
-
-
 class BrowserUnavailable(Exception):
     pass
 
@@ -401,10 +402,16 @@ class BrowserSession:
             if now - self._viewer_at < 0.05:
                 raise BrowserUnavailable("viewer is busy; wait before another request")
             self._viewer_at = now
-            payload = json.dumps({"session": self.token, "operation": "viewer",
-                                  "args": {"action": action, **args}}).encode()
-            if len(payload) > 12000:
+            public = {"session": self.token, "operation": "viewer",
+                      "args": {"action": action, **args}}
+            if len(json.dumps(public).encode()) > 12000:
                 raise BrowserUnavailable("viewer input exceeds limit")
+            hidden = _private_values(_secret_store(self))
+            if hidden is None:
+                raise BrowserUnavailable("unlock or repair this repository's secret store")
+            payload = json.dumps({**public, "private_values": hidden}).encode()
+            if len(payload) > MAX_PRIVATE_COMMAND:
+                raise BrowserUnavailable("browser private command exceeds limit")
             response = json.loads(_docker_exec(self.identity.generation, payload,
                 timeout=10, in_sandbox=True, limit=512 * 1024))
             return response
@@ -503,7 +510,7 @@ class BrowserSession:
                          limit=4096, timeout=10)
             self.paused = True
 
-    def command(self, operation: str, **args):
+    def command(self, operation: str, *, _private_values: tuple[str, ...] = (), **args):
         with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
             if self.human_active:
                 raise BrowserUnavailable("browser is controlled by its human viewer")
@@ -530,10 +537,13 @@ class BrowserSession:
             elif self.identity is None:
                 raise BrowserUnavailable("open a page first")
             identity = self.identity
-            command = json.dumps({"session": self.token, "operation": operation,
-                                  "args": args}, ensure_ascii=False).encode()
-            if len(command) > 32768:
+            public = {"session": self.token, "operation": operation, "args": args}
+            if len(json.dumps(public, ensure_ascii=False).encode()) > 32768:
                 raise BrowserUnavailable("browser command exceeds limit")
+            command = json.dumps({**public, "private_values": _private_values},
+                                 ensure_ascii=False).encode()
+            if len(command) > MAX_PRIVATE_COMMAND:
+                raise BrowserUnavailable("browser private command exceeds limit")
             try:
                 parsed = json.loads(_docker_exec(
                     identity.generation, command,
@@ -554,14 +564,14 @@ class BrowserSession:
                 raise
 
     def _handoff_pages(self):
-        """Read bounded worker metadata; transport failures never release the barrier."""
+        """Keep handback discovery limited to generated page IDs."""
         reply = json.loads(_docker_exec(self.identity.generation, json.dumps({
             "session": self.token, "operation": "viewer", "args": {"action": "tabs"}
         }).encode(), timeout=10, in_sandbox=True))
         pages = reply.get("result", {}).get("pages")
         if not isinstance(pages, list):
             raise BrowserUnavailable("current browser pages could not be observed")
-        return pages
+        return [{"page_id": page["page_id"]} for page in pages]
 
     def model_boundary(self):
         """Only a new model response after fresh observation can authorize effects."""
@@ -570,17 +580,22 @@ class BrowserSession:
                 self.needs_observation = False
                 self.handoff_observed = False
 
-    def save_download(self, download_id: str, filename: str | None = None):
+    def save_download(self, download_id: str, filename: str | None = None,
+                      hidden: tuple[str, ...] = ()):
         with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
-            return self._save_download_locked(download_id, filename)
+            return self._save_download_locked(download_id, filename, hidden)
 
-    def _save_download_locked(self, download_id: str, filename: str | None):
-        response = self.command("download_info", download_id=download_id)
+    def _save_download_locked(self, download_id: str, filename: str | None,
+                              hidden: tuple[str, ...] = ()):
+        response = self.command("download_info", _private_values=hidden,
+                                download_id=download_id)
         if "error" in response:
             return response
         info = response["result"]
         source = info["path"]
         name = filename or info["name"]
+        if isinstance(name, str) and _contains_hidden(name, hidden):
+            raise BrowserUnavailable("download name contains a private value")
         if (not isinstance(name, str) or not re.fullmatch(
                 r"[A-Za-z0-9][A-Za-z0-9._-]{0,179}", name)
                 or name.lower() in {"agents.md", "claude.md", "skill.md"}):
@@ -595,6 +610,10 @@ class BrowserSession:
             raise
         if len(data) != info["size"]:
             raise BrowserUnavailable("download byte count changed")
+        if (any(word.encode() in data for word in hidden)
+                or (b"%" in data or b"+" in data)
+                and _contains_hidden(data.decode("latin-1"), hidden)):
+            raise BrowserUnavailable("download contains a private value")
         downloads = os.path.join(self.work_dir, "downloads")
         try:
             os.mkdir(downloads, 0o700)
@@ -938,24 +957,66 @@ class BrowserManager:
                     state.mark_covered()
 
 
+def _secret_store(session):
+    from assist.secret_store import SecretStore
+
+    return SecretStore(getattr(session, "work_dir", os.path.join(
+        session.threads_root, session.thread_id, "domain")),
+                       os.path.join(session.threads_root, session.thread_id))
+
+
+def _private_values(store) -> tuple[str, ...] | None:
+    from assist.secret_store import SecretStoreError
+
+    try:
+        values = store.private_values()
+    except SecretStoreError as error:
+        return () if str(error) == "No secret store in this repository" else None
+    except FileNotFoundError:
+        return () if not os.path.isdir(store.repository) else None
+    except OSError:
+        return None
+    return tuple(sorted(set(values), key=len, reverse=True))
+
+
 def browser_tools(session: BrowserSession):
     """The web main sees typed operations, never Docker or general code execution."""
+    from assist.secret_store import SecretStoreError
+
+    store = _secret_store(session)
+
+    def scrub(value, hidden: tuple[str, ...]):
+        if isinstance(value, str):
+            return _replace_hidden(value, hidden)
+        if isinstance(value, list):
+            return [scrub(item, hidden) for item in value]
+        if isinstance(value, dict):
+            return {key: (item if key in {"page_id", "snapshot_id", "ref",
+                                         "download_id", "active_page_id",
+                                         "closed_page_id", "source_id"}
+                          else scrub(item, hidden)) for key, item in value.items()}
+        return value
+
     def invoke(operation, **args):
         try:
-            response = session.command(operation, **args)
+            hidden = _private_values(store)
+            if hidden is None:
+                return "Browser unavailable: unlock or repair this repository's secret store."
+            response = session.command(operation, _private_values=hidden, **args)
             observation = response.get("result") if isinstance(response, dict) else None
             if isinstance(observation, dict):
                 source_url = observation.pop("_source_url", None)
                 if (operation in {"open", "observe", "act", "wait"}
                         and isinstance(source_url, str)
+                        and not _contains_hidden(source_url, hidden)
                         and "navigation_failed" not in observation.get("observation_errors", [])):
                     from assist.thread_datastore import ThreadDataStore, register_source
-                    store = ThreadDataStore(os.path.join(
+                    datastore = ThreadDataStore(os.path.join(
                         session.threads_root, session.thread_id, "thread-data.sqlite"))
-                    source_id = register_source(store, source_url)
+                    source_id = register_source(datastore, source_url)
                     if source_id:
                         observation["source_id"] = f"ref:{source_id}"
-            return json.dumps(response, ensure_ascii=False)
+            return json.dumps(scrub(response, hidden), ensure_ascii=False)
         except BrowserUnavailable as error:
             return f"Browser unavailable: {error}"
         except Exception as error:
@@ -993,7 +1054,14 @@ def browser_tools(session: BrowserSession):
     def browser_save_download(download_id: str, filename: str = "") -> str:
         """Save one completed download under /workspace/downloads without replacing a file."""
         try:
-            return json.dumps(session.save_download(download_id, filename or None))
+            hidden = _private_values(store)
+            if hidden is None:
+                return "Download not saved: unlock or repair this repository's secret store."
+            saved = session.save_download(download_id, filename or None, hidden)
+            if isinstance(saved, dict) and set(saved) == {"path", "bytes"}:
+                # The host generated this path after validating the basename.
+                return json.dumps(saved)
+            return json.dumps(scrub(saved, hidden))
         except BrowserUnavailable as error:
             return f"Download not saved: {error}"
         except FileExistsError:
@@ -1002,5 +1070,43 @@ def browser_tools(session: BrowserSession):
             logger.warning("browser download failed: %s", type(error).__name__)
             return "Download not saved: browser transfer failed."
 
+    def browser_list_secrets() -> str:
+        """List this repository's opaque credential IDs and public login pages."""
+        try:
+            return json.dumps({"secrets": store.list_public(),
+                               "unlocked": bool(store.key())})
+        except SecretStoreError as error:
+            if str(error) == "No secret store in this repository":
+                return json.dumps({"secrets": [], "store_status": "not_created"})
+            if str(error) == "Unlock this repository in this thread":
+                return json.dumps({"secrets": store.list_public(), "unlocked": False})
+            return "Secret store unavailable."
+
+    def browser_request_secret(label: str, login_url: str) -> str:
+        """Offer a private client form for one public HTTPS login destination."""
+        try:
+            from assist.git_sync import GitSyncError, read_state
+            from manage.web import state
+            binding = read_state(str(store.thread_dir))
+            if binding is None or binding["source"] not in state.DOMAINS:
+                return "Private entry request unavailable: no configured repository."
+            request = store.request_input(label, login_url)
+            return json.dumps({"private_entry_requested": True, **request})
+        except (SecretStoreError, GitSyncError, OSError):
+            return "Private entry request unavailable."
+
+    def browser_fill_secret(page_id: str, snapshot_id: str, secret_id: str,
+                            password_ref: str, username_ref: str = "") -> str:
+        """Fill observed login fields with one opaque repo secret; never return its value."""
+        try:
+            secret = store.get(secret_id)
+            return invoke("fill_secret", page_id=page_id, snapshot_id=snapshot_id,
+                          login_page=secret["login_page"], username_ref=username_ref,
+                          password_ref=password_ref, username=secret["username"],
+                          password=secret["password"])
+        except SecretStoreError as error:
+            return str(error)
+
     return [browser_open, browser_close, browser_observe, browser_act,
-            browser_wait, browser_preflight, browser_save_download]
+            browser_wait, browser_preflight, browser_save_download,
+            browser_list_secrets, browser_request_secret, browser_fill_secret]
