@@ -11,7 +11,8 @@ Before-model delivery follows completed tool results. Injection carries each
 Run ID but does not claim it until a subsequent checkpoint contains that ID.
 The terminal sweep covers a last injection with no later model boundary. Claimed
 Runs cannot execute again as queued fallback. Unread entries keep FIFO fallback;
-terminal-error retries preserve origin and logical target. Checkpoint kwargs
+terminal-error retries preserve user intent and its logical target; delivered
+host facts are not retried as new intent. Checkpoint kwargs
 must remain available to collect_interjection_ids, including after summaries.
 
 The web embedder registers peek, consume and frame callbacks. Without callbacks
@@ -49,12 +50,8 @@ def collect_interjection_ids(msgs) -> set:
 # Set by the web layer at import time; None => middleware is inert.
 #   peek(tid) -> list of journal records (this hook runs on the turn's worker
 #                thread, so the locked read is fine)
-#   consume(tid, ids) -> None  (claim by id + turn-scoped claim tracking for
-#                               the web layer's error-exit re-journal + the
-#                               deferred continuation clear; idempotent)
-#   frame(record) -> str  (framing + message text; owner entries also
-#                          enumerate pending continuations and snapshot their
-#                          ids for the clear-at-claim)
+#   consume(tid, ids) -> None (idempotent durable claim and user-retry tracking)
+#   frame(record) -> str (distinct user-steering or host-decision framing)
 _CALLBACKS: dict[str, Callable] | None = None
 
 

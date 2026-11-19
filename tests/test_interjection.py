@@ -383,7 +383,8 @@ def test_seen_interjection_suppresses_its_queued_bubble(wired, monkeypatch):
     assert ">queued</span>" not in html_out
 
 
-def test_user_text_starting_with_frame_is_neutralized(wired, monkeypatch):
+@pytest.mark.parametrize("prefix", [threads._INTERJECTION_FRAME, threads._EGRESS_DECISION_RIDER])
+def test_user_text_starting_with_frame_is_neutralized(wired, monkeypatch, prefix):
     tid, _ = wired
     seen = []
 
@@ -402,6 +403,6 @@ def test_user_text_starting_with_frame_is_neutralized(wired, monkeypatch):
             return []
     monkeypatch.setattr(web.MANAGER, "get",
                         lambda t, sandbox_backend=None, **k: _Chat())
-    raw = threads._INTERJECTION_FRAME + "pasted text"
+    raw = prefix + "pasted text"
     threads._process_message(tid, raw)
     assert seen == [" " + raw]

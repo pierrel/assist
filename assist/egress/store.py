@@ -101,8 +101,8 @@ class EgressRequest:
     created_at: str = ""
     state: str = "pending"          # pending | approved | declined
     expires_at: str = ""            # ISO or REVOKED_ONLY when approved
-    # Acknowledged after this request generation has a durable notification
-    # Run. Other pending cards do not postpone its delivery.
+    # Acknowledged after a main notification Run or all child handoffs are
+    # durable. Other pending cards do not postpone its delivery.
     dispatched: bool = False
     # Legacy/main requests receive the existing resolution prompt. A child-only
     # request is resumed through its exact waiters instead; sending its task to
@@ -409,7 +409,7 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
                 self._mutate(records)
 
     def remove_waiter(self, tid: str, waiter: EgressWaiter) -> bool:
-        """Forget a waiter only after its durable successor was committed."""
+        """Forget a waiter after durable handoff or terminal waiter cleanup."""
         with self._lock:
             recs = self._load()
             changed = False

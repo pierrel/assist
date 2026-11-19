@@ -90,6 +90,7 @@ from assist.thread import Thread
 from assist.safe_markdown import render_markdown
 from assist.visible_conversation import (
     CONTINUATION_RIDER as _CONTINUATION_RIDER,
+    EGRESS_DECISION_RIDER as _EGRESS_DECISION_RIDER,
     INTERJECTION_FRAME as _INTERJECTION_FRAME,
     INTERJECTION_GUIDE as _INTERJECTION_GUIDE,
     TASK_COMPLETION_RIDER as _TASK_COMPLETION_RIDER,
@@ -2042,6 +2043,8 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
     A fresh id matches nothing stale; owner retries run as their own follow-ups.
     Owner retries target their consumed work in the host journal, preserving
     queued-follow-up authority instead of superseding earlier sibling retries.
+    Already-claimed host egress facts are settled delivery, so they are not
+    re-journaled as new intent after a consumer failure.
     The dead framed copy itself is duplicate EXPOSURE when the follow-up runs
     — benign, named in the design. Returns how many, so the error text can
     say so. BEST-EFFORT by contract: runs inside turn error handlers (a raise
@@ -2050,6 +2053,8 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
     try:
         claimed = (_TURN_INTERJECTION.pop(tid, None) or {}).get("claimed", [])
         for rec in claimed:
+            if rec.origin == "egress":
+                continue  # A persisted host fact has already been delivered.
             source = _runs().get(rec.thread_id, rec.id)
             fresh = _create_run(
                 rec.thread_id, rec.text,
@@ -2475,11 +2480,14 @@ def _hermes_messages(tid: str) -> list[dict]:
             continue
         text = first.text or first.pending_text
         if text and first.origin is None:
+            text = " " + text if text.startswith(_EGRESS_DECISION_RIDER) else text
             messages.append({"role": "user", "content": text, "run_id": first.id,
                              "message_id": f"hermes:user:{first.work_id}"})
         for follower in followers.get(first.work_id, ()):
             if follower.text and follower.origin is None:
-                messages.append({"role": "user", "content": follower.text, "run_id": follower.id,
+                text = follower.text
+                text = " " + text if text.startswith(_EGRESS_DECISION_RIDER) else text
+                messages.append({"role": "user", "content": text, "run_id": follower.id,
                                  "message_id": f"hermes:user:{follower.work_id}"})
         if latest.status == "success" and latest.result:
             messages.append({"role": "assistant", "content": latest.result, "run_id": latest.id,
@@ -3770,6 +3778,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # them to graph state directly), so frame-prefixed text is always
         # user-authored — same misattribution break as the rider above (it
         # would otherwise render stripped + "seen mid-turn"-badged).
+        text = " " + text
+    if origin != "egress" and text and text.startswith(_EGRESS_DECISION_RIDER):
         text = " " + text
     _pending_msg = text if text else pending_text
     pending_kwargs = {"pending_message": _pending_msg} if _pending_msg else {}
@@ -5185,7 +5195,11 @@ class _EmailApprovalPending(Exception):
 
 def _steering_owner(tid: str, previous: list[Run], held, session, prior_stage):
     """Select eligible main work under the admission lock and browser fence."""
-    if read_thread_engine(MANAGER.thread_dir(tid)).name not in {"deepagents", "hermes"}:
+    try:
+        engine = read_thread_engine(MANAGER.thread_dir(tid)).name
+    except ThreadEngineError:
+        return None  # The ordinary dispatcher reports this thread's error.
+    if engine not in {"deepagents", "hermes"}:
         return None
     active = next((item for item in reversed(previous)
                    if (item.status == "running" or

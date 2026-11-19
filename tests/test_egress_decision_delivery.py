@@ -113,6 +113,48 @@ def test_host_notice_projection_is_never_user_authored_or_capture_eligible(decis
     assert not raw.capture_eligible and not web.capture_eligible
 
 
+def test_native_user_quoting_host_prefix_keeps_user_provenance(decisions):
+    from assist.visible_conversation import visible_records_from_dicts
+    tid = threads.MANAGER.reserve_visible("hermes")
+    text = "[Host network decision] quoted by the user"
+    run = threads._create_run(tid, text, user_origin=True)
+    record, = visible_records_from_dicts(threads._hermes_messages(tid))
+    assert record.role == "user" and record.source_kind == "user" and record.capture_eligible
+    assert record.text.strip() == text and run.user_event_id == run.id
+
+
+def test_bad_engine_marker_does_not_stop_other_threads_decision_recovery(decisions, monkeypatch):
+    from pathlib import Path
+    bad = threads.MANAGER.reserve_visible("hermes")
+    good = threads.MANAGER.reserve_visible("deepagents")
+    for tid in (bad, good): resolved_request(decisions, tid)
+    (Path(threads.MANAGER.thread_dir(bad)) / "engine.json").write_text('{"engine":"invalid"}')
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit", lambda *_a, **_kw: None)
+    threads.queue_recovery_runs()
+    assert all(len(threads._runs().list(tid)) == 1 for tid in (bad, good))
+
+
+def test_failed_consumer_retries_user_intent_but_not_a_delivered_host_fact(decisions, monkeypatch):
+    tid = threads.MANAGER.reserve_visible("deepagents")
+    owner = threads._create_run(tid, "Read the announcement", user_origin=True)
+    threads._runs().claim(tid, owner.id)
+    threads._set_status(tid, "processing", pending_run_id=owner.id)
+    user, _busy = threads._accept_message_run(tid, "Make the note shorter")
+    resolved_request(decisions, tid)
+    threads._dispatch_egress_resolution(tid)
+    event, = [run for run in threads._runs().list(tid) if run.origin == "egress"]
+    threads._TURN_INTERJECTION[tid] = {"run_id": owner.id, "claimed": []}
+    threads._consume_interjections(tid, {user.id, event.id})
+    threads._runs().transition(tid, owner.id, "error", error="Synthetic consumer failure")
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit", lambda *_a, **_kw: None)
+    assert threads._rejournal_claimed_interjections(tid, None) == 1
+    threads._dispatch_egress_resolution(tid)
+    assert len([run for run in threads._runs().list(tid) if run.origin == "egress"]) == 1
+    assert threads._runs().get(tid, event.id).consumed_by == owner.id
+    fresh = threads._runs().list(tid)[-1]
+    assert fresh.text == user.text and fresh.user_event_id == fresh.id
+
+
 def test_child_wait_sets_ignore_unrelated_pending_but_keep_group_dependencies(decisions):
     from assist.egress.store import EgressWaiter
     grouped, independent = EgressWaiter("sub-group", "group-run"), EgressWaiter("sub-one", "one-run")
