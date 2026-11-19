@@ -10,6 +10,7 @@ digraph Boundaries {
         arrowsize=0.7];
 
   C6 [label="C6  Agent assembly\nhost graph + tool dispatch"];
+  C2 [label="C2  Trusted web client\nthread-scoped human viewer"];
   C8 [label="C8  Host authorities\ncontainer, browser, Git, grants, secrets"];
   C9 [label="C9  Durable thread state\nthread files + Git checkout",
       fillcolor="#fff4d7"];
@@ -29,12 +30,13 @@ digraph Boundaries {
 
   C6 -> C10 [label="file / shell tool calls"];
   C6 -> C8 [label="browser tool calls", constraint=false];
+  C2 -> C8 [label="same-origin control capability; pixels / input"];
   C6 -> C12 [label="model requests"];
   C6 -> C15 [label="host tool HTTP requests"];
   C8 -> C10 [label="create / freeze / resume / retire"];
   C8 -> C21 [label="original generation +3h ownership check"];
   C21 -> C10 [label="fenced ownerless removal; retain owned/unknown"];
-  C8 -> C11 [label="browser actions + opaque fill + lease / teardown"];
+  C8 -> C11 [label="exclusive agent/human controls + opaque fill + lease / teardown"];
   C8 -> C14 [label="verified Git publish"];
   C10 -> C11 [label="hosts worker"];
   C10 -> C13 [label="network requests"];

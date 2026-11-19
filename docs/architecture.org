@@ -114,7 +114,14 @@ in both views. An ID shown in only one view keeps that meaning.
   unlocked known values, without the key, through the private browser command
   transport. The worker combines them with current password-field values and
   masks raw observations before display limits; the host checks returned
-  observations again. The key is outside the workspace, scratch and =/agent= mounts.
+  observations again. Viewer commands carry the same inventory: tab metadata
+  uses text masking, and native screenshot masks cover bounded known-value
+  DOM/control reflections before JPEG capture. Failed collection, selection or
+  capture refuses the frame; arbitrary painted transformations remain outside
+  this coverage. The key is outside the workspace, scratch and =/agent= mounts.
+  The thread-scoped [[file:../manage/web/browser_viewer.py][browser viewer]] adds
+  human pixel/input control through C2 and C8. It retains the existing session,
+  lease, worker and generation, with a single host-owned controller capability.
 - *C10 Execution sandbox.* [[file:../assist/sandbox.py][DockerSandboxBackend]]
   sends file and shell tools to one restricted container shared by a logical
   parent turn and its eligible children, with a bound workspace, scratch and
@@ -135,6 +142,23 @@ in both views. An ID shown in only one view keeps that meaning.
   A fairness successor reuses its exact session/backend after C8 freezes the
   container with Docker pause. C8 unpauses only the same logical work, direct
   user event and generation after checking the current admission sequence.
+  A requested human takeover uses the same cooperative boundary but retains
+  the container running after releasing the model slot. Parent/child dispatch
+  defers in that existing session. Return revokes human input, freezes the
+  container and releases the same-work pending continuation. Fresh observation
+  followed by a new model response is required before further browser effects,
+  so buffered pre-handoff actions cannot silently overwrite human changes.
+  Failed Return before successor publication settles the original Run only
+  after captured-generation cleanup; closed flags or registry absence alone
+  never prove stop. Independent accepted followers remain dispatchable afterward.
+  Parent and child fairness pause decisions share the takeover thread gate and
+  session lock, so human activation and container freezing cannot interleave.
+  Read-only worker metadata discovers replacement page IDs. A verified empty
+  website set is also fresh state for the next model response; an unknown page
+  or a failed transport by itself does not authorize effects.
+  The viewer carries bounded JPEG pixels and fixed input operations, never raw
+  CDP or website DOM under the host origin. Session/generation checks and
+  same-origin control tokens cover viewing and input; reset/cleanup retires both.
   An unconfirmed unpause closes the session and attempts exact-generation
   teardown before releasing the slot; failed stop proof remains tracked.
   Before freezing it attempts a private storage snapshot, including cleared login
@@ -145,7 +169,8 @@ in both views. An ID shown in only one view keeps that meaning.
   completion slice skips the initial Git handoff rather than stopping its writer.
   Entering an approval wait, terminal and error boundaries close the browser;
   new-user and cancellation
-  resets prove the frozen generation stopped before releasing held work.
+  resets prove the retained generation stopped before releasing held work,
+  including an unpaused human wait with no executing model worker.
   Checkpoint-verified approval repair may replace a cancelled physical slice;
   explicit cancellation receipts keep the entire logical work revoked.
   The browser worker binds observed input-button values independently of their

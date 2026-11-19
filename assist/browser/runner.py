@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import base64
+import math
 import os
 import re
 import socket
@@ -27,6 +29,7 @@ PROXY_HOST = os.environ.get("BROWSER_PROXY_HOST", "assist-egress-proxy")
 PROXY_PORT = int(os.environ.get("BROWSER_PROXY_PORT", "8888"))
 MAX_COMMAND = MAX_PRIVATE_COMMAND
 MAX_RESULT = 65536
+MAX_VIEWER_RESULT = 512 * 1024
 MAX_STORAGE = 48 * 1024
 MAX_RAW_TEXT = 128 * 1024
 MAX_CURRENT_PASSWORDS = 64 * 1024
@@ -409,6 +412,65 @@ class BrowserWorker:
     def observe(self, page_id):
         return self._observe(page_id)
 
+    def viewer(self, action, page_id=None, **args):
+        """Fixed viewer controls and JPEG frames through the host viewer route."""
+        self._prune_pages()
+        if action == "tabs":
+            return self._finish({"pages": [{"page_id": ident, "url": page.url}
+                              for ident, page in self.pages.items()
+                              if page in self.web_pages and page.url.startswith(("http://", "https://"))]})
+        page = self._page(page_id)
+        self._check_page_url(page)
+        if action == "frame":
+            try:
+                masks = self._screenshot_masks(page, self._hidden_values())
+                for quality in (50, 25, 10):
+                    data = page.screenshot(type="jpeg", quality=quality, timeout=5000,
+                                           mask=masks, mask_color="#ff00ff")
+                    if len(data) <= 350 * 1024:
+                        break
+                else:
+                    raise BrowserInputError("page image exceeds viewer limit")
+            except Exception:
+                raise BrowserInputError("viewer frame redaction unavailable") from None
+            size = page.viewport_size
+            return {"image": base64.b64encode(data).decode("ascii"), **size}
+        if action == "viewport":
+            width, height = args.get("width"), args.get("height")
+            if (type(width) is not int or type(height) is not int
+                    or not 320 <= width <= 1024 or not 240 <= height <= 1024):
+                raise BrowserInputError("invalid viewer dimensions")
+            page.set_viewport_size({"width": width, "height": height})
+        elif action == "click":
+            x, y = args.get("x"), args.get("y")
+            size = page.viewport_size
+            if any(type(v) not in (int, float) or not math.isfinite(v) for v in (x, y)) or not (
+                    0 <= x <= size["width"] and 0 <= y <= size["height"]):
+                raise BrowserInputError("invalid viewer position")
+            page.mouse.click(x, y)
+        elif action == "text":
+            text = args.get("text")
+            if not isinstance(text, str) or len(text) > 2000:
+                raise BrowserInputError("viewer text exceeds limit")
+            page.keyboard.insert_text(text)
+        elif action == "key":
+            key = args.get("key")
+            if key not in {"Enter", "Tab", "Backspace", "Delete", "ArrowLeft", "ArrowRight",
+                           "ArrowUp", "ArrowDown", "Home", "End", "Control+a"}:
+                raise BrowserInputError("unsupported viewer key")
+            page.keyboard.press(key)
+        elif action == "scroll":
+            delta = args.get("delta")
+            if type(delta) not in (int, float) or not math.isfinite(delta) or abs(delta) > 1500:
+                raise BrowserInputError("invalid viewer scroll")
+            page.mouse.wheel(0, delta)
+        else:
+            raise BrowserInputError("unsupported viewer action")
+        # Human interaction invalidates the agent's old semantic target binding.
+        self.snapshots.pop(page_id, None)
+        self.targets.pop(page_id, None)
+        return {"applied": True}
+
     def act(self, page_id, snapshot_id, action, target):
         page = self._page(page_id)
         if self.snapshots.get(page_id) != snapshot_id:
@@ -642,10 +704,47 @@ class BrowserWorker:
                 values.append(value)
         return values
 
+    def _screenshot_masks(self, page, hidden):
+        """Mask bounded DOM/control reflections; arbitrary painted content is outside scope."""
+        masks = []
+        for frame in page.frames:
+            nodes = frame.locator("body, body *")
+            states = nodes.evaluate_all("""nodes => {
+                if (nodes.length > 2000) throw new Error('DOM mask budget');
+                const indices = new Map(nodes.map((node, index) => [node, index]));
+                let size = 0;
+                return nodes.map(node => {
+                    const skip = ['SCRIPT', 'STYLE', 'NOSCRIPT', 'CANVAS', 'IFRAME'].includes(node.tagName);
+                    const parts = skip ? [] : Array.from(node.childNodes).flatMap(child => {
+                        if (child.nodeType === 3) return [child.textContent];
+                        const index = indices.get(child);
+                        return index === undefined ? [] : [index];
+                    });
+                    const value = typeof node.value === 'string' ? node.value : '';
+                    size += (parts.filter(part => typeof part === 'string').join('').length + value.length) * 4;
+                    if (size > 131072) throw new Error('DOM mask budget');
+                    return {parts, value, password: node.tagName === 'INPUT' && node.type === 'password'};
+                });
+            }""")
+            visible = {}
+            for index in reversed(range(len(states))):
+                state = states[index]
+                text = ''.join(part if isinstance(part, str) else visible[part]
+                               for part in state["parts"])
+                if (state["password"] or contains_hidden(state["value"], hidden)
+                        or contains_hidden(text, hidden)):
+                    masks.append(nodes.nth(index))
+                    visible[index] = "\0"
+                else:
+                    visible[index] = text
+        return masks
+
+    def _hidden_values(self):
+        return tuple(sorted(set(self._private_values + self._current_before
+                                + tuple(self._password_values())), key=len, reverse=True))
+
     def _finish(self, result, *, trusted_path=False):
-        hidden = tuple(sorted(set(self._private_values + self._current_before
-                                  + tuple(self._password_values())),
-                              key=len, reverse=True))
+        hidden = self._hidden_values()
         if isinstance(result, dict) and "_source_url" in result:
             if contains_hidden(result["_source_url"], hidden):
                 result.pop("_source_url")
@@ -742,7 +841,8 @@ class BrowserWorker:
                    "fill_secret": self.fill_secret,
                    "wait": self.wait, "download_info": self.download_info,
                    "preflight": self.preflight, "load_storage": self.load_storage,
-                   "storage_state": self.storage_state, "revoke": self.revoke}
+                   "storage_state": self.storage_state, "revoke": self.revoke,
+                   "viewer": self.viewer}
         if operation not in methods:
             raise BrowserInputError("unsupported browser operation")
         if operation == "close":
@@ -753,7 +853,7 @@ class BrowserWorker:
                 self._close_unobserved = True
         else:
             before = self._password_values() if operation in {
-                "open", "observe", "act", "wait", "download_info", "preflight"} else []
+                "open", "observe", "act", "wait", "download_info", "preflight", "viewer"} else []
         self._private_values = tuple(private_values)
         self._current_before = tuple(before)
         try:
@@ -838,16 +938,20 @@ def serve():
         while True:
             conn, _ = server.accept()
             with conn:
+                limit = MAX_RESULT
                 try:
                     payload = recv_limited(conn, MAX_COMMAND)
-                    answer = {"result": worker.handle(json.loads(payload))}
+                    command = json.loads(payload)
+                    if isinstance(command, dict) and command.get("operation") == "viewer":
+                        limit = MAX_VIEWER_RESULT
+                    answer = {"result": worker.handle(command)}
                 except BrowserInputError as error:
                     answer = {"error": str(error)}
                 except Exception:
                     # Playwright errors can contain URL paths and form content.
                     answer = {"error": "browser operation failed"}
                 encoded = json.dumps(answer, ensure_ascii=False).encode()
-                if len(encoded) > MAX_RESULT:
+                if len(encoded) > limit:
                     encoded = b'{"error":"browser observation exceeds limit"}'
                 conn.sendall(encoded)
                 if worker.revoked:
@@ -865,7 +969,8 @@ def call():
         conn.connect(SOCKET)
         conn.sendall(payload)
         conn.shutdown(socket.SHUT_WR)
-        result = recv_limited(conn, MAX_RESULT)
+        command = json.loads(payload)
+        result = recv_limited(conn, MAX_VIEWER_RESULT if command.get("operation") == "viewer" else MAX_RESULT)
     if not result:
         raise SystemExit(2)
     sys.stdout.buffer.write(result)

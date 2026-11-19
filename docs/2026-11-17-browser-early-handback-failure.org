@@ -1,0 +1,56 @@
+#+title: Settle failed handback before publishing a browser successor
+#+date: 2026-11-17
+State: Reviewed host-only successor; deployment pending
+
+* Counterexample
+Copilot round three identified a failed-Return window after the inner fairness
+pause but before the outer handler publishes a successor. Takeover can resume
+that paused generation and Return can fail. Confirmed teardown clears human
+flags and removes the session, but its callback has no pending same-work Run
+to fail because the original is still running. The cached keep_browser value
+then caused the outer handler to interrupt the original and create a successor
+for a destroyed session. The uncertain-stop control also queued work without
+propagating the failed exact-stop proof. Both old-head controls failed against
+immutable candidate 58f7efb9 before the correction.
+
+* Correction using existing settlement
+Under the existing handoff gate, viewer_error rejects successor publication.
+The existing finally cleanup also handles that failure regardless of mutable
+human flags or session registry state. Browser cleanup and captured-container
+cleanup must finish before ordinary error projection and Run terminalization.
+A cleanup exception escapes and keeps the original Run nonterminal. A closed
+flag, missing registry entry or failure message alone never proves exact stop.
+Confirmed cleanup errors the original work and dispatches independent accepted
+followers. No new helper, lifecycle store, lock order, worker protocol or image
+is introduced. Saved workspace files and the fresh-model barrier are unchanged.
+
+* Causal acceptance
+The test runs actual parent Run processing, pauses its session, and forces real
+Takeover and failed Return after the outermost pause gate releases, before any
+successor exists. The confirmed-stop case requires original-Run error, no
+same-work successor, and actual successful execution of an independent follower.
+Uncertain-stop controls require the original to remain running, no runnable or
+held successor, pending follower and retained authority. One control removes
+both session and container registry entries after failed Return, requiring the
+captured-generation cleanup path to preserve the same nonterminal result.
+The synthetic backend now records the latest direct event's authority sequence,
+as production does, so independent follower execution uses the real contract.
+
+Focused checks passed 89 tests with five skips in 1.16 seconds. Actual
+Firefox/Chromium handoff coverage passed 26 tests in 10.07 seconds. The full
+suite passed 3,114 tests and 15 subtests, with 16 skips and one deselection,
+in 119.21 seconds. Independent review found no remaining blocker, confirmed
+cleanup proof and lock order, and accepted affected documentation alignment.
+
+* Review scope
+Keyboard-only remote focus navigation was declined as a new capability outside
+the accepted touch/pointer plus masked-typing viewer. Website fields require
+pointer/touch selection. Revisit it for a concrete accessibility requirement;
+this correction adds no focus-navigation feature. Physical-phone validation
+remains pending stable SSH access.
+
+* Historical supersessions
+This corrects =2026-11-17-browser-human-control.org=, section =Existing owners and
+control flow=: failed handback must also error the original Run when no held
+parent continuation has yet been published. The cleanup-before-failure contract
+now covers that earlier window without treating mutable session state as proof.

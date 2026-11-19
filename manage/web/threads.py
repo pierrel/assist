@@ -83,7 +83,7 @@ from assist.schedule.scheduler import Scheduler
 from manage.web.drain import DrainClosed, RUN_GATE
 from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
-from assist.browser.manager import BrowserManager, BrowserSession, BrowserUserRequest, browser_tools
+from assist.browser.manager import BrowserManager, BrowserSession, BrowserUserRequest, BrowserUnavailable, browser_tools
 from assist.browser import authority as browser_authority
 from assist.egress.client_map import browser_records, configured_directory
 from assist.thread import Thread
@@ -1068,6 +1068,9 @@ def render_thread(
     status_banner = ""
     if busy:
         label = STAGE_LABELS.get(stage, "Working...")
+        viewer_session = BrowserManager.current_session(tid)
+        if viewer_session is not None and viewer_session.human_active:
+            label = "You control the browser. Return to Assist in Browser control to continue."
         if status.get("origin") == "continuation" and stage == "processing":
             # Not the user's message — say what's actually happening.
             task_txt = " ".join(pending[len(_CONTINUATION_RIDER):].split())[:120] \
@@ -1441,6 +1444,7 @@ def render_thread(
         <div class="container">
           <div class="nav" style="display:flex; justify-content:space-between; align-items:center;">
             <a href="/">← All threads</a>
+            <a href="/thread/{tid}/browser" target="_blank" rel="noopener">Browser control</a>
             <button type="button" onclick="copyThreadId(this)"
                     style="background:none; border:1px solid #e5e7eb; border-radius:6px;
                            color:#171717; cursor:pointer; font-size:.8rem; padding:.3rem .6rem;
@@ -2684,7 +2688,11 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
 
     def refreeze_shared_execution() -> None:
         try:
-            shared_session.pause()
+            with BrowserManager.bounded_thread_gate(run.parent_thread_id), shared_session._lock:
+                if shared_session.human_requested:
+                    shared_session.human_active = True
+                else:
+                    shared_session.pause()
         except Exception:
             try:
                 BrowserManager.cleanup(run.parent_thread_id, shared_session)
@@ -2707,6 +2715,8 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
         with ExitStack() as child_scope:
             queue_handle = child_scope.enter_context(THREAD_QUEUE.acquire(
                 run.thread_id, accumulated_active_ms=run.active_ms))
+            if _defer_to_browser_viewer(run):
+                return
             child_scope.callback(git_scope.close)
             with _RUN_ADMISSION_LOCK:
                 run = _runs().get(run.thread_id, run.id)
@@ -2738,10 +2748,11 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                                 or parent.user_event_id != event_id):
                             raise BrowserUnavailable(
                                 "child belongs to an earlier execution lifetime")
+                        shared_session = session
                         shared_session = BrowserManager.resume_session(
                             run.parent_thread_id, session.work_id, session.user_request)
                     if shared_session is not None:
-                        # Refreeze before releasing the checkout and model slot.
+                        # Settle browser ownership before releasing the checkout and model slot.
                         child_scope.callback(refreeze_shared_execution)
                     else:
                         git_lifecycle.resume()
@@ -2815,7 +2826,8 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                     dispatch_key=f"task-resume:{run.id}", work_id=run.work_id,
                     resume=True, active_ms=carry, origin=run.origin,
                     delegate_user_urls=run.delegate_user_urls)
-        _RESUME_SCHEDULER.submit(successor.id, successor.thread_id)
+        if not _defer_to_browser_viewer(successor):
+            _RESUME_SCHEDULER.submit(successor.id, successor.thread_id)
         return
     except (ThreadHoldExpired, QueueWaitTimeout) as exc:
         logging.error("child run %s timed out: %s", run.id, exc)
@@ -2986,6 +2998,41 @@ def _complete_child_handoff(run: Run) -> Run | None:
     return successor
 
 
+def _release_browser_waiters(session) -> None:
+    waiting = tuple(session.held_runs)
+    session.held_runs.clear()
+    failed = set()
+    if session.viewer_error:
+        with _RUN_ADMISSION_LOCK:
+            for run in _runs().list(session.thread_id):
+                if run.status == "pending" and run.work_id == session.work_id:
+                    _runs().claim(session.thread_id, run.id)
+                    _runs().transition(session.thread_id, run.id, "error", error=session.viewer_error)
+                    failed.add(run.id)
+            RUN_STREAMS.finish(session.thread_id, session.work_id)
+            _set_status(session.thread_id, "error", error=session.viewer_error)
+    for run_id, tid in waiting:
+        if tid == session.thread_id and run_id in failed:
+            continue
+        _RESUME_SCHEDULER.submit(run_id, tid)
+    if session.viewer_error:
+        _dispatch_pending_after(session.thread_id)
+
+
+def _defer_to_browser_viewer(run) -> bool:
+    """Keep pending work in the existing session until human ownership ends."""
+    tid = run.parent_thread_id if run.mode == "child" else run.thread_id
+    with BrowserManager.bounded_thread_gate(tid):
+        session = BrowserManager.current_session(tid)
+        if session is None:
+            return False
+        with session._lock:
+            if session.human_requested or session.human_active:
+                session.held_runs[(run.id, run.thread_id)] = None
+                return True
+    return False
+
+
 def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
     """Load and execute one durable run; dispatch queues carry ids only."""
     with RUN_GATE.active() as accepted:
@@ -2998,6 +3045,8 @@ def _execute_run_active(run_id: str, tid: str, *, user_priority: bool = False) -
         run = _runs().get(tid, run_id)
     except RunNotFound:
         logging.info("run %s on %s disappeared before dispatch", run_id, tid)
+        return
+    if _defer_to_browser_viewer(run):
         return
     if (run.status == "pending" and not any(
             item.id == run.id for item in _runs_before_browser_reset(
@@ -3105,6 +3154,8 @@ def _execute_run_active(run_id: str, tid: str, *, user_priority: bool = False) -
                        for candidate in _runs().list(tid)):
                 RUN_STREAMS.finish(tid, current.work_id)
             _dispatch_pending_after(tid, run_id)
+            if any(browser_reset_owed(item) for item in _runs().list(tid)):
+                _queue_browser_revocation(tid)
     except RunNotFound:
         pass  # thread deletion removes its run store while a dispatcher unwinds.
 
@@ -3248,6 +3299,9 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
 
 def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
     """Queue approvals, paused head successors, user turns, then other FIFO work."""
+    session = BrowserManager.current_session(tid)
+    if session is not None and (session.human_requested or session.human_active):
+        return
     runs = _runs().list(tid)
     if any(run.status == "running" for run in runs):
         return
@@ -3589,6 +3643,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                or (_run is not None and _run.origin is None
                                    and _run.mode == "turn"
                                    and _run.text is not None))) as queue_handle, ExitStack() as error_scope:
+            if _run is not None and _defer_to_browser_viewer(_run):
+                return
             # A queued run remains pending until it actually owns THREAD_QUEUE. This
             # is what makes it visible to the active turn's interjection reader. Two
             # dispatchers for one run serialize here; only the first can claim it.
@@ -3719,10 +3775,15 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             # and writable sandbox remain owned by the original admitted event.
             user_request = _browser_user_request(
                 _run, _runs().list(tid) if _run is not None else [])
-            browser_session = (BrowserManager.resume_session(
-                tid, _run.work_id, user_request)
-                if resume and _run is not None
-                else None)
+            try:
+                browser_session = (BrowserManager.resume_session(
+                    tid, _run.work_id, user_request)
+                    if resume and _run is not None
+                    else None)
+            except ThreadPauseRequested:
+                browser_session = BrowserManager.current_session(tid)
+                keep_browser = True
+                raise
             if not resume and resume_decision is None and origin != "task-completion":
                 def terminalize_dirty(error: GitSyncError) -> None:
                     if _run is not None:
@@ -3799,6 +3860,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                             sandbox_backend=sandbox,
                             run_service=_runs())
                         BrowserManager.register(browser_session)
+                        browser_session.on_control_end = lambda: _release_browser_waiters(browser_session)
                     if browser_session is not None and browser_capable:
                         extra_browser_tools = tuple(browser_tools(browser_session))
                     # on_queue_state=None: the outer acquire above already
@@ -3952,7 +4014,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 keep_browser = browser_session is not None and not browser_session.closed
                 if keep_browser:
                     try:
-                        browser_session.pause()
+                        with BrowserManager.bounded_thread_gate(tid), browser_session._lock:
+                            if not browser_session.human_requested:
+                                browser_session.pause()
                     except Exception:
                         keep_browser = False
                         raise
@@ -4113,14 +4177,11 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     append_event(MANAGER.thread_dir(tid), "continuation_completed",
                                  id=event_id or "")
     except ThreadPauseRequested:
-        # NON-terminal (fair scheduling): the turn yielded the slot at its quantum so a
-        # waiting turn could run. Its work is durable in the checkpoint (nothing lost);
-        # Mark it paused and hand it to the dedicated
-        # resume scheduler — NOT a BackgroundTask (that would park a shared-threadpool
-        # worker per paused turn and stall request handling). Carry the active hold it
-        # burned so the 2h cap accounts across resumes.
+        # A scheduler yield or human takeover retains the same checkpoint. Fair
+        # work queues a successor now; human work holds it until Return, without
+        # parking a shared request worker. Both carry cumulative active hold.
         carry = THREAD_QUEUE.pop_hold(queue_handle)
-        logging.info("fair-sched: %s paused (active hold %.0fs carried); queuing resume", tid,
+        logging.info("thread %s paused (active hold %.0fs carried)", tid,
                      carry / 1000.0)
         DOMAIN_MANAGERS.pop(tid, None)  # rebuild domain tools against the resumed backend
         # Atomically create the successor and publish the paused projection before
@@ -4128,8 +4189,17 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # Admission and DELETE take this lock too, so neither can observe an
         # interrupted predecessor without its same-work successor.
         ticket = None
+        handed_off = False
+        handoff_error = None
         try:
-            with _RUN_ADMISSION_LOCK:
+            with BrowserManager.bounded_thread_gate(tid), ExitStack() as handoff_scope:
+                if keep_browser and browser_session.viewer_error:
+                    raise BrowserUnavailable(browser_session.viewer_error)
+                if keep_browser and browser_session.human_requested:
+                    state = handoff_scope.enter_context(
+                        browser_authority.fence(MANAGER.root_dir, tid))
+                    browser_session._check_fenced_command(state)
+                handoff_scope.enter_context(_RUN_ADMISSION_LOCK)
                 if _run is not None and _run.approval_id is not None:
                     successor = _runs().continue_approval(tid, _run.id, active_ms=carry)
                 elif _run is not None:
@@ -4154,21 +4224,33 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 _set_status(tid, "paused", accumulated_active_ms=carry, **pending_kwargs)
                 # Reserve a promotable queue item while this durable handoff is atomic,
                 # but do not notify or execute it until admission is released below.
-                ticket = _RESUME_SCHEDULER.reserve(successor.id, tid)
+                if keep_browser and browser_session.human_requested:
+                    browser_session.held_runs[(successor.id, tid)] = None
+                    browser_session.human_active = True
+                    handed_off = True
+                else:
+                    ticket = _RESUME_SCHEDULER.reserve(successor.id, tid)
+        except BrowserUnavailable as error:
+            handoff_error = str(error)
         finally:
-            handed_off = False
             try:
                 if ticket is not None:
                     _RESUME_SCHEDULER.commit(ticket)
                     handed_off = True
             finally:
-                if (not handed_off and keep_browser and browser_session.paused
-                        and BrowserManager.current_session(tid) is browser_session):
+                if (not handed_off and keep_browser and (browser_session.viewer_error
+                        or (not browser_session.human_active
+                            and (browser_session.paused or browser_session.human_requested)
+                            and BrowserManager.current_session(tid) is browser_session))):
                     try:
                         BrowserManager.cleanup(tid, browser_session)
                     finally:
                         SandboxManager.cleanup(browser_session.work_dir, sandbox_generation)
-        return
+        if handoff_error is None:
+            return
+        # Cleanup above must succeed before ordinary terminal projection settles
+        # this Run and wakes its held reset/followers. Unknown stop still raises.
+        _set_status(tid, "error", error=handoff_error, **pending_kwargs)
     except SandboxContainerLostError as e:
         # Distinct status message: a dead container is recoverable —
         # the user can simply retry — but they should know their
@@ -4777,13 +4859,13 @@ def _drain_held_browser_events(tid: str) -> bool:
                     live_generation = (current_sandbox is not None
                                        and current_sandbox.id in lease["generations"])
                     if (active_owner or live_generation) and not (
-                            session is not None and session.paused):
+                            session is not None and (session.paused or session.human_active)):
                         if session is not None and session.run_id == owner:
                             session.disarm_for_held_event()
                         return False
                 if session is not None and session.run_id == owner:
                     reset = session.revoke_for_promotion()
-                    if session.paused:
+                    if session.paused or session.human_active:
                         SandboxManager.cleanup(
                             session.work_dir, session.sandbox_backend.container)
                         BrowserManager.cleanup(tid, session)

@@ -24,7 +24,7 @@ from manage.web.app import app  # noqa: F401
 # Importing the route modules registers their endpoints on ``app``.
 # Order matters only insofar as ``review`` imports from ``threads``.
 from manage.web import (  # noqa: E402,F401
-    threads, review, evals, schedules, geo, egress,
+    threads, review, evals, schedules, geo, egress, browser_viewer,
 )
 from manage.web.phone_api import router as _phone_api_router  # noqa: E402
 app.include_router(_phone_api_router)
