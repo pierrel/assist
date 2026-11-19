@@ -379,8 +379,9 @@ def test_immediate_return_after_human_activation_cannot_run_failed_handoff_clean
     assert stopped=={'host-'+tid:1}
 
 
+@pytest.mark.parametrize('early_resume',[False,True])
 @pytest.mark.parametrize('stop_failure,registry_lost',[(False,False),(True,False),(True,True)])
-def test_failed_return_before_successor_publication_never_queues_destroyed_work(handoff_host,monkeypatch,stop_failure,registry_lost):
+def test_failed_return_before_successor_publication_never_queues_destroyed_work(handoff_host,monkeypatch,stop_failure,registry_lost,early_resume):
     tid,root,scheduler,stopped,_notifications,faults=handoff_host
     from tests.test_browser_lifecycle_v12 import _ORIGINAL_DISPATCH_PENDING
     monkeypatch.setattr(threads,'_dispatch_pending_after',_ORIGINAL_DISPATCH_PENDING)
@@ -391,15 +392,31 @@ def test_failed_return_before_successor_publication_never_queues_destroyed_work(
     returned=[]
     failed_sessions=[]
     follower=[]
+    prior_work_ids=set()
     def control(argv,**_kwargs):
         if fail_pause and argv[1]=='pause':
             raise browser.BrowserUnavailable('Return pause outcome unconfirmed')
         if argv[1]=='inspect':return b'false\n'
         return b''
     monkeypatch.setattr(browser,'_bounded_cli',control)
+    def fail_return(session):
+        nonlocal fail_pause
+        assert {r.id for r in threads._runs().list(tid) if r.work_id==owner.work_id}==prior_work_ids
+        if not session.human_active:
+            session.request_human(session.viewer_token,'a'*32)
+        assert session.human_active and not session.paused
+        fail_pause=True
+        faults['stop']=stop_failure
+        with pytest.raises(browser.BrowserUnavailable) as error:
+            session.return_control(session.viewer_token,'a'*32)
+        returned.append(str(error.value))
+        failed_sessions.append(session)
+        if registry_lost:
+            browser.BrowserManager._sessions.pop(tid)
+            browser.SandboxManager._containers.pop(str(root/tid))
     @contextmanager
     def failed_return_between_handlers(t):
-        nonlocal depth,armed,fail_pause
+        nonlocal depth,armed
         with original_gate(t):
             depth+=1
             try:yield
@@ -407,18 +424,7 @@ def test_failed_return_before_successor_publication_never_queues_destroyed_work(
         session=browser.BrowserManager.current_session(t)
         if armed and depth==0 and session and session.paused:
             armed=False
-            assert not any(r.id!=owner.id and r.work_id==owner.work_id for r in threads._runs().list(tid))
-            session.request_human(session.viewer_token,'a'*32)
-            assert session.human_active and not session.paused
-            fail_pause=True
-            faults['stop']=stop_failure
-            with pytest.raises(browser.BrowserUnavailable) as error:
-                session.return_control(session.viewer_token,'a'*32)
-            returned.append(str(error.value))
-            failed_sessions.append(session)
-            if registry_lost:
-                browser.BrowserManager._sessions.pop(tid)
-                browser.SandboxManager._containers.pop(str(root/tid))
+            fail_return(session)
     monkeypatch.setattr(browser.BrowserManager,'bounded_thread_gate',failed_return_between_handlers)
     class Chat:
         agent=None
@@ -432,14 +438,40 @@ def test_failed_return_before_successor_publication_never_queues_destroyed_work(
             session=browser.BrowserManager.current_session(tid)
             session.command('open',url='https://example.test/')
             follower.append(threads._create_run(tid,'Accepted follower',origin='continuation'))
-            armed=True
+            armed=not early_resume
             raise ThreadPauseRequested('fairness pause before handoff publication')
     monkeypatch.setattr(web.MANAGER,'get',lambda *_a,**_k:Chat())
     owner=threads._create_run(tid,'Browser work',user_origin=True)
+    prior_work_ids.add(owner.id)
+    target=owner
+    if early_resume:
+        threads._execute_run(owner.id,tid)
+        target=next(r for r in threads._runs().list(tid) if r.resume)
+        prior_work_ids.add(target.id)
+        while not scheduler._q.empty():scheduler._q.get_nowait()
+        original_status=threads._set_status
+        takeover_once=[True]
+        def takeover_before_resume(t,stage,**kwargs):
+            original_status(t,stage,**kwargs)
+            if stage=='starting_sandbox' and takeover_once[0]:
+                takeover_once[0]=False
+                session=browser.BrowserManager.current_session(t)
+                session.request_human(session.viewer_token,'a'*32)
+        monkeypatch.setattr(threads,'_set_status',takeover_before_resume)
+        original_pop=threads.THREAD_QUEUE.pop_hold
+        def failed_return_after_capture(handle):
+            nonlocal armed
+            session=browser.BrowserManager.current_session(tid)
+            if session and session.human_active and not returned:
+                # The early resume branch has unwound; Return runs before its
+                # outer pause handler can publish another successor.
+                fail_return(session)
+            return original_pop(handle)
+        monkeypatch.setattr(threads.THREAD_QUEUE,'pop_hold',failed_return_after_capture)
     if stop_failure:
         with pytest.raises(browser.BrowserUnavailable,match='exact stop unconfirmed'):
-            threads._execute_run(owner.id,tid)
-        assert threads._runs().get(tid,owner.id).status=='running'
+            threads._execute_run(target.id,tid)
+        assert threads._runs().get(tid,target.id).status=='running'
         session=failed_sessions[0]
         assert session.closed and session.identity and session.viewer_error
         assert threads._runs().get(tid,follower[0].id).status=='pending'
@@ -447,8 +479,8 @@ def test_failed_return_before_successor_publication_never_queues_destroyed_work(
             assert state.lease['generations']==['host-'+tid]
         assert scheduler._q.empty()
     else:
-        threads._execute_run(owner.id,tid)
-        assert threads._runs().get(tid,owner.id).status=='error'
+        threads._execute_run(target.id,tid)
+        assert threads._runs().get(tid,target.id).status=='error'
         assert browser.BrowserManager.current_session(tid) is None
         assert stopped=={'host-'+tid:1}
         queued=scheduler._q.get_nowait()
@@ -457,7 +489,7 @@ def test_failed_return_before_successor_publication_never_queues_destroyed_work(
         threads._execute_run(queued['run_id'],queued['tid'])
         assert threads._runs().get(tid,follower[0].id).status=='success'
     assert returned
-    assert not any(r.id!=owner.id and r.work_id==owner.work_id for r in threads._runs().list(tid))
+    assert {r.id for r in threads._runs().list(tid) if r.work_id==owner.work_id}==prior_work_ids
 
 
 @pytest.mark.parametrize('path',['parent','child'])

@@ -3775,15 +3775,17 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             # and writable sandbox remain owned by the original admitted event.
             user_request = _browser_user_request(
                 _run, _runs().list(tid) if _run is not None else [])
-            try:
-                browser_session = (BrowserManager.resume_session(
-                    tid, _run.work_id, user_request)
-                    if resume and _run is not None
-                    else None)
-            except ThreadPauseRequested:
-                browser_session = BrowserManager.current_session(tid)
-                keep_browser = True
-                raise
+            with BrowserManager.bounded_thread_gate(tid):
+                try:
+                    browser_session = (BrowserManager.resume_session(
+                        tid, _run.work_id, user_request)
+                        if resume and _run is not None
+                        else None)
+                except ThreadPauseRequested:
+                    browser_session = BrowserManager.current_session(tid)
+                    sandbox_generation = browser_session.sandbox_backend.container
+                    keep_browser = True
+                    raise
             if not resume and resume_decision is None and origin != "task-completion":
                 def terminalize_dirty(error: GitSyncError) -> None:
                     if _run is not None:
