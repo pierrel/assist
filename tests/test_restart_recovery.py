@@ -192,7 +192,7 @@ def test_recover_redispatches_head_and_drains_backlog_in_order(wired, monkeypatc
     tid, _ = wired
     calls = []
     _wire_chat(monkeypatch, tid, calls)
-    monkeypatch.setattr(threads, "_recovery_decision", lambda t, p: "redispatch")
+    monkeypatch.setattr(threads, "_recovery_decision", lambda t, p, **_kw: "redispatch")
     _set_status(tid, "paused", pending_message="head")
     MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="f1"))
     MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="f2"))
@@ -239,7 +239,7 @@ def test_restart_reset_requeues_head_successor_before_accepted_follower(
     monkeypatch.setattr(threads, "_RESUME_SCHEDULER", scheduler)
     monkeypatch.setattr(threads, "THREAD_QUEUE", ThreadAffinityQueue())
     monkeypatch.setattr(threads, "_queue_browser_revocation", lambda _tid: None)
-    monkeypatch.setattr(threads, "_recovery_decision", lambda *_args: decision)
+    monkeypatch.setattr(threads, "_recovery_decision", lambda *_args, **_kw: decision)
     # The interrupted process has no live browser or Docker generation.
     monkeypatch.setattr(BrowserManager, "current_session", lambda _tid: None)
     monkeypatch.setattr(BrowserManager, "confirm_owner_stopped", lambda *_args: False)
@@ -306,7 +306,7 @@ def test_pre_model_review_redispatch_keeps_accepted_snapshot(wired, monkeypatch)
     run = threads._create_run(tid, "## Change review\nimportant line",
                               review_snapshot=snapshot)
     run = threads._runs().claim(tid, run.id)
-    monkeypatch.setattr(threads, "_recovery_decision", lambda *_args: "redispatch")
+    monkeypatch.setattr(threads, "_recovery_decision", lambda *_args, **_kw: "redispatch")
     submitted = []
     monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
                         lambda run_id, _tid, **_kwargs: submitted.append(run_id))
@@ -872,7 +872,7 @@ def test_recover_resumes_and_preserves_triage_sender(wired, monkeypatch):
     tid, _ = wired
     calls, triage_seen = [], []
     _wire_chat(monkeypatch, tid, calls, triage_seen)
-    monkeypatch.setattr(threads, "_recovery_decision", lambda t, p: "resume")
+    monkeypatch.setattr(threads, "_recovery_decision", lambda t, p, **_kw: "resume")
     _set_status(tid, "paused", pending_message="sms text", sender="+15550001111",
                 accumulated_active_ms=1234.0)
 
@@ -891,7 +891,7 @@ def test_recover_dedupes_claimed_entry(wired, monkeypatch):
     tid, _ = wired
     calls = []
     _wire_chat(monkeypatch, tid, calls)
-    monkeypatch.setattr(threads, "_recovery_decision", lambda t, p: "resume")
+    monkeypatch.setattr(threads, "_recovery_decision", lambda t, p, **_kw: "resume")
     rec = MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="claimed msg"))
     _set_status(tid, "paused", pending_message="claimed msg", claimed_id=rec.id)
 
@@ -906,7 +906,7 @@ def test_recover_finalizes_completed_turn(wired, monkeypatch):
     tid, _ = wired
     calls = []
     _wire_chat(monkeypatch, tid, calls)
-    monkeypatch.setattr(threads, "_recovery_decision", lambda t, p: "finalize")
+    monkeypatch.setattr(threads, "_recovery_decision", lambda t, p, **_kw: "finalize")
     _set_status(tid, "paused", pending_message="already answered")
 
     threads.queue_recovery_runs()
@@ -920,7 +920,7 @@ def test_legacy_git_completed_projection_is_not_ready_after_restart(wired, monke
     from assist.git_sync import bind, read_state
     bind(str(root / tid), "https://example.invalid/repo.git")
     before = read_state(str(root / tid))
-    monkeypatch.setattr(threads, "_recovery_decision", lambda *_: "finalize")
+    monkeypatch.setattr(threads, "_recovery_decision", lambda *_, **_kw: "finalize")
     _set_status(tid, "processing", pending_message="saved checkpoint answer")
     threads.queue_recovery_runs()
     assert _get_status(tid)["stage"] == "error"
@@ -932,7 +932,7 @@ def test_recover_unrecoverable_errors_with_message_surfaced(wired, monkeypatch):
     tid, _ = wired
     calls = []
     _wire_chat(monkeypatch, tid, calls)
-    monkeypatch.setattr(threads, "_recovery_decision", lambda t, p: "error")
+    monkeypatch.setattr(threads, "_recovery_decision", lambda t, p, **_kw: "error")
     _set_status(tid, "paused", pending_message="lost?")
 
     threads.queue_recovery_runs()
@@ -952,7 +952,7 @@ def test_lifespan_rewrites_busy_to_paused_and_enqueues_recovery(wired, monkeypat
     _set_status(tid, "processing", pending_message="mid-flight",
                 sender="+15550001111")
     recovered = []
-    monkeypatch.setattr(threads, "_recovery_decision", lambda t, p: "resume")
+    monkeypatch.setattr(threads, "_recovery_decision", lambda t, p, **_kw: "resume")
     monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
                         lambda run_id, t: recovered.append((run_id, t)))
 

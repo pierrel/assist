@@ -475,7 +475,12 @@ their explicit summary handoff creates an independent Deep Agents thread.
   delivery. It reuses C3's logical target and the existing Deep/native intake
   when current work is eligible; otherwise C4 keeps its durable fallback. No
   direct-user sequence is minted. Startup repairs either admission/ack crash
-  window without duplicating a Run. Child resumes wait only for their exact
+  window without duplicating a Run.
+  Deep completion recovery skips only exact host messages verified by their
+  journal identity and recovered owner target. It claims pending checkpointed
+  notices before finalizing the completed owner, avoiding owner replay and
+  duplicate fallback. Ordinary user input keeps exact-message recovery checks.
+  Child resumes wait only for their exact
   attached request set, preserving grouped dependencies and declines. Unrelated
   pending cards do not hold notifications or ready children. Native helpers share the parent thread's
   cards and do not use Deep Agents checkpoints. Browser/search/interactive command approval

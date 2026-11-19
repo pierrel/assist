@@ -856,6 +856,10 @@ dispatch key prevents duplicate Runs after a lost acknowledgment or restart.
 Eligible Deep Agents and Hermes main work receive it after the current tool
 batch through their existing durable intake; unread notifications remain queued.
 The notification has no direct-user admission sequence and grants no authority.
+Deep restart recovery verifies checkpointed host notices against that owner's
+journal before matching its completed input. It settles any unclaimed notice
+without replaying the completed user request; quoted or later user input retains
+the existing exact-message recovery checks.
 A child resumes once all cards attached to that exact parked Run resolve;
 unrelated thread cards do not block it. Declines remain declines on resume.
 Pending mail/reply actions retain their exact approval and checkpoint binding.

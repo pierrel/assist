@@ -68,7 +68,7 @@ from assist.egress.tools import (EGRESS_ORIGIN_THREAD_ID,
                                  EGRESS_WAITER_RUN_ID,
                                  EGRESS_WAITER_THREAD_ID, egress_tools)
 from starlette.concurrency import run_in_threadpool
-from assist.middleware.interjection import (collect_interjection_ids,
+from assist.middleware.interjection import (INTERJECTION_IDS_KEY, collect_interjection_ids,
                                             register_interjection_callbacks)
 from assist.middleware.url_provenance import DELEGATE_USER_URLS_KEY
 from assist.events.thread_log import append_event
@@ -3663,7 +3663,7 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
         return
 
     decision = _recovery_decision(
-        tid, pending_text or "",
+        tid, pending_text or "", owner=run,
         **({"continuation": True} if run.resume or run.resume_decision is not None else {}))
     logging.info("recovery: run %s on %s -> %s", run.id, tid, decision)
     if decision == "finalize":
@@ -6109,18 +6109,23 @@ def _location_to_fields(location: LocationSnapshot) -> dict:
             "observed_at": location.observed_at.isoformat()}
 
 
-def _recovery_decision(tid: str, pending_message: str, *, continuation: bool = False) -> str:
+def _recovery_decision(tid: str, pending_message: str, *, continuation: bool = False,
+                       owner: Run | None = None) -> str:
     """Resume-vs-redispatch for one recovered thread, decided by GRAPH STATE (not
     text equality — a re-sent duplicate text or the supersede prefix would fool a
     text compare in both directions):
     - ``snap.next`` or ``snap.interrupts`` non-empty → the turn is mid-flight in
       the checkpoint → "resume" (input=None re-runs only the unpersisted work).
-    - otherwise, if the latest checkpointed human message EXACTLY equals
+    - otherwise, if the latest checkpointed human input EXACTLY equals
       ``pending_message`` (as sent, or as the supersede fold checkpoints it —
       ``_SUPERSEDE_RIDER`` + text) → the turn COMPLETED before the kill (the
       crash landed in post-invoke bookkeeping) → "finalize". Exact only:
       containment/suffix would misread a short pending found inside the
       PREVIOUS turn's message as completed and silently drop it.
+      Host interjections are skipped only when their exact message and journal
+      identity belong to the explicit recovered owner. Pending receipts are
+      settled before finalization; user messages and unverifiable markers remain
+      ordinary input. Legacy status-only recovery has no owner to authorize this.
     - a continuation (including an accepted approval) with no pending checkpoint
       work is complete even when it carries no new human message.
     - otherwise the message never reached the checkpoint → "redispatch" it fresh.
@@ -6135,22 +6140,45 @@ def _recovery_decision(tid: str, pending_message: str, *, continuation: bool = F
         return "error"
     if (getattr(snap, "next", None) or ()) or (getattr(snap, "interrupts", None) or ()):
         return "resume"
-    if continuation:
-        return "finalize"
-    latest_human = ""
-    for m in reversed((snap.values or {}).get("messages", [])):
-        if isinstance(m, HumanMessage):
-            latest_human = m.content if isinstance(m.content, str) else str(m.content)
-            break
-    # EXACT match only — against the message as sent, or as the supersede fold
-    # checkpoints it (_SUPERSEDE_RIDER + text; status keeps the unfolded text).
-    # Anything looser silently drops messages: containment/suffix would read a
-    # short pending ("ok" / "book it") found inside or at the end of the
-    # PREVIOUS turn's message (here after a crash pre-input-checkpoint) as "this
-    # turn completed" and finalize it away.
-    if pending_message and latest_human in (pending_message,
-                                            _SUPERSEDE_RIDER + pending_message):
-        return "finalize"
+    latest_human = None
+    delivered = []
+    try:
+        history = {run.id: run for run in _runs().list(tid)} if owner else {}
+        for m in reversed((snap.values or {}).get("messages", [])):
+            if not isinstance(m, HumanMessage):
+                continue
+            ids = (m.additional_kwargs or {}).get(INTERJECTION_IDS_KEY)
+            rec = (history.get(ids[0]) if isinstance(ids, list) and len(ids) == 1
+                   and isinstance(ids[0], str) else None)
+            consumer = history.get(rec.consumed_by) if rec else None
+            if (owner is not None and owner.thread_id == tid and rec is not None
+                    and rec.origin == "egress" and rec.thread_id == tid
+                    and rec.mode == "turn" and rec.sender is None
+                    and rec.assistant_id == "general-agent"
+                    and rec.user_event_id is None and rec.admission_sequence == 0
+                    and rec.review_snapshot is None and rec.approval_id is None
+                    and not rec.resume and rec.resume_decision is None
+                    and rec.interjection_work_id == owner.work_id
+                    and m.content == rec.text
+                    and ((rec.status == "pending" and rec.consumed_by is None)
+                         or (rec.status == "success" and consumer is not None
+                             and consumer.work_id == owner.work_id))):
+                delivered.append(rec)
+                continue
+            if latest_human is None:
+                latest_human = m.content if isinstance(m.content, str) else str(m.content)
+        # EXACT original/supersede match only. Containment would mistake "ok"
+        # in a previous turn for completed input and silently drop new work.
+        if continuation or (pending_message and latest_human in (
+                pending_message, _SUPERSEDE_RIDER + pending_message)):
+            for rec in delivered:
+                if rec.status == "pending":
+                    _runs().transition(tid, rec.id, "success", consumed_by=owner.id)
+            return "finalize"
+    except Exception:
+        logging.error("recovery: host receipt reconciliation failed for %s", tid,
+                      exc_info=True)
+        return "error"
     return "redispatch"
 
 

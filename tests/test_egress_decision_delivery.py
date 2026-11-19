@@ -134,6 +134,116 @@ def test_bad_engine_marker_does_not_stop_other_threads_decision_recovery(decisio
     assert all(len(threads._runs().list(tid)) == 1 for tid in (bad, good))
 
 
+@pytest.mark.parametrize("claimed", [False, True])
+@pytest.mark.parametrize("resumed", [False, True])
+def test_completed_deep_owner_with_host_notice_recovers_without_replaying_effect(
+        decisions, monkeypatch, tmp_path, claimed, resumed):
+    """A reopened completed checkpoint must settle its owner and notice once."""
+    import sqlite3
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    tid = threads.MANAGER.reserve_visible("deepagents")
+    owner = threads._create_run(tid, "Save the synthetic announcement", user_origin=True)
+    threads._runs().claim(tid, owner.id)
+    prompt = owner.text
+    if resumed:
+        threads._runs().transition(tid, owner.id, "interrupted")
+        owner = threads._create_run(tid, None, resume=True, pending_text=prompt,
+            work_id=owner.work_id, user_event_id=owner.user_event_id)
+        threads._runs().claim(tid, owner.id)
+    threads._set_status(tid, "processing", pending_run_id=owner.id)
+    resolved_request(decisions, tid)
+    threads._dispatch_egress_resolution(tid)
+    notice, = [run for run in threads._runs().list(tid) if run.origin == "egress"]
+    monkeypatch.setattr(interjection, "active_handle", lambda: SimpleNamespace(thread_id=tid))
+    monkeypatch.setattr(interjection, "_turn_sender", lambda _runtime: None)
+    threads._TURN_INTERJECTION[tid] = {"run_id": owner.id, "claimed": []}
+    effects, submitted = [], []
+    hook = interjection.InterjectionMiddleware()
+    builder = StateGraph(MessagesState)
+    def effect(_state):
+        effects.append("saved once")
+        return {}
+    def finish(state):
+        if claimed:
+            hook.before_model(state, None)
+        return {"messages": [AIMessage("Saved the announcement.")]}
+    builder.add_node("effect", effect)
+    builder.add_node("notice", lambda state: hook.before_model(state, None))
+    builder.add_node("finish", finish)
+    builder.add_edge(START, "effect")
+    builder.add_edge("effect", "notice")
+    builder.add_edge("notice", "finish")
+    builder.add_edge("finish", END)
+    config = {"configurable": {"thread_id": tid}}
+    database = str(tmp_path / "completed.sqlite")
+    with sqlite3.connect(database, check_same_thread=False) as connection:
+        graph = builder.compile(checkpointer=SqliteSaver(connection))
+        graph.invoke({"messages": [HumanMessage(prompt)]}, config)
+        assert not graph.get_state(config).next
+    threads._TURN_INTERJECTION.pop(tid)
+    with sqlite3.connect(database, check_same_thread=False) as connection:
+        graph = builder.compile(checkpointer=SqliteSaver(connection))
+        chat = SimpleNamespace(agent=graph, runconfig=config)
+        monkeypatch.setattr(threads.MANAGER, "get", lambda *_a, **_kw: chat)
+        monkeypatch.setattr(threads, "git_recovery_error", lambda *_a: None)
+        monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
+                            lambda *args, **_kw: submitted.append(args))
+        threads._recover_run(threads._runs().get(tid, owner.id))
+    assert effects == ["saved once"] and submitted == []
+    assert threads._runs().get(tid, owner.id).status == "success"
+    delivered = threads._runs().get(tid, notice.id)
+    assert delivered.status == "success" and delivered.consumed_by == owner.id
+    assert len(threads._runs().list(tid)) == 2 + int(resumed)
+
+
+@pytest.mark.parametrize("invalid", ["missing", "unknown", "mixed", "wrong-target",
+                                    "wrong-consumer", "different-text", "later-user", "legacy"])
+def test_completed_recovery_does_not_skip_unverified_or_user_messages(
+        decisions, monkeypatch, invalid):
+    from langchain_core.messages import AIMessage, HumanMessage
+    tid = threads.MANAGER.reserve_visible("deepagents")
+    owner = threads._create_run(tid, "Save the synthetic announcement", user_origin=True)
+    threads._runs().claim(tid, owner.id)
+    threads._set_status(tid, "processing", pending_run_id=owner.id)
+    resolved_request(decisions, tid)
+    threads._dispatch_egress_resolution(tid)
+    notice, = [run for run in threads._runs().list(tid) if run.origin == "egress"]
+    other = threads._create_run(tid, "Other synthetic work")
+    if invalid == "wrong-target":
+        notice = threads._create_run(tid, notice.text, origin="egress",
+                                     interjection_work_id=other.work_id)
+    if invalid == "wrong-consumer":
+        threads._runs().transition(tid, notice.id, "success", consumed_by=other.id)
+    ids = ([] if invalid == "missing" else ["f" * 32] if invalid == "unknown"
+           else [notice.id, other.id] if invalid == "mixed" else [notice.id])
+    content = notice.text + " quoted" if invalid == "different-text" else notice.text
+    messages = [HumanMessage(owner.text), HumanMessage(content,
+        additional_kwargs={interjection.INTERJECTION_IDS_KEY: ids})]
+    if invalid == "later-user":
+        messages.append(HumanMessage("Read a different synthetic document"))
+    messages.append(AIMessage("Done"))
+    snapshot = SimpleNamespace(next=(), interrupts=(), values={"messages": messages})
+    chat = SimpleNamespace(agent=SimpleNamespace(get_state=lambda _cfg: snapshot), runconfig={})
+    monkeypatch.setattr(threads.MANAGER, "get", lambda *_a, **_kw: chat)
+    assert threads._recovery_decision(tid, owner.text,
+        owner=None if invalid == "legacy" else owner) == "redispatch"
+
+
+def test_recovery_journal_failure_does_not_guess_completed_owner(decisions, monkeypatch):
+    from langchain_core.messages import AIMessage, HumanMessage
+    tid = threads.MANAGER.reserve_visible("deepagents")
+    owner = threads._create_run(tid, "Save the synthetic announcement", user_origin=True)
+    snapshot = SimpleNamespace(next=(), interrupts=(), values={
+        "messages": [HumanMessage(owner.text), AIMessage("Done")]})
+    chat = SimpleNamespace(agent=SimpleNamespace(get_state=lambda _cfg: snapshot), runconfig={})
+    monkeypatch.setattr(threads.MANAGER, "get", lambda *_a, **_kw: chat)
+    monkeypatch.setattr(threads._runs(), "list", lambda _tid:
+        (_ for _ in ()).throw(OSError("Synthetic journal read failure")))
+    assert threads._recovery_decision(tid, owner.text, owner=owner) == "error"
+
+
 def test_failed_consumer_retries_user_intent_but_not_a_delivered_host_fact(decisions, monkeypatch):
     tid = threads.MANAGER.reserve_visible("deepagents")
     owner = threads._create_run(tid, "Read the announcement", user_origin=True)
