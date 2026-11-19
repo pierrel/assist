@@ -13,7 +13,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 from manage import web
 from manage.web import threads
 from manage.web.state import MESSAGE_BACKLOG, _get_status, _set_status
-from assist.backlog import PendingMessage
 from assist.run_service import InvalidRunTransition
 from assist.middleware import interjection as ij
 from assist.middleware.interjection import InterjectionMiddleware
@@ -218,14 +217,16 @@ def test_error_exit_rejournals_claimed_interjections(wired, monkeypatch):
     entry would be silently re-claimed by a later turn's boundary scan of the
     dead framed copy, and the follow-up's entry-gone gate would skip it)."""
     tid, _ = wired
-    rec = PendingMessage(thread_id=tid, text="the rescue steer")
+    rec = _journal(tid, "the rescue steer")
+    threads._runs().claim(tid, rec.id)
+    threads._runs().transition(tid, rec.id, "success")
     threads._TURN_INTERJECTION[tid] = {"claimed": [rec]}
     submitted = []
     monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
                         lambda *a: submitted.append(a))
     n = threads._rejournal_claimed_interjections(tid, None)
     assert n == 1
-    (entry,) = threads._runs().list(tid)
+    entry = next(run for run in threads._runs().list(tid) if run.id != rec.id)
     assert entry.text == "the rescue steer" and entry.id != rec.id
     assert submitted == [(entry.id, tid)]     # dispatched under the fresh id
     assert tid not in threads._TURN_INTERJECTION      # coverage ended with the pop

@@ -65,8 +65,10 @@ where reliability is harder than with frontier APIs.
   UID cannot traverse that directory. Ordinary owner follow-ups reach an active
   DeepAgents turn at its next model boundary after the current tool finishes,
   preserving its browser through startup and fairness resumes. Unconsumed
-  follow-ups run separately in their original queue order. Explicit cancellation
-  or replacement work revokes the old browser before later work proceeds.
+  follow-ups run separately in their original queue order. If a turn fails after
+  consuming follow-ups, fresh retries retain that order without superseding
+  one another. Explicit cancellation or replacement work revokes the old
+  browser before later work proceeds.
   See the [shared-execution design](docs/2026-11-12-browser-shared-execution.org)
   with its [trusted-state amendment](docs/2026-11-13-trusted-agent-state.org)
   and [current architecture](docs/architecture.org).

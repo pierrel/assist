@@ -771,6 +771,52 @@ class TestSandboxManager(TestCase):
         assert client.containers.run.call_count == 3
 
     @patch('assist.sandbox.DockerSandboxBackend')
+    def test_failed_turn_retries_start_real_sandbox_in_order(self, _backend):
+        from assist.browser import authority
+        from assist.browser.manager import BrowserManager
+        from assist.run_service import RunService
+        from manage.web import threads
+        tid = "retry-thread"
+        work_dir = os.path.join(self.temp_dir, tid, "domain")
+        os.makedirs(work_dir)
+        authority.mark_new_thread(self.temp_dir, tid)
+        runs = RunService(self.temp_dir)
+        owner = runs.create(tid, "general-agent", "Original request", user_origin=True)
+        runs.claim(tid, owner.id)
+        followups = [runs.create(tid, "general-agent", text, user_origin=True,
+                                interjection_work_id=owner.work_id)
+                     for text in ["First rescue", "Second rescue"]]
+        submitted = []
+        with patch.object(threads, '_runs', return_value=runs), \
+             patch.object(threads._RESUME_SCHEDULER, 'submit',
+                          side_effect=lambda rid, _tid: submitted.append(rid)):
+            threads._TURN_INTERJECTION[tid] = {'run_id': owner.id, 'claimed': []}
+            threads._consume_interjections(tid, {run.id for run in followups})
+            runs.transition(tid, owner.id, 'error', error='model failed')
+            assert threads._rejournal_claimed_interjections(tid, None) == 2
+        client, container = MagicMock(), MagicMock()
+        container.id = "retry-generation"
+        container.logs.return_value = (b"egress-proxy: listening on 0.0.0.0:8888\n"
+                                       b"egress-proxy: listening on 0.0.0.0:8889\n")
+        self._attached_proxy(container, client)
+        client.containers.run.return_value = container
+        handled = []
+        with patch.object(SandboxManager, '_get_docker_client', return_value=client), \
+             patch.object(BrowserManager, 'reconcile_startup', return_value=True), \
+             patch.object(BrowserManager, 'confirm_owner_stopped', return_value=False), \
+             patch.object(SandboxManager, '_forget_egress_client'), \
+             patch('assist.sandbox_manager.confirm_generation_stopped'):
+            for run_id in submitted:
+                run = runs.claim(tid, run_id)
+                SandboxManager.get_sandbox_backend(work_dir, browser_capable=True,
+                    thread_scope=(self.temp_dir, tid), owner_run_id=run.id)
+                handled.append(run.text)
+                runs.transition(tid, run.id, 'success')
+                SandboxManager.cleanup(work_dir, container)
+        assert handled == ['First rescue', 'Second rescue']
+        assert client.containers.run.call_count == 2
+
+    @patch('assist.sandbox.DockerSandboxBackend')
     def test_managed_shell_generation_is_journaled_and_cleared(self, _backend):
         from assist.browser import authority
         from assist.browser.manager import BrowserManager

@@ -162,6 +162,8 @@ in both views. An ID shown in only one view keeps that meaning.
   Unconsumed follow-ups aimed at the same completed owner retain separate
   fallback executions in journal order. A later sibling cannot revoke the
   earlier fallback's startup snapshot; unrelated replacements still can.
+  After a consuming turn fails, C2 journals fresh retries targeted at their
+  consumed source work, retaining the same FIFO authority rule.
   Steering admitted during a fallback likewise stays queued for its own
   target. Only host-assigned targets referring to an earlier known work are
   exempt from replacement ordering; missing or forward targets remain denied.
