@@ -278,6 +278,11 @@ Snapshot reads and background probes do not clear notifications.
   Before each native agent starts, Hermes's manifest-based sync seeds its bundled
   skills into that profile, preserving custom copies, deletions and opt-outs.
   Native platform, environment, app and disabled-skill filters still apply.
+  Ordinary owner follow-ups can steer that same invocation after its current
+  tool batch. They do not interrupt model generation or cancel tools. Assist
+  keeps each follow-up's journal identity until native history persistence is
+  confirmed; an unread message remains queued for its own later turn. Native
+  user-row receipts also recover a lost host acknowledgment after a crash.
   A lost process ends the Run without replay. A held model slot is released only
   after verified model parking or provider revocation and drain. Unconfirmed
   container cleanup retains its nonterminal Run and generation; existing Run and
@@ -370,8 +375,9 @@ name/alias and legacy-flat precedence, disabled
 preferences, deletion tracking, opt-outs, filters and project trust without a
 model. The native capability check uses a fake provider and Docker `network:none`;
 it checks browser
-creation, two native pauses with distinct competitors, a second user turn queued
-behind the first continuation, phone history and unattended command denial.
+creation, two native pauses with distinct competitors, a follow-up steering the
+same invocation after a joined helper finishes, phone history and unattended
+command denial.
 The model-egress check creates a private
 internal network and fake model, verifying ordinary mapped access, native denial,
 missing/malformed attribution and legacy no-map denial, with external allowlist

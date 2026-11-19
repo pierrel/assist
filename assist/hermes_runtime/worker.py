@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import logging
 import os
 from pathlib import Path
 import sys
@@ -29,6 +30,71 @@ def control(path: str, payload: dict) -> dict:
         response = client.post("http://host" + path, json=payload)
         response.raise_for_status()
         return response.json()
+
+
+class _Steering:
+    """Transfer journal tickets through native steering, then receipt real flushes.
+
+    The parent step callback runs before Hermes's pre-API steer drain. Joined
+    children retain their own callbacks. Buffer acceptance never claims a Run.
+    """
+
+    def __init__(self, agent, work_id):
+        self.agent, self.work_id = agent, work_id
+        self.offered = {}
+        self.flush_native = agent._flush_messages_to_session_db
+        agent.step_callback = self.step
+        agent._flush_messages_to_session_db = self.flush
+
+    def step(self, *_args):
+        for ticket in control("/steering", {})["messages"]:
+            if ticket["id"] not in self.offered:
+                text = ticket["text"].strip()
+                if self.agent.steer(text, ticket=ticket["id"]):
+                    self.offered[ticket["id"]] = text
+
+    def flush(self, messages, *args, **kwargs):
+        from agent.context_compressor import _DB_PERSISTED_MARKER
+
+        # The opaque journal marker pairs equal-text admissions independently.
+        # Store the identities in the SAME native row transaction, allowing
+        # host recovery when a crash falls between commit and acknowledgment.
+        for row in messages:
+            if (row.get("role") == "user" and row.get("display_kind") == "steer"
+                    and not row.get(_DB_PERSISTED_MARKER)):
+                ids = [rid for rid, text in self.offered.items()
+                       if text in (row.get("content") or "")]
+                if ids:
+                    row["display_metadata"] = {**(row.get("display_metadata") or {}),
+                        "assist_steering": {"work_id": self.work_id, "run_ids": ids}}
+        success = self.flush_native(messages, *args, **kwargs)
+        if success is True:
+            ids = {rid for row in messages if row.get(_DB_PERSISTED_MARKER)
+                   for rid in (row.get("display_metadata") or {}).get(
+                       "assist_steering", {}).get("run_ids", [])
+                   if rid in self.offered}
+            ids = sorted(ids)
+            for start in range(0, len(ids), 256):
+                batch = ids[start:start + 256]
+                try:
+                    control("/steering", {"consumed": batch, "peek": False})
+                except Exception:
+                    # A parked host or lost acknowledgment cannot turn a
+                    # committed native flush into failure. Retry on a later
+                    # flush; host recovery reads the same durable identities.
+                    logging.getLogger(__name__).warning("Native steering acknowledgment deferred")
+                    break
+                for rid in batch:
+                    self.offered.pop(rid, None)
+                    self.agent.withdraw_steer(rid)
+        return success
+
+    def finish(self):
+        self.agent.step_callback = None
+        for ticket in self.offered:
+            # This removes unread buffer entries. A consumed/unknown fate is
+            # never used as a durability receipt; pending journal Runs survive.
+            self.agent.withdraw_steer(ticket)
 
 
 class _ProviderBridge(http.server.BaseHTTPRequestHandler):
@@ -195,8 +261,10 @@ def main(request_path: str) -> None:
                 fallback_model={},
                 session_id=session_id, session_db=database,
                 enabled_toolsets=request["toolsets"], quiet_mode=True, cwd="/workspace")
+        steering = _Steering(agent, request.get("work_id"))
         result = agent.run_conversation(request["prompt"], conversation_history=history,
                                         system_message=request.get("system_message"))
+        steering.finish()
         # Pinned native review completion and title-thread registries provide
         # joins; the host Run supplies the bound and cancellation. The host
         # stops the entire generation, including background tool processes,

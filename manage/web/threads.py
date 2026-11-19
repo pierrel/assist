@@ -106,6 +106,7 @@ from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
                                  ThreadHoldExpired, ThreadPauseRequested,
                                  active_handle)
 from assist.hermes_runtime import HermesRuntimeError, HermesRuntimeManager
+from assist.hermes_steering import committed_receipts, frame as frame_hermes_steering
 from edd.live_capture import CaptureStorageFull
 
 from manage.web.app import app
@@ -2460,11 +2461,19 @@ def _hermes_messages(tid: str) -> list[dict]:
             first, _ = work.get(run.work_id, (run, run))
             work[run.work_id] = (first, run)
     messages = []
+    run_work = {run.id: run.work_id for run in _runs().list(tid)}
     for first, latest in work.values():
+        if first.consumed_by:
+            continue
         text = first.text or first.pending_text
         if text and first.origin is None:
             messages.append({"role": "user", "content": text, "run_id": first.id,
                              "message_id": f"hermes:user:{first.work_id}"})
+        for follower, _ in work.values():
+            if (follower.text and follower.origin is None and follower.consumed_by
+                    and run_work.get(follower.consumed_by) == first.work_id):
+                messages.append({"role": "user", "content": follower.text, "run_id": follower.id,
+                                 "message_id": f"hermes:user:{follower.work_id}"})
         if latest.status == "success" and latest.result:
             messages.append({"role": "assistant", "content": latest.result, "run_id": latest.id,
                              "message_id": f"hermes:assistant:{first.work_id}"})
@@ -3216,9 +3225,56 @@ def _execute_run_active(run_id: str, tid: str, *, user_priority: bool = False) -
         pass  # thread deletion removes its run store while a dispatcher unwinds.
 
 
+def _hermes_steering(run: Run, consumed=()) -> list[dict]:
+    """Offer only this owner's journaled follow-ups; claim persisted identities."""
+    with _RUN_ADMISSION_LOCK:
+        runs = _runs().list(run.thread_id)
+        browser_authority.execution_sequence(runs, run.id)
+        eligible = [item for item in _runs_before_browser_reset(runs)
+                    if item.status == "pending" and item.interjection_work_id == run.work_id
+                    and item.sender is None and item.origin is None and item.user_event_id == item.id
+                    and item.mode == "turn" and item.assistant_id == "general-agent"
+                    and item.text and item.review_snapshot is None and item.approval_id is None]
+        for item in eligible:
+            if item.id in consumed:
+                _runs().transition(run.thread_id, item.id, "success", consumed_by=run.id)
+        return [{"id": item.id, "text": frame_hermes_steering(item)} for item in eligible
+                if item.id not in consumed]
+
+
+def _reconcile_hermes_steering(tid: str) -> None:
+    """Close native-commit/host-ack crash gaps before a targeted fallback runs."""
+    with _RUN_ADMISSION_LOCK:
+        runs = _runs().list(tid)
+        pending = [run for run in runs if run.status == "pending" and run.interjection_work_id]
+        if not pending:
+            return
+        receipts = committed_receipts(MANAGER.thread_agent_dir(tid))
+        for run in pending:
+            if receipts.get(run.id) == run.interjection_work_id:
+                owner = next(item for item in runs if item.work_id == run.interjection_work_id)
+                _runs().transition(tid, run.id, "success", consumed_by=owner.id)
+
+
 def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
     """Dispatch native work and retain its process across same-work successors."""
     tid = run.thread_id
+    if run.status == "pending" and run.interjection_work_id is not None:
+        try:
+            _reconcile_hermes_steering(tid)
+        except Exception:
+            # An unreadable receipt store cannot prove queued delivery safe.
+            # Keep the journal entry visible without replaying uncertain work.
+            message = "Native steering delivery could not be verified; retained files need review"
+            with _RUN_ADMISSION_LOCK:
+                _runs().claim(tid, run.id)
+                _runs().transition(tid, run.id, "error", error=message)
+            _set_status(tid, "error", error=message, pending_message=run.text)
+            return
+        run = _runs().get(tid, run.id)
+        if run.status != "pending":
+            _dispatch_pending_after(tid, run.id)
+            return
     if run.status != "pending":
         recovered = False
         with _RUN_ADMISSION_LOCK:
@@ -3318,6 +3374,7 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
                 reply = _HERMES_RUNTIME.run_slice(
                     run, work_dir=work_dir, agent_dir=MANAGER.thread_agent_dir(tid),
                     thread_scope=(MANAGER.root_dir, tid), handle=handle, admitted=admitted,
+                    steering=lambda consumed: _hermes_steering(run, consumed),
                     egress_tools=(egress_tools(EGRESS_STORE, EGRESS_BASE_HOSTS,
                                               thread_dir=MANAGER.thread_dir, thread_id=tid)
                                   if EGRESS_STORE is not None else ()))
@@ -5149,10 +5206,10 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
                     or browser_active or bool(held) or bool(older_web))
     busy = busy or browser_active or bool(older_web) or bool(held)
     pi_thread = False
-    deep_thread = False
+    steering_engine = False
     try:
         pi_thread = _is_native_thread(tid)
-        deep_thread = read_thread_engine(MANAGER.thread_dir(tid)).name == "deepagents"
+        steering_engine = read_thread_engine(MANAGER.thread_dir(tid)).name in {"deepagents", "hermes"}
         if pi_thread:
             if _is_pi_thread(tid):
                 _ensure_pi_description(tid, text)
@@ -5172,7 +5229,7 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
             browser_authority.execution_sequence(previous, active.id)
         except RuntimeError:
             active = None
-    steering = (active is not None and deep_thread and not pi_thread and not held
+    steering = (active is not None and steering_engine and not held
                 and active.mode == "turn" and active.assistant_id == "general-agent"
                 and active.sender is None and active.approval_id is None
                 and prior_stage != "awaiting_approval"
