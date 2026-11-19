@@ -281,8 +281,7 @@ def handoff_host(wired,monkeypatch):
         containers[str(root/t)]=container
         run=threads._runs().get(t,kwargs['owner_run_id'])
         with authority.fence(str(root),t) as lease:
-            sequence=max((r.admission_sequence for r in threads._runs().list(t)
-                          if r.user_event_id==r.id),default=0)
+            sequence=authority.execution_sequence(threads._runs().list(t),run.id)
             lease.begin(run.id,sequence)
             lease.add_generation(run.id,container.id)
         return SimpleNamespace(container=container)
@@ -393,19 +392,23 @@ def test_unconsumed_browser_steering_runs_once_as_fallback(handoff_host,monkeypa
         def message(self,text):
             calls.append(text)
             if not followups:
-                followups.append(threads._accept_message_run(tid,'Follow-up not consumed')[0])
+                for text in ['First unconsumed follow-up','Second unconsumed follow-up']:
+                    followups.append(threads._accept_message_run(tid,text)[0])
+            elif text=='First unconsumed follow-up':
+                followups.append(threads._accept_message_run(tid,'Third unconsumed follow-up')[0])
             return 'Completed this execution'
     monkeypatch.setattr(web.MANAGER,'get',lambda *_a,**_k:Chat())
     owner=threads._create_run(tid,'Original browser work',user_origin=True)
     threads._execute_run(owner.id,tid)
     assert threads._runs().get(tid,owner.id).status=='success'
     assert threads._runs().get(tid,followups[0].id).status=='pending'
-    item=scheduler._q.get_nowait()
-    assert item['run_id']==followups[0].id
-    threads._execute_run(item['run_id'],tid)
-    threads._execute_run(item['run_id'],tid)
-    assert calls==['Original browser work','Follow-up not consumed']
-    assert threads._runs().get(tid,followups[0].id).status=='success'
+    for followup in followups:
+        item=scheduler._q.get_nowait()
+        assert item['run_id']==followup.id
+        threads._execute_run(item['run_id'],tid)
+        threads._execute_run(item['run_id'],tid)
+        assert threads._runs().get(tid,followup.id).status=='success'
+    assert calls==['Original browser work','First unconsumed follow-up','Second unconsumed follow-up','Third unconsumed follow-up']
 
 
 def test_targeted_steering_cannot_enter_another_execution(handoff_host,monkeypatch):

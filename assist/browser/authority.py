@@ -33,9 +33,14 @@ def execution_sequence(runs, owner_run_id: str) -> int:
     first = next(index for index, run in enumerate(runs) if run.work_id == owner.work_id)
     sequence = max((run.admission_sequence for run in runs[:first + 1]
                     if run.user_event_id == run.id), default=0)
-    latest = max((run.admission_sequence for run in runs
-                  if run.user_event_id == run.id
-                  and run.interjection_work_id != owner.work_id), default=0)
+    # Host-targeted steering keeps its FIFO fallback even across successive
+    # executions. It cannot become replacement authority over older queue work.
+    known_work = {run.work_id for run in runs[:first + 1]}
+    latest = sequence
+    for run in runs[first + 1:]:
+        if run.user_event_id == run.id and run.interjection_work_id not in known_work:
+            latest = max(latest, run.admission_sequence)
+        known_work.add(run.work_id)
     if latest != sequence:
         raise RuntimeError("newer user message revoked browser startup")
     return sequence
