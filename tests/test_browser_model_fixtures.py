@@ -42,6 +42,42 @@ def test_personal_browsing_eval_uses_its_paired_handoff_capability(monkeypatch):
     case.test_personal_browsing_opens_and_hands_over_a_static_page()
 
 
+@pytest.mark.parametrize("unrequested_handoff", [False, True])
+def test_information_only_completion_rejects_unrequested_handoff(monkeypatch, unrequested_handoff):
+    from langchain_core.messages import AIMessage
+    from tests.middleware.test_skills_kernel import _RecordingModel
+    from edd.eval.test_browser_agent import TestBrowserAgent
+
+    calls = [("load_skill", {"name": "browse-website"}),
+             ("browser_open", {"url": "https://v1-auth.fern.example/"})]
+    if unrequested_handoff:
+        calls.append(("browser_handoff", {}))
+    responses = [AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": str(i)}])
+                 for i, (name, args) in enumerate(calls)]
+    responses.append(AIMessage(content="October Reliability Review"))
+    monkeypatch.setattr(TestBrowserAgent, "model", _RecordingModel(responses=responses), raising=False)
+    case = TestBrowserAgent("test_v1_one_turn_completion")
+    if unrequested_handoff:
+        with pytest.raises(AssertionError, match="browser_handoff"):
+            case.test_v1_one_turn_completion()
+    else:
+        case.test_v1_one_turn_completion()
+
+
+def test_ordinary_site_offer_records_handoff_and_freezes_browser_commands(tmp_path):
+    site = _BrowserSite("v1-auth", str(tmp_path))
+    assert "error" in site.offer_control()
+    opened = site.command("open", url="https://v1-auth.fern.example/")
+    offer = site.offer_control()
+    assert offer["status"] == "waiting_for_user"
+    assert offer["handoff_url"] == "https://assist.fern.example/thread/exhibit/browser"
+    assert site.handed_off
+    assert "error" in site.command("close", page_id=opened["result"]["page_id"])
+    assert site.session_open
+    site.end_turn()
+    assert not site.handed_off
+
+
 @pytest.mark.parametrize("journey", ["auth", "approval_before", "approval_after"])
 def test_selected_journey_completes_legal_context_work(monkeypatch, journey):
     import hashlib

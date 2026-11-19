@@ -101,13 +101,14 @@ def _browser_task_fixture():
 
 
 class _BrowserSite:
-    """Selected stateful scenarios retain one current page for observations."""
+    """Offline pages expose an observable control offer and freeze after handoff."""
     def __init__(self, scenario, root):
         self.scenario = scenario
         self.root = Path(root)
         self.calls = []
         self.approved = False
         self.session_open = False
+        self.handed_off = False
         self.turn = 1
         self.page_sequence = 0
         self.form_values = {}
@@ -115,8 +116,17 @@ class _BrowserSite:
 
     def end_turn(self):
         self.session_open = False
+        self.handed_off = False
         self.form_values = {}
         self.turn += 1
+
+    def offer_control(self):
+        self.calls.append(("handoff", {}))
+        if not self.session_open:
+            return {"error": "No live website page is available."}
+        self.handed_off = True
+        return {"handoff_url": "https://assist.fern.example/thread/exhibit/browser",
+                "status": "waiting_for_user"}
 
     def _form_page(self, snapshot):
         return self._page(
@@ -147,6 +157,8 @@ class _BrowserSite:
 
     def command(self, operation, **args):
         self.calls.append((operation, args))
+        if self.handed_off:
+            return {"error": "Browser control is reserved for the user."}
         selected = self.scenario in {"v1-form", "approval", "v1-auth"}
         if operation == "open" and selected:
             reuse = args.get("reuse_page_id")
@@ -525,6 +537,7 @@ class TestBrowserAgent(TestCase):
                         "https://v1-auth.fern.example/?"])
         self.assertTrue(any(op == "open" for op, _ in turns[0]), turns)
         self.assertIn("October Reliability Review", answers[0])
+        self.assertFalse(agent_tool_calls(agent, "browser_handoff"), agent.all_messages())
         self.assertFalse(agent_tool_calls(agent, "task"), agent.all_messages())
 
     def test_v1_form_continues_after_fair_yield(self):
