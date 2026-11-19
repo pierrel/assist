@@ -212,6 +212,29 @@ def test_startup_and_prior_tool_history_do_not_enable_steering(monkeypatch):
     assert buffered == [("new-owner-message", "Use green")]
 
 
+def test_each_followup_batch_requires_fresh_tool_completion(monkeypatch):
+    worker = load_worker()
+    phase = ["green"]
+    requests, buffered = [], []
+    def control(_path, _payload):
+        requests.append(phase[0])
+        return {"messages": [{"id": phase[0], "text": "Use " + phase[0]}]}
+    monkeypatch.setattr(worker, "control", control)
+    agent = SimpleNamespace(_flush_messages_to_session_db=lambda _rows: True,
+        steer=lambda text, ticket: (buffered.append((ticket, text)), True)[1],
+        withdraw_steer=lambda _ticket: False)
+    worker._Steering(agent, "current-work")
+    agent.tool_complete_callback("tool-1", "terminal", {}, "FIRST_RESULT")
+    agent.step_callback(1, [{"name": "terminal", "result": "FIRST_RESULT"}])
+    phase[0] = "red"
+    agent.step_callback(2, [{"name": "terminal", "result": "FIRST_RESULT"}])
+    assert requests == ["green"] and buffered == [("green", "Use green")]
+    agent.tool_complete_callback("tool-2", "terminal", {}, "SECOND_RESULT")
+    agent.step_callback(3, [{"name": "terminal", "result": "SECOND_RESULT"}])
+    assert requests == ["green", "red"]
+    assert buffered == [("green", "Use green"), ("red", "Use red")]
+
+
 @pytest.mark.parametrize("edge", ["trailing_newline", "ack_failure", "large_batch"])
 def test_native_receipts_survive_transport_and_batch_edges(monkeypatch, edge):
     worker = load_worker()

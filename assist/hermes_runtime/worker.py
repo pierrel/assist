@@ -35,9 +35,9 @@ def control(path: str, payload: dict) -> dict:
 class _Steering:
     """Transfer journal tickets through native steering, then receipt real flushes.
 
-    A current tool completion enables the parent step callback before Hermes's
-    pre-API steer drain. Loaded history cannot enable intake. Buffer acceptance
-    never claims a Run.
+    A current tool completion enables one parent intake before Hermes's pre-API
+    steer drain. Loaded history and no-tool retries cannot enable another intake.
+    Buffer acceptance never claims a Run.
     """
 
     def __init__(self, agent, work_id):
@@ -55,6 +55,7 @@ class _Steering:
     def step(self, *_args):
         if not self.completed_tool:
             return
+        self.completed_tool = False
         for ticket in control("/steering", {})["messages"]:
             if ticket["id"] not in self.offered:
                 text = ticket["text"].strip()
