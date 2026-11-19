@@ -458,9 +458,10 @@ their explicit summary handoff creates an independent Deep Agents thread.
   file/terminal tools, skills, memory, compression and joined delegation.
   Native SessionDB and preferences persist in C9's isolated =/agent/hermes=.
   C2 projects accepted messages and committed replies from existing C3 Runs.
-  The parent instance's native step callback receives owner steering before
-  Hermes drains it after complete tool results. Children do not share this
-  intake. Native =steer(text, ticket=Run.id)= accepts a buffer entry only.
+  A native tool completion from this invocation enables the parent instance's
+  step callback before Hermes drains steering after complete tool results.
+  Loaded tool history cannot enable intake. Children do not share the parent
+  step callback. Native =steer(text, ticket=Run.id)= accepts a buffer entry only.
   The pin has no post-persistence hook: a narrow instance flush wrapper adds
   Run/work identities to the native user row's =display_metadata= before its
   transaction and acknowledges only a successful durable flush. C3's

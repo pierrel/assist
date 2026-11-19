@@ -16,6 +16,8 @@ from assist.thread_queue import ThreadAffinityQueue
 from manage.web import threads
 from tests.test_web_hermes import hermes_threads
 
+_DISPATCH_PENDING = threads._dispatch_pending_after
+
 
 def owner_and_followers(hermes_threads, count=2):
     tid = threads.MANAGER.reserve_visible("hermes")
@@ -39,6 +41,21 @@ def test_same_owner_followups_keep_identity_until_persisted(hermes_threads):
     assert threads._runs().get(tid, followers[0].id).consumed_by == owner.id
     threads._hermes_steering(owner, [followers[0].id])
     assert threads._runs().get(tid, followers[1].id).status == "pending"
+
+
+def test_native_history_keeps_each_owners_consumed_followups_before_its_reply(hermes_threads):
+    tid, owner, followers = owner_and_followers(hermes_threads, count=2)
+    threads._hermes_steering(owner, [run.id for run in followers])
+    threads._runs().transition(tid, owner.id, "success", result="First reply")
+    later = threads._create_run(tid, "Next ordinary turn", user_origin=True)
+    threads._runs().claim(tid, later.id)
+    threads._runs().transition(tid, later.id, "success", result="Second reply")
+    messages = threads._hermes_messages(tid)
+    assert [(row["role"], row["content"]) for row in messages] == [
+        ("user", "Create a blue note"), ("user", "Make the note green"),
+        ("user", "Make the note green"), ("assistant", "First reply"),
+        ("user", "Next ordinary turn"), ("assistant", "Second reply")]
+    assert len({row["message_id"] for row in messages}) == len(messages)
 
 
 @pytest.mark.parametrize("boundary", ["cancel", "other_work", "sender", "scheduled"])
@@ -134,6 +151,24 @@ def test_unreadable_native_receipt_is_visible_without_replay(hermes_threads, mon
     assert threads._get_status(tid)["stage"] == "error"
 
 
+def test_unreadable_receipts_dispatch_each_remaining_follower_without_replay(hermes_threads, monkeypatch):
+    tid, owner, followers = owner_and_followers(hermes_threads, count=2)
+    path = receipt_database(tid, owner, [followers[0].id])
+    path.write_bytes(b"Synthetic corrupted native state")
+    threads._runs().transition(tid, owner.id, "error", error="Synthetic process loss")
+    submitted = []
+    monkeypatch.setattr(threads, "_dispatch_pending_after", _DISPATCH_PENDING)
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
+        lambda rid, thread_id, **_kwargs: submitted.append((rid, thread_id)))
+    monkeypatch.setattr(threads._HERMES_RUNTIME, "run_slice", lambda *_a, **_k:
+                        pytest.fail("Ambiguous delivery must not replay"))
+    threads._execute_hermes_run(followers[0], user_priority=False)
+    assert submitted == [(followers[1].id, tid)]
+    threads._execute_hermes_run(followers[1], user_priority=False)
+    assert all(threads._runs().get(tid, run.id).status == "error" for run in followers)
+    assert submitted == [(followers[1].id, tid)]
+
+
 @pytest.mark.parametrize("ending", ["unadmitted", "result", "stopped"])
 def test_late_or_parked_intake_cannot_claim_journal(tmp_path, ending):
     relay = HermesProviderRelay(tmp_path, "http://127.0.0.1:9/v1", "dummy", "dummy", 8192,
@@ -155,6 +190,26 @@ def load_worker():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_startup_and_prior_tool_history_do_not_enable_steering(monkeypatch):
+    worker = load_worker()
+    requests, buffered = [], []
+    def control(_path, payload):
+        requests.append(payload)
+        return {"messages": [{"id": "new-owner-message", "text": "Use green"}]}
+    monkeypatch.setattr(worker, "control", control)
+    agent = SimpleNamespace(_flush_messages_to_session_db=lambda _rows: True,
+        steer=lambda text, ticket: (buffered.append((ticket, text)), True)[1],
+        withdraw_steer=lambda _ticket: False)
+    worker._Steering(agent, "current-work")
+    prior_round = [{"name": "terminal", "result": "PRIOR_RESULT", "arguments": "{}"}]
+    agent.step_callback(0, prior_round)
+    agent.step_callback(1, prior_round)
+    assert requests == [] and buffered == []
+    agent.tool_complete_callback("current-tool-id", "terminal", {}, "CURRENT_RESULT")
+    agent.step_callback(2, [{"name": "terminal", "result": "CURRENT_RESULT", "arguments": "{}"}])
+    assert buffered == [("new-owner-message", "Use green")]
 
 
 @pytest.mark.parametrize("edge", ["trailing_newline", "ack_failure", "large_batch"])
@@ -184,6 +239,7 @@ def test_native_receipts_survive_transport_and_batch_edges(monkeypatch, edge):
         steer=lambda text, ticket: (buffered.append(text.strip()), True)[1],
         withdraw_steer=lambda _ticket: False)
     delivery = worker._Steering(agent, "logical-work")
+    agent.tool_complete_callback("current-tool", "terminal", {}, "CURRENT_RESULT")
     agent.step_callback(0, [])
     rows = [{"role": "user", "display_kind": "steer", "content": "\n".join(buffered)}]
     assert agent._flush_messages_to_session_db(rows) is True
@@ -216,6 +272,7 @@ def test_worker_only_receipts_successful_native_flush(monkeypatch, persisted):
         steer=lambda text, ticket: (buffered.append((ticket, text)), True)[1],
         withdraw_steer=lambda ticket: True)
     delivery = worker._Steering(agent, "logical-work")
+    agent.tool_complete_callback("current-tool", "terminal", {}, "CURRENT_RESULT")
     agent.step_callback(0, [])
     agent.step_callback(1, [])
     assert len(buffered) == 2
