@@ -92,13 +92,17 @@ def test_viewer_frame_failure_never_falls_back_to_raw(monkeypatch, stage):
       {'parts':['fixture-'],'value':'','password':False},
       {'parts':['secret'],'value':'','password':False}], [1,0]),
     ([{'parts':[1,2],'value':'','password':False},
+      {'parts':['fixture-secret fixture-'],'value':'','password':False},
+      {'parts':['secret'],'value':'','password':False}], [1,0]),
+    ([{'parts':[],'value':'','password':False,'placeholder':'fixture-secret'}], [0]),
+    ([{'parts':[1,2],'value':'','password':False},
       {'parts':['fixture-secret'],'value':'','password':False},
       {'parts':['Safe action'],'value':'','password':False}], [1]),
 ])
 def test_native_masks_cover_each_visible_occurrence_and_keep_safe_sibling(states, expected):
     class Nodes:
         def evaluate_all(self, _expression):
-            return states
+            return [{**state, 'placeholder':state.get('placeholder', '')} for state in states]
         def nth(self, index):
             return index
     page = SimpleNamespace(frames=[SimpleNamespace(locator=lambda selector: Nodes()

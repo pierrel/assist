@@ -116,7 +116,8 @@ in both views. An ID shown in only one view keeps that meaning.
   masks raw observations before display limits; the host checks returned
   observations again. Viewer commands carry the same inventory: tab metadata
   uses text masking, and native screenshot masks cover bounded known-value
-  DOM/control reflections before JPEG capture. Failed collection, selection or
+  DOM/control reflections, including displayed placeholders and matches extending
+  beyond masked child elements, before JPEG capture. Failed collection, selection or
   capture refuses the frame; arbitrary painted transformations remain outside
   this coverage. The key is outside the workspace, scratch and =/agent= mounts.
   The thread-scoped [[file:../manage/web/browser_viewer.py][browser viewer]] adds

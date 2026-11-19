@@ -18,9 +18,9 @@ from uuid import uuid4
 
 from playwright.sync_api import sync_playwright
 if __package__:
-    from .redaction import MAX_PRIVATE_COMMAND, contains_hidden, replace_hidden
+    from .redaction import MAX_PRIVATE_COMMAND, contains_hidden, hidden_spans, replace_hidden
 else:
-    from browser_redaction import MAX_PRIVATE_COMMAND, contains_hidden, replace_hidden
+    from browser_redaction import MAX_PRIVATE_COMMAND, contains_hidden, hidden_spans, replace_hidden
 
 RUNTIME_DIR = os.environ.get("BROWSER_RUNTIME_DIR", "/run")
 SOCKET = os.path.join(RUNTIME_DIR, "browser.sock")
@@ -721,22 +721,40 @@ class BrowserWorker:
                         return index === undefined ? [] : [index];
                     });
                     const value = typeof node.value === 'string' ? node.value : '';
-                    size += (parts.filter(part => typeof part === 'string').join('').length + value.length) * 4;
+                    const placeholder = !value && ['INPUT', 'TEXTAREA'].includes(node.tagName) ? node.getAttribute('placeholder') || '' : '';
+                    size += (parts.filter(part => typeof part === 'string').join('').length + value.length + placeholder.length) * 4;
                     if (size > 131072) throw new Error('DOM mask budget');
-                    return {parts, value, password: node.tagName === 'INPUT' && node.type === 'password'};
+                    return {parts, value, placeholder, password: node.tagName === 'INPUT' && node.type === 'password'};
                 });
             }""")
-            visible = {}
+            rendered = {}
             for index in reversed(range(len(states))):
                 state = states[index]
-                text = ''.join(part if isinstance(part, str) else visible[part]
-                               for part in state["parts"])
+                pieces, covered = [], []
+                offset = 0
+                for part in state["parts"]:
+                    text, spans = (part, []) if isinstance(part, str) else rendered[part]
+                    pieces.append(text)
+                    covered.extend((begin + offset, end + offset) for begin, end in spans)
+                    offset += len(text)
+                text = ''.join(pieces)
+                def uncovered(begin, end):
+                    cursor = begin
+                    for left, right in covered:
+                        if right <= cursor:
+                            continue
+                        if left > cursor:
+                            return True
+                        cursor = right
+                        if cursor >= end:
+                            return False
+                    return cursor < end
                 if (state["password"] or contains_hidden(state["value"], hidden)
-                        or contains_hidden(text, hidden)):
+                        or contains_hidden(state["placeholder"], hidden)
+                        or any(uncovered(begin, end) for begin, end in hidden_spans(text, hidden))):
                     masks.append(nodes.nth(index))
-                    visible[index] = "\0"
-                else:
-                    visible[index] = text
+                    covered = [(0, len(text))]
+                rendered[index] = text, covered
         return masks
 
     def _hidden_values(self):

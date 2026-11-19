@@ -1355,8 +1355,8 @@ secrecy against arbitrary page behavior. A thread with an existing locked or
 damaged store must unlock or repair it before browser observations resume.
 
 Human viewer frames and tab URLs use that same inventory. Native Playwright
-masks cover password controls and selected known-value DOM/control reflections
-before JPEG capture; normal page values remain unchanged. Frame selection is
+masks cover password controls, displayed empty-control placeholders, and complete
+known-value DOM/control matches before JPEG capture; normal page values remain unchanged. Frame selection is
 bounded to 2,000 elements and 128 KiB of conservatively sized DOM text per frame;
 a failed collection, selection, or capture returns a fixed refusal with no raw
 frame fallback. Canvas/image transformations and rendering races remain outside

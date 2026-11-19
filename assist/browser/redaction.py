@@ -50,9 +50,10 @@ def contains_hidden(value: str, hidden: tuple[str, ...]) -> bool:
                or needle in decoded or needle in form for word in hidden)
 
 
-def replace_hidden(value: str, hidden: tuple[str, ...], marker: str = MARKER) -> str:
+def hidden_spans(value: str, hidden: tuple[str, ...]) -> list[tuple[int, int]]:
+    """Return merged original-text spans for the same matches used by text masking."""
     if not contains_hidden(value, hidden):
-        return value
+        return []
     changes = [0] * (len(value) + 1)
     decoded = [_decoded_spans(value, False)] if "%" in value else []
     if "+" in value:
@@ -75,16 +76,24 @@ def replace_hidden(value: str, hidden: tuple[str, ...], marker: str = MARKER) ->
                 changes[beginning] += 1
                 changes[end] -= 1
                 start = data.find(needle, start + 1)
-    result = []
-    cursor = 0
+    spans = []
+    beginning = 0
     depth = 0
     for index, change in enumerate(changes):
         previous = depth
         depth += change
         if previous == 0 and depth:
-            result.append(value[cursor:index])
+            beginning = index
         elif previous and depth == 0:
-            result.append(marker)
-            cursor = index
+            spans.append((beginning, index))
+    return spans
+
+
+def replace_hidden(value: str, hidden: tuple[str, ...], marker: str = MARKER) -> str:
+    result = []
+    cursor = 0
+    for beginning, end in hidden_spans(value, hidden):
+        result.extend((value[cursor:beginning], marker))
+        cursor = end
     result.append(value[cursor:])
     return "".join(result)
