@@ -1,5 +1,9 @@
 """Isolated synthetic destination checks; no production endpoints or tokens."""
 import socket
+import os
+import subprocess
+import sys
+from pathlib import Path
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import Mock
@@ -74,15 +78,15 @@ def test_resolver_denies_alias_and_mixed_answers_before_dial(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, **kwargs: [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port)) for ip in answers])
     with pytest.raises(control_api.ControlApiDenied):
-        control_api.resolve_target("alias.example.test", 5050)
-    assert control_api.resolve_target("docs.example.test", 8484) == "93.184.216.34"
+        control_api.resolve_targets("alias.example.test", 5050)
+    assert control_api.resolve_targets("docs.example.test", 8484) == ("93.184.216.34", "10.1.2.3")
     monkeypatch.setenv("ASSIST_BASE_URL", "https://control.example.test")
     with pytest.raises(control_api.ControlApiDenied):
-        control_api.resolve_target("alternate.example.test", 443)
+        control_api.resolve_targets("alternate.example.test", 443)
 
 
 def test_http_and_tls_pin_dial_address_keep_hostname(monkeypatch):
-    monkeypatch.setattr(url_fetch, "resolve_target", lambda host, port: "93.184.216.34")
+    monkeypatch.setattr(url_fetch, "resolve_targets", lambda host, port: ("93.184.216.34",))
     dial = Mock(return_value=object())
     monkeypatch.setattr(url_fetch, "create_connection", dial)
     for cls in (url_fetch._HttpConnection, url_fetch._HttpsConnection):
@@ -99,9 +103,9 @@ def test_configured_public_origin_and_failed_inventory_deny(monkeypatch):
         raise socket.gaierror("synthetic inventory unavailable")
     monkeypatch.setattr(socket, "getaddrinfo", fail)
     with pytest.raises(control_api.ControlApiDenied):
-        control_api.resolve_target("CONTROL.EXAMPLE.TEST.", 443)
+        control_api.resolve_targets("CONTROL.EXAMPLE.TEST.", 443)
     with pytest.raises(OSError):
-        control_api.resolve_target("other.example.test", 443)
+        control_api.resolve_targets("other.example.test", 443)
 
 
 def test_docs_and_model_ports_survive_local_control_deny(monkeypatch):
@@ -110,9 +114,9 @@ def test_docs_and_model_ports_survive_local_control_deny(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, **kwargs: [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.1.2.3", port))])
     for port in (8484, 9001, 8000):
-        assert control_api.resolve_target("private.example.test", port) == "10.1.2.3"
+        assert control_api.resolve_targets("private.example.test", port) == ("10.1.2.3",)
     with pytest.raises(control_api.ControlApiDenied):
-        control_api.resolve_target("private.example.test", 5050)
+        control_api.resolve_targets("private.example.test", 5050)
 
 
 @pytest.mark.parametrize('alias', ['::ffff:93.184.216.34', '::ffff:5db8:d822'])
@@ -124,4 +128,54 @@ def test_published_ipv4_origin_denies_mapped_ipv6_alias(monkeypatch, alias):
          socket.SOCK_STREAM, 6, '',
          ('93.184.216.34' if host == 'control.example.test' else alias, port))])
     with pytest.raises(control_api.ControlApiDenied):
-        control_api.resolve_target('alternate.example.test', 443)
+        control_api.resolve_targets('alternate.example.test', 443)
+
+
+@pytest.mark.parametrize('connection_class', [url_fetch._HttpConnection, url_fetch._HttpsConnection])
+def test_host_transport_retries_only_vetted_numeric_addresses(monkeypatch, connection_class):
+    monkeypatch.setenv('ASSIST_PORT', '5050')
+    monkeypatch.delenv('ASSIST_BASE_URL', raising=False)
+    resolutions = []
+    def resolve(host, port, **kwargs):
+        resolutions.append((host, port))
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (ip, port))
+                for ip in ('93.184.216.34', '93.184.216.35')]
+    monkeypatch.setattr(socket, 'getaddrinfo', resolve)
+    connected = object()
+    dial = Mock(side_effect=[OSError('synthetic first address unreachable'), connected])
+    monkeypatch.setattr(url_fetch, 'create_connection', dial)
+    assert connection_class('page.example.test', 443)._new_conn() is connected
+    assert resolutions == [('page.example.test', 443)]
+    assert [call.args[0] for call in dial.call_args_list] == [
+        ('93.184.216.34', 443), ('93.184.216.35', 443)]
+
+
+def test_empty_exported_port_has_the_web_default(monkeypatch):
+    monkeypatch.setenv('ASSIST_PORT', '')
+    assert control_api.control_config()[0] == 8000
+
+
+def test_web_module_entrypoint_uses_same_empty_port_default(tmp_path):
+    script = """
+import runpy
+import uvicorn
+import assist.env
+assist.env.load_dev_env = lambda: None
+class Server:
+    def __init__(self, config):
+        assert config.port == 8000
+    def run(self):
+        self.started = True
+        print('ENTRYPOINT_PORT=8000')
+uvicorn.Server = Server
+runpy.run_module('manage.web', run_name='__main__')
+"""
+    result = subprocess.run([sys.executable, '-c', script], cwd=tmp_path,
+        env={'PATH': os.environ['PATH'],
+             'PYTHONPATH': str(Path(__file__).resolve().parents[1]),
+             'ASSIST_PORT': '', 'ASSIST_THREADS_DIR': str(tmp_path / 'threads'),
+             'ASSIST_CAPTURES_DIR': str(tmp_path / 'captures'),
+             'ASSIST_EGRESS_RUNTIME_DIR': str(tmp_path / 'egress-runtime')},
+        timeout=15, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert 'ENTRYPOINT_PORT=8000' in result.stdout

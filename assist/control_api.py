@@ -16,7 +16,7 @@ class ControlApiDenied(ValueError):
 
 def control_config() -> tuple[int, str]:
     """Return the trusted service port and optional published origin."""
-    port = int(os.environ.get("ASSIST_PORT", "8000"))
+    port = int(os.environ.get("ASSIST_PORT") or "8000")
     if not 1 <= port <= 65535:
         raise ValueError("ASSIST_PORT is outside 1-65535")
     return port, os.environ.get("ASSIST_BASE_URL", "")
@@ -27,8 +27,8 @@ def _address(value: str):
     return ip.ipv4_mapped if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped else ip
 
 
-def resolve_target(host: str, port: int, *, public_only: bool = False) -> str:
-    """Check every resolved address, then return the exact address to dial.
+def resolve_targets(host: str, port: int, *, public_only: bool = False) -> tuple[str, ...]:
+    """Check every resolved address, then return vetted numeric dial candidates.
 
     A base allowlist or egress grant cannot override this check. Rejecting a
     mixed protected/public answer set prevents address-order dependent policy.
@@ -53,7 +53,8 @@ def resolve_target(host: str, port: int, *, public_only: bool = False) -> str:
         if ((port == control_port and not ip.is_global)
                 or port == published_port and ip in published_ips):
             raise ControlApiDenied("Assist control APIs are unavailable to agents")
-    for address in addresses:
-        if not public_only or _address(address).is_global:
-            return address
+    permitted = tuple(dict.fromkeys(address for address in addresses
+                                    if not public_only or _address(address).is_global))
+    if permitted:
+        return permitted
     raise OSError("destination has no permitted address")

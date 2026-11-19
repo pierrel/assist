@@ -171,7 +171,8 @@ in both views. An ID shown in only one view keeps that meaning.
 - *C13 Egress proxy.* [[file:../assist/sandbox_manager.py][SandboxManager]]
   starts the proxy and isolated networks. [[file:../assist/egress/store.py][EgressStore]]
   projects approved grants; [[file:../assist/egress/client_map.py][client_map.py]]
-  attributes browser traffic. The proxy resolves and pins every admitted destination;
+  attributes browser traffic. The proxy resolves every admitted destination once and retains only vetted
+  numeric addresses for connection fallback;
   [[file:../assist/control_api.py][the shared control-service boundary]] applies
   even to destinations admitted by base allowances and thread grants. Both
   execution networks require isolated gateway mode, so direct host connections

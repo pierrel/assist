@@ -245,6 +245,8 @@ Snapshot reads and background probes do not clear notifications.
   HTML/PDF connections now permanently deny the configured Assist port on
   non-public addresses, and the configured `ASSIST_BASE_URL` origin and its
   resolved addresses. Base allowances and thread grants cannot override this.
+  Connection failure may try another vetted numeric address without resolving
+  the hostname again.
   Public services on the same port, docs on their existing ports and the private
   model relay remain usable. This is destination isolation; review tokens do
   not provide separate human authentication. Unconfigured public forwards are

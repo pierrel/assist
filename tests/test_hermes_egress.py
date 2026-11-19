@@ -62,7 +62,7 @@ def test_native_request_card_decision_and_scoped_proxy_grant(
     spec.loader.exec_module(proxy)
     # Public DNS vet is existing proxy coverage; this check exercises attribution
     # and the actual store projection without touching DNS or an external host.
-    monkeypatch.setattr(proxy, "vet_resolved", lambda *_a, **_kw: "93.184.216.34")
+    monkeypatch.setattr(proxy, "vet_resolved", lambda *_a, **_kw: ("93.184.216.34",))
     record_client(str(projection), "172.20.0.9", ClientRecord(tid, "native-a", "hermes"))
     record_client(str(projection), "172.20.0.10", ClientRecord("other", "native-b", "hermes"))
     host, port = "releases.example.test", 443
@@ -107,7 +107,7 @@ def test_native_request_card_decision_and_scoped_proxy_grant(
                                                    follow_redirects=False).status_code == 303
                 assert len(submitted) == 1
                 if decision == "hour":
-                    assert proxy.target_policy(host, port, "172.20.0.9") == ("93.184.216.34", None)
+                    assert proxy.target_policy(host, port, "172.20.0.9") == (("93.184.216.34",), None)
                 else:
                     assert proxy.target_policy(host, port, "172.20.0.9")[1] == "host_not_approved"
                 assert proxy.target_policy(host, 80, "172.20.0.9")[1] == "host_not_approved"

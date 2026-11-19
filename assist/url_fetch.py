@@ -5,15 +5,20 @@ from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 from urllib3.util.connection import create_connection
 
-from assist.control_api import resolve_target
+from assist.control_api import resolve_targets
 
 
 class _CheckedConnection:
     def _new_conn(self):
-        address = resolve_target(self.host, self.port)
-        return create_connection((address, self.port), self.timeout,
-                                 source_address=self.source_address,
-                                 socket_options=self.socket_options)
+        addresses = resolve_targets(self.host, self.port)
+        for address in addresses:
+            try:
+                return create_connection((address, self.port), self.timeout,
+                                         source_address=self.source_address,
+                                         socket_options=self.socket_options)
+            except OSError as error:
+                last_error = error
+        raise last_error
 
 
 class _HttpConnection(_CheckedConnection, HTTPConnection):
