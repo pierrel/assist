@@ -1955,7 +1955,7 @@ def _cancel_this_turns_continuations(tid: str, pre_turn_ids: set) -> int:
 def _consume_interjections(tid: str, ids: set) -> None:
     """Terminalize injected pending Runs and remember them for fate-sharing retry.
 
-    Dispatch skips each now non-pending ticket, giving exactly-once execution. A
+    Dispatch skips each now non-pending ticket, giving exactly-once execution.
     Called from the middleware's next-boundary claim and from the terminal
     sweep below; idempotent (terminal runs are absent from pending records)."""
     ctx = _TURN_INTERJECTION.setdefault(
@@ -2016,8 +2016,9 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
     the old id in the thread checkpoint forever, so any later turn's boundary
     claim scan would silently consume a same-id retry too — the promised retry
     would never run.
-    A fresh id matches nothing stale: the entry is delivered exactly once, by
-    its dispatcher or by legitimate re-injection into an intervening turn.
+    A fresh id matches nothing stale; owner retries run as their own follow-ups.
+    Owner retries target their consumed work in the host journal, preserving
+    queued-follow-up authority instead of superseding earlier sibling retries.
     The dead framed copy itself is duplicate EXPOSURE when the follow-up runs
     — benign, named in the design. Returns how many, so the error text can
     say so. BEST-EFFORT by contract: runs inside turn error handlers (a raise
@@ -2026,14 +2027,15 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
     try:
         claimed = (_TURN_INTERJECTION.pop(tid, None) or {}).get("claimed", [])
         for rec in claimed:
+            source = _runs().get(rec.thread_id, rec.id)
             fresh = _create_run(
                 rec.thread_id, rec.text,
                 rider=_rider_from_fields(rec.rider), sender=rec.sender,
-                user_origin=rec.sender is None)
+                user_origin=rec.sender is None,
+                interjection_work_id=source.work_id if rec.sender is None else None)
             # The retried turn keeps the ORIGINAL message's context rider
             # (sent_at/tz/lat/lon from the journal entry — recovery fidelity,
-            # like the restart drain); fall back to a fresh rider with the
-            # dead turn's tz only when the entry never carried one.
+            # like the restart drain).
             _RESUME_SCHEDULER.submit(fresh.id, tid)
             n += 1
     except Exception:

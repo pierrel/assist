@@ -403,6 +403,39 @@ def test_unconsumed_browser_steering_runs_once_as_fallback(handoff_host,monkeypa
     assert calls==['Original browser work','First unconsumed follow-up','Second unconsumed follow-up','Third unconsumed follow-up']
 
 
+def test_failed_turn_claimed_steering_retries_both_messages(handoff_host,monkeypatch):
+    tid,_root,scheduler,_stopped,_notifications,_faults=handoff_host
+    calls=[]
+    followups=[]
+    class Chat:
+        agent=None
+        pending_reply=lambda self:None
+        get_messages=lambda self:[]
+        get_raw_messages=get_messages
+        def message(self,text):
+            calls.append(text)
+            if not followups:
+                for message in ['First rescue','Second rescue']:
+                    followups.append(threads._accept_message_run(tid,message)[0])
+                threads._consume_interjections(tid,{run.id for run in followups})
+                raise RuntimeError('model failed after consuming both instructions')
+            return 'Recovered this instruction'
+    monkeypatch.setattr(web.MANAGER,'get',lambda *_a,**_k:Chat())
+    owner=threads._create_run(tid,'Original browser work',user_origin=True)
+    threads._execute_run(owner.id,tid)
+    assert threads._runs().get(tid,owner.id).status=='error'
+    retries=[run for run in threads._runs().list(tid)
+             if run.id not in {owner.id,*(followup.id for followup in followups)}]
+    assert [run.text for run in retries]==['First rescue','Second rescue']
+    for retry in retries:
+        item=scheduler._q.get_nowait()
+        assert item['run_id']==retry.id
+        threads._execute_run(retry.id,tid)
+        threads._execute_run(retry.id,tid)
+        assert threads._runs().get(tid,retry.id).status=='success'
+    assert calls==['Original browser work','First rescue','Second rescue']
+
+
 def test_targeted_steering_cannot_enter_another_execution(handoff_host,monkeypatch):
     tid,_root,_scheduler,_stopped,_notifications,_faults=handoff_host
     owner=threads._create_run(tid,'Active owner',user_origin=True)
