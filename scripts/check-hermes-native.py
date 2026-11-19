@@ -12,7 +12,6 @@ import os
 from pathlib import Path
 import sys
 import signal
-import shlex
 import tempfile
 import threading
 import time
@@ -77,19 +76,24 @@ def answer(p):
             if message.get('role')=='user':break
             if message.get('role')=='tool':current.insert(0,message)
         if latest == EGRESS_PROMPT:
+            if current and 'blocked' in text(current[-1]).lower():
+                return {'role':'assistant','content':'The synthetic fixture tool was blocked; no approval was granted.'}
             if not current:return call('tool_describe',{'names':['request_egress']})
             if len(current)==1:
                 assert 'request_egress' in text(current[-1]) and 'host' in text(current[-1])
                 return call('tool_call',{'calls':[{'name':'request_egress','arguments':{'host':'releases.example.test','port':443,'task':EGRESS_PROMPT}}]})
-            assert 'awaits' in text(current[-1]),current[-1]
-            assert len(current)==2,current
-            code=("from pathlib import Path\nimport time\np=Path('/workspace')\n"
-                  "(p/'egress-tool-started').write_text('ready')\n"
-                  "deadline=time.monotonic()+30\n"
-                  "while not (p/'egress-go').exists():\n"
-                  " if time.monotonic()>deadline: raise RuntimeError('synthetic tool gate timed out')\n"
-                  " time.sleep(.02)\nprint('EGRESS_TOOL_COMPLETE')\n")
-            return call('terminal',{'command':'python -c '+shlex.quote(code)})
+            if len(current)==2:
+                assert 'awaits' in text(current[-1]),current[-1]
+                code=("from pathlib import Path\nimport time\np=Path('/workspace')\n"
+                      "(p/'egress-tool-started').write_text('ready')\n"
+                      "deadline=time.monotonic()+30\n"
+                      "while not (p/'egress-go').exists():\n"
+                      " if time.monotonic()>deadline: raise RuntimeError('synthetic tool gate timed out')\n"
+                      " time.sleep(.02)\nprint('EGRESS_TOOL_COMPLETE')\n")
+                return call('write_file',{'path':'/workspace/egress-tool-gate.py','content':code})
+            if len(current)==3:
+                return call('terminal',{'command':'python /workspace/egress-tool-gate.py'})
+            return {'role':'assistant','content':'The synthetic gate ended without receiving a network decision.'}
         assert 'releases.example.test:443 APPROVED' in latest,latest
         assert 'optional.example.test:443 DECLINED' in latest,latest
         assert not a_done.is_set(), 'decision incorrectly started another invocation'
@@ -299,7 +303,7 @@ try:
     requested=client.post(f'/thread/{A}/message',data={'text':EGRESS_PROMPT},follow_redirects=False)
     assert requested.status_code==303
     deadline=time.monotonic()+30
-    while not (WORK/'egress-tool-started').exists() and time.monotonic()<deadline:time.sleep(.02)
+    while not (WORK/'egress-tool-started').exists() and not a_done.is_set() and time.monotonic()<deadline:time.sleep(.02)
     assert (WORK/'egress-tool-started').exists() and not a_done.is_set()
     egress_owner=next(r for r in threads._runs().list(A) if r.status=='running')
     egress_generation=sm.SandboxManager.current_container(str(WORK)).id

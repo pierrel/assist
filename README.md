@@ -348,7 +348,10 @@ docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
 The first uses a fake provider and Docker `network:none`; it checks browser
 creation, two native pauses with distinct competitors, a follow-up steering the
 same invocation after a joined helper finishes, phone history and unattended
-command denial. The second creates a private
+command denial. It writes a bounded synthetic gate file through the native file
+tool, runs it normally, and requires partial network approvals and declines to
+reach that same invocation after the tool completes while another card remains
+pending. It retains native unattended command guards. The second creates a private
 internal network and fake model, verifying ordinary mapped access, native denial,
 missing/malformed attribution and legacy no-map denial, with external allowlist
 behavior preserved. The third runs inside the pinned runtime image with a private

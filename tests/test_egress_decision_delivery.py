@@ -155,6 +155,34 @@ def test_failed_consumer_retries_user_intent_but_not_a_delivered_host_fact(decis
     assert fresh.text == user.text and fresh.user_event_id == fresh.id
 
 
+def test_native_fixture_writes_gate_file_and_reports_a_block_without_retry():
+    import ast
+    import json
+    from pathlib import Path
+    source = Path(__file__).parents[1] / "scripts/check-hermes-native.py"
+    module = ast.parse(source.read_text())
+    functions = ast.Module(body=[node for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name in {"text", "answer"}], type_ignores=[])
+    context = {"json": json, "EGRESS_PROMPT": "Read the release announcement and save a short note.",
+               "native_calls": [], "write_calls": [], "requests": []}
+    exec(compile(functions, str(source), "exec"), context)
+    messages = [{"role": "user", "content": context["EGRESS_PROMPT"]},
+                {"role": "tool", "content": "request_egress description"},
+                {"role": "tool", "content": "request awaits a decision"}]
+    written = context["answer"]({"messages": messages})["tool_calls"][0]["function"]
+    args = json.loads(written["arguments"])
+    assert written["name"] == "write_file" and args["path"] == "/workspace/egress-tool-gate.py"
+    assert "deadline=time.monotonic()+30" in args["content"]
+    messages.append({"role": "tool", "content": "File written"})
+    run = context["answer"]({"messages": messages})["tool_calls"][0]["function"]
+    assert run["name"] == "terminal"
+    assert json.loads(run["arguments"])["command"] == "python /workspace/egress-tool-gate.py"
+    messages.append({"role": "tool", "content": json.dumps({"status": "blocked", "error": "BLOCKED: unattended fixture"})})
+    stopped = context["answer"]({"messages": messages})
+    assert "tool_calls" not in stopped and "blocked" in stopped["content"]
+    assert len(context["native_calls"]) == 2
+
+
 def test_child_wait_sets_ignore_unrelated_pending_but_keep_group_dependencies(decisions):
     from assist.egress.store import EgressWaiter
     grouped, independent = EgressWaiter("sub-group", "group-run"), EgressWaiter("sub-one", "one-run")
