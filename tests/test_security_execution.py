@@ -326,3 +326,157 @@ def test_expired_creation_never_calls_daemon(tmp_path):
         budget.create_container(SimpleNamespace(create=lambda *_a, **_kw: pytest.fail('expired create')),
                                 'synthetic', (), {}, [], [])
     assert budget.reason == 'wall_limit'
+
+
+@pytest.mark.parametrize('kind', ['tool', 'model'])
+def test_stalled_journal_cannot_delay_stop_or_resume_admitted_effect(tmp_path, kind):
+    import threading
+    evidence = Evidence(tmp_path)
+    budget = Budget(evidence, 4, 10)
+    entered, release, stopped = threading.Event(), threading.Event(), threading.Event()
+    effects, errors = [], []
+    original_flush = evidence.stream.flush
+    def stalled_flush():
+        entered.set()
+        assert release.wait(2)
+        original_flush()
+    evidence.stream.flush = stalled_flush
+    left, right = socket.socketpair()
+    budget.sockets.add(left)
+    def work():
+        try:
+            budget.enter(kind, 'synthetic')
+            effects.append('forbidden after stop')
+        except ExecutionStopped:
+            errors.append('stopped')
+    worker = threading.Thread(target=work)
+    stopper = threading.Thread(target=lambda: (budget.stop('wall_limit'), stopped.set()))
+    try:
+        worker.start()
+        assert entered.wait(1)
+        stopper.start()
+        assert stopped.wait(.2), 'Stop waited for journal I/O'
+        right.settimeout(.2)
+        assert right.recv(1) == b''
+    finally:
+        release.set()
+        worker.join(2)
+        stopper.join(2)
+        evidence.stream.flush = original_flush
+        left.close()
+        right.close()
+    assert not worker.is_alive() and not stopper.is_alive()
+    assert effects == [] and errors == ['stopped']
+
+
+@pytest.mark.parametrize('upstream_error', [False, True])
+def test_native_response_drain_keeps_host_evidence_without_dead_agent_delivery(tmp_path, monkeypatch, upstream_error):
+    import io
+    import json
+    from types import SimpleNamespace
+    from assist.hermes_provider_relay import HermesProviderRelay
+    evidence = Evidence(tmp_path)
+    budget = Budget(evidence, 4, 10)
+    output = io.BytesIO()
+    handler = SimpleNamespace(wfile=output)
+    def provider(self, target, body):
+        target.wfile.write(b'HTTP/1.0 200 OK\r\nContent-Type: text/event-stream\r\n\r\n')
+        target.wfile.write(b'data: {"choices":[{"delta":{"content":"before"}}]}\n\n')
+        before_stop = output.getvalue()
+        budget.stop('wall_limit')
+        payload = json.dumps({'choices': [{'message': {'content': 'Synthetic response'}}]}).encode()
+        target.wfile.write(payload)
+        target.wfile.flush()
+        assert output.getvalue() == before_stop
+        if upstream_error:
+            raise OSError('Independent synthetic upstream failure')
+    monkeypatch.setattr(HermesProviderRelay, 'forward', provider)
+    with instrument(budget, 'http://127.0.0.1:8000/v1', '172.22.0.2'):
+        if upstream_error:
+            with pytest.raises(OSError):
+                HermesProviderRelay.forward(None, handler, b'{}')
+        else:
+            HermesProviderRelay.forward(None, handler, b'{}')
+        with pytest.raises(ExecutionStopped):
+            budget.enter('tool', 'not admitted during drain')
+        with pytest.raises(ExecutionStopped):
+            budget.enter('model', 'not admitted during drain')
+    rows = [json.loads(line) for line in evidence.path.read_text().splitlines()]
+    assert budget.native_providers == budget.native_active == 0
+    assert any(row['kind'] == 'provider_artifact' for row in rows)
+    assert any(row['kind'] == 'provider_error' for row in rows) == upstream_error
+    assert any(row['kind'] == 'model_output' for row in rows)
+
+
+def test_deep_planned_limit_drains_stream_without_late_output_or_hidden_errors(tmp_path):
+    import json
+    from langchain_openai import ChatOpenAI
+    for broken in (False, True):
+        evidence = Evidence(tmp_path / str(broken))
+        budget = Budget(evidence, 4, 10)
+        def event(text):
+            return ('data: ' + json.dumps({'id': 'synthetic', 'object': 'chat.completion.chunk',
+                'created': 0, 'model': 'synthetic', 'choices': [{'index': 0,
+                    'delta': {'content': text}, 'finish_reason': None}]}) + '\n\n').encode()
+        class Stream(httpx.SyncByteStream):
+            def __iter__(self):
+                yield event('before')
+                budget.stop('wall_limit')
+                if broken:
+                    raise httpx.ReadError('Independent synthetic upstream failure')
+                yield event('after')
+                yield b'data: [DONE]\n\n'
+        transport = httpx.MockTransport(lambda request: httpx.Response(200,
+            headers={'Content-Type': 'text/event-stream'}, stream=Stream()))
+        seen = []
+        with httpx.Client(transport=transport) as client:
+            model = ChatOpenAI(model='synthetic', api_key='EMPTY',
+                base_url='http://127.0.0.1:8000/v1', http_client=client, streaming=True, max_retries=0)
+            with instrument(budget, 'http://127.0.0.1:8000/v1', '172.22.0.2'):
+                with pytest.raises(httpx.ReadError if broken else ExecutionStopped):
+                    for row in model.stream('Synthetic bounded episode.'):
+                        seen.append(row.content)
+        assert 'after' not in ''.join(seen)
+        rows = evidence.path.read_text()
+        assert ('provider_error' in rows) == broken
+        assert 'model_output' in rows
+
+
+def test_stalled_model_output_journal_does_not_hold_stop_lock(tmp_path, monkeypatch):
+    import io
+    import threading
+    from types import SimpleNamespace
+    from assist.hermes_provider_relay import HermesProviderRelay
+    evidence = Evidence(tmp_path)
+    budget = Budget(evidence, 4, 10)
+    entered, release, stopped = threading.Event(), threading.Event(), threading.Event()
+    original_write, original_flush = evidence.stream.write, evidence.stream.flush
+    output_row = [False]
+    def write(line):
+        output_row[0] = '"kind": "model_output"' in line
+        return original_write(line)
+    def flush():
+        if output_row[0]:
+            entered.set()
+            assert release.wait(2)
+        original_flush()
+    monkeypatch.setattr(evidence.stream, 'write', write)
+    monkeypatch.setattr(evidence.stream, 'flush', flush)
+    def provider(self, handler, body):
+        handler.wfile.write(b'HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n'
+                            b'{"choices":[{"message":{"content":"synthetic"}}]}')
+    monkeypatch.setattr(HermesProviderRelay, 'forward', provider)
+    worker = threading.Thread(target=lambda: HermesProviderRelay.forward(
+        None, SimpleNamespace(wfile=io.BytesIO()), b'{}'))
+    stopper = threading.Thread(target=lambda: (budget.stop('wall_limit'), stopped.set()))
+    with instrument(budget, 'http://127.0.0.1:8000/v1', '172.22.0.2'):
+        try:
+            worker.start()
+            assert entered.wait(1)
+            stopper.start()
+            assert stopped.wait(.2), 'Output journaling blocked cancellation'
+        finally:
+            release.set()
+            worker.join(2)
+            stopper.join(2)
+    assert not worker.is_alive() and not stopper.is_alive()

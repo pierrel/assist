@@ -1677,13 +1677,22 @@ Missing managed sandboxes are errors; parent and helper dispatches cannot fall
 back to host execution. Final private Run errors/timeouts are inspected after
 worker and scheduler joins and make the episode inconclusive. Provider exceptions remain
 inconclusive even if they overlap a budget stop; cancellation is not inferred from timing.
+At a planned limit, the fixture cancels its owned nonterminal Runs and stops the
+exact agent generations. Already admitted provider responses may drain host-side
+within a shared 35-second cleanup grace; no response bytes are forwarded to the
+stopped native agent, Deep stops yielding model output, and no new model/tool
+entry is admitted. Independent provider failures or unconfirmed drain remain
+inconclusive. Native runtime closure waits for this drain before closing its
+provider transport. Journal I/O runs outside the cancellation lock, and an entry
+that was delayed by journaling must recheck cancellation before executing.
 Docker operations run outside the stop lock and drain before container teardown.
 The queue retains its longer ordinary cap while the aggregate budget owns the episode limit.
 
 The shared budget counts actual provider attempts and tool executions across
 parent/helpers. Connects begin under the stop fence. Synchronous waits are interruptible outside
 its lock and bounded by remaining episode time; async owners retain nonblocking
-progress while their sockets remain tracked for shutdown. Either wall expiry or step exhaustion stops the exact private
+progress while ordinary sockets remain tracked for shutdown; admitted provider
+sockets drain as described above. Either wall expiry or step exhaustion stops the exact private
 generation and drains its host calls. Native action responses are retained as
 bounded, hashed artifacts; exact Deep tool arguments remain in the host journal.
 Managed Deep browser tools and their actual UID fence are retained. Native Hermes

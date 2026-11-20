@@ -35,9 +35,11 @@ class Budget:
         self.output_seen = False
         self.reason = None
         self.sockets = set()
+        self.provider_sockets = set()
         self.creation_active = 0
         self.creation_condition = threading.Condition(self.lock)
         self.native_active = 0
+        self.native_providers = 0
         self.native_cleanup_complete = False
         self.native_condition = threading.Condition()
 
@@ -74,16 +76,20 @@ class Budget:
             return container
 
     @contextmanager
-    def native_operation(self):
+    def native_operation(self, *, provider=False):
         with self.native_condition:
             if self.native_cleanup_complete:
                 raise ExecutionStopped('Native generation stopped')
             self.native_active += 1
+            if provider:
+                self.native_providers += 1
         try:
             yield
         finally:
             with self.native_condition:
                 self.native_active -= 1
+                if provider:
+                    self.native_providers -= 1
                 self.native_condition.notify_all()
 
     def enter(self, kind, detail=''):
@@ -92,25 +98,32 @@ class Budget:
                 self.reason = 'wall_limit'
             if self.reason is None and self.count >= self.steps:
                 self.reason = 'step_limit'
+            reason = self.reason
+            if not reason:
+                self.count += 1
+            step = self.count
+        if reason:
+            self.evidence.record('execution_rejected', operation=kind, detail=detail, reason=reason)
+            raise ExecutionStopped(reason)
+        self.evidence.record('execution_step', step=step, operation=kind, detail=detail)
+        with self.lock:
+            if self.reason is None and time.monotonic() >= self.deadline:
+                self.reason = 'wall_limit'
             if self.reason:
-                self.evidence.record('execution_rejected', operation=kind, detail=detail,
-                                     reason=self.reason)
                 raise ExecutionStopped(self.reason)
-            self.count += 1
-            self.evidence.record('execution_step', step=self.count, operation=kind,
-                                 detail=detail)
-            return self.count
+        return step
 
     def stop(self, reason):
         with self.lock:
             self.reason = self.reason or reason
-            for transport in tuple(self.sockets):
-                try:
-                    transport.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
+            sockets = tuple(self.sockets - self.provider_sockets)
+        for transport in sockets:
+            try:
+                transport.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
-    def connect(self, transport, address, start_connect):
+    def connect(self, transport, address, start_connect, *, provider=False):
         """Start under the stop fence; wait interruptibly outside that lock."""
         original_timeout = transport.gettimeout()
         pending = {errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY, errno.EINTR}
@@ -124,6 +137,8 @@ class Budget:
                 connect_deadline = time.monotonic() + timeout
                 transport.setblocking(False)
                 self.sockets.add(transport)
+                if provider:
+                    self.provider_sockets.add(transport)
                 result = start_connect(transport, address)
             if original_timeout == 0 and result in pending:
                 # Async owners register readiness themselves. Keep their
@@ -198,9 +213,10 @@ def instrument(budget, model_url, control_ip):
     original_resolve = control_api.resolve_targets
     def record_output(engine):
         with budget.lock:
-            if not budget.output_seen:
-                budget.evidence.record('model_output', engine=engine)
-                budget.output_seen = True
+            first = not budget.output_seen
+            budget.output_seen = True
+        if first:
+            budget.evidence.record('model_output', engine=engine)
 
     def observed_output(value):
         message = getattr(value, 'message', None)
@@ -233,7 +249,8 @@ def instrument(budget, model_url, control_ip):
                 budget.evidence.record('host_transport_unavailable', destination=str(address)[:512])
                 raise OSError('Host network transport unavailable in security fixture')
             try:
-                return budget.connect(transport, address, original_connect_ex)
+                return budget.connect(transport, address, original_connect_ex,
+                                      provider=_PROVIDER.get())
             except BlockingIOError:
                 raise  # Normal async progress is not a fixture route failure.
             except OSError:
@@ -277,8 +294,11 @@ def instrument(budget, model_url, control_ip):
                     token = _PROVIDER.set(True)
                     try:
                         async for row in _original(self, *a, **kw):
-                            observed_output(row)
-                            yield row
+                            if not budget.reason:
+                                observed_output(row)
+                                yield row
+                        if budget.reason:
+                            raise ExecutionStopped(budget.reason)
                     except Exception as error:
                         budget.evidence.record('provider_error', error=type(error).__name__)
                         raise
@@ -289,6 +309,8 @@ def instrument(budget, model_url, control_ip):
                     token = _PROVIDER.set(True)
                     try:
                         result = await _original(self, *a, **kw)
+                        if budget.reason:
+                            raise ExecutionStopped(budget.reason)
                         observed_output(result)
                         return result
                     except Exception as error:
@@ -301,8 +323,11 @@ def instrument(budget, model_url, control_ip):
                     token = _PROVIDER.set(True)
                     try:
                         for row in _original(self, *a, **kw):
-                            observed_output(row)
-                            yield row
+                            if not budget.reason:
+                                observed_output(row)
+                                yield row
+                        if budget.reason:
+                            raise ExecutionStopped(budget.reason)
                     except Exception as error:
                         budget.evidence.record('provider_error', error=type(error).__name__)
                         raise
@@ -313,6 +338,8 @@ def instrument(budget, model_url, control_ip):
                     token = _PROVIDER.set(True)
                     try:
                         result = _original(self, *a, **kw)
+                        if budget.reason:
+                            raise ExecutionStopped(budget.reason)
                         observed_output(result)
                         return result
                     except Exception as error:
@@ -366,14 +393,23 @@ def instrument(budget, model_url, control_ip):
             step = budget.enter('model', 'native provider')
             artifact = budget.evidence.path.parent / f'native-provider-{step}.http'
             original_stream = handler.wfile
+            delivered_end = 0
             with artifact.open('xb') as stream:
                 class Tee:
                     def write(self, data):
+                        nonlocal delivered_end
                         if stream.tell() + len(data) > 3 * 1024 * 1024:
                             raise RuntimeError('Native provider evidence exceeded bound')
                         stream.write(data)
                         stream.flush()
-                        return original_stream.write(data)
+                        if budget.reason:
+                            return len(data)
+                        written = original_stream.write(data)
+                        delivered_end = stream.tell() - len(data) + written
+                        return written
+                    def flush(self):
+                        if not budget.reason:
+                            return original_stream.flush()
                     def __getattr__(self, name):
                         return getattr(original_stream, name)
                 handler.wfile = Tee()
@@ -388,7 +424,8 @@ def instrument(budget, model_url, control_ip):
                     handler.wfile = original_stream
                     stream.flush()
                     raw = artifact.read_bytes()
-                    header, _, payload = raw.partition(b'\r\n\r\n')
+                    header, _, _body = raw.partition(b'\r\n\r\n')
+                    _delivered_header, _, payload = raw[:delivered_end].partition(b'\r\n\r\n')
                     if header.split(b'\r\n', 1)[0].split()[1:2] == [b'200']:
                         pieces = ([line[6:] for line in payload.splitlines() if line.startswith(b'data: ')]
                                   if b'text/event-stream' in header.lower() else [payload])
@@ -407,7 +444,7 @@ def instrument(budget, model_url, control_ip):
                     budget.evidence.record('provider_artifact', name=artifact.name,
                         size=stream.tell(), sha256=hashlib.sha256(artifact.read_bytes()).hexdigest())
         def forward(self, handler, body):
-            with budget.native_operation():
+            with budget.native_operation(provider=True):
                 return captured_forward(self, handler, body)
         def boundary(self, value):
             with budget.native_operation():
@@ -416,7 +453,6 @@ def instrument(budget, model_url, control_ip):
                         budget.enter('tool', value)
                     except ExecutionStopped:
                         # No swallowed hook may return to a live generation.
-                        self.stop_admission()
                         with budget.native_condition:
                             budget.native_condition.wait_for(lambda: budget.native_cleanup_complete)
                         raise
@@ -450,6 +486,14 @@ def execute(root, evidence, args, threads, fixture):
     # longer default cap rather than racing an independent timer at that limit.
     threads.THREAD_QUEUE = ThreadAffinityQueue(wait_timeout_s=5)
     threads._HERMES_RUNTIME = HermesRuntimeManager(model_config=lambda: config)
+    native_stop_ready = threading.Event()
+    original_native_stop = threads._HERMES_RUNTIME.stop
+    def stop_native(thread_id):
+        if budget.reason in {'wall_limit', 'step_limit'}:
+            if not native_stop_ready.wait(35):
+                failures.append('Native cancellation drain fence expired')
+        return original_native_stop(thread_id)
+    threads._HERMES_RUNTIME.stop = stop_native
     threads.HERMES_PREVIEW = PiPreviewPolicy(root, engine='hermes')
     threads.HERMES_PREVIEW.set_enabled(True)
     # All private dispatches, including joined helpers, retain the real journal.
@@ -564,22 +608,36 @@ def execute(root, evidence, args, threads, fixture):
             termination = budget.reason or 'finish'
         finally:
             budget.stop('finish')
-            with budget.creation_condition:
-                if not budget.creation_condition.wait_for(lambda: budget.creation_active == 0, timeout=35):
-                    raise RuntimeError('Private container creation drain unconfirmed')
+            cleanup_deadline = time.monotonic() + 35
+            try:
+                if termination in {'wall_limit', 'step_limit'}:
+                    with threads._RUN_ADMISSION_LOCK:
+                        for directory in (root / 'threads').iterdir():
+                            if directory.is_dir() and directory.name not in prior_threads:
+                                for current in threads._runs().list(directory.name):
+                                    if current.status in {'pending', 'running', 'interrupted'}:
+                                        threads._runs().cancel(directory.name, current.id)
+                with budget.creation_condition:
+                    if not budget.creation_condition.wait_for(lambda: budget.creation_active == 0,
+                            timeout=max(0, cleanup_deadline - time.monotonic())):
+                        raise RuntimeError('Private container creation drain unconfirmed')
+                for container in agent_containers:
+                    sm.confirm_generation_stopped(container.id)
+                with budget.native_condition:
+                    if not budget.native_condition.wait_for(lambda: budget.native_providers == 0,
+                            timeout=max(0, cleanup_deadline - time.monotonic())):
+                        failures.append('Native provider drain unconfirmed')
+            finally:
+                native_stop_ready.set()
             threads._HERMES_RUNTIME.stop(tid)
             for path, container in list(sm.SandboxManager._containers.items()):
                 sm.SandboxManager.cleanup(path, container)
-            # Runtime auto-removal can still be completing after wait(). Use
-            # the existing exact-ID stop/removal proof instead of racing rm.
-            for container in agent_containers:
-                sm.confirm_generation_stopped(container.id)
             with budget.native_condition:
                 budget.native_cleanup_complete = True
                 budget.native_condition.notify_all()
                 if not budget.native_condition.wait_for(lambda: budget.native_active == 0, timeout=5):
                     raise RuntimeError('Native handler drain unconfirmed')
-            worker.join(10)
+            worker.join(max(0, cleanup_deadline - time.monotonic()))
             if worker.is_alive():
                 raise RuntimeError('Run worker drain unconfirmed')
             if threads._RESUME_SCHEDULER._thread:
