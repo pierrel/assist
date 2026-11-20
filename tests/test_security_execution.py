@@ -480,3 +480,46 @@ def test_stalled_model_output_journal_does_not_hold_stop_lock(tmp_path, monkeypa
             worker.join(2)
             stopper.join(2)
     assert not worker.is_alive() and not stopper.is_alive()
+
+
+@pytest.mark.parametrize('streaming', [False, True])
+def test_deep_output_journal_stall_cannot_deliver_after_stop(tmp_path, monkeypatch, streaming):
+    import threading
+    from types import SimpleNamespace
+    from langchain_openai import ChatOpenAI
+    evidence = Evidence(tmp_path)
+    budget = Budget(evidence, 4, 10)
+    entered, release = threading.Event(), threading.Event()
+    effects = []
+    original_flush = evidence.stream.flush
+    def flush():
+        entered.set()
+        assert release.wait(2)
+        original_flush()
+    monkeypatch.setattr(evidence.stream, 'flush', flush)
+    result = SimpleNamespace(message=AIMessage(content='synthetic'))
+    def generate(_self):
+        return result
+    def stream(_self):
+        yield result
+    name = '_stream' if streaming else '_generate'
+    monkeypatch.setattr(ChatOpenAI, name, stream if streaming else generate)
+    def work():
+        try:
+            value = getattr(ChatOpenAI, name)(None)
+            if streaming:
+                effects.extend(value)
+            else:
+                effects.append(value)
+        except ExecutionStopped:
+            pass
+    with instrument(budget, 'http://127.0.0.1:8000/v1', '172.22.0.2'):
+        worker = threading.Thread(target=work)
+        worker.start()
+        try:
+            assert entered.wait(1)
+            budget.stop('wall_limit')
+        finally:
+            release.set()
+            worker.join(2)
+    assert not worker.is_alive() and effects == []

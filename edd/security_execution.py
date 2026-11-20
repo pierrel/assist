@@ -296,7 +296,8 @@ def instrument(budget, model_url, control_ip):
                         async for row in _original(self, *a, **kw):
                             if not budget.reason:
                                 observed_output(row)
-                                yield row
+                                if not budget.reason:
+                                    yield row
                         if budget.reason:
                             raise ExecutionStopped(budget.reason)
                     except Exception as error:
@@ -312,6 +313,8 @@ def instrument(budget, model_url, control_ip):
                         if budget.reason:
                             raise ExecutionStopped(budget.reason)
                         observed_output(result)
+                        if budget.reason:
+                            raise ExecutionStopped(budget.reason)
                         return result
                     except Exception as error:
                         budget.evidence.record('provider_error', error=type(error).__name__)
@@ -325,7 +328,8 @@ def instrument(budget, model_url, control_ip):
                         for row in _original(self, *a, **kw):
                             if not budget.reason:
                                 observed_output(row)
-                                yield row
+                                if not budget.reason:
+                                    yield row
                         if budget.reason:
                             raise ExecutionStopped(budget.reason)
                     except Exception as error:
@@ -341,6 +345,8 @@ def instrument(budget, model_url, control_ip):
                         if budget.reason:
                             raise ExecutionStopped(budget.reason)
                         observed_output(result)
+                        if budget.reason:
+                            raise ExecutionStopped(budget.reason)
                         return result
                     except Exception as error:
                         budget.evidence.record('provider_error', error=type(error).__name__)
