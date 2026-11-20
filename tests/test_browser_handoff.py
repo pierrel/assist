@@ -533,6 +533,174 @@ def test_requested_control_has_a_resumable_checkpoint_and_held_followup(handoff_
     assert model_calls==['resumed'] and browser.BrowserManager.current_session(tid) is None
 
 
+def test_natural_requested_control_roundtrip(handoff_host, monkeypatch, tmp_path):
+    """Deep checkpoint + HTTP edit/Return with an optional injected model and Chromium."""
+    from dataclasses import replace
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langgraph.checkpoint.memory import MemorySaver
+    from assist.thread import Thread as ChatThread
+    from assist.thread_manager import web_main_skill_sources
+    from edd.eval.test_browser_agent import _TurnBackend, _browser_task_fixture, _offline_url_fetch
+    from edd.eval.utils import prompt_rewrite_web_main_spec, stub_research_subagent
+    from tests.middleware.test_skills_kernel import _RecordingModel
+    import assist.thread as thread_module
+    import sys
+    import time
+
+    tid, root, scheduler, _stopped, _notifications, _faults = handoff_host
+    chrome = os.getenv('ASSIST_BROWSER_HANDOFF_CHROMIUM')
+    injected_model = getattr(sys.modules[__name__], '_REQUESTED_HANDOFF_MODEL', None)
+    assert injected_model is None or chrome, 'Real-model acceptance needs the owned Chromium fixture'
+    monkeypatch.setenv('ASSIST_BASE_URL', 'http://testserver')
+    monkeypatch.setattr(thread_module, 'THREAD_QUEUE', threads.THREAD_QUEUE)
+    monkeypatch.setattr(threads, '_require_deep_thread', lambda *_a: None)
+    executor, worker, server = None, None, None
+    draft = {'text': 'Unsent draft'}
+    origin = 'https://example.test'
+    if chrome:
+        class Fixture(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b'<input aria-label="Artist" value="Unsent draft" style="position:absolute;left:8px;top:8px;width:300px;height:40px">'
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *_a): pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Fixture)
+        Thread(target=server.serve_forever, daemon=True).start()
+        origin = f'http://127.0.0.1:{server.server_port}'
+        executor = ThreadPoolExecutor(max_workers=1)
+        def bootstrap():
+            from playwright.sync_api import sync_playwright
+            from urllib.parse import urlsplit
+            actual = BrowserWorker()
+            try:
+                actual.playwright = sync_playwright().start()
+                actual.browser = actual.playwright.chromium.launch(executable_path=chrome, headless=True, args=['--no-sandbox'])
+                actual.context = actual.browser.new_context(viewport={'width':390,'height':600}, service_workers='block')
+                expected = urlsplit(origin)
+                actual.context.route('**/*', lambda route: route.continue_() if
+                    (urlsplit(route.request.url).scheme, urlsplit(route.request.url).netloc) == (expected.scheme, expected.netloc)
+                    else route.abort())
+                actual.context.route_web_socket('**/*', lambda socket: socket.close())
+                actual.context.on('page', actual._register_page)
+                return actual
+            except BaseException:
+                actual.revoke()
+                raise
+
+    def transport(_generation, payload, **_kwargs):
+        command = json.loads(payload)
+        operation, args = command['operation'], command.get('args', {})
+        if worker:
+            def execute():
+                try: return {'result': getattr(worker, operation)(**args)}
+                except Exception as error: return {'error': str(error)}
+            return json.dumps(executor.submit(execute).result(timeout=15)).encode()
+        if operation == 'viewer':
+            if args.get('action') == 'text': draft['text'] += args['text']
+            result = {'pages':[{'page_id':'page','url':origin+'/'}]}
+            if args.get('action') == 'frame':
+                result = {'image':base64.b64encode(b'\xff\xd8fixture').decode(), 'width':390, 'height':600}
+        else:
+            result = {'page_id':'page','snapshot_id':'fresh','url':origin+'/',
+                      'snapshot':'Artist: '+draft['text'], 'targets':[],
+                      'pages':[{'page_id':'page','url':origin+'/'}]}
+        return json.dumps({'result':result}).encode()
+    monkeypatch.setattr(browser, '_docker_exec', transport)
+    model = injected_model
+    if model is None:
+        calls = [('load_skill',{'name':'browse-website'}), ('browser_open',{'url':origin+'/'}),
+                 ('browser_handoff',{}), ('browser_observe',{'page_id':'page'})]
+        replies = [AIMessage(content='',tool_calls=[{'name':name,'args':args,'id':str(i)}]) for i,(name,args) in enumerate(calls)]
+        replies.append(AIMessage(content='The Artist field contains Unsent draft + Cedar Lantern 731.'))
+        model = _RecordingModel(responses=replies)
+    saver, chats, bound_sessions = MemorySaver(), [], []
+    (root/tid/'agent').mkdir(exist_ok=True)
+    (root/tid/'README.org').write_text('Disposable synthetic form workspace.')
+    def get_chat(_tid, **kwargs):
+        if not kwargs.get('browser_tools') and chats: return chats[-1]
+        current = browser.BrowserManager.current_session(tid)
+        if bound_sessions: assert current is bound_sessions[0]
+        bound_sessions.append(current)
+        backend = _TurnBackend(str(root/tid))
+        backend.container = kwargs['sandbox_backend'].container
+        spec = replace(prompt_rewrite_web_main_spec(tools=kwargs.get('browser_tools', ())),
+                       web_main=True, main_guidance_skills=True,
+                       skill_sources=web_main_skill_sources(browser=True))
+        chat = ChatThread(str(root/tid), model=model, thread_id=tid, checkpointer=saver,
+                          sandbox_backend=backend, agent_dir=str(root/tid/'agent'),
+                          configurable=kwargs.get('configurable'), spec=spec)
+        chats.append(chat)
+        return chat
+    monkeypatch.setattr(web.MANAGER, 'get', get_chat)
+    def execute_run(run_id, thread_id):
+        process = Thread(target=threads._execute_run, args=(run_id, thread_id), daemon=True)
+        process.start(); process.join(timeout=150)
+        assert not process.is_alive(), 'Synthetic Run exceeded its bounded execution window'
+    try:
+        if executor: worker = executor.submit(bootstrap).result(timeout=15)
+        with _browser_task_fixture(), _offline_url_fetch('static'), stub_research_subagent():
+            owner = threads._create_run(tid, f'Open {origin}/ so I can fill it out myself.', user_origin=True)
+            execute_run(owner.id, tid)
+            session = browser.BrowserManager.current_session(tid)
+            assert session is not None and session.handoff_url and session.human_active
+            assert threads._runs().get(tid,owner.id).status == 'interrupted'
+            assert chats[-1].agent.get_state(chats[-1].runconfig).next
+            assert threads.THREAD_QUEUE.peek_holder() is None
+            generation = session.sandbox_generation
+            client, identity, token = TestClient(web.app), 'a'*32, session.viewer_token
+            headers = {'Origin':'http://testserver','X-Browser-Token':token}
+            path = f'/thread/{tid}/browser/control'
+            def control(action, **values):
+                time.sleep(0.07)
+                return client.post(path, headers=headers, json={'client':identity,'action':action,**values})
+            assert client.get(session.handoff_url).status_code == 200
+            assert control('takeover').status_code == 200
+            pages = control('tabs').json()['pages']
+            page_id = pages[0]['page_id']
+            frame = control('frame',page_id=page_id)
+            assert frame.status_code == 200 and frame.headers['content-type'] == 'image/jpeg'
+            assert frame.content.startswith(b'\xff\xd8')
+            for action, values in [('click',{'x':100,'y':20}), ('key',{'key':'End'}), ('text',{'text':' + Cedar Lantern 731'})]:
+                assert control(action,page_id=page_id,**values).status_code == 200
+            followup, _ = threads._accept_message_run(tid, 'Tell me what I put in the Artist field, without changing or submitting the form.')
+            execute_run(followup.id, tid)
+            assert threads._runs().get(tid,followup.id).status == 'pending'
+            assert browser.BrowserManager.current_session(tid) is session
+            assert session.sandbox_generation == generation
+            assert control('return').status_code == 200
+            assert control('text',page_id=page_id,text='late').status_code == 409
+            item = scheduler._q.get_nowait()
+            execute_run(item['run_id'], item['tid'])
+            assert threads._runs().get(tid,item['run_id']).status == 'success'
+            assert threads._runs().get(tid,followup.id).status == 'success'
+            messages = chats[-1].get_raw_messages()
+            handoff = next(i for i,m in enumerate(messages) if isinstance(m,ToolMessage) and m.name=='browser_handoff')
+            fresh = [m for m in messages[handoff+1:] if isinstance(m,ToolMessage) and m.name=='browser_observe']
+            assert fresh and 'Unsent draft + Cedar Lantern 731' in str(fresh[-1].content)
+            assert json.loads(fresh[-1].content)['result']['page_id'] == page_id
+            assert len(bound_sessions) == 2 and bound_sessions[0] is session
+            resumed_tools = [call['name'] for m in messages[handoff+1:] if isinstance(m,AIMessage) for call in m.tool_calls]
+            assert not {'browser_act','browser_open','browser_fill_secret'}.intersection(resumed_tools), resumed_tools
+            assert 'Cedar Lantern 731' in str(messages[-1].content)
+            assert browser.BrowserManager.current_session(tid) is None
+            facts = {'result':'PASS','model':'real' if injected_model is not None else 'scripted',
+                     'worker':'real Chromium' if worker else 'scripted','generation':generation,'page_id':page_id,
+                     'checkpoint_retained':True,'http_edit_return':True,'fresh_observation':True,
+                     'held_followup_consumed':True,'stale_token_denied':True,
+                     'boundary':'Real Deep Thread/Run/queue/HTTP; container backend and auxiliary work remain isolated fixtures.'}
+            (tmp_path/'natural-handoff-result.json').write_text(json.dumps(facts,indent=2)+'\n')
+            print('NATURAL_HOST_HANDOFF '+json.dumps(facts,sort_keys=True),flush=True)
+    finally:
+        if executor:
+            if worker: executor.submit(worker.revoke).result(timeout=10)
+            executor.shutdown(wait=True)
+        if server:
+            server.shutdown(); server.server_close()
+
+
 @pytest.mark.parametrize('base',['','https://user:password@assist.example','https://assist.example/path',
                                'https://assist.example/?token=x','javascript:alert(1)','https://assist.example\n'])
 def test_invalid_control_address_never_offers_a_session(controlled,monkeypatch,base):
