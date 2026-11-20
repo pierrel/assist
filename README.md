@@ -263,6 +263,9 @@ Snapshot reads and background probes do not clear notifications.
   keeps each follow-up's journal identity until native history persistence is
   confirmed; an unread message remains queued for its own later turn. Native
   user-row receipts also recover a lost host acknowledgment after a crash.
+  Before each native agent starts, Hermes's manifest-based sync seeds its bundled
+  skills into that profile, preserving custom copies, deletions and opt-outs.
+  Native platform, environment, app and disabled-skill filters still apply.
   A lost process ends the Run without replay. A held model slot is released only
   after verified model parking or provider revocation and drain. Unconfirmed
   container cleanup retains its nonterminal Run and generation; existing Run and
@@ -309,6 +312,9 @@ layered on the ordinary sandbox. `make deploy` also builds this image. Code-only
 updates to the native worker require rebuilding it. The archive checksum is
 verified by `dockerfiles/Dockerfile.hermes-runtime`; source download failure must
 be resolved without changing the pin silently.
+The image applies `dockerfiles/hermes-skills-sync.patch` so startup seeding keeps
+an existing local skill's name and directory aliases when it lives at another path,
+including native legacy flat Markdown skills.
 
 The preview starts disabled. Run this locally as the server owner, with the same
 `ASSIST_THREADS_DIR` as the server, to enable it (use `False` to disable):
@@ -335,24 +341,35 @@ Repeat the deterministic capability checks with the project Python environment:
 
 ```sh
 python scripts/check-hermes-native.py
+docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
+  -v "$PWD/scripts/check-hermes-skills.py:/tmp/check.py:ro" \
+  assist-hermes-runtime /tmp/check.py
 python dockerfiles/check-native-model-egress.py --proxy-image assist-egress-proxy
 docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
   -v "$PWD/scripts/check-hermes-compression.py:/tmp/check.py:ro" \
   assist-hermes-runtime /tmp/check.py
 ```
 
-The first uses a fake provider and Docker `network:none`; it checks browser
+The skill-startup check uses the actual worker and native agent constructor,
+with a scripted conversation, stubbed host coordination and locally served
+constructor metadata. Inference and provider forwarding are denied. Native list/view assertions check
+clean discovery and linked files, repeated startup, custom skills and alternate-path
+name/alias and legacy-flat precedence, disabled
+preferences, deletion tracking, opt-outs, filters and project trust without a
+model. The native capability check uses a fake provider and Docker `network:none`;
+it checks browser
 creation, two native pauses with distinct competitors, a follow-up steering the
 same invocation after a joined helper finishes, phone history and unattended
-command denial. The second creates a private
+command denial.
+The model-egress check creates a private
 internal network and fake model, verifying ordinary mapped access, native denial,
 missing/malformed attribution and legacy no-map denial, with external allowlist
-behavior preserved. The third runs inside the pinned runtime image with a private
+behavior preserved. The compression check runs inside the pinned runtime image with a private
 scripted provider and scripted summary output. It forces the supported rotating
 compression mode, closes the descendant, and requires the next worker turn and
 provider request to load its summary. It does not exercise host admission or
 summary quality. None of these checks proves real-model behavior or live deployment.
-`ASSIST_HERMES_TEST_IMAGE` can select an isolated native image for the first check.
+`ASSIST_HERMES_TEST_IMAGE` can select an isolated native image for the native capability check.
 The proxy must run with its client map mounted and valid ordinary sandbox records:
 legacy/no-map deployments deliberately lose the permanent host-model exception.
 The existing proxy-policy fingerprint forces replacement of an older running

@@ -449,6 +449,10 @@ their explicit summary handoff creates an independent Deep Agents thread.
   runs the complete pinned upstream runtime inside C10, with native prompts,
   file/terminal tools, skills, memory, compression and joined delegation.
   Native SessionDB and preferences persist in C9's isolated =/agent/hermes=.
+  Before agent construction, native =sync_skills= seeds the bundled library into
+  that profile using Hermes's manifest and preference-preserving update rules.
+  The image's seeder patch skips a new bundle name already owned by a local skill
+  at another path; native discovery and filtering remain unchanged.
   C2 projects accepted messages and committed replies from existing C3 Runs.
   A native tool completion from this invocation enables one intake at the
   parent's step callback before Hermes drains steering after complete tool
