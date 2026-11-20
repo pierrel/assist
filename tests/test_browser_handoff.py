@@ -533,8 +533,8 @@ def test_requested_control_has_a_resumable_checkpoint_and_held_followup(handoff_
     assert model_calls==['resumed'] and browser.BrowserManager.current_session(tid) is None
 
 
-def test_natural_requested_control_roundtrip(handoff_host, monkeypatch, tmp_path):
-    """Deep checkpoint + HTTP edit/Return with an optional injected model and Chromium."""
+def test_natural_requested_control_roundtrip(handoff_host, monkeypatch, tmp_path, _scripted_outcome="complete"):
+    """Answer after HTTP edit/Return, then finish or offer the unchanged form again."""
     from dataclasses import replace
     from langchain_core.messages import AIMessage, ToolMessage
     from langgraph.checkpoint.memory import MemorySaver
@@ -604,7 +604,7 @@ def test_natural_requested_control_roundtrip(handoff_host, monkeypatch, tmp_path
             if args.get('action') == 'frame':
                 result = {'image':base64.b64encode(b'\xff\xd8fixture').decode(), 'width':390, 'height':600}
         else:
-            result = {'page_id':'page','snapshot_id':'fresh','url':origin+'/',
+            result = {'page_id':args.get('page_id','page'),'snapshot_id':'fresh','url':origin+'/',
                       'snapshot':'Artist: '+draft['text'], 'targets':[],
                       'pages':[{'page_id':'page','url':origin+'/'}]}
         return json.dumps({'result':result}).encode()
@@ -614,7 +614,13 @@ def test_natural_requested_control_roundtrip(handoff_host, monkeypatch, tmp_path
         calls = [('load_skill',{'name':'browse-website'}), ('browser_open',{'url':origin+'/'}),
                  ('browser_handoff',{}), ('browser_observe',{'page_id':'page'})]
         replies = [AIMessage(content='',tool_calls=[{'name':name,'args':args,'id':str(i)}]) for i,(name,args) in enumerate(calls)]
-        replies.append(AIMessage(content='The Artist field contains Unsent draft + Cedar Lantern 731.'))
+        if _scripted_outcome == 'stale-page':
+            replies[-1] = AIMessage(content='',tool_calls=[{'name':'browser_observe','args':{'page_id':'another-page'},'id':'stale'}])
+        if _scripted_outcome == 'mutation':
+            replies.append(AIMessage(content='',tool_calls=[{'name':'browser_open','args':{'url':origin+'/'},'id':'mutation'}]))
+        answer = 'Control is available.' if _scripted_outcome == 'missing-answer' else 'The Artist field contains Unsent draft + Cedar Lantern 731.'
+        again = [{'name':'browser_handoff','args':{},'id':'again'}] if _scripted_outcome != 'complete' else []
+        replies.append(AIMessage(content=answer,tool_calls=again))
         model = _RecordingModel(responses=replies)
     saver, chats, bound_sessions = MemorySaver(), [], []
     (root/tid/'agent').mkdir(exist_ok=True)
@@ -674,22 +680,44 @@ def test_natural_requested_control_roundtrip(handoff_host, monkeypatch, tmp_path
             assert control('text',page_id=page_id,text='late').status_code == 409
             item = scheduler._q.get_nowait()
             execute_run(item['run_id'], item['tid'])
-            assert threads._runs().get(tid,item['run_id']).status == 'success'
-            assert threads._runs().get(tid,followup.id).status == 'success'
+            resumed = threads._runs().get(tid,item['run_id'])
+            assert threads._runs().get(tid,followup.id).status == 'success', 'held followup must succeed'
             messages = chats[-1].get_raw_messages()
             handoff = next(i for i,m in enumerate(messages) if isinstance(m,ToolMessage) and m.name=='browser_handoff')
             fresh = [m for m in messages[handoff+1:] if isinstance(m,ToolMessage) and m.name=='browser_observe']
             assert fresh and 'Unsent draft + Cedar Lantern 731' in str(fresh[-1].content)
-            assert json.loads(fresh[-1].content)['result']['page_id'] == page_id
+            assert json.loads(fresh[-1].content)['result']['page_id'] == page_id, 'fresh observation must use the same page'
             assert len(bound_sessions) == 2 and bound_sessions[0] is session
             resumed_tools = [call['name'] for m in messages[handoff+1:] if isinstance(m,AIMessage) for call in m.tool_calls]
-            assert not {'browser_act','browser_open','browser_fill_secret'}.intersection(resumed_tools), resumed_tools
-            assert 'Cedar Lantern 731' in str(messages[-1].content)
-            assert browser.BrowserManager.current_session(tid) is None
+            assert not {'browser_act','browser_open','browser_fill_secret'}.intersection(resumed_tools), 'readonly followup must not mutate: '+str(resumed_tools)
+            assert any(isinstance(m,AIMessage) and 'Cedar Lantern 731' in str(m.content)
+                       for m in messages[messages.index(fresh[-1])+1:]), 'assistant answer must contain the human edit'
+            projection = client.get(f'/thread/{tid}')
+            assert projection.status_code == 200 and 'Cedar Lantern 731' in projection.text
+            retained = browser.BrowserManager.current_session(tid)
+            if retained is None:
+                assert resumed.status == 'success'
+            else:
+                assert resumed.status == 'interrupted'
+                assert retained is session and session.sandbox_generation == generation
+                assert session.handoff_url and session.human_active and session.human_client is None
+                # A second offer must follow the fresh readback and still expose the original page.
+                after_fresh = messages[messages.index(fresh[-1])+1:]
+                assert any(isinstance(m,ToolMessage) and m.name=='browser_handoff' and
+                           'handoff_url' in json.loads(m.content) for m in after_fresh)
+                assert threads.THREAD_QUEUE.peek_holder() is None
+                headers['X-Browser-Token'] = session.viewer_token
+                status = control('status')
+                assert status.status_code == 200 and status.json()['unclaimed']
+                assert client.get(session.handoff_url).status_code == 200
+                assert control('takeover').status_code == 200
+                assert control('tabs').json()['pages'] == pages
+                assert control('frame',page_id=page_id).status_code == 200
             facts = {'result':'PASS','model':'real' if injected_model is not None else 'scripted',
                      'worker':'real Chromium' if worker else 'scripted','generation':generation,'page_id':page_id,
                      'checkpoint_retained':True,'http_edit_return':True,'fresh_observation':True,
-                     'held_followup_consumed':True,'stale_token_denied':True,
+                     'held_followup_consumed':True,'stale_token_denied':True,'answer_visible':True,
+                     'outcome':'control offered again' if retained else 'completed',
                      'boundary':'Real Deep Thread/Run/queue/HTTP; container backend and auxiliary work remain isolated fixtures.'}
             (tmp_path/'natural-handoff-result.json').write_text(json.dumps(facts,indent=2)+'\n')
             print('NATURAL_HOST_HANDOFF '+json.dumps(facts,sort_keys=True),flush=True)
@@ -699,6 +727,27 @@ def test_natural_requested_control_roundtrip(handoff_host, monkeypatch, tmp_path
             executor.shutdown(wait=True)
         if server:
             server.shutdown(); server.server_close()
+
+
+def test_natural_requested_control_can_reoffer_the_answered_form(handoff_host, monkeypatch, tmp_path):
+    test_natural_requested_control_roundtrip(handoff_host, monkeypatch, tmp_path, _scripted_outcome='reoffer')
+
+
+@pytest.mark.parametrize(('outcome','failure'),[('missing-answer','assistant answer'),
+    ('stale-page','same page'),('mutation','readonly'),('pending-followup','held followup')])
+def test_natural_requested_control_rejects_incomplete_or_changed_reoffers(handoff_host, monkeypatch, tmp_path, outcome, failure):
+    if outcome == 'pending-followup':
+        service = threads._runs()
+        transition = service.transition
+        def leave_followup_pending(tid, run_id, status, **kwargs):
+            record = service.get(tid, run_id)
+            if status == 'success' and record.text == 'Tell me what I put in the Artist field, without changing or submitting the form.':
+                return record
+            return transition(tid, run_id, status, **kwargs)
+        monkeypatch.setattr(service, 'transition', leave_followup_pending)
+    with pytest.raises(AssertionError, match=failure):
+        test_natural_requested_control_roundtrip(handoff_host, monkeypatch, tmp_path, _scripted_outcome=outcome)
+    assert not (tmp_path/'natural-handoff-result.json').exists()
 
 
 @pytest.mark.parametrize('base',['','https://user:password@assist.example','https://assist.example/path',
