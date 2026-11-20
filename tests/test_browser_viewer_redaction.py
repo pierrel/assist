@@ -1,4 +1,4 @@
-"""Viewer outputs use the browser's existing private-value boundary."""
+"""Human frames mask passwords; text retains the existing private-value boundary."""
 import json
 from types import SimpleNamespace
 from urllib.parse import quote
@@ -63,8 +63,8 @@ def test_viewer_frame_failure_never_falls_back_to_raw(monkeypatch, stage):
         if stage == 'collection':
             raise BrowserInputError('password fields unavailable')
         return ['fixture-current']
-    def masks(_page, hidden):
-        assert hidden == ('fixture-current', 'fixture-saved')
+    def masks(_page):
+        assert worker._hidden_values() == ('fixture-current', 'fixture-saved')
         if stage == 'selection':
             raise RuntimeError('fixture selection failed')
         return ['native-mask-locator']
@@ -82,7 +82,7 @@ def test_viewer_frame_failure_never_falls_back_to_raw(monkeypatch, stage):
     assert worker._private_values == worker._current_before == ()
 
 
-def test_empty_inventory_uses_native_password_masks_without_collecting_dom():
+def test_human_frames_use_native_password_masks_without_collecting_dom():
     masks = [object(), object()]
     def frame(mask):
         def locator(selector):
@@ -90,32 +90,28 @@ def test_empty_inventory_uses_native_password_masks_without_collecting_dom():
             return mask
         return SimpleNamespace(locator=locator)
     page = SimpleNamespace(frames=[frame(mask) for mask in masks])
-    assert BrowserWorker()._screenshot_masks(page, ()) == masks
+    assert BrowserWorker()._screenshot_masks(page) == masks
 
 
-@pytest.mark.parametrize('states,expected', [
-    ([{'parts':['fixture-secret',1],'value':'','password':False},
-      {'parts':['Safe action'],'value':'','password':False}], [0]),
-    ([{'parts':['fixture-secret',1],'value':'','password':False},
-      {'parts':['fixture-secret'],'value':'','password':False}], [1,0]),
-    ([{'parts':[1,2,3],'value':'','password':False},
-      {'parts':['fixture-secret'],'value':'','password':False},
-      {'parts':['fixture-'],'value':'','password':False},
-      {'parts':['secret'],'value':'','password':False}], [1,0]),
-    ([{'parts':[1,2],'value':'','password':False},
-      {'parts':['fixture-secret fixture-'],'value':'','password':False},
-      {'parts':['secret'],'value':'','password':False}], [1,0]),
-    ([{'parts':[],'value':'','password':False,'placeholder':'fixture-secret'}], [0]),
-    ([{'parts':[1,2],'value':'','password':False},
-      {'parts':['fixture-secret'],'value':'','password':False},
-      {'parts':['Safe action'],'value':'','password':False}], [1]),
-])
-def test_native_masks_cover_each_visible_occurrence_and_keep_safe_sibling(states, expected):
-    class Nodes:
-        def evaluate_all(self, _expression):
-            return [{**state, 'placeholder':state.get('placeholder', '')} for state in states]
-        def nth(self, index):
-            return index
-    page = SimpleNamespace(frames=[SimpleNamespace(locator=lambda selector: Nodes()
-        if selector == 'body, body *' else pytest.fail('body must be selectable'))])
-    assert BrowserWorker()._screenshot_masks(page, ('fixture-secret',)) == expected
+@pytest.mark.parametrize('private_values,current', [
+    ([], []), (['fixture-saved'], []), ([], ['fixture-current'])])
+def test_human_frame_keeps_native_masks_with_saved_or_current_values(monkeypatch, private_values, current):
+    monkeypatch.setenv('BROWSER_SESSION_TOKEN', 'fixture-token')
+    worker = BrowserWorker()
+    page = _Page()
+    page.viewport_size = {'width':640, 'height':480}
+    mask = object()
+    page.frames = [SimpleNamespace(locator=lambda selector: mask
+        if selector == 'input[type="password"]' else pytest.fail('must not collect DOM'))]
+    worker.pages['page'] = page
+    worker._password_values = lambda: current
+    def capture(**kwargs):
+        assert kwargs['mask'] == [mask]
+        assert kwargs['mask_color'] == '#ff00ff'
+        return b'synthetic-jpeg'
+    page.screenshot = capture
+    result = worker.handle({'session':'fixture-token', 'operation':'viewer',
+                            'private_values':private_values,
+                            'args':{'action':'frame', 'page_id':'page'}})
+    assert result['image']
+    assert worker._private_values == worker._current_before == ()

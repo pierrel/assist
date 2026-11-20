@@ -1354,15 +1354,16 @@ recognize, so this is a practical model-output boundary, not a guarantee of
 secrecy against arbitrary page behavior. A thread with an existing locked or
 damaged store must unlock or repair it before browser observations resume.
 
-Human viewer frames and tab URLs use that same inventory. Native Playwright
-masks cover password controls, displayed empty-control placeholders, and complete
-known-value DOM/control matches before JPEG capture; normal page values remain unchanged.
-When known private values are present, DOM selection is bounded to 2,000 elements
-and 128 KiB of conservatively sized DOM text per frame. An empty inventory uses
-native password-control masks without collecting whole-page DOM text;
-a failed collection, selection, or capture returns a fixed refusal with no raw
-frame fallback. Canvas/image transformations and rendering races remain outside
-this practical coverage. The viewer HTTP access boundary is a separate concern.
+Human viewer frames use native Playwright password-control masks in every frame,
+without whole-page known-value DOM matching. Ordinary rendered text and other
+controls remain visible to the human, including any site-reflected credentials.
+These JPEGs are not model observations: model tools must not expose them, and the
+control service must remain denied to agent HTTP transports and egress. Tab URLs
+and model-visible text observations still use the authoritative saved/current
+inventory. Inventory collection or native capture failures return a fixed refusal
+without an unmasked-frame fallback. Password sampling retains its existing limits;
+arbitrary transformed content and rendering races have no universal redaction
+promise. Preserve the separate control-API boundary when composing this change.
 
 New Git-backed web threads bind an approved source and non-main branch outside
 the agent workspace. Their branch is published immediately, even when it first

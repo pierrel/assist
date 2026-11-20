@@ -115,11 +115,12 @@ in both views. An ID shown in only one view keeps that meaning.
   transport. The worker combines them with current password-field values and
   masks raw observations before display limits; the host checks returned
   observations again. Viewer commands carry the same inventory: tab metadata
-  uses text masking, and native screenshot masks cover bounded known-value
-  DOM/control reflections, including displayed placeholders and matches extending
-  beyond masked child elements, before JPEG capture. Failed collection, selection or
-  capture refuses the frame; arbitrary painted transformations remain outside
-  this coverage. The key is outside the workspace, scratch and =/agent= mounts.
+  uses text masking. Human JPEG frames use native password-control masks in every
+  frame, without whole-page known-value matching; ordinary reflected credentials
+  remain visible to the human. Model tools and agent HTTP/egress must not reach
+  these frames: preserve the separate control-API destination boundary. Failed
+  collection or native capture refuses the frame without an unmasked fallback.
+  The key is outside the workspace, scratch and =/agent= mounts.
   The thread-scoped [[file:../manage/web/browser_viewer.py][browser viewer]] adds
   human pixel/input control through C2 and C8. It retains the existing session,
   lease, worker and generation, with a single host-owned controller capability.

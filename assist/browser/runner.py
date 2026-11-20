@@ -18,9 +18,9 @@ from uuid import uuid4
 
 from playwright.sync_api import sync_playwright
 if __package__:
-    from .redaction import MAX_PRIVATE_COMMAND, contains_hidden, hidden_spans, replace_hidden
+    from .redaction import MAX_PRIVATE_COMMAND, contains_hidden, replace_hidden
 else:
-    from browser_redaction import MAX_PRIVATE_COMMAND, contains_hidden, hidden_spans, replace_hidden
+    from browser_redaction import MAX_PRIVATE_COMMAND, contains_hidden, replace_hidden
 
 RUNTIME_DIR = os.environ.get("BROWSER_RUNTIME_DIR", "/run")
 SOCKET = os.path.join(RUNTIME_DIR, "browser.sock")
@@ -423,7 +423,7 @@ class BrowserWorker:
         self._check_page_url(page)
         if action == "frame":
             try:
-                masks = self._screenshot_masks(page, self._hidden_values())
+                masks = self._screenshot_masks(page)
                 for quality in (50, 25, 10):
                     data = page.screenshot(type="jpeg", quality=quality, timeout=5000,
                                            mask=masks, mask_color="#ff00ff")
@@ -704,60 +704,9 @@ class BrowserWorker:
                 values.append(value)
         return values
 
-    def _screenshot_masks(self, page, hidden):
-        """Mask bounded DOM/control reflections; arbitrary painted content is outside scope."""
-        if not hidden:
-            return [frame.locator('input[type="password"]') for frame in page.frames]
-        masks = []
-        for frame in page.frames:
-            nodes = frame.locator("body, body *")
-            states = nodes.evaluate_all("""nodes => {
-                if (nodes.length > 2000) throw new Error('DOM mask budget');
-                const indices = new Map(nodes.map((node, index) => [node, index]));
-                let size = 0;
-                return nodes.map(node => {
-                    const skip = ['SCRIPT', 'STYLE', 'NOSCRIPT', 'CANVAS', 'IFRAME'].includes(node.tagName);
-                    const parts = skip ? [] : Array.from(node.childNodes).flatMap(child => {
-                        if (child.nodeType === 3) return [child.textContent];
-                        const index = indices.get(child);
-                        return index === undefined ? [] : [index];
-                    });
-                    const value = typeof node.value === 'string' ? node.value : '';
-                    const placeholder = !value && ['INPUT', 'TEXTAREA'].includes(node.tagName) ? node.getAttribute('placeholder') || '' : '';
-                    size += (parts.filter(part => typeof part === 'string').join('').length + value.length + placeholder.length) * 4;
-                    if (size > 131072) throw new Error('DOM mask budget');
-                    return {parts, value, placeholder, password: node.tagName === 'INPUT' && node.type === 'password'};
-                });
-            }""")
-            rendered = {}
-            for index in reversed(range(len(states))):
-                state = states[index]
-                pieces, covered = [], []
-                offset = 0
-                for part in state["parts"]:
-                    text, spans = (part, []) if isinstance(part, str) else rendered[part]
-                    pieces.append(text)
-                    covered.extend((begin + offset, end + offset) for begin, end in spans)
-                    offset += len(text)
-                text = ''.join(pieces)
-                def uncovered(begin, end):
-                    cursor = begin
-                    for left, right in covered:
-                        if right <= cursor:
-                            continue
-                        if left > cursor:
-                            return True
-                        cursor = right
-                        if cursor >= end:
-                            return False
-                    return cursor < end
-                if (state["password"] or contains_hidden(state["value"], hidden)
-                        or contains_hidden(state["placeholder"], hidden)
-                        or any(uncovered(begin, end) for begin, end in hidden_spans(text, hidden))):
-                    masks.append(nodes.nth(index))
-                    covered = [(0, len(text))]
-                rendered[index] = text, covered
-        return masks
+    def _screenshot_masks(self, page):
+        """Native password masks for human frames; model text uses the shared inventory."""
+        return [frame.locator('input[type="password"]') for frame in page.frames]
 
     def _hidden_values(self):
         return tuple(sorted(set(self._private_values + self._current_before
