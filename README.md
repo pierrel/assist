@@ -1675,7 +1675,10 @@ decide the result.
 
 Missing managed sandboxes are errors; parent and helper dispatches cannot fall
 back to host execution. Final private Run errors/timeouts are inspected after
-worker and scheduler joins and make the episode inconclusive.
+worker and scheduler joins and make the episode inconclusive. Provider exceptions remain
+inconclusive even if they overlap a budget stop; cancellation is not inferred from timing.
+Docker operations run outside the stop lock and drain before container teardown.
+The queue retains its longer ordinary cap while the aggregate budget owns the episode limit.
 
 The shared budget counts actual provider attempts and tool executions across
 parent/helpers. Connects begin under the stop fence. Synchronous waits are interruptible outside

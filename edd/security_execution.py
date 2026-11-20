@@ -35,9 +35,43 @@ class Budget:
         self.output_seen = False
         self.reason = None
         self.sockets = set()
+        self.creation_active = 0
+        self.creation_condition = threading.Condition(self.lock)
         self.native_active = 0
         self.native_cleanup_complete = False
         self.native_condition = threading.Condition()
+
+    @contextmanager
+    def creation(self):
+        """Track admitted Docker operations without blocking budget revocation."""
+        with self.creation_condition:
+            if self.reason is None and time.monotonic() >= self.deadline:
+                self.reason = 'wall_limit'
+            if self.reason:
+                raise ExecutionStopped(self.reason)
+            self.creation_active += 1
+        try:
+            yield
+        finally:
+            with self.creation_condition:
+                self.creation_active -= 1
+                self.creation_condition.notify_all()
+
+    def create_container(self, collection, image, args, kwargs, owned, agents):
+        """Register late creates and drain admitted starts before teardown."""
+        with self.creation():
+            container = collection.create(image, *args, **kwargs)
+            with self.lock:
+                owned.append(container)
+                agents.append(container)
+                if self.reason is None and time.monotonic() >= self.deadline:
+                    self.reason = 'wall_limit'
+                if self.reason:
+                    raise ExecutionStopped(self.reason)
+                # This start is now admitted and remains tracked until reload.
+            container.start()
+            container.reload()
+            return container
 
     @contextmanager
     def native_operation(self):
@@ -246,8 +280,7 @@ def instrument(budget, model_url, control_ip):
                             observed_output(row)
                             yield row
                     except Exception as error:
-                        if budget.reason is None:
-                            budget.evidence.record('provider_error', error=type(error).__name__)
+                        budget.evidence.record('provider_error', error=type(error).__name__)
                         raise
                     finally:
                         _PROVIDER.reset(token)
@@ -259,8 +292,7 @@ def instrument(budget, model_url, control_ip):
                         observed_output(result)
                         return result
                     except Exception as error:
-                        if budget.reason is None:
-                            budget.evidence.record('provider_error', error=type(error).__name__)
+                        budget.evidence.record('provider_error', error=type(error).__name__)
                         raise
                     finally:
                         _PROVIDER.reset(token)
@@ -272,8 +304,7 @@ def instrument(budget, model_url, control_ip):
                             observed_output(row)
                             yield row
                     except Exception as error:
-                        if budget.reason is None:
-                            budget.evidence.record('provider_error', error=type(error).__name__)
+                        budget.evidence.record('provider_error', error=type(error).__name__)
                         raise
                     finally:
                         _PROVIDER.reset(token)
@@ -285,8 +316,7 @@ def instrument(budget, model_url, control_ip):
                         observed_output(result)
                         return result
                     except Exception as error:
-                        if budget.reason is None:
-                            budget.evidence.record('provider_error', error=type(error).__name__)
+                        budget.evidence.record('provider_error', error=type(error).__name__)
                         raise
                     finally:
                         _PROVIDER.reset(token)
@@ -303,7 +333,7 @@ def instrument(budget, model_url, control_ip):
                             budget.evidence.record('provider_error', status=response.status_code)
                         return response
                     except Exception as error:
-                        if _PROVIDER.get() and budget.reason is None:
+                        if _PROVIDER.get():
                             budget.evidence.record('provider_error', error=type(error).__name__)
                         raise
             else:
@@ -316,7 +346,7 @@ def instrument(budget, model_url, control_ip):
                             budget.evidence.record('provider_error', status=response.status_code)
                         return response
                     except Exception as error:
-                        if _PROVIDER.get() and budget.reason is None:
+                        if _PROVIDER.get():
                             budget.evidence.record('provider_error', error=type(error).__name__)
                         raise
             stack.enter_context(patch.object(cls, 'send', send))
@@ -351,8 +381,7 @@ def instrument(budget, model_url, control_ip):
                 try:
                     return original_forward(self, handler, body)
                 except Exception as error:
-                    if budget.reason is None:
-                        budget.evidence.record('provider_error', error=type(error).__name__)
+                    budget.evidence.record('provider_error', error=type(error).__name__)
                     raise
                 finally:
                     _PROVIDER.reset(token)
@@ -417,7 +446,9 @@ def execute(root, evidence, args, threads, fixture):
     tid = threads.MANAGER.reserve_visible(args.engine)
     Path(threads.MANAGER.thread_default_working_dir(tid)).mkdir(exist_ok=True)
     run = threads._create_run(tid, PROMPT, user_origin=True)
-    threads.THREAD_QUEUE = ThreadAffinityQueue(hold_timeout_s=args.wall_seconds, wait_timeout_s=5)
+    # The aggregate budget owns the short episode limit. Preserve the queue's
+    # longer default cap rather than racing an independent timer at that limit.
+    threads.THREAD_QUEUE = ThreadAffinityQueue(wait_timeout_s=5)
     threads._HERMES_RUNTIME = HermesRuntimeManager(model_config=lambda: config)
     threads.HERMES_PREVIEW = PiPreviewPolicy(root, engine='hermes')
     threads.HERMES_PREVIEW.set_enabled(True)
@@ -456,14 +487,7 @@ def execute(root, evidence, args, threads, fixture):
         kw['extra_hosts'] = {sm.EGRESS_PROXY_NAME: fixture[2]}
         kw.pop('detach', None)
         kw['auto_remove'] = kw.pop('remove', False)
-        with budget.lock:
-            if budget.reason:
-                raise RuntimeError('Private execution is stopping')
-            container = client.containers.create(image, *a, **kw)
-            owned.append(container)
-            agent_containers.append(container)
-            container.start()
-        container.reload()
+        container = budget.create_container(collection, image, a, kw, owned, agent_containers)
         assert set(container.attrs['NetworkSettings']['Networks']) == {execution.name}
         assert container.attrs['HostConfig']['Dns'] == ['127.0.0.1']
         assert not container.attrs['HostConfig'].get('PortBindings')
@@ -471,6 +495,7 @@ def execute(root, evidence, args, threads, fixture):
         evidence.record('agent_container', id=container.id, image=container.image.id,
             config=container.attrs['HostConfig'], mounts=container.attrs['Mounts'])
         return container
+
     def record(cls, docker_client, container, path, *, kind):
         cls._egress_client_ips[path] = cls._record_egress_client_direct(
             docker_client, container, path, kind=kind)
@@ -539,6 +564,9 @@ def execute(root, evidence, args, threads, fixture):
             termination = budget.reason or 'finish'
         finally:
             budget.stop('finish')
+            with budget.creation_condition:
+                if not budget.creation_condition.wait_for(lambda: budget.creation_active == 0, timeout=35):
+                    raise RuntimeError('Private container creation drain unconfirmed')
             threads._HERMES_RUNTIME.stop(tid)
             for path, container in list(sm.SandboxManager._containers.items()):
                 sm.SandboxManager.cleanup(path, container)

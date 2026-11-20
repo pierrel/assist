@@ -152,6 +152,7 @@ def test_model_connection_failures_cannot_become_real_pass_at_limit(tmp_path):
                     client.post('http://127.0.0.1:8000/v1/chat/completions')
         finally:
             _PROVIDER.reset(token)
+    assert 'provider_error' in evidence.path.read_text()
     evidence.record('isolation_verified')
     evidence.record('execution_complete', errors=[])
     evidence.close(termination='step_limit', execution_kind='real', drained=True)
@@ -224,3 +225,104 @@ def test_async_control_connect_progress_is_not_an_infrastructure_gap(tmp_path, m
             with pytest.raises(BlockingIOError):
                 transport.connect(('172.22.0.2', 9090))
     assert 'capability_gap' not in evidence.path.read_text()
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_independent_provider_failure_after_stop_is_observed(tmp_path, asynchronous):
+    evidence = Evidence(tmp_path)
+    budget = Budget(evidence, 2, 10)
+    def failed(request):
+        budget.stop('step_limit')
+        raise httpx.ConnectError('Independent synthetic failure', request=request)
+    with instrument(budget, 'http://127.0.0.1:8000/v1', '172.22.0.2'):
+        token = _PROVIDER.set(True)
+        try:
+            if asynchronous:
+                async def call():
+                    async with httpx.AsyncClient(transport=httpx.MockTransport(failed)) as client:
+                        await client.post('http://127.0.0.1:8000/v1/chat/completions')
+                with pytest.raises(httpx.ConnectError):
+                    asyncio.run(call())
+            else:
+                with httpx.Client(transport=httpx.MockTransport(failed)) as client:
+                    with pytest.raises(httpx.ConnectError):
+                        client.post('http://127.0.0.1:8000/v1/chat/completions')
+        finally:
+            _PROVIDER.reset(token)
+    assert 'provider_error' in evidence.path.read_text()
+
+
+def test_admitted_creation_drains_without_holding_stop_lock(tmp_path):
+    import threading
+    budget = Budget(Evidence(tmp_path), 2, 10)
+    entered, release = threading.Event(), threading.Event()
+    def creation():
+        with budget.creation():
+            entered.set()
+            assert release.wait(2)
+    worker = threading.Thread(target=creation)
+    worker.start()
+    try:
+        assert entered.wait(1)
+        budget.stop('wall_limit')
+        assert budget.reason == 'wall_limit'
+        with budget.creation_condition:
+            assert budget.creation_active == 1
+        with pytest.raises(ExecutionStopped):
+            with budget.creation():
+                pytest.fail('Creation admitted after stop')
+    finally:
+        release.set()
+        worker.join(2)
+    assert not worker.is_alive() and budget.creation_active == 0
+
+
+@pytest.mark.parametrize("phase", ['create', 'start'])
+def test_actual_container_launch_is_stopped_and_owned_while_daemon_blocks(tmp_path, phase):
+    import threading
+    from types import SimpleNamespace
+    budget = Budget(Evidence(tmp_path), 2, 10)
+    entered, release = threading.Event(), threading.Event()
+    calls, errors, owned, agents = [], [], [], []
+    def wait(which):
+        calls.append(which)
+        if phase == which:
+            entered.set()
+            assert release.wait(2)
+    container = SimpleNamespace(start=lambda: wait('start'), reload=lambda: wait('reload'))
+    def create(*args, **kwargs):
+        wait('create')
+        return container
+    def launch():
+        try:
+            budget.create_container(SimpleNamespace(create=create), 'synthetic', (), {}, owned, agents)
+        except ExecutionStopped as error:
+            errors.append(error)
+    worker = threading.Thread(target=launch)
+    worker.start()
+    try:
+        assert entered.wait(1)
+        budget.stop('wall_limit')
+        with budget.creation_condition:
+            assert budget.creation_active == 1
+            assert not budget.creation_condition.wait_for(lambda: budget.creation_active == 0, timeout=.01)
+    finally:
+        release.set()
+        worker.join(2)
+    assert not worker.is_alive() and owned == agents == [container]
+    assert budget.creation_active == 0
+    assert ('start' in calls) == (phase == 'start')
+    assert bool(errors) == (phase == 'create')
+    with pytest.raises(ExecutionStopped):
+        budget.create_container(SimpleNamespace(create=lambda *_a, **_kw: pytest.fail('late create')),
+                                'synthetic', (), {}, owned, agents)
+
+
+def test_expired_creation_never_calls_daemon(tmp_path):
+    from types import SimpleNamespace
+    budget = Budget(Evidence(tmp_path), 2, 10)
+    budget.deadline = 0
+    with pytest.raises(ExecutionStopped):
+        budget.create_container(SimpleNamespace(create=lambda *_a, **_kw: pytest.fail('expired create')),
+                                'synthetic', (), {}, [], [])
+    assert budget.reason == 'wall_limit'
