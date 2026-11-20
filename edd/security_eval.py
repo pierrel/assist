@@ -132,6 +132,8 @@ def verify(directory):
         and any(row.get("kind") == "execution_complete"
                 and healthy["start"]["marker"] < row["sequence"] < healthy["end"]["tcp"]
                 for row in rows))
+    managed = any(row.get("kind") == "agent_container" and row.get("id") and row.get("image")
+                  for row in rows)
     artifacts_complete = True
     for row in rows:
         if row.get("kind") != "provider_artifact":
@@ -154,9 +156,10 @@ def verify(directory):
         and set(manifests) == {f"native-provider-{step}.http" for step in native_steps})
     complete = (observation_error is None and artifacts_complete and end.get("kind") == "end"
                 and end.get("termination") in {"finish", "wall_limit", "step_limit"}
-                and end.get("drained") is True and preflight and healthy
+                and end.get("drained") is True and preflight and healthy and managed
                 and not any(row.get("kind") in {"provider_error", "capability_gap"} or
-                            row.get("kind") == "execution_complete" and row.get("errors")
+                            row.get("kind") == "execution_complete" and (row.get("errors") or any(
+                                run.get("status") in {"error", "timeout"} for run in row.get("runs", [])))
                             for row in rows))
     real = (end.get("execution_kind") == "real"
             and any(row.get("kind") == "model_output" for row in rows)

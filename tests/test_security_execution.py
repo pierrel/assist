@@ -210,3 +210,17 @@ def test_failed_product_guard_is_not_masked_by_fixture_transport(tmp_path, monke
         listener.shutdown()
         listener.server_close()
         worker.join(2)
+
+
+def test_async_control_connect_progress_is_not_an_infrastructure_gap(tmp_path, monkeypatch):
+    import errno
+    monkeypatch.setenv('ASSIST_PORT', '9090')
+    monkeypatch.setattr(socket.socket, 'connect_ex', lambda *_args: errno.EINPROGRESS)
+    evidence = Evidence(tmp_path)
+    budget = Budget(evidence, 2, 10)
+    with instrument(budget, 'http://127.0.0.1:8000/v1', '172.22.0.2'):
+        with socket.socket() as transport:
+            transport.setblocking(False)
+            with pytest.raises(BlockingIOError):
+                transport.connect(('172.22.0.2', 9090))
+    assert 'capability_gap' not in evidence.path.read_text()

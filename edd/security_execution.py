@@ -2,6 +2,8 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
 import inspect
+import errno
+import select
 import hashlib
 import ipaddress
 import json
@@ -74,6 +76,68 @@ class Budget:
                 except OSError:
                     pass
 
+    def connect(self, transport, address, start_connect):
+        """Start under the stop fence; wait interruptibly outside that lock."""
+        original_timeout = transport.gettimeout()
+        pending = {errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY, errno.EINTR}
+        try:
+            with self.lock:
+                remaining = self.deadline - time.monotonic()
+                if self.reason or remaining <= 0:
+                    self.reason = self.reason or 'wall_limit'
+                    raise OSError('Security execution stopped')
+                timeout = min(remaining, original_timeout) if original_timeout is not None else remaining
+                connect_deadline = time.monotonic() + timeout
+                transport.setblocking(False)
+                self.sockets.add(transport)
+                result = start_connect(transport, address)
+            if original_timeout == 0 and result in pending:
+                # Async owners register readiness themselves. Keep their
+                # socket live and tracked, rather than blocking their loop.
+                raise BlockingIOError(result, 'Connection in progress')
+            while result:
+                if result not in pending:
+                    raise OSError(result, 'Connection failed')
+                with self.lock:
+                    if self.reason:
+                        raise OSError('Security execution stopped')
+                    remaining = min(connect_deadline, self.deadline) - time.monotonic()
+                    if remaining <= 0:
+                        if time.monotonic() >= self.deadline:
+                            self.reason = 'wall_limit'
+                        raise TimeoutError('Bounded fixture connection timed out')
+                _read, write, error = select.select([], [transport], [transport], min(.05, remaining))
+                if write or error:
+                    result = transport.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            with self.lock:
+                remaining = self.deadline - time.monotonic()
+                if self.reason or remaining <= 0:
+                    self.reason = self.reason or 'wall_limit'
+                    raise OSError('Security execution stopped')
+                transport.settimeout(min(original_timeout, remaining)
+                    if original_timeout is not None else remaining)
+        except BlockingIOError as error:
+            if original_timeout != 0 or error.errno not in pending:
+                transport.close()
+            raise
+        except BaseException:
+            transport.close()  # The connecting thread owns close; stop only shuts down.
+            raise
+
+
+@contextmanager
+def require_managed_execution(threads):
+    """Reject the common parent/helper sandbox factory's host fallback."""
+    from unittest.mock import patch
+    original = threads._get_sandbox_backend
+    def required(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if result is None:
+            raise RuntimeError('Managed sandbox unavailable; host fallback forbidden in security evaluation')
+        return result
+    with patch.object(threads, '_get_sandbox_backend', required):
+        yield
+
 
 @contextmanager
 def instrument(budget, model_url, control_ip):
@@ -96,6 +160,7 @@ def instrument(budget, model_url, control_ip):
     model_port = endpoint.port or 80
     control_port, _origin = control_api.control_config()
     original_dns, original_connect = socket.getaddrinfo, socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
     original_resolve = control_api.resolve_targets
     def record_output(engine):
         with budget.lock:
@@ -133,22 +198,15 @@ def instrument(budget, model_url, control_ip):
                     and not control_transport or budget.reason):
                 budget.evidence.record('host_transport_unavailable', destination=str(address)[:512])
                 raise OSError('Host network transport unavailable in security fixture')
-            with budget.lock:
-                if budget.reason:
-                    raise OSError("Security execution stopped")
-                if time.monotonic() >= budget.deadline:
-                    budget.reason = 'wall_limit'
-                    raise OSError('Security execution expired')
-                budget.sockets.add(transport)
-                # Serialize the bounded initial connect with revocation. The
-                # transport owner closes it after supervisor shutdown wakes it.
-                try:
-                    return original_connect(transport, address)
-                except OSError:
-                    if control_transport:
-                        budget.evidence.record('capability_gap',
-                            capability='host control transport', destination=str(address))
-                    raise
+            try:
+                return budget.connect(transport, address, original_connect_ex)
+            except BlockingIOError:
+                raise  # Normal async progress is not a fixture route failure.
+            except OSError:
+                if control_transport and budget.reason is None:
+                    budget.evidence.record('capability_gap',
+                        capability='host control transport', destination=str(address))
+                raise
 
         def checked_resolve(*args, **kwargs):
             try:
@@ -165,7 +223,15 @@ def instrument(budget, model_url, control_ip):
 
         stack.enter_context(patch.object(socket, 'getaddrinfo', dns))
         stack.enter_context(patch.object(socket.socket, 'connect', connect))
-        stack.enter_context(patch.object(socket.socket, 'connect_ex', lambda s, a: (connect(s, a) or 0)))
+        def connect_ex(transport, address):
+            try:
+                connect(transport, address)
+                return 0
+            except OSError as error:
+                if error.errno is None:
+                    raise
+                return error.errno
+        stack.enter_context(patch.object(socket.socket, 'connect_ex', connect_ex))
         stack.enter_context(patch.object(control_api, 'resolve_targets', checked_resolve))
         stack.enter_context(patch.object(url_fetch, 'resolve_targets', checked_resolve))
         stack.enter_context(patch.object(tools, '_read_pdf_url', pdf))
@@ -442,6 +508,7 @@ def execute(root, evidence, args, threads, fixture):
         stack.enter_context(patch.object(model_manager, '_cached_config', config))
         os.environ['ASSIST_MODEL_URL'] = args.model_url
         stack.enter_context(instrument(budget, args.model_url, origin_ip))
+        stack.enter_context(require_managed_execution(threads))
         evidence.record('isolation_verified', host_dns='static fixture only',
             host_network='provider-context loopback model; protected fixture host transport after product checks; other host transport/PDF unavailable',
             engine=args.engine, capabilities=('native file/terminal/memory/skills/delegation/egress; '
@@ -470,11 +537,6 @@ def execute(root, evidence, args, threads, fixture):
                 else:
                     time.sleep(min(.1, remaining))
             termination = budget.reason or 'finish'
-            for directory in (root / 'threads').iterdir():
-                if directory.is_dir() and directory.name not in prior_threads:
-                    failures.extend(f'Run {row.id}: {row.status}'
-                        for row in threads._runs().list(directory.name)
-                        if row.status in {'error', 'timeout'})
         finally:
             budget.stop('finish')
             threads._HERMES_RUNTIME.stop(tid)
@@ -498,8 +560,13 @@ def execute(root, evidence, args, threads, fixture):
                 threads._RESUME_SCHEDULER._thread.join(5)
                 if threads._RESUME_SCHEDULER._thread.is_alive():
                     raise RuntimeError('Private scheduler drain unconfirmed')
+            final_runs = [row for directory in (root / 'threads').iterdir()
+                if directory.is_dir() and directory.name not in prior_threads
+                for row in threads._runs().list(directory.name)]
+            failures.extend(f'Run {row.id}: {row.status}' for row in final_runs
+                            if row.status in {'error', 'timeout'})
             evidence.record('execution_complete', termination=termination, steps=budget.count,
-                errors=failures, runs=[row.to_dict() for row in threads._runs().list(tid)])
+                errors=failures, runs=[row.to_dict() for row in final_runs])
             if failures or (threads._runs().get(tid, run.id).status != 'success' and termination == 'finish'):
                 termination = 'error'
         return termination

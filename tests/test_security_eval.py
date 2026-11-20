@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from edd.security_eval import Evidence, verify
 
 
-def health(evidence, broken=None):
+def health(evidence, broken=None, run_status=None):
     def probe(phase):
         start = evidence.sequence
         path = '/?security_health=synthetic-' + phase
@@ -35,9 +35,12 @@ def health(evidence, broken=None):
             http_status=200)
     probe('start')
     evidence.record('isolation_verified')
+    if broken != 'sandbox':
+        evidence.record('agent_container', id='synthetic-generation', image='sha256:' + '0' * 64)
     evidence.record('execution_step', step=1, operation='model', detail='synthetic provider')
     evidence.record('model_output', engine='deepagents')
-    evidence.record('execution_complete', errors=[])
+    evidence.record('execution_complete', errors=[],
+        runs=[{'status': run_status}] if run_status else [])
     probe('end')
 
 
@@ -163,3 +166,94 @@ def test_fresh_private_app_does_not_load_model_or_development_environment(tmp_pa
     assert result.returncode == 0, result.stdout + result.stderr
     value = json.loads(result.stdout.splitlines()[-1])
     assert value['model'] == 'unset' and value['docker'] == 'not started'
+
+
+def test_missing_managed_sandbox_cannot_pass(tmp_path):
+    evidence = Evidence(tmp_path)
+    health(evidence, broken='sandbox')
+    evidence.close(termination='finish', execution_kind='real', drained=True)
+    assert verify(tmp_path)['outcome'] == 'inconclusive'
+
+
+@pytest.mark.parametrize('status', ['error', 'timeout'])
+def test_late_run_failure_cannot_pass_at_wall_limit(tmp_path, status):
+    evidence = Evidence(tmp_path)
+    health(evidence, run_status=status)
+    evidence.close(termination='wall_limit', execution_kind='real', drained=True)
+    assert verify(tmp_path)['outcome'] == 'inconclusive'
+
+
+def test_required_sandbox_rejects_parent_and_helper_host_fallback():
+    from types import SimpleNamespace
+    from edd.security_execution import require_managed_execution
+    calls = []
+    module = SimpleNamespace(_get_sandbox_backend=lambda tid: calls.append(tid))
+    with require_managed_execution(module):
+        for tid in ('synthetic-parent', 'synthetic-helper'):
+            with pytest.raises(RuntimeError, match='host fallback forbidden'):
+                module._get_sandbox_backend(tid)
+    assert calls == ['synthetic-parent', 'synthetic-helper']
+
+
+def test_pending_connect_does_not_block_stop(tmp_path, monkeypatch):
+    import errno
+    import time
+    from edd import security_execution as execution
+    budget = execution.Budget(Evidence(tmp_path), 2, 10)
+    entered, stopped = threading.Event(), threading.Event()
+    errors = []
+    def begin(transport, address):
+        assert transport.gettimeout() == 0
+        entered.set()
+        return errno.EINPROGRESS
+    def waiting(*args):
+        time.sleep(min(args[-1], .01))
+        return [], [], []
+    monkeypatch.setattr(execution.select, 'select', waiting)
+    def connect():
+        try:
+            with socket.socket() as transport:
+                budget.connect(transport, ('127.0.0.1', 1), begin)
+        except OSError:
+            errors.append('stopped')
+    worker = threading.Thread(target=connect)
+    worker.start()
+    assert entered.wait(2)
+    def stop():
+        budget.stop('wall_limit')
+        stopped.set()
+    stopper = threading.Thread(target=stop)
+    stopper.start()
+    assert stopped.wait(.2), 'A pending connect retained the stop lock'
+    worker.join(2)
+    stopper.join(2)
+    assert not worker.is_alive() and errors == ['stopped']
+
+
+def test_stopped_budget_cannot_start_connect(tmp_path):
+    from edd.security_execution import Budget
+    budget = Budget(Evidence(tmp_path), 2, 10)
+    budget.stop('wall_limit')
+    with socket.socket() as transport, pytest.raises(OSError):
+        budget.connect(transport, ('127.0.0.1', 1),
+            lambda *_args: pytest.fail('A connection began after stop'))
+
+
+def test_nonblocking_connect_preserves_async_progress_and_stop_tracking(tmp_path):
+    import errno
+    from edd.security_execution import Budget
+    class Transport:
+        closed = False
+        shutdown_seen = False
+        def gettimeout(self): return 0
+        def setblocking(self, value): assert value is False
+        def settimeout(self, value): assert value == 0
+        def close(self): self.closed = True
+        def shutdown(self, value): self.shutdown_seen = True
+    transport = Transport()
+    budget = Budget(Evidence(tmp_path), 2, 10)
+    with pytest.raises(BlockingIOError):
+        budget.connect(transport, ('127.0.0.1', 1), lambda *_args: errno.EINPROGRESS)
+    assert not transport.closed
+    budget.stop('wall_limit')
+    assert transport.shutdown_seen
