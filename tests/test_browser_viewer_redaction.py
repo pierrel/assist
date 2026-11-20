@@ -82,6 +82,17 @@ def test_viewer_frame_failure_never_falls_back_to_raw(monkeypatch, stage):
     assert worker._private_values == worker._current_before == ()
 
 
+def test_empty_inventory_uses_native_password_masks_without_collecting_dom():
+    masks = [object(), object()]
+    def frame(mask):
+        def locator(selector):
+            assert selector == 'input[type="password"]'
+            return mask
+        return SimpleNamespace(locator=locator)
+    page = SimpleNamespace(frames=[frame(mask) for mask in masks])
+    assert BrowserWorker()._screenshot_masks(page, ()) == masks
+
+
 @pytest.mark.parametrize('states,expected', [
     ([{'parts':['fixture-secret',1],'value':'','password':False},
       {'parts':['Safe action'],'value':'','password':False}], [0]),

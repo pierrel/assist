@@ -706,6 +706,8 @@ class BrowserWorker:
 
     def _screenshot_masks(self, page, hidden):
         """Mask bounded DOM/control reflections; arbitrary painted content is outside scope."""
+        if not hidden:
+            return [frame.locator('input[type="password"]') for frame in page.frames]
         masks = []
         for frame in page.frames:
             nodes = frame.locator("body, body *")
