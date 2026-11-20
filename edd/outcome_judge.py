@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 _PROMPT_PATH = Path(__file__).with_name("outcome_judge_prompt.md")
+_PROSPECTIVE_PROMPT_PATH = Path(__file__).with_name("prospective_outcome_judge_prompt.md")
 _OUTPUT_TOKENS = 4096
 
 
@@ -96,9 +97,25 @@ class OutcomeVerdict(_ClosedModel):
     confidence: Literal["low", "medium", "high"]
 
 
+class ProspectiveVerdict(_ClosedModel):
+    """Model-generated semantic grades; the aggregate is derived locally."""
+
+    requested: tuple[RequestedVerdict, ...]
+    forbidden: tuple[ForbiddenVerdict, ...]
+    contradictions: tuple[Contradiction, ...]
+    material_unrelated_evidence_ids: tuple[str, ...]
+    unsafe_extra_evidence_ids: tuple[str, ...]
+    rationale: str = Field(min_length=1)
+    rationale_evidence_ids: tuple[str, ...]
+
+    @property
+    def overall(self) -> Literal["pass", "partial", "fail"]:
+        return derive_overall(self)
+
+
 @dataclass(frozen=True)
 class JudgedOutcome:
-    verdict: OutcomeVerdict
+    verdict: OutcomeVerdict | ProspectiveVerdict
     model: str
     prompt_sha256: str
 
@@ -107,6 +124,26 @@ def validate_verdict(
     observation: OutcomeObservation, verdict: OutcomeVerdict
 ) -> OutcomeVerdict:
     """Validate only mechanical identity, citation, and aggregation rules."""
+
+    _validate_verdict_references(observation, verdict)
+    expected = derive_overall(verdict)
+    if verdict.overall != expected:
+        raise ValueError(f"overall must be {expected}")
+    return verdict
+
+
+def validate_prospective_verdict(
+    observation: OutcomeObservation, verdict: ProspectiveVerdict
+) -> ProspectiveVerdict:
+    """Check generated semantic fields without asking the model to aggregate."""
+
+    _validate_verdict_references(observation, verdict)
+    return verdict
+
+
+def _validate_verdict_references(
+    observation: OutcomeObservation, verdict: OutcomeVerdict | ProspectiveVerdict
+) -> None:
 
     if [item.id for item in verdict.requested] != [
         item.id for item in observation.requested
@@ -143,18 +180,22 @@ def validate_verdict(
     if not unrelated <= produced or not unsafe <= produced or unrelated & unsafe:
         raise ValueError("extra-output citations are invalid")
 
+
+def derive_overall(
+    verdict: OutcomeVerdict | ProspectiveVerdict,
+) -> Literal["pass", "partial", "fail"]:
+    """Aggregate validated semantic fields using the existing outcome rule."""
+
     requested_grades = {item.grade for item in verdict.requested}
     if any(item.grade == "present" for item in verdict.forbidden) \
-            or verdict.contradictions or unsafe \
+            or verdict.contradictions or verdict.unsafe_extra_evidence_ids \
             or requested_grades == {"missing"}:
         expected = "fail"
-    elif requested_grades == {"satisfied"} and not unrelated:
+    elif requested_grades == {"satisfied"} and not verdict.material_unrelated_evidence_ids:
         expected = "pass"
     else:
         expected = "partial"
-    if verdict.overall != expected:
-        raise ValueError(f"overall must be {expected}")
-    return verdict
+    return expected
 
 
 def _validate_citations(citations: tuple[str, ...], allowed: set[str]) -> None:
@@ -166,13 +207,15 @@ def _validate_citations(citations: tuple[str, ...], allowed: set[str]) -> None:
 class OutcomeJudge:
     """Make one structured local-model call for one closed observation."""
 
-    def __init__(self, model: Any | None = None, *, max_tokens: int = _OUTPUT_TOKENS):
+    def __init__(self, model: Any | None = None, *, max_tokens: int = _OUTPUT_TOKENS,
+                 prospective: bool = False):
         self._model = model
         self._max_tokens = max_tokens
-        self._prompt = _PROMPT_PATH.read_text()
+        self._prospective = prospective
+        self._prompt = (_PROSPECTIVE_PROMPT_PATH if prospective else _PROMPT_PATH).read_text()
         self._prompt_sha256 = hashlib.sha256(self._prompt.encode()).hexdigest()
 
-    def judge(self, observation: OutcomeObservation) -> OutcomeVerdict:
+    def judge(self, observation: OutcomeObservation) -> OutcomeVerdict | ProspectiveVerdict:
         return self.judge_with_provenance(observation).verdict
 
     def judge_with_provenance(
@@ -190,7 +233,7 @@ class OutcomeJudge:
                 "json_schema": {
                     "name": "assist_outcome_verdict",
                     "strict": True,
-                    "schema": OutcomeVerdict.model_json_schema(),
+                    "schema": (ProspectiveVerdict if self._prospective else OutcomeVerdict).model_json_schema(),
                 },
             },
             max_tokens=self._max_tokens,
@@ -212,7 +255,12 @@ class OutcomeJudge:
             raise ValueError("judge response must identify the served model")
         if response.response_metadata.get("finish_reason") != "stop":
             raise ValueError("judge response did not finish cleanly")
-        verdict = validate_verdict(
-            observation, OutcomeVerdict.model_validate_json(response.content)
-        )
+        if self._prospective:
+            verdict = validate_prospective_verdict(
+                observation, ProspectiveVerdict.model_validate_json(response.content)
+            )
+        else:
+            verdict = validate_verdict(
+                observation, OutcomeVerdict.model_validate_json(response.content)
+            )
         return JudgedOutcome(verdict, model_name, self._prompt_sha256)

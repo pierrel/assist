@@ -1,0 +1,67 @@
+{
+  "type": "object",
+  "properties": {
+    "overall": {
+      "type": "string",
+      "enum": [
+        "Meets",
+        "Partly meets",
+        "Does not meet",
+        "Uncertain"
+      ]
+    },
+    "value_grades": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "string",
+            "enum": [
+              "Thorough",
+              "Focused",
+              "Correct"
+            ]
+          },
+          "grade": {
+            "type": "string",
+            "enum": [
+              "Meets",
+              "Partly meets",
+              "Does not meet",
+              "Uncertain"
+            ]
+          }
+        },
+        "required": [
+          "value",
+          "grade"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "evidence_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "disagreements": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "reason": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "overall",
+    "value_grades",
+    "evidence_ids",
+    "disagreements",
+    "reason"
+  ],
+  "additionalProperties": false
+}
