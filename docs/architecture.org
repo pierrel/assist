@@ -455,9 +455,12 @@ their explicit summary handoff creates an independent Deep Agents thread.
   The pin has no post-persistence hook: a narrow instance flush wrapper adds
   Run/work identities to the native user row's =display_metadata= before its
   transaction and acknowledges only a successful durable flush. C3's
-  =consumed_by= is written afterward. [[file:../assist/hermes_steering.py][Receipt reconciliation]]
-  reads those same rows, including compression-archived rows, before a
-  targeted queued fallback can execute after a lost acknowledgment. No
+  =consumed_by= is written afterward. [[file:../assist/hermes_steering.py][The native steering bridge]]
+  owns ticket eligibility/framing, exact-ID acknowledgment and receipt-to-Run
+  matching. C4's web wrappers retain admission locking, owner/reset checks and
+  error/fallback dispatch. The bridge reads those same native rows, including
+  compression-archived rows, before a targeted queued fallback can execute
+  after a lost acknowledgment. No
   separate queue, receipt store or native model loop is introduced.
   No native worker starts another Run. Resolved egress cards may enqueue one
   host-owned native follow-up through C4; native helpers share the parent thread's
