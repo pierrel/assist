@@ -154,7 +154,8 @@ where reliability is harder than with frontier APIs.
   You can also ask Assist to open a page for you to use. Its `browser_handoff`
   tool offers the live control link, then parks at a checkpoint before the next
   model step. Set `ASSIST_BASE_URL` to the client-reachable HTTP(S) origin for
-  that link. The server publishes it while the model slot is free; choose
+  that link. The server publishes it while the model slot is free, including in
+  the phone/Emacs thread snapshot so a reload keeps the current offer visible; choose
   **Take over** to claim the offered browser. Ordinary follow-ups to this
   explicit offer stay queued for the same work until **Return to Assist**,
   then enter its resumed model step. The agent must observe the changed page
