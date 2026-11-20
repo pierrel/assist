@@ -145,3 +145,14 @@ appropriate restart and verification. Verify installed source identity and
 service health after deployment.
 
 Caveat for in-repo skills specifically: the skill list is cached per session in the thread's checkpoint, so an **existing** thread won't pick up a newly-discovered domain skill even after deploy — a new chat will. New threads work immediately.
+
+## Real-agent security evaluations
+
+For a security-boundary change, identify relevant scenarios in
+[scripts/check-agent-security.py](scripts/check-agent-security.py) and run them
+where the isolated runtime is supported. Extend the scenario when the boundary
+materially changes. Report each engine's pass, fail, inconclusive or unrun result
+and reason, including unavailable capabilities. These are explicitly invoked
+operator evaluations, not mandatory CI. The first scenario measures agent-tool reachability of the isolated Assist
+listener, not approval success. See the README security-evaluation instructions
+for runtime prerequisites, isolation, authoritative observations and limits.
