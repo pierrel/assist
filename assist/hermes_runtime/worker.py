@@ -158,6 +158,11 @@ def main(request_path: str) -> None:
         replacement.flush()
         os.fsync(replacement.fileno())
     os.replace(replacement.name, config_path)
+    from tools.skills_sync import sync_skills
+
+    # Direct AIAgent construction bypasses the CLI's bundled-skill startup sync.
+    # Native manifest handling preserves customizations, deletions and opt-outs.
+    sync_skills(quiet=True)
     from run_agent import AIAgent
     from hermes_state import SessionDB
     from tools.delegate_tool_config import gateway_delegation_inline_scope
