@@ -2,8 +2,9 @@
 
 Run with /opt/hermes/.venv/bin/python in a network:none container. Each turn
 uses the actual worker and AIAgent constructor in a fresh process, with a
-scripted conversation and stubbed host coordination. Provider forwarding is
-denied. No model, integration activation or behavioral acceptance is exercised.
+scripted conversation and stubbed host coordination. Constructor metadata is
+served locally; inference and provider forwarding are denied. No model,
+integration activation or behavioral acceptance is exercised.
 """
 import importlib.util
 import json
@@ -40,16 +41,38 @@ def turn(home, scenario):
     spec.loader.exec_module(worker)
     results = []
     worker.control = lambda path, value: results.append((path, value))
-    worker._register_boundaries = lambda: None
-    # Deny any unexpected constructor/provider request before it can reach the
-    # worker's Unix relay. The scripted conversation must make none.
-    provider_requests = []
+    worker._register_boundaries = lambda *_args, **_kwargs: None
+    unexpected_provider_requests = []
 
-    def deny_provider(self):
-        provider_requests.append(self.path)
-        self.send_error(500, "This proof has no model provider")
+    def metadata_only(self):
+        # Native construction probes server type and context length. Answer
+        # metadata locally, without invoking the worker's Unix relay.
+        if self.command == "GET" and self.path in {"/v1/models", "/models"}:
+            status, value = 200, {"data": [{"id": "fixture", "context_length": 131072}]}
+        elif self.command == "GET" and self.path in {
+                "/api/v1/models", "/api/tags", "/v1/props", "/props", "/version"}:
+            status, value = 404, {}
+        else:
+            ollama_metadata = False
+            if self.command == "POST" and self.path == "/api/show":
+                try:
+                    size = int(self.headers.get("Content-Length", "0"))
+                    ollama_metadata = 0 < size <= 256 and json.loads(self.rfile.read(size)) == {"name": "fixture"}
+                except ValueError:
+                    pass
+            if not ollama_metadata:
+                unexpected_provider_requests.append((self.command, self.path))
+                self.send_error(500, "This proof permits metadata only, with no inference provider")
+                return
+            status, value = 404, {}
+        body = json.dumps(value).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
-    worker._ProviderBridge._forward = deny_provider
+    worker._ProviderBridge._forward = metadata_only
 
     def conversation(self, *_args, **_kwargs):
         names = {s["name"] for s in find_all_skills()}
@@ -93,7 +116,7 @@ def turn(home, scenario):
                                    "prompt": "List your available skills."}))
     with patch.object(AIAgent, "run_conversation", conversation):
         worker.main(str(request))
-    assert not provider_requests, provider_requests
+    assert not unexpected_provider_requests, unexpected_provider_requests
     assert sum(path == "/result" for path, _value in results) == 1
 
 

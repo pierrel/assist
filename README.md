@@ -294,8 +294,8 @@ docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
 ```
 
 The skill-startup check uses the actual worker and native agent constructor,
-with a scripted conversation, stubbed host coordination and denied provider
-forwarding. Native list/view assertions check
+with a scripted conversation, stubbed host coordination and locally served
+constructor metadata. Inference and provider forwarding are denied. Native list/view assertions check
 clean discovery and linked files, repeated startup, custom skills and alternate-path
 name/alias and legacy-flat precedence, disabled
 preferences, deletion tracking, opt-outs, filters and project trust without a
