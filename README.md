@@ -130,6 +130,8 @@ where reliability is harder than with frontier APIs.
   in the masked toolbar and choose **Type**. **Select all**, backspace, Enter,
   scrolling buttons and swipe scrolling operate on that remote page. Reloading
   the viewer reconnects its current controller without reopening the website.
+  Capture errors stay visible during status polling until a frame succeeds or
+  the selected page changes; Refresh view retries capture.
   **Return to Assist** ends human input, freezes execution until its same-work
   checkpoint resumes, and requires the agent to observe changed state before
   further browser effects. A failed Return errors the retained work only after
