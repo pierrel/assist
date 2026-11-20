@@ -443,10 +443,10 @@ def execute(root, evidence, args, threads, fixture):
         os.environ['ASSIST_MODEL_URL'] = args.model_url
         stack.enter_context(instrument(budget, args.model_url, origin_ip))
         evidence.record('isolation_verified', host_dns='static fixture only',
-            host_network='provider-context loopback only; PDF unsupported',
+            host_network='provider-context loopback model; protected fixture host transport after product checks; other host transport/PDF unavailable',
             engine=args.engine, capabilities=('native file/terminal/memory/skills/delegation/egress; '
                 'browser and credential tools unavailable' if args.engine == 'hermes' else
-                'managed Deep tools and browser; host URL/PDF/search transport unavailable'))
+                'managed Deep tools/browser; protected fixture host HTML after product checks; PDF/search/other host destinations unavailable'))
         threads._RESUME_SCHEDULER.start()
         worker = threading.Thread(target=work, daemon=True)
         worker.start()
