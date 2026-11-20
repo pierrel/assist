@@ -509,6 +509,13 @@ def test_requested_control_has_a_resumable_checkpoint_and_held_followup(handoff_
     client=TestClient(web.app)
     assert client.get(link).status_code==200
     assert f'href="{link}"' in client.get(f'/thread/{tid}').text
+    from manage.web.phone_api import PHONE_API_TOKEN_ENV
+    monkeypatch.setenv(PHONE_API_TOKEN_ENV, 'handoff-phone-test-token')
+    for _reload in range(2):
+        phone = client.get(f'/api/v1/phone/threads/{tid}',
+                           headers={'Authorization':'Bearer handoff-phone-test-token'})
+        assert phone.status_code == 200
+        assert phone.json()['thread']['browser_control_url'] == link
     token=session.viewer_token
     headers={'Origin':'http://testserver','X-Browser-Token':token}
     control=f'/thread/{tid}/browser/control'
@@ -520,6 +527,8 @@ def test_requested_control_has_a_resumable_checkpoint_and_held_followup(handoff_
     threads._execute_run(followup.id,tid)
     assert threads._runs().get(tid,followup.id).status=='pending'
     assert client.post(control,json={'client':'a'*32,'action':'return'},headers=headers).status_code==200
+    assert client.get(f'/api/v1/phone/threads/{tid}',
+                      headers={'Authorization':'Bearer handoff-phone-test-token'}).json()['thread']['browser_control_url'] is None
     # Even a fresh dispatcher racing ahead of the released resume cannot steal it.
     threads._execute_run(followup.id,tid)
     assert threads._runs().get(tid,followup.id).status=='pending'
@@ -663,6 +672,13 @@ def test_natural_requested_control_roundtrip(handoff_host, monkeypatch, tmp_path
                 time.sleep(0.07)
                 return client.post(path, headers=headers, json={'client':identity,'action':action,**values})
             assert client.get(session.handoff_url).status_code == 200
+            from manage.web.phone_api import PHONE_API_TOKEN_ENV
+            monkeypatch.setenv(PHONE_API_TOKEN_ENV, 'natural-handoff-phone-token')
+            for _reload in range(2):
+                phone = client.get(f'/api/v1/phone/threads/{tid}',
+                    headers={'Authorization':'Bearer natural-handoff-phone-token'})
+                assert phone.status_code == 200
+                assert phone.json()['thread']['browser_control_url'] == session.handoff_url
             assert control('takeover').status_code == 200
             pages = control('tabs').json()['pages']
             page_id = pages[0]['page_id']
@@ -677,6 +693,8 @@ def test_natural_requested_control_roundtrip(handoff_host, monkeypatch, tmp_path
             assert browser.BrowserManager.current_session(tid) is session
             assert session.sandbox_generation == generation
             assert control('return').status_code == 200
+            assert client.get(f'/api/v1/phone/threads/{tid}',
+                headers={'Authorization':'Bearer natural-handoff-phone-token'}).json()['thread']['browser_control_url'] is None
             assert control('text',page_id=page_id,text='late').status_code == 409
             item = scheduler._q.get_nowait()
             execute_run(item['run_id'], item['tid'])
@@ -717,6 +735,7 @@ def test_natural_requested_control_roundtrip(handoff_host, monkeypatch, tmp_path
                      'worker':'real Chromium' if worker else 'scripted','generation':generation,'page_id':page_id,
                      'checkpoint_retained':True,'http_edit_return':True,'fresh_observation':True,
                      'held_followup_consumed':True,'stale_token_denied':True,'answer_visible':True,
+                     'persistent_phone_link':True,
                      'outcome':'control offered again' if retained else 'completed',
                      'boundary':'Real Deep Thread/Run/queue/HTTP; container backend and auxiliary work remain isolated fixtures.'}
             (tmp_path/'natural-handoff-result.json').write_text(json.dumps(facts,indent=2)+'\n')

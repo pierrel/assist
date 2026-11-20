@@ -170,6 +170,26 @@ def test_phone_api_has_no_server_pin_endpoints(tmp_path, monkeypatch):
                          headers=_auth()).status_code == 404
 
 
+def test_paused_browser_control_link_survives_snapshot_reload_and_changes_revision(tmp_path, monkeypatch):
+    _thread_environment(tmp_path, monkeypatch, [])
+    status = {"stage": "paused", "browser_control_url": "https://assist.example/thread/thread-a/browser"}
+    monkeypatch.setattr(state, "_get_status", lambda _tid: dict(status))
+    session = SimpleNamespace(handoff_url=status["browser_control_url"], closed=False)
+    monkeypatch.setattr(phone_api.threads.BrowserManager, "current_session", lambda _tid: session)
+    client = _client(monkeypatch)
+    first = client.get("/api/v1/phone/threads/thread-a", headers=_auth()).json()
+    reloaded = client.get("/api/v1/phone/threads/thread-a", headers=_auth()).json()
+    assert first["messages"] == reloaded["messages"] == []
+    assert first["thread"]["browser_control_url"] == status["browser_control_url"]
+    assert reloaded["thread"]["browser_control_url"] == status["browser_control_url"]
+    assert reloaded["thread"]["revision"] == first["thread"]["revision"]
+    # Return clears the live offer before its queued resume replaces the status file.
+    session.handoff_url = None
+    returned = client.get("/api/v1/phone/threads/thread-a", headers=_auth()).json()
+    assert returned["thread"]["browser_control_url"] is None
+    assert returned["thread"]["revision"] != first["thread"]["revision"]
+
+
 def test_thread_list_uses_stored_titles_and_supplies_chooser_metadata(tmp_path, monkeypatch):
     thread_dir = _thread_environment(tmp_path, monkeypatch, [])
     from assist.git_sync import bind

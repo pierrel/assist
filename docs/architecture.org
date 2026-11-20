@@ -39,7 +39,9 @@ in both views. An ID shown in only one view keeps that meaning.
   routes]]. Authenticated phone requests enter through
   [[file:../manage/web/phone_api.py][phone_api.py]]. Their client
   implementations are outside this map. The Agent Protocol used by C7 is a
-  private in-process adapter, not a public web route.
+  private in-process adapter, not a public web route. Phone snapshots project
+  the live session's control link independently of streamed prose, and include
+  offer changes in their revision so reload and Return update the client.
 - *C1b Local embedders.* The CLI builds a local Thread in
   [[file:../manage/cli.py][manage/cli.py]]. EmacsOS embeds Assist through
   [[file:../assist/spec.py][AgentSpec]]. This direct route does not pass through

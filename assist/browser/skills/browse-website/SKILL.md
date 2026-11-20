@@ -27,7 +27,10 @@ are destroyed, but a site's stored values may reappear; reconstruct only safe
 inputs from the user's request and current page. Do not replay submissions.
 
 When the user wants to interact with a page personally, open it and call
-`browser_handoff()`. The host publishes its actual control link and pauses at
+`browser_handoff()`. Always share the live control link alongside the offer:
+the host publishes its actual link immediately in the conversation's control
+notice, including after a client reload. Do not rely on a later model reply to
+deliver it: execution pauses at
 the tool checkpoint, retaining the same live browser without holding the model
 slot. Keep its pages open. This is remote control in the user's browser, not
 a transfer into a native website tab. On Return to Assist, execution resumes
