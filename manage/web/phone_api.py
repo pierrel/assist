@@ -1586,9 +1586,10 @@ def _approval_collection(tid: str) -> dict[str, Any]:
             proposals.append({"state": "pending", **mail})
         elif (reply := threads.reply_approval_preview(tid)) is not None:
             proposals.append(reply)
-        proposals.extend(egress.approval_previews(tid))
         proposals.extend(geo.approval_previews(tid))
         proposals.extend(_sms_previews(tid))
+    if read_thread_engine(threads.MANAGER.thread_dir(tid)).name != "pi":
+        proposals.extend(egress.approval_previews(tid))
     value = {"thread_id": tid, "proposals": proposals}
     # Results are disposable projections; preserve complete active SMS drafts.
     for result in [proposal for proposal in proposals if proposal.get("kind") == "send_sms"

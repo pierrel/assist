@@ -37,8 +37,9 @@ User-approved grants (docs/2026-07-21-egress-approval-hitl.org):
   resolve, reject private/loopback/link-local/metadata space, and connect
   to the vetted IP — a user-approved hostname is attacker-influenceable
   (DNS rebinding), unlike the operator-curated base entries, so it must
-  never be able to point into the host or LAN. Other operator base hosts retain
-  their ordinary any-port policy on both listeners. The browser listener
+  never be able to point into the host or LAN. Every admitted target, including base
+  entries, passes the permanent Assist control-service denial and uses its
+  vetted, pinned dial address. Unapproved targets are rejected before DNS. Base entries retain their other ports on both listeners. The browser listener
   additionally requires sandbox ingress and an armed exact-generation map
   record. A policy-only preflight returns the current decision without an
   upstream connection. The 403 body arrives via EGRESS_DENY_BODY in
@@ -70,6 +71,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse
+from assist.control_api import ControlApiDenied, resolve_targets
 
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8888"))
 BROWSER_LISTEN_PORT = 8889
@@ -186,23 +188,30 @@ def admit_host(host: str, *, browser_listener: bool = False) -> None:
 
 
 def connect_upstream(host: str, port: int,
-                     approved_ip: str | None, *,
+                     dial_addresses: tuple[str, ...], *,
                      browser_listener: bool = False) -> socket.socket:
-    """Admit then open one vetted upstream connection."""
+    """Admit once, then try vetted numeric addresses without resolving again."""
     admit_host(host, browser_listener=browser_listener)
-    return socket.create_connection((approved_ip or host, port), timeout=10)
+    for address in dial_addresses:
+        try:
+            return socket.create_connection((address, port), timeout=10)
+        except OSError as error:
+            last_error = error
+    raise last_error
 
 
 def deny(client: socket.socket, host: str, reason: str) -> None:
     log(f"DENY {host} ({reason})")
     try:
         code = reason if re.fullmatch(r"[a-z_]+", reason) else "proxy_denied"
+        body = (b"Assist control APIs are unavailable to agents; egress approval cannot allow them.\n"
+                if reason == "assist_control_api" else DENY_BODY)
         client.sendall(
             b"HTTP/1.1 403 Forbidden\r\n"
             b"Content-Type: text/plain\r\n"
             + f"X-Assist-Egress-Result: {code}\r\n".encode()
-            + f"Content-Length: {len(DENY_BODY)}\r\n".encode()
-            + b"Connection: close\r\n\r\n" + DENY_BODY
+            + f"Content-Length: {len(body)}\r\n".encode()
+            + b"Connection: close\r\n\r\n" + body
         )
     except OSError:
         pass
@@ -334,26 +343,17 @@ def approved_target(host: str, port: int, tid: str | None) -> bool:
         return False
 
 
-def vet_resolved(host: str, port: int, *, global_only: bool = True) -> str | None:
-    """Resolve once and return an address that the caller will actually dial."""
+def vet_resolved(host: str, port: int, *, global_only: bool = True) -> tuple[str, ...] | None:
+    """Resolve once, enforce permanent denial, and retain vetted dial candidates."""
     try:
-        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+        return resolve_targets(host, port, public_only=global_only)
     except OSError:
         return None
-    for info in infos:
-        addr = info[4][0]
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            continue
-        if ip.is_global == global_only:
-            return addr
-    return None
 
 
 def target_policy(host: str, port: int, client_ip: str,
-                  *, browser_listener: bool = False) -> tuple[str | None, str | None]:
-    """Return a vetted dial IP and no error, or a stable denial reason."""
+                  *, browser_listener: bool = False) -> tuple[tuple[str, ...] | None, str | None]:
+    """Return vetted dial candidates and no error, or a stable denial reason."""
     kind = source_kind(client_ip)
     if kind is None:
         return None, "unknown_proxy_source"
@@ -364,7 +364,8 @@ def target_policy(host: str, port: int, client_ip: str,
         record = client_record(client_ip, "hermes")
     # Native model access belongs to the host relay. Requiring positive
     # ordinary attribution also closes this route when the map is absent,
-    # malformed or unreadable; permanent external allowlist entries are unchanged.
+    # malformed or unreadable. The permanent control-service denial below also
+    # applies to ordinary clients and operator base entries.
     if host == "host.docker.internal" and (record is None or record["kind"] != "sandbox"):
         return None, "host_requires_ordinary_attribution"
     if browser_listener:
@@ -373,12 +374,15 @@ def target_policy(host: str, port: int, client_ip: str,
     if host not in ALLOWLIST:
         if not approved_target(host, port, record["thread_id"] if record else None):
             return None, "host_not_approved"
-    if host not in ALLOWLIST:
-        address = vet_resolved(host, port)
-        if address is None:
-            return None, "approved_address_not_public"
-    else:
-        address = None
+    try:
+        address = vet_resolved(host, port, global_only=host not in ALLOWLIST)
+    except ControlApiDenied:
+        return None, "assist_control_api"
+    except (OSError, ValueError):
+        return None, "destination_unavailable"
+    if address is None:
+        return None, ("destination_unavailable" if host in ALLOWLIST
+                      else "approved_address_not_public")
     return address, None
 
 
@@ -456,7 +460,7 @@ def handle(client: socket.socket, addr, browser_listener: bool = False) -> None:
             if not 1 <= port <= 65535:
                 deny(client, host, "bad_port")
                 return
-            approved_ip, rejection = target_policy(
+            dial_addresses, rejection = target_policy(
                 host, port, addr[0], browser_listener=browser_listener)
             if method == "POLICY":
                 reason = rejection or "allowed"
@@ -470,7 +474,7 @@ def handle(client: socket.socket, addr, browser_listener: bool = False) -> None:
                 deny(client, host, rejection)
                 return
             try:
-                upstream = connect_upstream(host, port, approved_ip,
+                upstream = connect_upstream(host, port, dial_addresses,
                                             browser_listener=browser_listener)
             except HostThrottleBusy as e:
                 throttle(client, addr[0], host, e.retry_after_s, correlation)
@@ -478,8 +482,8 @@ def handle(client: socket.socket, addr, browser_listener: bool = False) -> None:
             except OSError as e:
                 deny(client, host, f"upstream connect failed: {e}")
                 return
-            if approved_ip:
-                log(f"ALLOW-APPROVED CONNECT {host}:{port} via {approved_ip}")
+            if host not in ALLOWLIST:
+                log(f"ALLOW-APPROVED CONNECT {host}:{port} via {dial_addresses}")
             else:
                 log(f"ALLOW CONNECT {host}:{port}")
             client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -507,7 +511,7 @@ def handle(client: socket.socket, addr, browser_listener: bool = False) -> None:
         if not host or not 1 <= port <= 65535 or u.username or u.password:
             deny(client, host or "<malformed>", "bad_request")
             return
-        approved_ip, rejection = target_policy(
+        dial_addresses, rejection = target_policy(
             host, port, addr[0], browser_listener=browser_listener)
         if rejection:
             deny(client, host, rejection)
@@ -531,7 +535,7 @@ def handle(client: socket.socket, addr, browser_listener: bool = False) -> None:
             new_request += h + "\r\n"
         new_request += "\r\n"
         try:
-            upstream = connect_upstream(host, port, approved_ip,
+            upstream = connect_upstream(host, port, dial_addresses,
                                             browser_listener=browser_listener)
         except HostThrottleBusy as e:
             throttle(client, addr[0], host, e.retry_after_s, correlation)
@@ -539,8 +543,8 @@ def handle(client: socket.socket, addr, browser_listener: bool = False) -> None:
         except OSError as e:
             deny(client, host, f"upstream connect failed: {e}")
             return
-        if approved_ip:
-            log(f"ALLOW {method} {host}:{port} via {approved_ip}")
+        if dial_addresses:
+            log(f"ALLOW {method} {host}:{port} via {dial_addresses}")
         else:
             log(f"ALLOW {method} {host}:{port}")
         upstream.sendall(new_request.encode("latin-1") + body)

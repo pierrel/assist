@@ -74,7 +74,7 @@ class _ProviderBridge(http.server.BaseHTTPRequestHandler):
                     self.wfile.flush()
 
 
-def _register_boundaries():
+def _register_boundaries(egress_tools=()):
     from hermes_cli.plugins import PluginContext, PluginManifest, _delivery_manager
 
     context = PluginContext(PluginManifest(name="assist-host", version="1"), _delivery_manager())
@@ -109,6 +109,14 @@ def _register_boundaries():
     context.register_middleware("tool_execution", tool)
     context.register_hook("pre_auxiliary_call", auxiliary_start)
     context.register_hook("post_auxiliary_call", auxiliary_end)
+    for schema in egress_tools:
+        name = schema["function"]["name"]
+
+        def invoke(arguments, _name=name, **_kwargs):
+            return control("/egress", {"name": _name, "arguments": arguments})["result"]
+
+        context.register_tool(name=name, toolset="assist_egress", schema=schema["function"],
+                              handler=invoke)
 
 
 def main(request_path: str) -> None:
@@ -163,7 +171,7 @@ def main(request_path: str) -> None:
     from tools.delegate_tool_config import gateway_delegation_inline_scope
     from agent import title_generator
 
-    _register_boundaries()
+    _register_boundaries(request.get("egress_tools", ()))
     threading.Thread(target=bridge.serve_forever, name="hermes-provider", daemon=True).start()
     database = SessionDB(Path(os.environ["HERMES_HOME"]) / "session.db")
     agent = None

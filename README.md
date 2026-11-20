@@ -73,7 +73,8 @@ where reliability is harder than with frontier APIs.
   Approved browser resources can make up to eight parallel connections per
   shared host backoff window; ordinary shell connections retain their limit.
   Browser and shell destinations follow the same
-  operator allowlist (any port) and exact thread/host/port grants; page content
+  operator allowlist and exact thread/host/port grants, subject to the permanent
+  control-service destination denial; page content
   cannot approve access. A policy-only browser preflight checks a top-level
   origin without contacting it and can annotate origins observed from an open
   page. Those dependencies may be incomplete or incidental; the agent can
@@ -235,8 +236,27 @@ Snapshot reads and background probes do not clear notifications.
   A first-turn cleanup failure does not discard accepted
   follow-up messages. Git diffs and Merge remain available;
   the Deep Agents Review action is not offered for native threads.
-  Available tools are files, terminal, skills, memory and helpers. Native browser,
-  web search and interactive approvals are unavailable; commands requiring approval
+  Available tools are files, terminal, skills, memory and helpers. When egress
+  approvals are configured, native tools can list destinations, request one or
+  up to three exact host/port grants, and revoke a thread grant. Requests use the
+  existing browser and phone-API approval cards. **Deployment of native egress
+  is held** pending runtime verification of the control-service boundary and
+  safe migration of the existing ordinary Docker network. Agent proxy and host
+  HTML/PDF connections now permanently deny the configured Assist port on
+  non-public addresses, and the configured `ASSIST_BASE_URL` origin and its
+  resolved addresses. Base allowances and thread grants cannot override this.
+  Connection failure may try another vetted numeric address without resolving
+  the hostname again.
+  Public services on the same port, docs on their existing ports and the private
+  model relay remain usable. This is destination isolation; review tokens do
+  not provide separate human authentication. Unconfigured public forwards are
+  outside the known-origin inventory. No live self-approval exploit is claimed. Once every pending card
+  is resolved through the decision surface, one host-created Hermes follow-up
+  carries the recorded task and decisions. Native helpers share their parent
+  thread's cards; they finish rather than waiting on a Deep Agents checkpoint.
+  Grants are thread scoped and may be used by later turns of that thread.
+  Internal host-model access remains unavailable. Native browser, web search and
+  interactive command approvals are unavailable; commands requiring approval
   are denied. Turn completion and accepted cancellation stop the entire sandbox before Git
   publication, including still-running background jobs marked `persist_on_release`.
   Those jobs can survive native agent cleanup, but cannot outlive this preview's
@@ -1453,6 +1473,16 @@ Shared proxy/network retirement uses a separate host-only ledger outside the
 thread workspaces (`ASSIST_EGRESS_RUNTIME_DIR`, or a private sibling directory
 by default). It must remain writable even when browser attribution is disabled;
 if it cannot be read safely, new egress setup fails closed.
+
+Both execution networks require Docker's isolated bridge gateway mode with
+IPv6 disabled. An existing ordinary network without that mode is refused before
+new execution or proxy mutation. The operator must confirm all attached generations are
+stopped before replacing that network; deployment must not remove an active
+thread. Rebuilding the proxy image also installs its shared destination policy.
+`ASSIST_PORT` and `ASSIST_BASE_URL` are propagated from the web service to the
+proxy and included in its replacement fingerprint. Set `ASSIST_BASE_URL` to the
+actual externally published origin when one exists; an unmanaged public forward
+cannot be inferred from localhost configuration.
 
 If Docker is unavailable, non-Git work can retain the established host fallback.
 Git-bound web turns fail closed instead of running unsafe host worktree commands.

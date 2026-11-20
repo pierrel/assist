@@ -25,16 +25,27 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 from assist.egress.store import remaining_lifetime, request_key
+from assist.thread_engine import ThreadEngineError, read_thread_engine
 from manage.web.app import app
 from manage.web.state import EGRESS_CSRF, EGRESS_STORE, MANAGER
 from manage.web.threads import (_FAVICON_LINKS, _PULL_TO_REFRESH_SCRIPT,
                                 _dispatch_egress_resolution,
-                                _resume_egress_waiters, _require_deep_thread)
+                                _resume_egress_waiters)
 
 
 def _require_egress():
     if EGRESS_STORE is None:
         raise HTTPException(status_code=404, detail="egress approvals are not configured")
+
+
+def _require_egress_thread(tid: str):
+    """Egress decisions use the shared store, not an engine checkpoint."""
+    try:
+        engine = read_thread_engine(MANAGER.thread_dir(tid)).name
+    except ThreadEngineError as error:
+        raise HTTPException(status_code=409, detail="Thread engine is unavailable") from error
+    if engine not in {"deepagents", "hermes"}:
+        raise HTTPException(status_code=409, detail="This engine does not support egress approvals")
 
 
 def _check_csrf(token: str | None):
@@ -100,7 +111,7 @@ def resolve_request(tid: str, host: str, port: int, decision: str, *, expected=N
     reply_decision precedent): a full agent turn must never run where the
     HTTP response waits (it acquires THREAD_QUEUE — behind a running turn
     that's up to the 2h hold before the browser would get its 303)."""
-    _require_deep_thread(tid)
+    _require_egress_thread(tid)
     if not os.path.isdir(MANAGER.thread_dir(tid)):
         # Thread deleted between request and approval: no consumer — drop ALL
         # the dead thread's records (projection-safe; also mops up anything
@@ -142,7 +153,7 @@ def approval_previews(tid: str) -> list[dict]:
 def approval_decision(tid: str, token: str, decision: str):
     """Resolve only a reviewed request generation; replay never dispatches again."""
     _require_egress()
-    _require_deep_thread(tid)
+    _require_egress_thread(tid)
     if re.fullmatch(r"[0-9a-f]{64}", token) is None:
         raise HTTPException(status_code=409, detail="Network review is invalid; refresh and review")
     if decision not in {"hour", "always", "decline", "revoke"}:

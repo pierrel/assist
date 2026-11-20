@@ -51,7 +51,8 @@ digraph Assist {
   C4 -> C25 [label="native Run / same-work successor"];
   C25 -> C8 [label="existing generation authority"];
   C25 -> C26 [label="start once · park / resume · verified stop"];
-  C26 -> C24 [label="native provider requests"];
+  C26 -> C24 [label="provider + bound egress requests"];
+  C24 -> C8 [label="existing egress tools / cards / grants"];
   C24 -> C12 [label="admitted model request"];
   C26 -> C9 [label="native SessionDB · skills · memory", style=dashed];
 }
