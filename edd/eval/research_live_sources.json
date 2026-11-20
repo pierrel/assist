@@ -1,0 +1,382 @@
+{
+  "version": "frozen-synthetic-retrieval-v1",
+  "source_note": "Music and ballot entries paraphrase public factual material; Helio is invented. These are not live-page snapshots. Unmatched searches return empty results; URLs outside listed pages and the bounded Helio citation frontier produce an explicit corpus miss.",
+  "fixtures": {
+    "music": [
+      {
+        "url": "https://recordstoreday.com/SpecialRelease/19972",
+        "title": "RSD 2026 Phoenix United",
+        "tags": [
+          "phoenix",
+          "united",
+          "record store day",
+          "rsd",
+          "19972"
+        ],
+        "snippet": "Phoenix United listed for April 18, 2026.",
+        "body": "Phoenix — United. Record Store Day 2026 exclusive release; April 18, 2026; LP; Rhino; quantity 3,500. This listing concerns the United pressing, not the original album release year.",
+        "status": 200
+      },
+      {
+        "url": "https://recordstoreday.com/SpecialRelease/19973",
+        "title": "RSD 2026 Phoenix Alphabetical",
+        "tags": [
+          "phoenix",
+          "alphabetical",
+          "record store day",
+          "rsd",
+          "19973"
+        ],
+        "snippet": "Phoenix Alphabetical listed for April 18, 2026.",
+        "body": "Phoenix — Alphabetical. Record Store Day 2026 special release; April 18, 2026; LP. This is a separate listing from United.",
+        "status": 200
+      },
+      {
+        "url": "https://recordstoreday.com/SpecialRelease/19982",
+        "title": "RSD 2026 Deafheaven KEXP Sessions",
+        "tags": [
+          "deafheaven",
+          "kexp",
+          "record store day",
+          "rsd",
+          "19982"
+        ],
+        "snippet": "KEXP Sessions listed on 12-inch single, quantity 6,500.",
+        "body": "Deafheaven — KEXP Sessions. Record Store Day 2026 exclusive release; April 18, 2026; 12-inch single; quantity 6,500. The listing does not call Lonely People With Power itself the RSD release.",
+        "status": 200
+      },
+      {
+        "url": "https://recordstoreday.com/UPC/075678601378",
+        "title": "RSD UPC Phoenix United",
+        "tags": [
+          "phoenix",
+          "united",
+          "upc"
+        ],
+        "snippet": "UPC listing for the United pressing.",
+        "body": "United by Phoenix; 2026 special pressing. UPC 075678601378. This listing does not independently establish every quantity or format field.",
+        "status": 200
+      },
+      {
+        "url": "https://music-review.test/deafheaven/lonely-people-with-power",
+        "title": "Deafheaven album review",
+        "tags": [
+          "deafheaven",
+          "lonely people with power",
+          "album"
+        ],
+        "snippet": "Album review, no official RSD classification.",
+        "body": "Lonely People With Power is a Deafheaven album. This review does not establish a 2026 Record Store Day exclusive release.",
+        "status": 200
+      }
+    ],
+    "ballot": [
+      {
+        "url": "https://elections.cdn.sos.ca.gov/sov/2024-general/sov/65-official-dec-vote-results-bm.pdf",
+        "title": "California 2024 certified vote results",
+        "tags": [
+          "california",
+          "proposition 2",
+          "proposition 3",
+          "official results",
+          "sov"
+        ],
+        "snippet": "Certified statewide vote results.",
+        "body": "2024 California statewide certified results: Proposition 2 approved; Proposition 3 approved. This results table does not explain each measure. PDF text extracted from a synthetic evaluation copy.",
+        "status": 200
+      },
+      {
+        "url": "https://vigarchive.sos.ca.gov/2024/general/propositions/2/title-summary.htm",
+        "title": "California Proposition 2 title and summary",
+        "tags": [
+          "california",
+          "proposition 2",
+          "prop 2",
+          "school",
+          "bond"
+        ],
+        "snippet": "$10 billion school facilities bond.",
+        "body": "Proposition 2 authorizes $10 billion in general obligation bonds for K–12 public school and community college facilities. Approved in November 2024.",
+        "status": 200
+      },
+      {
+        "url": "https://vigarchive.sos.ca.gov/2024/general/propositions/3/title-summary.htm",
+        "title": "California Proposition 3 title and summary",
+        "tags": [
+          "california",
+          "proposition 3",
+          "prop 3",
+          "marriage"
+        ],
+        "snippet": "Fundamental right to marry; removes man-and-woman language.",
+        "body": "Proposition 3 amends the California Constitution to recognize a fundamental right to marry and removes language defining marriage as between a man and a woman. Approved in November 2024. It does not by itself establish a changed eligibility rule.",
+        "status": 200
+      },
+      {
+        "url": "https://www.oregonlegislature.gov/bills_laws/lawsstatutes/2025OrLawForeword.pdf",
+        "title": "Oregon 2025 law foreword",
+        "tags": [
+          "oregon",
+          "measure 118",
+          "law"
+        ],
+        "snippet": "Foreword to Oregon laws, not Measure 118 result.",
+        "body": "Foreword to the Oregon laws. This document is not a certified Measure 118 outcome or detailed measure explanation.",
+        "status": 200
+      },
+      {
+        "url": "https://sos.oregon.gov/elections/Documents/G24-Certified-Ballot-Statement.pdf",
+        "title": "Oregon 2024 certified ballot statement",
+        "tags": [
+          "oregon",
+          "measure 118",
+          "corporate",
+          "tax",
+          "rebate",
+          "results"
+        ],
+        "snippet": "Measure 118 failed.",
+        "body": "Oregon Measure 118 failed in November 2024. The proposal would have raised the highest corporate minimum taxes and distributed revenue to eligible individuals as rebates. Because it failed, these changes did not take effect.",
+        "status": 200
+      }
+    ],
+    "helio": [
+      {
+        "url": "https://helio-specs.test/tier/aurora",
+        "title": "Helio Aurora specification",
+        "tags": [
+          "helio",
+          "aurora",
+          "specification",
+          "hardware"
+        ],
+        "snippet": "Aurora has QUASAR-9 cooling loop.",
+        "body": "Helio Aurora tier has QUASAR-9 cooling loop. The source distinguishes this tier from adjacent models. Related citations: https://helio-specs.test/cite/aurora/0 https://helio-specs.test/cite/aurora/1 https://helio-specs.test/cite/aurora/2 https://helio-specs.test/cite/aurora/3 https://helio-specs.test/cite/aurora/4 https://helio-specs.test/cite/aurora/5 https://helio-specs.test/cite/aurora/6 https://helio-specs.test/cite/aurora/7 https://helio-specs.test/cite/aurora/8 https://helio-specs.test/cite/aurora/9 https://helio-specs.test/cite/aurora/10 https://helio-specs.test/cite/aurora/11",
+        "status": 200
+      },
+      {
+        "url": "https://helio-specs.test/tier/borealis",
+        "title": "Helio Borealis specification",
+        "tags": [
+          "helio",
+          "borealis",
+          "specification",
+          "hardware"
+        ],
+        "snippet": "Borealis has TIDELOCK power cell.",
+        "body": "Helio Borealis tier has TIDELOCK power cell. The source distinguishes this tier from adjacent models. Related citations: https://helio-specs.test/cite/borealis/0 https://helio-specs.test/cite/borealis/1 https://helio-specs.test/cite/borealis/2 https://helio-specs.test/cite/borealis/3 https://helio-specs.test/cite/borealis/4 https://helio-specs.test/cite/borealis/5 https://helio-specs.test/cite/borealis/6 https://helio-specs.test/cite/borealis/7 https://helio-specs.test/cite/borealis/8 https://helio-specs.test/cite/borealis/9 https://helio-specs.test/cite/borealis/10 https://helio-specs.test/cite/borealis/11",
+        "status": 200
+      },
+      {
+        "url": "https://helio-specs.test/tier/cascade",
+        "title": "Helio Cascade specification",
+        "tags": [
+          "helio",
+          "cascade",
+          "specification",
+          "hardware"
+        ],
+        "snippet": "Cascade has FERNWEH-3 controller.",
+        "body": "Helio Cascade tier has FERNWEH-3 controller. The source distinguishes this tier from adjacent models. Related citations: https://helio-specs.test/cite/cascade/0 https://helio-specs.test/cite/cascade/1 https://helio-specs.test/cite/cascade/2 https://helio-specs.test/cite/cascade/3 https://helio-specs.test/cite/cascade/4 https://helio-specs.test/cite/cascade/5 https://helio-specs.test/cite/cascade/6 https://helio-specs.test/cite/cascade/7 https://helio-specs.test/cite/cascade/8 https://helio-specs.test/cite/cascade/9 https://helio-specs.test/cite/cascade/10 https://helio-specs.test/cite/cascade/11",
+        "status": 200
+      },
+      {
+        "url": "https://helio-specs.test/tier/drift",
+        "title": "Helio Drift specification",
+        "tags": [
+          "helio",
+          "drift",
+          "specification",
+          "hardware"
+        ],
+        "snippet": "Drift has MARLINSPIKE certification.",
+        "body": "Helio Drift tier has MARLINSPIKE certification. The source distinguishes this tier from adjacent models. Related citations: https://helio-specs.test/cite/drift/0 https://helio-specs.test/cite/drift/1 https://helio-specs.test/cite/drift/2 https://helio-specs.test/cite/drift/3 https://helio-specs.test/cite/drift/4 https://helio-specs.test/cite/drift/5 https://helio-specs.test/cite/drift/6 https://helio-specs.test/cite/drift/7 https://helio-specs.test/cite/drift/8 https://helio-specs.test/cite/drift/9 https://helio-specs.test/cite/drift/10 https://helio-specs.test/cite/drift/11",
+        "status": 200
+      },
+      {
+        "url": "https://helio-specs.test/tier/ember",
+        "title": "Helio Ember specification",
+        "tags": [
+          "helio",
+          "ember",
+          "specification",
+          "hardware"
+        ],
+        "snippet": "Ember has GLIMMERWICK sensor array.",
+        "body": "Helio Ember tier has GLIMMERWICK sensor array. The source distinguishes this tier from adjacent models. Related citations: https://helio-specs.test/cite/ember/0 https://helio-specs.test/cite/ember/1 https://helio-specs.test/cite/ember/2 https://helio-specs.test/cite/ember/3 https://helio-specs.test/cite/ember/4 https://helio-specs.test/cite/ember/5 https://helio-specs.test/cite/ember/6 https://helio-specs.test/cite/ember/7 https://helio-specs.test/cite/ember/8 https://helio-specs.test/cite/ember/9 https://helio-specs.test/cite/ember/10 https://helio-specs.test/cite/ember/11",
+        "status": 200
+      },
+      {
+        "url": "https://helio-specs.test/tier/frost",
+        "title": "Helio Frost specification",
+        "tags": [
+          "helio",
+          "frost",
+          "specification",
+          "hardware"
+        ],
+        "snippet": "Frost has SLIPSTREAM-7 chassis.",
+        "body": "Helio Frost tier has SLIPSTREAM-7 chassis. The source distinguishes this tier from adjacent models. Related citations: https://helio-specs.test/cite/frost/0 https://helio-specs.test/cite/frost/1 https://helio-specs.test/cite/frost/2 https://helio-specs.test/cite/frost/3 https://helio-specs.test/cite/frost/4 https://helio-specs.test/cite/frost/5 https://helio-specs.test/cite/frost/6 https://helio-specs.test/cite/frost/7 https://helio-specs.test/cite/frost/8 https://helio-specs.test/cite/frost/9 https://helio-specs.test/cite/frost/10 https://helio-specs.test/cite/frost/11",
+        "status": 200
+      },
+      {
+        "url": "https://helio-specs.test/tier/gale",
+        "title": "Helio Gale specification",
+        "tags": [
+          "helio",
+          "gale",
+          "specification",
+          "hardware"
+        ],
+        "snippet": "Gale has HALCYON-2 firmware.",
+        "body": "Helio Gale tier has HALCYON-2 firmware. The source distinguishes this tier from adjacent models. Related citations: https://helio-specs.test/cite/gale/0 https://helio-specs.test/cite/gale/1 https://helio-specs.test/cite/gale/2 https://helio-specs.test/cite/gale/3 https://helio-specs.test/cite/gale/4 https://helio-specs.test/cite/gale/5 https://helio-specs.test/cite/gale/6 https://helio-specs.test/cite/gale/7 https://helio-specs.test/cite/gale/8 https://helio-specs.test/cite/gale/9 https://helio-specs.test/cite/gale/10 https://helio-specs.test/cite/gale/11",
+        "status": 200
+      },
+      {
+        "url": "https://helio-specs.test/tier/harbor",
+        "title": "Helio Harbor specification",
+        "tags": [
+          "helio",
+          "harbor",
+          "specification",
+          "hardware"
+        ],
+        "snippet": "Harbor has KESTREL-5 telemetry unit.",
+        "body": "Helio Harbor tier has KESTREL-5 telemetry unit. The source distinguishes this tier from adjacent models. Related citations: https://helio-specs.test/cite/harbor/0 https://helio-specs.test/cite/harbor/1 https://helio-specs.test/cite/harbor/2 https://helio-specs.test/cite/harbor/3 https://helio-specs.test/cite/harbor/4 https://helio-specs.test/cite/harbor/5 https://helio-specs.test/cite/harbor/6 https://helio-specs.test/cite/harbor/7 https://helio-specs.test/cite/harbor/8 https://helio-specs.test/cite/harbor/9 https://helio-specs.test/cite/harbor/10 https://helio-specs.test/cite/harbor/11",
+        "status": 200
+      },
+      {
+        "url": "https://helio-specs.test/guide",
+        "title": "Helio buyer guide",
+        "tags": [
+          "helio",
+          "tiers",
+          "guide",
+          "moonrise"
+        ],
+        "snippet": "Eight documented tiers, Moonrise unverified.",
+        "body": "The documented Helio line comprises Aurora, Borealis, Cascade, Drift, Ember, Frost, Gale, and Harbor. This guide does not list Moonrise as a confirmed tier.",
+        "status": 200
+      }
+    ],
+    "helio-partial": [
+      {
+        "url": "https://helio-specs.test/tier/aurora",
+        "title": "Helio Aurora specification",
+        "tags": [
+          "helio",
+          "aurora",
+          "specification",
+          "hardware"
+        ],
+        "snippet": "Aurora has QUASAR-9 cooling loop.",
+        "body": "Helio Aurora tier has QUASAR-9 cooling loop. The source distinguishes this tier from adjacent models. Related citations: https://helio-specs.test/cite/aurora/0 https://helio-specs.test/cite/aurora/1 https://helio-specs.test/cite/aurora/2 https://helio-specs.test/cite/aurora/3 https://helio-specs.test/cite/aurora/4 https://helio-specs.test/cite/aurora/5 https://helio-specs.test/cite/aurora/6 https://helio-specs.test/cite/aurora/7 https://helio-specs.test/cite/aurora/8 https://helio-specs.test/cite/aurora/9 https://helio-specs.test/cite/aurora/10 https://helio-specs.test/cite/aurora/11",
+        "status": 200
+      },
+      {
+        "url": "https://helio-specs.test/tier/borealis",
+        "title": "Helio Borealis specification",
+        "tags": [
+          "helio",
+          "borealis",
+          "specification",
+          "hardware"
+        ],
+        "snippet": "Borealis specification listing; details unavailable in this frozen corpus.",
+        "body": "",
+        "status": 503
+      },
+      {
+        "url": "https://helio-specs.test/tier/cascade",
+        "title": "Helio Cascade specification",
+        "tags": [
+          "helio",
+          "cascade",
+          "specification",
+          "hardware"
+        ],
+        "snippet": "Cascade has FERNWEH-3 controller.",
+        "body": "Helio Cascade tier has FERNWEH-3 controller. The source distinguishes this tier from adjacent models. Related citations: https://helio-specs.test/cite/cascade/0 https://helio-specs.test/cite/cascade/1 https://helio-specs.test/cite/cascade/2 https://helio-specs.test/cite/cascade/3 https://helio-specs.test/cite/cascade/4 https://helio-specs.test/cite/cascade/5 https://helio-specs.test/cite/cascade/6 https://helio-specs.test/cite/cascade/7 https://helio-specs.test/cite/cascade/8 https://helio-specs.test/cite/cascade/9 https://helio-specs.test/cite/cascade/10 https://helio-specs.test/cite/cascade/11",
+        "status": 200
+      },
+      {
+        "url": "https://helio-specs.test/tier/drift",
+        "title": "Helio Drift specification",
+        "tags": [
+          "helio",
+          "drift",
+          "specification",
+          "hardware"
+        ],
+        "snippet": "Drift has MARLINSPIKE certification.",
+        "body": "Helio Drift tier has MARLINSPIKE certification. The source distinguishes this tier from adjacent models. Related citations: https://helio-specs.test/cite/drift/0 https://helio-specs.test/cite/drift/1 https://helio-specs.test/cite/drift/2 https://helio-specs.test/cite/drift/3 https://helio-specs.test/cite/drift/4 https://helio-specs.test/cite/drift/5 https://helio-specs.test/cite/drift/6 https://helio-specs.test/cite/drift/7 https://helio-specs.test/cite/drift/8 https://helio-specs.test/cite/drift/9 https://helio-specs.test/cite/drift/10 https://helio-specs.test/cite/drift/11",
+        "status": 200
+      },
+      {
+        "url": "https://helio-specs.test/tier/ember",
+        "title": "Helio Ember specification",
+        "tags": [
+          "helio",
+          "ember",
+          "specification",
+          "hardware"
+        ],
+        "snippet": "Ember has GLIMMERWICK sensor array.",
+        "body": "Helio Ember tier has GLIMMERWICK sensor array. The source distinguishes this tier from adjacent models. Related citations: https://helio-specs.test/cite/ember/0 https://helio-specs.test/cite/ember/1 https://helio-specs.test/cite/ember/2 https://helio-specs.test/cite/ember/3 https://helio-specs.test/cite/ember/4 https://helio-specs.test/cite/ember/5 https://helio-specs.test/cite/ember/6 https://helio-specs.test/cite/ember/7 https://helio-specs.test/cite/ember/8 https://helio-specs.test/cite/ember/9 https://helio-specs.test/cite/ember/10 https://helio-specs.test/cite/ember/11",
+        "status": 200
+      },
+      {
+        "url": "https://helio-specs.test/tier/frost",
+        "title": "Helio Frost specification",
+        "tags": [
+          "helio",
+          "frost",
+          "specification",
+          "hardware"
+        ],
+        "snippet": "Frost has SLIPSTREAM-7 chassis.",
+        "body": "Helio Frost tier has SLIPSTREAM-7 chassis. The source distinguishes this tier from adjacent models. Related citations: https://helio-specs.test/cite/frost/0 https://helio-specs.test/cite/frost/1 https://helio-specs.test/cite/frost/2 https://helio-specs.test/cite/frost/3 https://helio-specs.test/cite/frost/4 https://helio-specs.test/cite/frost/5 https://helio-specs.test/cite/frost/6 https://helio-specs.test/cite/frost/7 https://helio-specs.test/cite/frost/8 https://helio-specs.test/cite/frost/9 https://helio-specs.test/cite/frost/10 https://helio-specs.test/cite/frost/11",
+        "status": 200
+      },
+      {
+        "url": "https://helio-specs.test/tier/gale",
+        "title": "Helio Gale specification",
+        "tags": [
+          "helio",
+          "gale",
+          "specification",
+          "hardware"
+        ],
+        "snippet": "Gale has HALCYON-2 firmware.",
+        "body": "Helio Gale tier has HALCYON-2 firmware. The source distinguishes this tier from adjacent models. Related citations: https://helio-specs.test/cite/gale/0 https://helio-specs.test/cite/gale/1 https://helio-specs.test/cite/gale/2 https://helio-specs.test/cite/gale/3 https://helio-specs.test/cite/gale/4 https://helio-specs.test/cite/gale/5 https://helio-specs.test/cite/gale/6 https://helio-specs.test/cite/gale/7 https://helio-specs.test/cite/gale/8 https://helio-specs.test/cite/gale/9 https://helio-specs.test/cite/gale/10 https://helio-specs.test/cite/gale/11",
+        "status": 200
+      },
+      {
+        "url": "https://helio-specs.test/tier/harbor",
+        "title": "Helio Harbor specification",
+        "tags": [
+          "helio",
+          "harbor",
+          "specification",
+          "hardware"
+        ],
+        "snippet": "Harbor has KESTREL-5 telemetry unit.",
+        "body": "Helio Harbor tier has KESTREL-5 telemetry unit. The source distinguishes this tier from adjacent models. Related citations: https://helio-specs.test/cite/harbor/0 https://helio-specs.test/cite/harbor/1 https://helio-specs.test/cite/harbor/2 https://helio-specs.test/cite/harbor/3 https://helio-specs.test/cite/harbor/4 https://helio-specs.test/cite/harbor/5 https://helio-specs.test/cite/harbor/6 https://helio-specs.test/cite/harbor/7 https://helio-specs.test/cite/harbor/8 https://helio-specs.test/cite/harbor/9 https://helio-specs.test/cite/harbor/10 https://helio-specs.test/cite/harbor/11",
+        "status": 200
+      },
+      {
+        "url": "https://helio-specs.test/guide",
+        "title": "Helio buyer guide",
+        "tags": [
+          "helio",
+          "tiers",
+          "guide",
+          "moonrise"
+        ],
+        "snippet": "Eight documented tiers, Moonrise unverified.",
+        "body": "The documented Helio line comprises Aurora, Borealis, Cascade, Drift, Ember, Frost, Gale, and Harbor. This guide does not list Moonrise as a confirmed tier.",
+        "status": 200
+      }
+    ]
+  }
+}
