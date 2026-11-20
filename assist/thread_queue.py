@@ -1,6 +1,6 @@
 """Per-thread LLM-affinity queue.
 
-Serializes access at the ``Thread.message()`` boundary so concurrent
+Serializes access at the ``Thread.message()`` or native dispatch boundary so concurrent
 threads don't thrash llama.cpp's ``--parallel 1`` KV cache.  When two
 agents alternate turns through the slot, every turn pays a full
 prefill from scratch — prefill cost grows from O(T) to O(T²) per
@@ -12,11 +12,12 @@ Affinity, then fairness under contention:
 - Affinity: holding the slot for one full turn keeps the KV prefix matched.
 - Fairness: a holder that has held the slot for ``quantum_s`` AND has a
   waiter in the model queue or another thread's dispatch notification behind
-  it is asked to PAUSE at its next superstep (cooperative,
+  it is asked to PAUSE at its next checkpoint or native safe point (cooperative,
   via ``pause_requested`` -> :class:`ThreadPauseRequested`), so a quick turn
   isn't blocked for the full length of a long research turn.  The paused
-  turn is requeued by the Run scheduler and resumes from its durable
-  checkpoint under its priority and FIFO rules — no lost work. UNCONTENDED,
+  turn is requeued by the Run scheduler under its priority and FIFO rules.
+  Graph callers resume a durable checkpoint; native callers retain the same
+  process across slices and end without replay after process loss. UNCONTENDED,
   the holder is never paused (the tick just re-arms), so a long turn with nobody
   waiting runs uninterrupted.
 - User work precedes background work; each tier is FIFO.  Promotion can move an
@@ -31,18 +32,21 @@ Failure-fast bounds:
   pausing).  On breach the holder is flagged ``expired`` so the cooperative
   cancel point in :class:`ThreadQueueMiddleware` raises :class:`ThreadHoldExpired`
   between LLM calls (terminal — a runaway backstop, not resumable), AND the slot
-  is vacated immediately.  Honors the project rule that threads die on
-  infrastructure failure rather than heal-and-retry. The cap timer releases
-  the slot at the active-time limit; cooperative cancellation is detected at
+  is vacated immediately for ordinary checkpoint callers. A caller supplying
+  ``before_release`` retains the slot until that callback succeeds, including
+  after expiry. A native caller may instead revoke and drain its provider relay,
+  then release its exact handle while retaining unresolved cleanup ownership.
+  The queue does not silently retry infrastructure failures. For ordinary checkpoint
+  callers the cap timer releases at the active-time limit; cancellation is detected at
   the next middleware boundary. A ``wrap_model_call`` retry inside
   :class:`EmptyResponseRecoveryMiddleware` or
   :class:`BadRequestRetryMiddleware` can run one or two more LLM calls
   past the boundary before ``after_model`` next fires.  Forcible slot
-  release happens regardless, logged at WARNING.
+  release for those callers happens regardless, logged at WARNING.
 - ``wait_timeout_s`` — a waiter that can't acquire raises
   :class:`QueueWaitTimeout` and the thread errors.
 
-After a force-release (cap breach) the original holder thread may still be
+After an ordinary caller's force-release (cap breach) its thread may still be
 unwinding its ``with`` block while a waiter is already running; the identity
 guard in :meth:`_release_if_holder` prevents the unwinding holder's late
 cleanup from clobbering the new holder.
@@ -107,12 +111,13 @@ class _Handle:
     __slots__ = (
         "thread_id", "expired", "acquired_at", "pause_requested",
         "accumulated_active_ms", "quantum_s", "hold_timeout_s", "timer", "cap_timer",
-        "completed_hold_ms",
+        "completed_hold_ms", "before_release",
     )
 
     def __init__(
         self, thread_id: str, quantum_s: float, hold_timeout_s: float,
         accumulated_active_ms: float = 0.0,
+        before_release: Callable[[], None] | None = None,
     ) -> None:
         self.thread_id = thread_id
         self.expired = False
@@ -123,6 +128,7 @@ class _Handle:
         # pausing).  Never counts paused/queued wall-time.
         self.accumulated_active_ms = accumulated_active_ms
         self.completed_hold_ms = 0.0
+        self.before_release = before_release
         self.quantum_s = quantum_s
         self.hold_timeout_s = hold_timeout_s
         self.timer: threading.Timer | None = None
@@ -168,8 +174,14 @@ class ThreadAffinityQueue:
         quantum_s: float | None = None,
         accumulated_active_ms: float = 0.0,
         user_priority: bool = False,
+        before_release: Callable[[], None] | None = None,
     ) -> Iterator[_Handle]:
         """Acquire this thread's single-flight slot for the ``with`` block.
+
+        ``before_release`` runs outside the queue lock before handing the slot
+        to a competitor. Failure retains the slot: unconfirmed native teardown
+        cannot authorize another model user. Expiry still flags the handle,
+        but this caller must stop and pass its release check before handoff.
 
         Context-affine: the context manager sets a ``ContextVar`` token on entry
         and resets it on exit, so it must be entered, resumed across ``yield``,
@@ -241,6 +253,7 @@ class ThreadAffinityQueue:
                 handle = _Handle(
                     thread_id, quantum, hold_timeout,
                     accumulated_active_ms=accumulated_active_ms,
+                    before_release=before_release,
                 )
                 self._holder = handle
                 cb("running")
@@ -277,9 +290,21 @@ class ThreadAffinityQueue:
             # iterate across thread boundaries must bind via
             # ``contextvars.Context.run`` — see `Thread.stream_message`'s
             # `_ContextBoundIterator` for the in-tree pattern.  If the
-            # contract is violated, the cap timer bounds the resulting
-            # `_holder` leak to ``hold_timeout_s``.
+            # contract is violated, ordinary callers still have a cap timer;
+            # Native callers retain the slot until their model-release fence
+            # is verified.
             _active_handle.reset(token)
+            if handle.before_release is not None:
+                try:
+                    handle.before_release()
+                except BaseException:
+                    with self._cond:
+                        handle.expired = True
+                        if handle.timer is not None:
+                            handle.timer.cancel()
+                        if handle.cap_timer is not None:
+                            handle.cap_timer.cancel()
+                    raise
             with self._cond:
                 # Cancel both timers; persist this slice's active time so a
                 # resume carries it toward the 2h cap; release the slot — all under
@@ -300,8 +325,9 @@ class ThreadAffinityQueue:
     def _release_if_holder(self, handle: _Handle) -> bool:
         """Vacate the slot iff ``handle`` is still the current holder.
 
-        Idempotent across ``acquire``'s ``finally``, :meth:`_on_tick`, and
-        :meth:`_on_cap`; whichever wins the
+        Idempotent across ``acquire``'s ``finally``, :meth:`_on_tick`,
+        :meth:`_on_cap`, and native cleanup after a failed release proof;
+        whichever wins the
         lock first releases, the other sees ``_holder is not handle`` and
         returns False without clobbering a newly-promoted holder.
         """
@@ -321,7 +347,8 @@ class ThreadAffinityQueue:
         Order (terminal expiry wins at the next middleware boundary even if a
         pause was requested earlier):
           - cumulative active hold >= ``hold_timeout_s`` -> ``expired`` (terminal
-            kill) + force-release the slot.  ``expired`` is read by
+            kill), retaining native callers until their release check succeeds.
+            Ordinary callers force-release. ``expired`` is read by
             :class:`ThreadQueueMiddleware`, which raises :class:`ThreadHoldExpired`.
           - else this slice >= ``quantum_s`` AND a model or dispatch waiter is
             present -> request ``pause_requested`` (read by the middleware -> non-terminal
@@ -351,7 +378,8 @@ class ThreadAffinityQueue:
                 waiter_count, handle.quantum_s, handle.hold_timeout_s)
             if cumulative_s >= handle.hold_timeout_s:
                 handle.expired = True
-                self._release_if_holder(handle)
+                if handle.before_release is None:
+                    self._release_if_holder(handle)
                 logger.warning(
                     "thread %s hit the %.0fs cumulative-active cap — terminating",
                     handle.thread_id, handle.hold_timeout_s,
@@ -387,7 +415,8 @@ class ThreadAffinityQueue:
                 timer.start()
                 return
             handle.expired = True
-            self._release_if_holder(handle)
+            if handle.before_release is None:
+                self._release_if_holder(handle)
             logger.warning(
                 "thread %s hit the %.0fs cumulative-active cap — terminating",
                 handle.thread_id, handle.hold_timeout_s,

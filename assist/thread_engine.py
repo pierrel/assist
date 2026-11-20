@@ -1,9 +1,9 @@
 """Immutable engine identity for visible Assist web threads.
 
 The engine marker belongs to the thread directory rather than Run metadata: a
-client must not be able to change a thread from Deep Agents to Pi by crafting a
+client must not be able to change a thread's execution engine by crafting a
 later request.  A missing marker denotes a legacy Deep Agents thread; malformed
-markers never select Pi.
+markers never select a native engine.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 
-EngineName = Literal["deepagents", "pi"]
+EngineName = Literal["deepagents", "pi", "hermes"]
 ENGINE_MARKER = "engine.json"
 _MARKER_VERSION = 1
 _VISIBLE_ORIGIN = "manual-web"
@@ -47,7 +47,7 @@ def _validated(value: object) -> ThreadEngine:
     if value["version"] != _MARKER_VERSION:
         raise ThreadEngineError("thread engine marker version is unsupported")
     engine = value["engine"]
-    if not isinstance(engine, str) or engine not in {"deepagents", "pi"}:
+    if not isinstance(engine, str) or engine not in {"deepagents", "pi", "hermes"}:
         raise ThreadEngineError("thread engine marker has an unknown engine")
     origin = value["origin"]
     if not isinstance(origin, str) or origin != _VISIBLE_ORIGIN:
@@ -84,7 +84,7 @@ def read_thread_engine(thread_dir: str) -> ThreadEngine:
 
 def write_new_thread_engine(thread_dir: str, engine: EngineName) -> ThreadEngine:
     """Publish a new manual-web identity once, refusing overwrite or mutation."""
-    if not isinstance(engine, str) or engine not in {"deepagents", "pi"}:
+    if not isinstance(engine, str) or engine not in {"deepagents", "pi", "hermes"}:
         raise ThreadEngineError(f"unknown thread engine: {engine!r}")
     identity = ThreadEngine(engine, _VISIBLE_ORIGIN)
     payload = json.dumps(

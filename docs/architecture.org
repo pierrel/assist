@@ -1,7 +1,7 @@
 #+title: Assist architecture
 
 This map follows the source in this branch. It shows the ordinary Deep Agents
-web path and the interfaces other clients use. A Pi preview thread,
+web path and the interfaces other clients use. A native Hermes thread,
 voice call, inbound SMS, scheduled prompt, or child task enters through a
 different admission route, then uses the same durable Run service where that
 route creates a Run. The diagrams show ownership and major data
@@ -209,8 +209,13 @@ in both views. An ID shown in only one view keeps that meaning.
 - *C13 Egress proxy.* [[file:../assist/sandbox_manager.py][SandboxManager]]
   starts the proxy and isolated networks. [[file:../assist/egress/store.py][EgressStore]]
   projects approved grants; [[file:../assist/egress/client_map.py][client_map.py]]
-  attributes browser traffic. It gates sandbox and browser network traffic,
-  not host Python tool requests. The
+  attributes browser traffic. The proxy resolves every admitted destination once and retains only vetted
+  numeric addresses for connection fallback;
+  [[file:../assist/control_api.py][the shared control-service boundary]] applies
+  even to destinations admitted by base allowances and thread grants. Both
+  execution networks require isolated gateway mode, so direct host connections
+  do not replace proxy policy. Existing non-isolated networks require a
+  operator-controlled migration after their attached generations stop. The
   [[file:browser-site-compatibility.org][browser view]] describes this branch's
   bounded browser connection burst and the retained destination policy.
 - *C14 Domain Git remote.* [[file:../assist/thread_git.py][ThreadGit]] and
@@ -219,8 +224,12 @@ in both views. An ID shown in only one view keeps that meaning.
 - *C15 Network destinations.* [[file:../assist/tools.py][tools.py]] provides
   search and URL fetching; [[file:../assist/geo/tools.py][geo/tools.py]] and
   related travel tools call configured services. Websites visited by C11 are
-  also destinations. Host Python tools call services directly; sandbox and
-  browser requests cross C13's allowlist and exact-grant boundary first.
+  also destinations. Host HTML/PDF fetching uses
+  [[file:../assist/url_fetch.py][a dedicated checked transport]]: each connection,
+  including redirects, uses the same control-service denial and a pinned dial
+  address while retaining HTTP Host and TLS hostname verification. Configured
+  search and travel services keep their dedicated clients. Sandbox and browser
+  requests cross C13's allowlist and exact-grant boundary first.
 - *C21 Host user systemd.* [[file:../assist/sandbox_expiry.py][sandbox_expiry.py]]
   arms one transient age check for each ordinary managed Docker generation at
   original creation + three hours. The unit outlives the web process and its
@@ -383,8 +392,51 @@ after the original user turn has ended.
 
 * Conditional paths and limits of this view
 
-The web route can select a Pi preview engine instead of C6's Deep Agents
-graph; its implementation is [[file:../assist/pi_runtime.py][PiRuntimeManager]].
+The browser and authenticated phone API can select the operator-enabled Hermes
+engine instead of C6's Deep Agents graph. Retired Pi threads remain readable;
+their explicit summary handoff creates an independent Deep Agents thread.
+
+- *C25 Native host adapter.* [[file:../assist/hermes_runtime.py][HermesRuntimeManager]]
+  retains the same invocation across C4's same-work Run successors. Existing C8
+  generation authority owns creation and verified stop. C4 releases model admission
+  after cooperative model parking or exact-work provider revocation and drain.
+  Independent background tools may finish while parked; the same native process
+  consumes their results after readmission. Failed container cleanup keeps its
+  nonterminal Run and generation/Git ownership while unrelated model work proceeds.
+  Failed provider drain still retains the slot. Startup reaps generations before
+  recovery; lost native work is reported without replay.
+- *C24 Native provider relay.* [[file:../assist/hermes_provider_relay.py][The private Unix relay]]
+  checks the current Run/queue admission and original generation lease for every
+  parent, child and auxiliary model request. Native hooks coordinate drain;
+  hooks do not grant authority. Native RPC deadlines remain native, while the
+  existing Run bounds total active lifetime. C13 denies the direct host-model
+  exception to native and unattributed clients.
+  Supported native egress tools use this same private transport with host-bound
+  thread identity and independent admission checks. C8's existing EgressStore,
+  approval cards and proxy projection own requests and thread-scoped grants;
+  the new egress tool/RPC cannot approve access. Native egress deployment remains held
+  pending runtime verification and safe ordinary-network migration. The
+  control-service denial covers the configured local port on non-public
+  addresses and ASSIST_BASE_URL's origin/resolved addresses; it does not add
+  human authentication or discover unmanaged public forwards. An accepted host egress operation participates in cooperative
+  drain and must settle before lifecycle closure, without holding the provider
+  admission lock during store I/O. Provider-only revocation excludes host writes;
+  failed host drain retains cleanup ownership and blocks deletion for retry.
+- *C26 Pinned native Hermes.* [[file:../assist/hermes_runtime/worker.py][The worker]]
+  runs the complete pinned upstream runtime inside C10, with native prompts,
+  file/terminal tools, skills, memory, compression and joined delegation.
+  Native SessionDB and preferences persist in C9's isolated =/agent/hermes=.
+  C2 projects accepted messages and committed replies from existing C3 Runs.
+  No native worker starts another Run. Resolved egress cards may enqueue one
+  host-owned native follow-up through C4; native helpers share the parent thread's
+  cards and do not use Deep Agents checkpoints. Browser/search/interactive command approval
+  transports are not enabled; native unattended command approval denies a
+  gated operation instead of waiting on an invisible prompt.
+
+The native image is built with [[file:../dockerfiles/Dockerfile.hermes-runtime][Dockerfile.hermes-runtime]].
+It inherits the ordinary restricted sandbox and its Git publication boundary.
+The current runtime capability proofs use deterministic providers and isolated
+Docker networks; they do not establish local-model behavioral quality.
 The CLI and embedders can use host-backed or embedder-supplied backends, so
 C10/C11 depict the ordinary sandboxed web path. Inbound SMS, schedules, voice
 and approvals have their own interfaces and rules; this map does not detail

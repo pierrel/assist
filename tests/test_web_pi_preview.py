@@ -12,20 +12,18 @@ from fastapi.testclient import TestClient
 
 from manage.web import threads
 from manage.web import state
-from assist.pi_runtime import PiRuntimeError, PiRuntimeResult
 from assist.pi_conversation import PiMessage
 from assist.pi_trace import PiTraceEvent
 from assist.thread_engine import read_thread_engine
-from assist.web_main_prompt import (WebMainPromptError, WebMainPromptUnavailable,
-                                    render_pi_web_main_prompt)
 
 
 class _Preview:
-    def __init__(self, admits: bool) -> None:
+    def __init__(self, admits: bool, engine="pi") -> None:
         self._admits = admits
+        self.engine = engine
 
     def admits(self, engine: str) -> bool:
-        assert engine == "pi"
+        assert engine == self.engine
         return self._admits
 
 
@@ -54,68 +52,23 @@ def test_new_thread_engine_defaults_to_deep_and_rejects_unknown(monkeypatch) -> 
     assert error.value.status_code == 400
 
 
-def test_new_pi_thread_requires_operator_admission(monkeypatch) -> None:
+def test_retired_pi_cannot_be_enabled_for_new_threads(monkeypatch) -> None:
     monkeypatch.setattr(threads, "PI_PREVIEW", _Preview(False))
     with pytest.raises(HTTPException) as error:
         threads._require_new_thread_engine("pi")
     assert error.value.status_code == 503
     monkeypatch.setattr(threads, "PI_PREVIEW", _Preview(True))
-    assert threads._require_new_thread_engine("pi") == "pi"
+    with pytest.raises(HTTPException) as error:
+        threads._require_new_thread_engine("pi")
+    assert error.value.status_code == 503
 
 
-def test_pi_system_prompt_translates_a_renderer_failure(monkeypatch) -> None:
-    def broken_renderer():
-        raise WebMainPromptUnavailable("web-main prompt is unavailable")
-
-    monkeypatch.setattr(threads, "render_pi_web_main_prompt", broken_renderer)
-
-    with pytest.raises(PiRuntimeError, match="unavailable"):
-        threads._pi_system_prompt()
 
 
-def test_pi_system_prompt_fails_closed_on_an_unknown_renderer_error(monkeypatch) -> None:
-    def broken_renderer():
-        raise WebMainPromptError("web-main prompt is unavailable")
-
-    monkeypatch.setattr(threads, "render_pi_web_main_prompt", broken_renderer)
-
-    with pytest.raises(PiRuntimeError, match="invalid"):
-        threads._pi_system_prompt()
 
 
-def test_pi_system_prompt_is_the_host_rendered_shared_prompt() -> None:
-    assert threads._pi_system_prompt() == render_pi_web_main_prompt().text
 
 
-def test_pi_run_passes_the_host_rendered_prompt_to_the_runtime(
-    pi_threads_root, monkeypatch,
-) -> None:
-    threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
-    threads._create_empty_pi_workspace("pi-source")
-    run = threads._create_run("pi-source", "Inspect this workspace")
-    received = {}
-
-    class Runtime:
-        def run(self, **kwargs):
-            received.update(kwargs)
-            result = PiRuntimeResult("Done", 1)
-            kwargs["commit"](result)
-            return result
-
-    monkeypatch.setattr(threads, "PI_PREVIEW", _Preview(True))
-    monkeypatch.setattr(threads, "THREAD_QUEUE", _Queue())
-    monkeypatch.setattr(threads, "_PI_RUNTIME", Runtime())
-    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *_args: None)
-
-    threads._execute_pi_run(run, user_priority=False)
-
-    assert received["system_prompt"] == render_pi_web_main_prompt().text
-    assert received["prompt"] == "Inspect this workspace"
-    assert received["thread_scope"] == (threads.MANAGER.root_dir, "pi-source")
-    assert received["history"] == []
-    assert threads._PI_CONVERSATIONS.get_messages(threads.MANAGER.thread_dir("pi-source")) == [
-        PiMessage(run.id, "user", "Inspect this workspace"), PiMessage(run.id, "assistant", "Done"),
-    ]
 
 
 def test_completed_pi_transcript_recovers_an_interrupted_run_without_restarting(
@@ -159,44 +112,20 @@ def test_corrupt_pi_transcript_marks_the_claimed_run_error_and_dispatches_follow
     assert dispatched == [("pi-source", run.id)]
 
 
-def test_pi_prompt_render_failure_does_not_start_the_runtime(
-    pi_threads_root, monkeypatch,
-) -> None:
-    threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
-    threads._create_empty_pi_workspace("pi-source")
-    run = threads._create_run("pi-source", "Inspect this workspace")
-    started = False
-
-    class Runtime:
-        def run(self, **_kwargs):
-            nonlocal started
-            started = True
-            raise AssertionError("Pi runtime must not start")
-
-    def broken_renderer():
-        raise WebMainPromptError("web-main prompt is invalid")
-
-    monkeypatch.setattr(threads, "PI_PREVIEW", _Preview(True))
-    monkeypatch.setattr(threads, "THREAD_QUEUE", _Queue())
-    monkeypatch.setattr(threads, "_PI_RUNTIME", Runtime())
-    monkeypatch.setattr(threads, "render_pi_web_main_prompt", broken_renderer)
-    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *_args: None)
-
-    threads._execute_pi_run(run, user_priority=False)
-
-    assert not started
 
 
-def test_merge_refuses_pi_before_constructing_a_deep_thread(monkeypatch) -> None:
-    monkeypatch.setattr(threads, "_is_pi_thread", lambda tid: True)
+def test_merge_refuses_pi_before_constructing_a_deep_thread(pi_threads_root, monkeypatch) -> None:
+    tid = threads.MANAGER.reserve_visible("pi", thread_id="pi-thread")
+    assert read_thread_engine(pi_threads_root / tid).name == "pi"
     monkeypatch.setattr(
         threads.MANAGER, "get",
         lambda *args, **kwargs: pytest.fail("Pi must not construct a Deep thread"))
 
     with pytest.raises(HTTPException) as error:
-        threads.merge_thread("pi-thread")
+        threads.merge_thread(tid)
 
     assert error.value.status_code == 409
+    assert error.value.detail == "Pi threads are read-only"
 
 
 def test_invalid_engine_marker_returns_controlled_web_errors(pi_threads_root) -> None:
@@ -272,14 +201,14 @@ def test_empty_pi_handoff_summary_copies_no_transcript() -> None:
     )
 
 
-def test_first_pi_message_creation_creates_its_empty_workspace(
+def test_first_hermes_message_creation_creates_its_empty_workspace(
     pi_threads_root, monkeypatch,
 ) -> None:
-    monkeypatch.setattr(threads, "PI_PREVIEW", _Preview(True))
+    monkeypatch.setattr(threads, "HERMES_PREVIEW", _Preview(True, "hermes"))
     monkeypatch.setattr(threads, "DOMAINS", [])
 
     tid, run_id, selected = threads.create_thread_with_message_core(
-        "hello", None, engine="pi")
+        "hello", None, engine="hermes")
 
     assert run_id
     assert selected is None
@@ -287,13 +216,13 @@ def test_first_pi_message_creation_creates_its_empty_workspace(
     assert (pi_threads_root / tid / "description.txt").read_text() == "hello"
 
 
-def test_empty_pi_thread_creation_creates_its_workspace(
+def test_empty_hermes_thread_creation_creates_its_workspace(
     pi_threads_root, monkeypatch,
 ) -> None:
-    monkeypatch.setattr(threads, "PI_PREVIEW", _Preview(True))
+    monkeypatch.setattr(threads, "HERMES_PREVIEW", _Preview(True, "hermes"))
     monkeypatch.setattr(threads, "DOMAINS", [])
 
-    response = asyncio.run(threads.create_thread(None, "pi"))
+    response = asyncio.run(threads.create_thread(None, "hermes"))
 
     tid = response.headers["location"].removeprefix("/thread/")
     assert (pi_threads_root / tid / "domain").is_dir()

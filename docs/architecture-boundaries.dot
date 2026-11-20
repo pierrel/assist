@@ -14,20 +14,29 @@ digraph Boundaries {
   C8 [label="C8  Host authorities\ncontainer, browser, Git, grants, secrets"];
   C9 [label="C9  Durable thread state\nthread files + Git checkout",
       fillcolor="#fff4d7"];
-  C10 [label="C10  Shared execution\ntrusted parent + child · native /agent",
+  C10 [label="C10  Shared execution\nisolated gateway · native /agent",
        fillcolor="#fff0df", color="#a46b36"];
   C11 [label="C11  Browser worker\nChromium · untrusted page content",
        fillcolor="#fff0df", color="#a46b36"];
   C12 [label="C12  Model endpoint\nOpenAI-compatible HTTP",
        fillcolor="#f3f3f3"];
-  C13 [label="C13  Egress proxy\nallowlist and exact grants",
+  C13 [label="C13  Egress proxy\npermanent control denial · pinned IP\nallowlist and exact grants",
        fillcolor="#f3f3f3"];
   C14 [label="C14  Domain Git remote\npublished thread branch",
        fillcolor="#f3f3f3"];
   C15 [label="C15  Network destinations\nweb pages · search · travel services",
        fillcolor="#f3f3f3"];
+  C25 [label="C25  Native host adapter\nexisting Run + queue + generation"];
+  C24 [label="C24  Private provider relay\nadmission + exact owner fence"];
+  C26 [label="C26  Whole native Hermes\ninside shared execution container"];
   C21 [label="C21  Host user systemd\nindependent of web worker", fillcolor="#f3f3f3"];
 
+  C25 -> C8 [label="existing lifecycle authority"];
+  C25 -> C26 [label="start / model drain / resume / verified stop"];
+  C26 -> C24 [label="model + bound egress requests"];
+  C24 -> C8 [label="existing egress approval authority"];
+  C24 -> C12 [label="admitted exact generation only"];
+  C26 -> C9 [label="native history + workspace", style=dashed];
   C6 -> C10 [label="file / shell tool calls"];
   C6 -> C8 [label="browser tool calls", constraint=false];
   C2 -> C8 [label="same-origin control capability; pixels / input"];
@@ -41,6 +50,6 @@ digraph Boundaries {
   C10 -> C11 [label="hosts worker"];
   C10 -> C13 [label="network requests"];
   C11 -> C13 [label="attributed page requests"];
-  C13 -> C15 [label="allowed sandbox/browser requests"];
-  C10 -> C9 [label="workspace + /agent mounts; no thread key", style=dashed];
+  C13 -> C15 [label="pinned allowed sandbox/browser requests"];
+  C10 -> C9 [label="workspace + persistent /agent mounts; no thread key", style=dashed];
 }

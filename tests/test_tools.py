@@ -62,11 +62,11 @@ def test_pdf_download_bounds_reported_and_actual_bytes(monkeypatch):
             yield b"67890"
 
     monkeypatch.setattr(pdf_text, "_MAX_INPUT", 8)
-    with patch.object(pdf_text.requests, "get", return_value=Response()):
+    with patch.object(pdf_text.url_fetch, "get", return_value=Response()):
         with pytest.raises(ValueError, match="oversized PDF"):
             pdf_text._fetch_pdf("https://example.org/a.pdf")
     Response.headers = {}
-    with patch.object(pdf_text.requests, "get", return_value=Response()):
+    with patch.object(pdf_text.url_fetch, "get", return_value=Response()):
         with pytest.raises(ValueError, match="oversized PDF"):
             pdf_text._fetch_pdf("https://example.org/a.pdf")
 
@@ -101,7 +101,7 @@ def test_read_url_does_not_refetch_extensionless_pdf():
     response = MagicMock()
     response.headers = {"Content-Type": "application/pdf"}
     response.raise_for_status.return_value = None
-    with (patch.object(tools.requests, "get", return_value=response) as get,
+    with (patch.object(tools.url_fetch, "get", return_value=response) as get,
           patch.object(tools.subprocess, "run") as run):
         result = tools.read_url("https://one-shot.example/download?token=once")
     assert "direct .pdf URL" in result
@@ -113,6 +113,9 @@ def test_read_url_does_not_refetch_extensionless_pdf():
 def _reset_tool_state(monkeypatch):
     """Reset per-host throttle state and clear ASSIST_SEARCH_URL so each test
     starts from a known config (SearXNG tests set it explicitly)."""
+    def no_unmocked_connection(*_args, **_kwargs):
+        raise AssertionError("host tool unit test attempted an unmocked connection")
+    monkeypatch.setattr(tools.url_fetch, "create_connection", no_unmocked_connection)
     tools._host_last_call.clear()
     monkeypatch.delenv("ASSIST_SEARCH_URL", raising=False)
     yield
@@ -466,7 +469,7 @@ class TestReadUrlExtraction:
     )
 
     def _read(self, html):
-        with patch.object(tools, "requests") as rq, \
+        with patch.object(tools, "url_fetch") as rq, \
                 patch.object(tools, "_host_throttle"):
             rq.get.return_value = _html_resp(html)
             return tools.read_url("https://example.com/x")
@@ -552,7 +555,7 @@ class TestReadUrlExtraction:
         assert len(self._read("<article><p>" + ("x" * 9000) + "</p></article>")) == 9000
 
     def test_error_path_unchanged(self):
-        with patch.object(tools, "requests") as rq, \
+        with patch.object(tools, "url_fetch") as rq, \
                 patch.object(tools, "_host_throttle"):
             rq.get.side_effect = RuntimeError("boom")
             out = tools.read_url("https://example.com/err")

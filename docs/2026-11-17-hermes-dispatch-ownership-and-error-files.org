@@ -1,0 +1,62 @@
+#+title: Hermes dispatch ownership and failed-turn files
+#+date: 2026-11-17
+
+* Corrected behavior
+A dispatch notification must claim its still-pending Run before it can stop native
+work or run the queue release fence. A stale pending snapshot that times out
+behind the live invocation cannot stop that invocation or terminalize its Run.
+The existing global queue handle also protects the interval between the original
+owner acquiring its slot and claiming its Run. A notification that eventually
+acquires a slot but finds its Run already claimed returns without native cleanup
+or follower dispatch. No new ownership record or scheduler is introduced.
+
+The existing Git checkout scope now stays open through queue cleanup and the
+existing exact-work cleanup recovery path. Execution errors are preserved only
+after verified native stop, while the checkout lock and model slot are still
+held. A transient stop failure followed by successful teardown therefore commits
+failed-turn tracked and new files before releasing the slot or notifying an
+accepted follower. Preservation runs once; normal fair pauses do not commit or
+stop the retained invocation. The original execution error and any Git recovery
+notes remain visible.
+
+Persistent unconfirmed native teardown still retains the model slot and leaves
+the Run nonterminal. The existing operator recovery limit is unchanged. A Git
+recovery failure retains files and the existing reconciliation notice; it cannot
+be presented as successful publication. Failure to acquire a bound checkout
+scope still cannot authorize credentialed Git recovery. The worker image,
+provider protocol, admission authority and persistent native history are unchanged.
+
+* Verification
+The ownership regression uses the real queue and durable Run store, with prompt
+"Keep working on the note". An original dispatch holds the slot while a second
+OS thread carries an earlier pending Run snapshot and times out. Both the
+preclaim and already-claimed original states must retain the same queue handle,
+Run state and native work, with no stop or follower dispatch. A separate stale
+notification that acquires a free slot after interruption must perform no native
+release or follower dispatch.
+
+The failed-turn regression uses a private bound Git repository and the actual Git
+lifecycle. Prompt "Keep the draft" reaches a scripted native failure that changes
+README and creates draft.txt. The first teardown attempt fails, the existing
+recovery succeeds, and follower notification asserts both files were committed
+under the retained checkout lock. The source branch must remain unchanged: a
+failed-turn local commit is not a successful published answer. Existing ordinary
+error preservation, persistent cleanup failure, first-message Run state, Pi
+retirement, client and queue checks remain in the affected panel.
+
+The actual pinned native capability check retains the two-pause B/C competitor
+sequence, accepted early second turn, history, dangerous-command denial and
+cleanup assertions. It uses disposable network:none containers and a scripted
+private provider. It is not a real-model quality evaluation or a device test.
+
+* Delivery observation
+During this review, a phone chooser reportedly displayed the old Pi label while
+Root's read-only inspection found the refreshed catalog already contained Hermes.
+A chooser opened from a cached catalog is a possible explanation, not a proved
+remaining client defect. No phone or client behavior was changed for this report.
+
+* Historical supersessions
+=2026-11-17-hermes-first-turn-failure-boundary.org=, "Corrected behavior": the
+nonterminal failure boundary additionally requires dispatch ownership and keeps
+failed-turn Git preservation inside the held checkout scope through recovered
+cleanup. The earlier first-message initialization correction remains in effect.

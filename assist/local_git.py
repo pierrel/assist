@@ -105,7 +105,7 @@ def _validated_objects(worktree: str) -> str:
 
 
 class LocalGit:
-    """One disposable, config-clean Git repository for exact-ref host work."""
+    """Disposable host Git with credentials isolated from checkout configuration."""
 
     def __init__(self, source: str, worktree: str | None = None):
         self.source = source
@@ -119,6 +119,26 @@ class LocalGit:
                                  GIT_NO_REPLACE_OBJECTS="1", GIT_TERMINAL_PROMPT="0")
         try:
             self.git("init", "--bare", self.directory, repository=False)
+            if source.startswith(("https://", "http://")):
+                # Read only trusted host credential settings, never checkout
+                # config or global hooks/rewrites. Preserve Git's URL matching
+                # and ordered helper chains, including empty reset entries.
+                host_environment = dict(self._environment)
+                host_environment.pop("GIT_CONFIG_GLOBAL")
+                settings = self.git(
+                    "config", "--global", "--includes", "--null", "--get-regexp",
+                    r"^credential(\..*)?\.(helper|username|usehttppath)$",
+                    allowed=(0, 1), environment=host_environment)
+                entries = settings.rstrip("\0").split("\0") if settings else []
+                for index, entry in enumerate(entries):
+                    key, separator, value = entry.partition("\n")
+                    if not separator:
+                        if not key.endswith(".usehttppath"):
+                            raise GitSyncError("Host Git credential settings are invalid")
+                        value = "true"
+                    self._environment[f"GIT_CONFIG_KEY_{index}"] = key
+                    self._environment[f"GIT_CONFIG_VALUE_{index}"] = value
+                self._environment["GIT_CONFIG_COUNT"] = str(len(entries))
             if worktree is not None:
                 self._environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = _validated_objects(worktree)
         except BaseException:
@@ -135,7 +155,8 @@ class LocalGit:
         self._temporary.cleanup()
 
     def git(self, *arguments: str, repository: bool = True,
-            allowed: tuple[int, ...] = (0,), timeout: int = _GIT_TIMEOUT) -> str:
+            allowed: tuple[int, ...] = (0,), timeout: int = _GIT_TIMEOUT,
+            environment: dict[str, str] | None = None) -> str:
         command = ["prlimit", "--as=2147483648", "--cpu=30",
                    f"--fsize={_BUNDLE_LIMIT}", "--", "git"]
         if repository:
@@ -149,7 +170,8 @@ class LocalGit:
                     *arguments]
         with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
             process = subprocess.Popen(command, cwd=self.directory,
-                                       env=self._environment, stdout=output, stderr=errors,
+                                       env=self._environment if environment is None else environment,
+                                       stdout=output, stderr=errors,
                                        start_new_session=True)
             try:
                 process.wait(timeout=timeout)

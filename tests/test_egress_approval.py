@@ -163,7 +163,9 @@ def test_request_flow_correctives(tmp_path, monkeypatch):
     request, list_hosts, remove, _batch = egress_tools(st, frozenset({"pypi.org"}))
     # events flow through the thread_dir seam when wired; unwired here — the
     # tools must still work (CLI/eval shape)
-    assert "already on the base allowlist" in request("pypi.org", 443, "x")
+    base_reply = request("pypi.org", 443, "x")
+    assert "already on the base allowlist" in base_reply
+    assert "egress approval cannot override" in base_reply
     out = request("https://api.github.com/x", None, "fetch releases and summarize")
     assert "awaits the user's approval" in out
     assert "already awaiting" in request("api.github.com", 443, "again")
@@ -179,7 +181,9 @@ def test_request_flow_correctives(tmp_path, monkeypatch):
     assert "already approved" in request("b.example.com", 443, "t")
     # list shows base + grant with lifetime; remove drops the grant
     listing = list_hosts()
-    assert "pypi.org (any port; base allowlist" in listing
+    assert "pypi.org (base allowlist" in listing
+    assert "Assist control APIs remain blocked" in listing
+    assert "any port" not in listing
     assert "b.example.com:443" in listing and "min left" in listing
     assert "Removed" in remove("b.example.com", 443)
     assert "no grant" in remove("b.example.com", 443)
@@ -201,7 +205,7 @@ def test_batch_validates_all_targets_before_creating_any_card(tmp_path, monkeypa
     answer = batch([
         {"host": "api.example.com", "port": 443},
         {"host": "host.docker.internal", "port": 80}], "read the page")
-    assert "already reachable" in answer
+    assert "approval is unavailable" in answer
     assert st.all() == []
 
 
@@ -364,6 +368,8 @@ def test_client_map_roundtrip(tmp_path):
 
 @pytest.fixture
 def proxy_mod(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASSIST_PORT", "5050")
+    monkeypatch.delenv("ASSIST_BASE_URL", raising=False)
     monkeypatch.setenv("EGRESS_ALLOWLIST", "pypi.org,host.docker.internal")
     monkeypatch.setenv("APPROVALS_DIR", str(tmp_path))
     monkeypatch.setenv("CLIENT_MAP_DIR", str(tmp_path))
@@ -374,6 +380,9 @@ def proxy_mod(tmp_path, monkeypatch):
         "egress_proxy_under_test",
         os.path.join(os.path.dirname(__file__), "..", "dockerfiles",
                      "egress-proxy.py"))
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, **kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", (
+            "172.17.0.1" if host == "host.docker.internal" else "93.184.216.34", port))])
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -404,12 +413,40 @@ def test_proxy_approved_target_matrix(proxy_mod, tmp_path):
 def test_pi_recycled_ip_never_inherits_old_shell_approval(proxy_mod, tmp_path,
                                                           monkeypatch):
     _write_approval(tmp_path)
-    monkeypatch.setattr(proxy_mod, "vet_resolved", lambda *_args, **_kwargs: "93.184.216.34")
+    monkeypatch.setattr(proxy_mod, "vet_resolved", lambda *_args, **_kwargs: ("93.184.216.34",))
     ip = "172.20.0.9"
     assert proxy_mod.target_policy("api.example.com", 443, ip) == (
-        "93.184.216.34", None)
+        ("93.184.216.34",), None)
     record_client(str(tmp_path), ip, ClientRecord("t1", "pi-generation", "pi"))
     assert proxy_mod.target_policy("api.example.com", 443, ip)[1] == "host_not_approved"
+
+
+@pytest.mark.parametrize("kind", ["hermes", "pi"])
+def test_native_runtime_cannot_bypass_model_relay(proxy_mod, tmp_path, kind):
+    ip = "172.20.0.9"
+    record_client(str(tmp_path), ip, ClientRecord("t1", "native-generation", kind))
+    assert proxy_mod.target_policy("host.docker.internal", 8000, ip)[1] == "host_requires_ordinary_attribution"
+    assert proxy_mod.target_policy("pypi.org", 443, ip) == (("93.184.216.34",), None)
+
+
+@pytest.mark.parametrize("contents", [None, "broken-json", "{}", '{"172.20.0.9":{"kind":"sandbox"}}'])
+def test_model_host_requires_positive_ordinary_attribution(proxy_mod, tmp_path, contents):
+    if contents is not None:
+        (tmp_path / "client-map.json").write_text(contents)
+    ip = "172.20.0.9"
+    assert proxy_mod.target_policy("host.docker.internal", 8000, ip)[1] == "host_requires_ordinary_attribution"
+    assert proxy_mod.target_policy("pypi.org", 443, ip) == (("93.184.216.34",), None)
+    (tmp_path / "client-map.json").unlink(missing_ok=True)
+    record_client(str(tmp_path), ip, ClientRecord("t1", "ordinary-generation", "sandbox"))
+    assert proxy_mod.target_policy("host.docker.internal", 8000, ip) == (("172.17.0.1",), None)
+
+
+def test_hermes_keeps_thread_scoped_external_approval(proxy_mod, tmp_path, monkeypatch):
+    _write_approval(tmp_path)
+    ip = "172.20.0.9"
+    record_client(str(tmp_path), ip, ClientRecord("t1", "hermes-generation", "hermes"))
+    monkeypatch.setattr(proxy_mod, "vet_resolved", lambda *_args, **_kwargs: ("93.184.216.34",))
+    assert proxy_mod.target_policy("api.example.com", 443, ip) == (("93.184.216.34",), None)
 
 
 def test_proxy_duration_fail_closed(proxy_mod, tmp_path):
@@ -444,7 +481,7 @@ def test_proxy_vet_resolved(proxy_mod, monkeypatch):
                 "good.example.com": "93.184.216.34"}[host]
         return [(2, 1, 6, "", (addr, port))]
     monkeypatch.setattr(proxy_mod.socket, "getaddrinfo", fake_gai)
-    assert proxy_mod.vet_resolved("good.example.com", 443) == "93.184.216.34"
+    assert proxy_mod.vet_resolved("good.example.com", 443) == ("93.184.216.34",)
     assert proxy_mod.vet_resolved("private.example.com", 443) is None
     assert proxy_mod.vet_resolved("meta.example.com", 443) is None
     assert proxy_mod.vet_resolved("loop.example.com", 443) is None
@@ -479,18 +516,18 @@ def test_sandbox_browser_listener_uses_same_target_policy_after_arming(
     shell = ClientRecord("t1", "g1", "sandbox")
     record_client(str(tmp_path), ip, shell)
     monkeypatch.setattr(proxy_mod, "vet_resolved", lambda host, port, **kwargs: (
-        "93.184.216.34" if host == "pypi.org" and kwargs.get("global_only", True)
-        else "172.17.0.1" if host == "host.docker.internal"
+        ("93.184.216.34",) if host == "pypi.org"
+        else ("172.17.0.1",) if host == "host.docker.internal"
         and not kwargs.get("global_only", True) else None))
     assert proxy_mod.target_policy(
         "pypi.org", 443, ip, browser_listener=True)[1] == "browser_attribution_missing"
-    assert proxy_mod.target_policy("host.docker.internal", 80, ip) == (None, None)
+    assert proxy_mod.target_policy("host.docker.internal", 80, ip) == (("172.17.0.1",), None)
     arm_sandbox_browser(str(tmp_path), ip, shell)
     assert proxy_mod.target_policy(
-        "pypi.org", 443, ip, browser_listener=True) == (None, None)
+        "pypi.org", 443, ip, browser_listener=True) == (("93.184.216.34",), None)
     assert proxy_mod.target_policy(
-        "host.docker.internal", 80, ip, browser_listener=True) == (None, None)
-    assert proxy_mod.target_policy("host.docker.internal", 80, ip) == (None, None)
+        "host.docker.internal", 80, ip, browser_listener=True) == (("172.17.0.1",), None)
+    assert proxy_mod.target_policy("host.docker.internal", 80, ip) == (("172.17.0.1",), None)
     record_client(str(tmp_path), ip, ClientRecord("t2", "g2", "sandbox"))
     assert proxy_mod.target_policy(
         "pypi.org", 443, ip, browser_listener=True)[1] == "browser_attribution_missing"
@@ -541,13 +578,13 @@ def test_recycled_browser_ip_cannot_use_previous_thread_grant(
     ip = "172.20.0.8"
     host = "api.example.com"
     monkeypatch.setattr(proxy_mod, "vet_resolved",
-                        lambda *_args, **_kwargs: "93.184.216.34")
+                        lambda *_args, **_kwargs: ("93.184.216.34",))
     _write_approval(tmp_path, host=host, tid="old-thread")
     old = ClientRecord("old-thread", "old-generation", "sandbox")
     record_client(str(tmp_path), ip, old)
     arm_sandbox_browser(str(tmp_path), ip, old)
     assert proxy_mod.target_policy(host, 443, ip, browser_listener=True) == (
-        "93.184.216.34", None)
+        ("93.184.216.34",), None)
     record_client(str(tmp_path), ip, ClientRecord(
         "new-thread", "new-generation", "sandbox", browser_armed=True))
     forget_client(str(tmp_path), ip, "old-generation")
@@ -646,10 +683,10 @@ def test_proxy_connect_throttles_before_opening_upstream(proxy_mod, monkeypatch)
         proxy_mod.socket, "create_connection",
         lambda target, timeout: calls.append(("connect", target, timeout)) or upstream)
 
-    assert proxy_mod.connect_upstream("example.com", 443, None) is upstream
+    assert proxy_mod.connect_upstream("example.com", 443, ("93.184.216.34",)) is upstream
     assert calls == [
         ("admit", "example.com"),
-        ("connect", ("example.com", 443), 10),
+        ("connect", ("93.184.216.34", 443), 10),
     ]
 
 
@@ -898,3 +935,80 @@ def test_browser_script_connections_share_a_bounded_parallel_window(proxy_mod):
     with pytest.raises(proxy_mod.HostThrottleBusy) as error:
         throttle.admit("scripts.example", burst=8)
     assert error.value.retry_after_s == 4
+
+
+@pytest.mark.parametrize("kind,browser,request_line", [
+    (kind, browser, line)
+    for kind, browser in [("sandbox", False), ("hermes", False), ("sandbox", True)]
+    for line in ["CONNECT control.example.test:5050 HTTP/1.1",
+                 "GET http://control.example.test:5050/path HTTP/1.1"]
+] + [("sandbox", True, "POLICY control.example.test:5050 HTTP/1.1")])
+@pytest.mark.parametrize("base", [False, True])
+def test_control_destination_denies_base_and_grant_before_dial(
+        proxy_mod, tmp_path, monkeypatch, kind, browser, base, request_line):
+    host = "control.example.test"
+    _write_approval(tmp_path, host=host, port=5050, expires=REVOKED_ONLY)
+    record = ClientRecord("t1", "generation", kind)
+    record_client(str(tmp_path), "172.20.0.9", record)
+    if browser:
+        arm_sandbox_browser(str(tmp_path), "172.20.0.9", record)
+    if base:
+        monkeypatch.setattr(proxy_mod, "ALLOWLIST", proxy_mod.ALLOWLIST | {host})
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, **kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.1.2.3", port))])
+    dials = []
+    monkeypatch.setattr(proxy_mod, "connect_upstream", lambda *a, **kw: dials.append(a))
+    client, peer = socket.socketpair()
+    peer.settimeout(1)
+    try:
+        peer.sendall((request_line + "\r\n\r\n").encode())
+        proxy_mod.handle(client, ("172.20.0.9", 1234), browser_listener=browser)
+        reply = peer.recv(8192)
+    finally:
+        client.close()
+        peer.close()
+    assert b"403 Forbidden" in reply
+    assert b"X-Assist-Egress-Result: assist_control_api" in reply
+    assert dials == []
+    # A public destination on the same port retains the ordinary grant path.
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, **kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))])
+    assert proxy_mod.target_policy(host, 5050, "172.20.0.9",
+                                   browser_listener=browser) == (("93.184.216.34",), None)
+
+
+def test_unapproved_destination_never_resolves(proxy_mod, monkeypatch):
+    calls = []
+    monkeypatch.setattr(proxy_mod, "resolve_targets", lambda *a, **kw: calls.append(a))
+    assert proxy_mod.target_policy("unapproved.example.test", 443, "172.20.0.9")[1] == "host_not_approved"
+    assert calls == []
+
+
+def test_approved_mixed_addresses_keep_public_choice(proxy_mod, tmp_path, monkeypatch):
+    _write_approval(tmp_path)
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, **kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))
+        for ip in ("10.1.2.3", "93.184.216.34")])
+    assert proxy_mod.target_policy("api.example.com", 443, "172.20.0.9") == (("93.184.216.34",), None)
+
+
+def test_base_target_connection_falls_back_without_new_dns(proxy_mod, monkeypatch):
+    resolutions = []
+    def resolve(host, port, **kwargs):
+        resolutions.append((host, port))
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (ip, port))
+                for ip in ('93.184.216.34', '93.184.216.35')]
+    monkeypatch.setattr(socket, 'getaddrinfo', resolve)
+    addresses, rejection = proxy_mod.target_policy('pypi.org', 443, '172.20.0.9')
+    assert rejection is None
+    connected = object()
+    dials = []
+    def connect(target, **kwargs):
+        dials.append(target)
+        if len(dials) == 1:
+            raise OSError('synthetic first address unreachable')
+        return connected
+    monkeypatch.setattr(proxy_mod.socket, 'create_connection', connect)
+    assert proxy_mod.connect_upstream('pypi.org', 443, addresses) is connected
+    assert resolutions == [('pypi.org', 443)]
+    assert dials == [('93.184.216.34', 443), ('93.184.216.35', 443)]

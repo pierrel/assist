@@ -549,7 +549,7 @@ def test_initialization_failure_retry_repairs_only_the_status_projection(wired, 
     monkeypatch.setattr(scheduler, "retry", lambda *job: retries.append(job))
     monkeypatch.setattr(scheduler, "complete", lambda *job: completions.append(job))
     monkeypatch.setattr(threads, "_set_status", fail_once)
-    monkeypatch.setattr(threads, "_execute_run",
+    monkeypatch.setattr(threads, "_settle_cancelled_initializer",
                         lambda *_args: (_ for _ in ()).throw(RuntimeError("setup failed")))
 
     threads._initialize_thread(tid, run.id, None)
@@ -588,8 +588,8 @@ def test_initialization_failure_requeues_the_same_run_until_one_final_dispatch(
     monkeypatch.setattr(threads, "_INITIALIZATION_SCHEDULER", scheduler)
     monkeypatch.setattr(scheduler, "retry", lambda *job: retries.append(job))
     monkeypatch.setattr(scheduler, "complete", lambda *job: completions.append(job))
-    monkeypatch.setattr(threads, "_execute_run",
-                        lambda *_args: (_ for _ in ()).throw(RuntimeError("clone failed")))
+    monkeypatch.setattr(threads, "_settle_cancelled_initializer",
+                        lambda *_args: (_ for _ in ()).throw(RuntimeError("setup failed")))
 
     threads._initialize_thread(tid, run.id, None)
 
@@ -597,6 +597,7 @@ def test_initialization_failure_requeues_the_same_run_until_one_final_dispatch(
     assert [(item.id, item.work_id, item.status) for item in service.list(tid)] == [
         (run.id, "first-work", "pending")]
 
+    monkeypatch.setattr(threads, "_settle_cancelled_initializer", lambda *_args: False)
     monkeypatch.setattr(threads, "_execute_run", execute)
     threads._initialize_thread(retries[0][1], retries[0][0], retries[0][2])
 
@@ -617,8 +618,8 @@ def test_persistent_initialization_failure_stays_owned_and_requeued(wired, monke
     monkeypatch.setattr(scheduler, "retry", lambda *job: retries.append(job))
     monkeypatch.setattr(service, "_write",
                         lambda *_args: (_ for _ in ()).throw(OSError("store unavailable")))
-    monkeypatch.setattr(threads, "_execute_run",
-                        lambda *_args: (_ for _ in ()).throw(RuntimeError("clone failed")))
+    monkeypatch.setattr(threads, "_settle_cancelled_initializer",
+                        lambda *_args: (_ for _ in ()).throw(RuntimeError("setup failed")))
 
     threads._initialize_thread(tid, run.id, None)
     threads._initialize_thread(tid, run.id, None)
@@ -682,7 +683,7 @@ def test_thread_deletion_closes_phone_journals(wired, monkeypatch):
     assert journal.reserve(tid, run.work_id)
     assert journal.activate(tid, run.work_id)
     monkeypatch.setattr(threads, "RUN_STREAMS", journal)
-    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+    monkeypatch.setattr(threads._HERMES_RUNTIME, "retire", lambda _tid: None)
     monkeypatch.setattr(threads, "_evict_caches", lambda _tid: None)
     monkeypatch.setattr(threads, "_evict_egress", lambda _tid: None)
 
@@ -712,7 +713,7 @@ def test_browser_stop_does_not_hold_global_admission(wired, monkeypatch, target)
         return False
 
     monkeypatch.setattr(BrowserManager, "confirm_owner_stopped", confirm)
-    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+    monkeypatch.setattr(threads._HERMES_RUNTIME, "retire", lambda _tid: None)
     monkeypatch.setattr(threads, "_evict_caches", lambda _tid: None)
     monkeypatch.setattr(threads, "_evict_egress", lambda _tid: None)
 
@@ -742,7 +743,7 @@ def test_unconfirmed_web_browser_stop_retains_thread_state(
         from assist.browser.authority import mark_new_thread
         mark_new_thread(str(root), child)
     from assist.browser.manager import BrowserManager
-    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+    monkeypatch.setattr(threads._HERMES_RUNTIME, "retire", lambda _tid: None)
     monkeypatch.setattr(BrowserManager, "confirm_owner_stopped",
                         lambda *_args: (_ for _ in ()).throw(RuntimeError("stop unconfirmed")))
 
@@ -769,7 +770,7 @@ def test_new_child_during_browser_proof_prevents_parent_deletion(wired, monkeypa
         return False
 
     monkeypatch.setattr(BrowserManager, "confirm_owner_stopped", confirm)
-    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+    monkeypatch.setattr(threads._HERMES_RUNTIME, "retire", lambda _tid: None)
 
     with pytest.raises(RuntimeError, match="children changed"):
         threads._delete_thread_and_children(tid)
@@ -793,7 +794,7 @@ def test_recreated_child_id_during_browser_proof_prevents_parent_deletion(
         return False
 
     monkeypatch.setattr(BrowserManager, "confirm_owner_stopped", confirm)
-    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+    monkeypatch.setattr(threads._HERMES_RUNTIME, "retire", lambda _tid: None)
 
     with pytest.raises(RuntimeError, match="children changed"):
         threads._delete_thread_and_children(tid)
