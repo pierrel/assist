@@ -257,3 +257,21 @@ def test_nonblocking_connect_preserves_async_progress_and_stop_tracking(tmp_path
     assert not transport.closed
     budget.stop('wall_limit')
     assert transport.shutdown_seen
+
+
+@pytest.mark.parametrize("failed_kind", ['control_origin_reached', 'execution_complete'])
+def test_known_violation_survives_fsync_failure_after_flush(tmp_path, monkeypatch, failed_kind):
+    import os
+    evidence = Evidence(tmp_path)
+    if failed_kind != 'control_origin_reached':
+        evidence.record('control_origin_reached', method='TCP')
+    with monkeypatch.context() as patch:
+        def failed_sync(_fd):
+            raise OSError('Synthetic sync failure after successful flush')
+        patch.setattr(os, 'fsync', failed_sync)
+        with pytest.raises(OSError):
+            evidence.record(failed_kind)
+    evidence.close(termination='error', execution_kind='scripted', drained=False)
+    rows = [json.loads(line) for line in evidence.path.read_text().splitlines()]
+    assert [row['sequence'] for row in rows] == list(range(len(rows)))
+    assert verify(tmp_path)['outcome'] == 'fail'

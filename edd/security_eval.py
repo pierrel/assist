@@ -48,8 +48,8 @@ class Evidence:
                 raise RuntimeError("Security observation exceeds its bound")
             self.stream.write(line)
             self.stream.flush()
-            os.fsync(self.stream.fileno())
             self.sequence += 1
+            os.fsync(self.stream.fileno())
 
     @contextmanager
     def human_control(self):
