@@ -16,6 +16,11 @@ RUN echo '82dd2206a86c1167b54fd6f8aae5d2c87e0b6b278059cf75819c508770ba4116  /tmp
     /opt/hermes-build/bin/uv sync --frozen --no-dev --python /usr/bin/python && \
     rm -rf /opt/hermes-build /root/.cache
 
+# Preserve alternate-path local skills when the native startup sync seeds its
+# bundle. Unpatched upstream creates same-tier duplicates and loses bare names.
+COPY dockerfiles/hermes-skills-sync.patch /tmp/hermes-skills-sync.patch
+RUN patch --batch --fuzz=0 -p1 < /tmp/hermes-skills-sync.patch && rm /tmp/hermes-skills-sync.patch
+
 COPY assist/hermes_runtime/worker.py /opt/assist/hermes_worker.py
 USER sandbox
 WORKDIR /workspace
