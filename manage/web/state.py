@@ -58,7 +58,7 @@ from assist.thread_manager import (
     ThreadManager, set_web_tools, set_web_triage_tools, set_web_interrupt_on,
     set_web_triage_interrupt_on)
 from assist.thread_engine import read_thread_engine
-from assist.pi_preview import PiPreviewPolicy
+from assist.pi_preview import NativePreviewPolicy, PiPreviewPolicy
 from assist.location import LocationStore, get_location
 from assist.frequency import FrequencyDecisionStore, frequency_tools
 from edd.live_capture import CaptureStore, CaptureWorker
@@ -129,6 +129,7 @@ CAPTURE_CSRF = secrets.token_urlsafe(32)
 # lifespan stop path only.
 CAPTURE_THREAD_LIMITER = anyio.CapacityLimiter(2)
 PI_PREVIEW = PiPreviewPolicy(ROOT)
+HERMES_PREVIEW = NativePreviewPolicy(ROOT, engine="hermes")
 LOCATION_STORE = LocationStore(ROOT)
 FREQUENCY_STORE = FrequencyDecisionStore(ROOT)
 
@@ -787,8 +788,8 @@ def get_cached_description(tid: str) -> str:
         if os.path.isfile(description_file):
             with open(description_file, 'r') as f:
                 DESCRIPTION_CACHE[tid] = f.read()
-        elif read_thread_engine(MANAGER.thread_dir(tid)).name == "pi":
-            return "Pi thread"
+        elif (engine := read_thread_engine(MANAGER.thread_dir(tid)).name) in {"pi", "hermes"}:
+            return "Pi thread" if engine == "pi" else "Hermes thread"
         else:
             set_description(tid, MANAGER.get(tid).description())
         return DESCRIPTION_CACHE[tid]

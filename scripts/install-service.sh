@@ -25,6 +25,7 @@ fi
 # Build environment variables section
 ENV_VARS=""
 [ -n "$ASSIST_PORT" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_PORT=$ASSIST_PORT\"\n"
+[ -n "${ASSIST_BASE_URL:-}" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_BASE_URL=$ASSIST_BASE_URL\"\n"
 [ -n "$ASSIST_MODEL_URL" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_MODEL_URL=$ASSIST_MODEL_URL\"\n"
 [ -n "$ASSIST_DOMAINS" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_DOMAINS=$ASSIST_DOMAINS\"\n"
 [ -n "$ASSIST_SEARCH_URL" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_SEARCH_URL=$ASSIST_SEARCH_URL\"\n"
@@ -58,6 +59,19 @@ ENV_VARS=""
 [ -n "$EMAIL_FROM_NAME" ] && ENV_VARS="${ENV_VARS}Environment=\"EMAIL_FROM_NAME=$EMAIL_FROM_NAME\"\n"
 [ -n "$EMAIL_ALWAYS_CC" ] && ENV_VARS="${ENV_VARS}Environment=\"EMAIL_ALWAYS_CC=$EMAIL_ALWAYS_CC\"\n"
 [ -n "$ASSIST_GMAIL_TOKEN_FILE" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_GMAIL_TOKEN_FILE=$ASSIST_GMAIL_TOKEN_FILE\"\n"
+
+# Native guidance is free text: quote for systemd, then for the sed replacement.
+if [ -n "${ASSIST_HERMES_SYSTEM_MESSAGE:-}" ]; then
+    HERMES_ENV=$(python3 - <<'PY_ENV'
+import json
+import os
+value = "ASSIST_HERMES_SYSTEM_MESSAGE=" + os.environ["ASSIST_HERMES_SYSTEM_MESSAGE"]
+line = "Environment=" + json.dumps(value.replace("%", "%%"), ensure_ascii=False)
+print(line.replace("\\", "\\\\").replace("&", "\\&").replace("|", "\\|"))
+PY_ENV
+)
+    ENV_VARS="${ENV_VARS}${HERMES_ENV}\n"
+fi
 
 # Generate service file from template and install it
 cat "$DEPLOY_PATH/scripts/assist-web.service.template" | \

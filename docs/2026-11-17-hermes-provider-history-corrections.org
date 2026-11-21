@@ -1,0 +1,58 @@
+#+title: Hermes provider admission and compressed history corrections
+#+date: 2026-11-17
+
+* Corrected behavior
+The provider relay evaluates current admission after acquiring its existing
+connection condition, immediately before registering and sending the request.
+A request waiting behind another bounded connect/send cannot reuse an earlier
+grant after Run expiry or operator disablement. The callback retains the exact
+Run, queue handle and original generation checks. No new admission mechanism is
+introduced. Runtime teardown takes the relay condition before later authority
+cleanup; queue release callbacks run outside the queue condition. The admission
+callback does not acquire the runtime or Run-admission lock.
+
+Native compression defaults to rewriting the current session in place. Its
+supported rotating mode can instead create a compression descendant. The worker
+now resolves the native SessionDB compression tip before both loading history and
+constructing AIAgent, including when the preceding worker closed that descendant.
+There is no additional session mapping or store.
+
+Native Git changes retain their diff and Merge controls. The Deep Agents Review
+link is hidden because its routes do not support a native thread.
+
+* Verification
+An actual Unix HTTP request waits on the relay condition after the old code's
+admission check. Revoking permission before releasing the condition produces an
+upstream request and HTTP 200 on the old source. The corrected source returns 409
+without contacting the private upstream. Existing active-request stop/drain and
+cross-thread queue ownership tests remain in the affected suite.
+
+The new =check-hermes-compression.py= capability runs in the pinned runtime image
+with =network:none= and temporary native state. Its full prompt sequence is
+"Remember that the note is blue." then "What color is the note?" A private
+scripted provider supplies the first response; a scripted summary replaces only
+the compressor's model output. The actual native forced-compression path must
+publish a different session, and worker cleanup must close it. The next worker
+must select that tip and pass its summary into both native history and the next
+provider request. The previous worker fails by reopening the original ID. This
+is persistence capability evidence, not summary quality, real-model behavior or
+host admission coverage. The separate native product capability retains its two
+pauses, two competitors and early accepted follower.
+
+An actual native thread page with Git changes must show its diff and Merge form,
+omit the unsupported Review link, and retain the review route's 409 guard.
+
+* Build provenance
+The normal Dockerfile remains pinned to the same complete native source and
+frozen dependencies. Its rebuild encountered an HTTP 429 on the pinned archive.
+The validation image therefore derives from the already verified runtime image
+with only the corrected worker copied into it. Delivery records name both exact
+image digests, the unchanged parent layers and worker checksum. No alternate
+native version or dependency set is substituted.
+
+* Historical supersessions
+=2026-11-16-hermes-native-implementation.org=, "Outcome and boundary":
+provider admission is checked inside the existing relay send condition, and
+native persisted history resolves compression descendants after close. The
+current preview UI offers native Git diff and Merge, without the unsupported
+Deep Agents Review action. The earlier dated record remains unchanged.

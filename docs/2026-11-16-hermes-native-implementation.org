@@ -1,0 +1,114 @@
+#+title: Hermes native implementation and bounded acceptance
+#+date: 2026-11-16
+
+* Outcome and boundary
+This implements selected option A: the whole pinned native Hermes runtime inside
+Assist's existing bounded Run and shared sandbox. Deep Agents remains the default.
+Hermes is an operator-enabled manual-thread preview; Pi execution is retired while
+its historical transcript, activity trace and visible-summary continuation remain.
+
+Native prompts, SessionDB history, tools, skills, memory and joined delegation
+remain native. Assist does not rewrite the native loop. The host retains admission,
+original generation/Run authority, Git, egress and verified stop before publication.
+The private provider relay independently checks admission and original authority
+for each parent, child and auxiliary request. Cooperative native callbacks identify
+quiescent boundaries, but cannot authorize model access after admission loss.
+
+A yield drains operations and open provider transports, freezes the existing
+container and uses the existing same-work successor scheduler. The successor
+resumes the same invocation and joined child. Both existing cap paths require
+verified stop/drain before releasing admission. Cancellation, deletion and Git
+publication reuse existing authority/reset and cleanup machinery. There is no new
+lease, scheduler or lifecycle owner. A lost native process records an error and preserves files without replaying the
+user's turn. An already interrupted invocation uses its existing terminal
+cancellation transition; a running invocation becomes error.
+
+* Source and configuration
+Hermes pin: =ec3249919accf7bc51f780dcff663e8f19a0e176=.
+The upstream archive SHA256 is
+=82dd2206a86c1167b54fd6f8aae5d2c87e0b6b278059cf75819c508770ba4116=.
+The Dockerfile retains the whole source and frozen dependency lock. The image
+inherits the ordinary sandbox's Git and browser/runtime foundation.
+
+Native =gateway_delegation_inline_scope(True)= must surround AIAgent construction;
+setting gateway mode alone did not select the joined delegation schema. Native
+outer hook/compression deadlines are disabled through supported configuration
+where host Run lifetime owns the bound; individual native RPC deadlines remain.
+Post-response memory/skill review and title work are joined before result delivery.
+The process and generation must actually exit/stop before Git success publication.
+
+Host configuration replaces native parent, child and built-in/persisted auxiliary
+provider routes and fallback routes with the private relay. Native toolsets are
+files, terminal, skills, memory and delegation. Browser/search and interactive
+approval transports are unavailable. Native api_server unattended approvals deny
+commands requiring approval. Optional host guidance adds only a native system
+message block; it is empty by default. Arbitrary additional native plugins are
+outside the validated preview configuration.
+
+The sandbox client map identifies Hermes separately. The permanent
+=host.docker.internal= model exception requires a valid ordinary sandbox record;
+Hermes, Pi, missing/malformed attribution and legacy/no-map traffic are denied.
+External allowlist behavior remains unchanged. Deployments must retain mapped
+ordinary attribution; the old no-map model exception is deliberately removed.
+
+* Acceptance scenarios
+These are deterministic capability checks, not natural-model behavioral evals.
+The provider chooses exact native tool calls so failures isolate the integration.
+No real model, GPU, physical phone or production deployment was used.
+
+** Repeatable native client check
+=scripts/check-hermes-native.py= creates a private server state tree, real native
+Docker sandbox with =network:none= and a fake OpenAI-compatible upstream. Browser
+creation selects Hermes. The first prompt is: "Have a helper create a note saying
+blue, then tell me it is done." The native joined helper writes the blue file.
+A queued competitor requests the model while the first thread parks. The check
+requires competitor completion between park/resume, the same native process and
+joined work resuming, and exactly one blue write. The second browser prompt is:
+"Change that note to green." Native history leads to a read and green rewrite.
+Browser HTML and authenticated phone history must show each final answer once.
+The third prompt is: "Remove the scratch folder." The fake provider selects a
+native terminal command requiring approval; unattended denial must preserve the
+fixture file. A native title request traverses the same provider fence.
+
+The fixture uses one child-boundary rendezvous and substitutes network setup and
+startup browser reconciliation. It does not prove live egress or model judgment.
+All private containers are stopped in cleanup, including on a bounded TERM.
+
+** Mapped ordinary compatibility
+=dockerfiles/check-native-model-egress.py= takes the exact candidate proxy image,
+creates an internal Docker network, a fake model and an ordinary sandbox client.
+It requires HTTP 200 for a valid ordinary record, 403 for Hermes/Pi/missing/malformed
+records, and 403 for a legacy proxy with no map. An external allowlisted fixture
+host must still return 200 in mapped and legacy modes. No host ports or production
+proxy/model are used. This smoke is repeatable before deployment; live attribution
+must still be checked on the intended target.
+
+** Additional actual product-path receipts
+Private acceptance runs also covered both cap-release paths with active provider
+work, authenticated user cancellation of a parked turn, paused thread deletion,
+and real restricted-sandbox Git success/error handling against a private bare
+remote. Success published blue and green commits only after verified native stop.
+Error preserved local edits without remote publication. Browser and phone-history
+requests used actual application routes; no physical phone action was performed.
+A native title parked before its RPC without consuming that RPC's timeout.
+Forced context compression and real-model quality were not acceptance claims.
+
+* Delivery and review
+The standard unit suite passed 3100 tests (15 skipped, one deselected) before the
+final lost-process regression and documentation/build wiring. Focused checks cover
+those changes. Existing deterministic tests cover native queue release, actual
+cross-thread relay admission/drain, client identity/history, ordinary/native egress,
+Git error handling and legacy Pi retirement. The retained independent reviewer
+checks the final host/client/retirement snapshot and separately checks documentation
+alignment. Exact final source and image identities accompany the candidate receipt.
+No deployment or merge is claimed by this document.
+
+* Historical supersessions
+- =2026-11-10-hermes-agent-option-a-decision.org=: the selected native-runtime
+  option remains. This implementation replaces the unproved parking boundary with
+  the existing Run/successor and retained-container integration described above.
+- =2026-11-10-hermes-agent-design.org=: its proposed adapter/component allocation
+  is replaced by current architecture views: C25 is the native host adapter, C24
+  the private relay, C26 the native runtime. C21 remains the independently merged
+  host expiry service. Browser capability and interactive approval transport are
+  explicitly unavailable in this bounded milestone.

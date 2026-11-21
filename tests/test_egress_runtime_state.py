@@ -24,7 +24,9 @@ def _client():
     ordinary.id = "ordinary-id"
     ordinary.attrs = {
         "Id": ordinary.id, "Driver": "bridge", "Internal": True,
-        "EnableIPv6": False, "IPAM": {"Config": [{"Subnet": "172.30.0.0/16"}]}}
+        "EnableIPv6": False,
+        "Options": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
+        "IPAM": {"Config": [{"Subnet": "172.30.0.0/16"}]}}
     browser = MagicMock()
     browser.id = "browser-id"
     browser.attrs = {

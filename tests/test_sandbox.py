@@ -612,6 +612,21 @@ class TestSandboxManager(TestCase):
         client.api._version = "1.43"
         client.api.create_container.return_value = {"Id": container.id}
         client.containers.get.return_value = container
+        networks = {}
+        for name, identity, subnet in (
+                ("assist-egress-network", "ordinary-net", "172.30.0.0/16"),
+                ("assist-browser-network", "browser-net", "172.31.0.0/16")):
+            network = MagicMock()
+            network.attrs = {
+                "Id": identity, "Driver": "bridge", "Internal": True,
+                "EnableIPv6": False,
+                "Options": {"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
+                "IPAM": {"Config": [{"Subnet": subnet}]}}
+            def connect(proxy, *, _name=name, _identity=identity):
+                proxy.attrs["NetworkSettings"]["Networks"][_name] = {"NetworkID": _identity}
+            network.connect.side_effect = connect
+            networks[name] = network
+        client.networks.get.side_effect = networks.__getitem__
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -619,20 +634,15 @@ class TestSandboxManager(TestCase):
         SandboxManager._docker_client = None
         SandboxManager._containers.clear()
         SandboxManager._generation_owners.clear()
-        # These lifecycle mocks have no Docker network attributes; live
-        # routing validation is covered by the real browser Docker tests.
-        self.network_identity = patch(
-            'assist.sandbox_manager._network_identity',
-            side_effect=lambda _network, *, isolated:
-                ('browser-net', '172.31.0.0/16') if isolated
-                else ('ordinary-net', '172.30.0.0/16'))
-        self.network_identity.start()
+        self.runtime_environment = patch.dict(os.environ, {
+            "ASSIST_EGRESS_RUNTIME_DIR": os.path.join(self.temp_dir, "egress-runtime")})
+        self.runtime_environment.start()
         self.expiry_patch = patch('assist.sandbox_expiry.arm')
         self.arm_expiry = self.expiry_patch.start()
 
     def tearDown(self):
         self.expiry_patch.stop()
-        self.network_identity.stop()
+        self.runtime_environment.stop()
         SandboxManager._docker_client = None
         SandboxManager._containers.clear()
         SandboxManager._generation_owners.clear()
@@ -1237,7 +1247,7 @@ class TestSandboxManager(TestCase):
         mock_client = MagicMock()
         # Has to be a DockerException subclass now that the catch is
         # narrowed; a bare Exception would propagate (correctly).
-        mock_client.api.create_container.side_effect = DockerException("Docker not running")
+        mock_client.networks.get.side_effect = DockerException("Docker not running")
 
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
             sandbox = SandboxManager.get_sandbox_backend(test_path)

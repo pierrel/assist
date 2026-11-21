@@ -463,7 +463,7 @@ def test_thread_deletion_stops_browser_before_erasing_run_journal(
     calls = []
     monkeypatch.setattr(threads, "_runs", lambda: runs)
     monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
-    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+    monkeypatch.setattr(threads._HERMES_RUNTIME, "retire", lambda _tid: None)
     monkeypatch.setattr(threads.RUN_STREAMS, "mark_thread_gone", lambda _tid: None)
     monkeypatch.setattr(browser.BrowserManager, "cleanup",
                         lambda _tid: calls.append("browser"))
@@ -480,7 +480,7 @@ def test_failed_browser_stop_prevents_thread_deletion(monkeypatch, tmp_path):
     (tmp_path / "t").mkdir()
     calls = []
     monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
-    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+    monkeypatch.setattr(threads._HERMES_RUNTIME, "retire", lambda _tid: None)
     monkeypatch.setattr(browser.BrowserManager, "cleanup",
                         lambda _tid: (_ for _ in ()).throw(
                             browser.BrowserUnavailable("stop unconfirmed")))
@@ -496,7 +496,7 @@ def test_deletion_gate_rejects_late_browser_registration(monkeypatch, tmp_path):
     entered, release = Event(), Event()
     monkeypatch.setattr(threads, "_runs", lambda: RunService(str(tmp_path)))
     monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
-    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: None)
+    monkeypatch.setattr(threads._HERMES_RUNTIME, "retire", lambda _tid: None)
     monkeypatch.setattr(threads.RUN_STREAMS, "mark_thread_gone", lambda _tid: None)
     monkeypatch.setattr(browser.BrowserManager, "cleanup", lambda _tid: None)
     monkeypatch.setattr(browser.BrowserManager, "confirm_owner_stopped",
@@ -528,7 +528,7 @@ def test_deletion_waits_for_pending_managed_generation(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(threads, "_runs", lambda: RunService(str(tmp_path)))
     monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
-    monkeypatch.setattr(threads._PI_RUNTIME, "retire", lambda _tid: started.set())
+    monkeypatch.setattr(threads._HERMES_RUNTIME, "retire", lambda _tid: started.set())
     monkeypatch.setattr(threads.RUN_STREAMS, "mark_thread_gone", lambda _tid: None)
     monkeypatch.setattr(browser.BrowserManager, "cleanup",
                         lambda _tid: calls.append("cleanup"))
