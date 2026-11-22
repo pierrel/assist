@@ -1720,3 +1720,18 @@ Explicit requests to quote or export SMS follow the existing privacy rules.
 Existing legacy inbound JSON files remain untouched. Migrate them only through
 an explicitly reviewed operator procedure, preserving their original identities;
 never replay messages to fill history.
+
+### Contacts in a private repository
+Contacts can be ordinary `contacts.yaml` data in a private Git domain. Use a
+thread bound to that repository and the existing file tools to read the current
+file, update it, and verify the result. Use the explicit Merge & Push action to
+land the branch; the agent does not push main. A phone checkout can be pulled
+manually afterward. No contacts are mounted into unrelated threads or injected
+into the system prompt by this workflow.
+
+For the EmacsOS SMS reader, the file has a top-level `contacts` list. Each entry
+has `name` and `phones`, with optional `emails` and `aliases` lists. Keep quoted
+phone strings in exact SMS form, such as `+12025550123`. Readable fields are
+available to all ordinary file tools in that repository thread; there is no
+per-contact isolation. Keep passwords and tokens in the secret store. Private Git
+does not encrypt files, history, backups or a phone SD card.
