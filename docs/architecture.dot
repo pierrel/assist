@@ -41,6 +41,7 @@ digraph Assist {
   C7 -> C3 [label="child + follow-up Runs", constraint=false];
   C7 -> C8 [label="borrow shared execution; defer Git", constraint=false];
   C4 -> C8 [label="Git / sandbox / browser slice control"];
+  C2 -> C8 [label="human viewer: pixels / input / handback", constraint=false];
   C8 -> C21 [label="arm once at container creation"];
   C21 -> C10 [label="+3h: retain owned; remove proven ownerless"];
   C6 -> C8 [label="browser tool calls", constraint=false];

@@ -1,12 +1,14 @@
 """Cooperative cancellation + fair-scheduling pause for :class:`ThreadAffinityQueue`.
 
-The queue's tick timer flips two flags on the holder handle, which this middleware
+An explicit browser offer pauses in ``before_model`` after its tool checkpoint,
+leaving a pending model node for Return. The host publishes its control link.
+The queue timer or a browser takeover request flags the holder handle, which this middleware
 reads in ``after_model`` (fired between LLM calls, so it yields at a superstep
 boundary without corrupting an in-flight slot):
 
 - ``expired`` — cumulative-active hold hit the 2h cap -> raise
   :class:`ThreadHoldExpired` (TERMINAL runaway backstop).  Checked FIRST.
-- ``pause_requested`` — the quantum expired with a waiter present -> raise
+- ``pause_requested`` — fairness or human browser takeover requested a yield -> raise
   :class:`ThreadPauseRequested` (NON-terminal: the run path pauses the turn and
   resumes it later from its durable checkpoint).
 
@@ -30,12 +32,29 @@ logger = logging.getLogger(__name__)
 
 
 class ThreadQueueMiddleware(AgentMiddleware):
+    def before_model(self, state: AgentState, runtime: Runtime):
+        """Park an explicit offer after its tool result checkpoint, before model END."""
+        handle = active_handle()
+        if handle is None:
+            return None
+        from assist.browser.manager import BrowserManager
+        session = BrowserManager.current_session(handle.thread_id)
+        if session is not None and session.handoff_url and session.human_requested:
+            if handle.expired:
+                raise ThreadHoldExpired("thread exceeded its active model hold cap")
+            raise ThreadPauseRequested("user requested live browser control")
+        return None
+
     def after_model(
         self, state: AgentState, runtime: Runtime
     ) -> dict[str, Any] | None:
         handle = active_handle()
         if handle is None:
             return None
+        from assist.browser.manager import BrowserManager
+        session = BrowserManager.current_session(handle.thread_id)
+        if session is not None:
+            session.model_boundary()
         if handle.expired:
             logger.info("thread-queue: yielding %s — hold cap hit (kill)", handle.thread_id)
             raise ThreadHoldExpired(
@@ -43,10 +62,10 @@ class ThreadQueueMiddleware(AgentMiddleware):
                 "killed to avoid starving other threads"
             )
         if handle.pause_requested:
-            logger.info("thread-queue: yielding %s — quantum pause for a waiting turn",
+            logger.info("thread-queue: yielding %s for scheduling or browser takeover",
                         handle.thread_id)
             raise ThreadPauseRequested(
-                f"thread {handle.thread_id} paused at its quantum to let a waiting "
-                "turn run; will resume from its checkpoint"
+                f"thread {handle.thread_id} yielded for scheduling or browser takeover; "
+                "will resume from its checkpoint"
             )
         return None

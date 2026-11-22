@@ -1,0 +1,115 @@
+#+title: Human control of an existing Assist browser session
+#+date: 2026-11-17
+State: Implemented candidate; deployment and physical phone trial pending
+
+* Problem and evidence
+The user needs to finish a login or form in the exact browser Assist opened,
+then return it with current tabs, unsent input and ephemeral page state intact.
+Copying cookies into another browser does not serialize the live page. A
+synthetic Chromium-to-Firefox storage copy preserved a fixture login but lost
+its modified form, heap and tab-local sessionStorage. A separate pixel/input
+viewer proof preserved those values in the original Chromium page.
+
+The chosen first flow is therefore Firefox displaying and controlling the
+existing Chromium session. Native Firefox with per-thread application/session
+state remains a future preference, not a claimed feature of this viewer.
+
+* Existing owners and control flow
+The existing BrowserSession remains the sole host owner. Its Take over request
+asks the actual parent or eligible child model-slot holder to pause at the
+normal cooperative boundary. The Run path saves an ordinary same-work
+continuation and releases the model queue. Human control retains the same
+container running instead of freezing it. A fairness-paused session can be
+unpaused through its existing verified resume path for human use.
+
+Parent and child dispatch recheck human ownership after acquiring the queue,
+before claiming or borrowing work. Deferred IDs remain with that session and
+are notified through the existing scheduler on return/cleanup. A child already
+running yields at its own boundary. No new lifecycle manager, browser service,
+durable session store, virtual display or browser synchronization layer exists.
+
+Human commands and agent commands share the thread gate and session lock. Only
+the controlling viewer client can issue fixed page inputs. The private worker
+captures bounded JPEG pixels and applies click, text, selected keys, scroll and
+viewport operations through its existing Playwright connection. Its debugging
+port remains sealed. Website DOM is not reconstructed under Assist's origin.
+
+Return invalidates the control capability and pauses execution before making
+its continuation runnable. Cached semantic targets are retired by human inputs.
+If a pause acknowledgment is lost, the host inspects that exact generation.
+Confirmed paused state completes handback; otherwise exact cleanup ends the
+session and terminalizes its held parent continuation with a visible error,
+without replaying uncertain effects. Saved workspace files remain.
+Browser mutations additionally remain blocked until an observation has reached
+a new model response. This prevents a buffered pre-takeover navigation/fill,
+including an old batch containing observe then navigation, from executing merely
+because the checkpoint resumed. The next response can choose its action using
+the fresh observation.
+
+Cancellation and newer-user reset recognize a completed human takeover as
+quiescent execution, even though its container is unpaused. They prove exact
+stop and retire the viewer without requiring Return. Approval, terminal,
+stop-before-host-Git, native persistent /agent sharing and the owned-generation
+age check remain existing contracts. Human work still owns its generation;
+age alone never authorizes killing it. Shared background processes run during
+human control, just as they do during trusted shared child execution.
+
+* Client boundary and usability
+The viewer is served on the existing trusted-network web UI boundary. A fresh
+session control token is delivered only by its same-origin page. POST controls
+require that token, the exact browser Origin and a client identity retained in
+the viewer tab's sessionStorage. Another client cannot become a second writer.
+Return and cleanup retire the token. No bearer credential is placed in a URL.
+Pages cannot be framed, cross-origin fetch access is not enabled, and pixels/
+control responses are not cached. Bodies, text, coordinates, viewport, image
+bytes and input rate are bounded. Busy frames fail promptly rather than queue
+behind a long current screenshot. Screenshots and typed values are never saved
+or returned to the agent by this viewer.
+Each displayed frame is bound to its tab and dimensions. Tab changes retire
+input authority until a matching frame arrives; obsolete responses are
+discarded. A slow old-tab frame cannot redirect a tap or text into a new tab.
+
+The phone path uses tap focus, an explicit masked text toolbar and Type,
+Select all/backspace/Enter controls, swipe/button scrolling, tab selection,
+viewer reconnect and Return. Firefox-native site autofill, DOM selection,
+clipboard/file transfer, audio and local passkeys are outside this first flow.
+The actual phone keyboard, display and network remain deployment acceptance.
+
+* Deterministic acceptance
+The synthetic integrated test uses real Run records, the affinity queue,
+BrowserSession, HTTP viewer routes and BrowserWorker's actual DOM operations.
+Its opt-in local Chromium bootstrap replaces Docker startup/transport/control;
+this limitation is explicit. The fixture opens a form and second tab, enters an
+agent draft and establishes synthetic login/heap/sessionStorage state. Takeover
+releases the queue. A separate Run completes while human input edits the form.
+Return rejects late input. Buffered navigation and overwrite calls fail until
+a fresh observation has reached another model boundary, then one submit occurs.
+No real model, website account or phone is used by this test.
+
+Additional deterministic controls cover newer-user and cancellation exact-stop
+without handback, pending child work, exclusive control, and stale capabilities.
+Delayed frame delivery exercises tab changes while an old image is in flight.
+Lost-acknowledgment controls distinguish confirmed pause from exact teardown.
+Real authority/admission contention checks the activation lock order.
+Existing shared-child/browser, native agent state, expiry, authority and Git
+regressions remain relevant compatibility checks. These are capability/runtime
+checks, not natural-model or physical-device acceptance.
+
+* Phone trial after deployment
+On an isolated synthetic thread, open a synthetic form in Assist. From that
+thread in phone Firefox choose Browser control, Take over and wait for human
+ownership. Verify the already filled field, edit using actual wvkbd, tap and
+scroll, select another existing tab, reload/reconnect the viewer, then Return.
+Require same-page readback, preserved login/heap/tab state and one intentional
+submit. In parallel require another thread to finish ordinary work. Repeat with
+cancellation during human control and require the old viewer to stop. Inspect
+Firefox version and viewport read-only first. Do not use real credentials for
+this first trial or restart unrelated phone/UI/radio services.
+
+* Historical supersessions
+This changes the browser fairness-only retention description in
+=2026-11-12-browser-shared-execution.org=, section =Ownership and privacy=:
+human control is another owner of the same shared execution, which stays
+running while the model slot is released. Shared /agent and later owner-aware
+lifetime amendments remain in effect. This is not live-page migration into a
+native Firefox engine.

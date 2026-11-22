@@ -683,9 +683,15 @@ class TestSandboxManager(TestCase):
     def test_browser_capable_turn_gets_private_tmpfs_and_seccomp(self, _backend):
         from assist.browser.authority import mark_new_thread
         from assist.browser.manager import BrowserManager
+        from assist.run_service import RunService
         test_path = os.path.join(self.temp_dir, "browser-turn", "domain")
         os.makedirs(test_path)
         mark_new_thread(self.temp_dir, "browser-turn")
+        runs = RunService(self.temp_dir)
+        owner = runs.create("browser-turn", "general-agent", "Open a page", user_origin=True)
+        runs.claim("browser-turn", owner.id)
+        runs.create("browser-turn", "general-agent", "Keep that page", user_origin=True,
+                    interjection_work_id=owner.work_id)
         client = MagicMock()
         container = MagicMock()
         container.id = "browser-turn-generation"
@@ -701,7 +707,10 @@ class TestSandboxManager(TestCase):
              patch('assist.sandbox_expiry.arm') as arm_expiry:
             SandboxManager.get_sandbox_backend(
                 test_path, browser_capable=True,
-                thread_scope=(self.temp_dir, "browser-turn"))
+                thread_scope=(self.temp_dir, "browser-turn"), owner_run_id=owner.id)
+        from assist.browser.authority import fence
+        with fence(self.temp_dir, "browser-turn") as state:
+            assert state.lease["sequence"] == owner.admission_sequence
         arm_expiry.assert_called_once_with(container.id, thread_id="browser-turn",
                                           threads_root=self.temp_dir)
         options = client.containers.run.call_args.kwargs
@@ -709,6 +718,96 @@ class TestSandboxManager(TestCase):
         assert options["tmpfs"]["/run/assist-browser"].endswith(
             "uid=10001,gid=10001,mode=0700")
         assert options["security_opt"][0].startswith("seccomp={")
+
+    @patch('assist.sandbox.DockerSandboxBackend')
+    def test_sibling_fallbacks_start_real_sandbox_in_order(self, _backend):
+        from assist.browser import authority
+        from assist.browser.manager import BrowserManager
+        from assist.run_service import RunService
+        tid = "fallback-thread"
+        work_dir = os.path.join(self.temp_dir, tid, "domain")
+        os.makedirs(work_dir)
+        authority.mark_new_thread(self.temp_dir, tid)
+        runs = RunService(self.temp_dir)
+        owner = runs.create(tid, "general-agent", "Original request", user_origin=True)
+        runs.claim(tid, owner.id)
+        followups = [runs.create(tid, "general-agent", text, user_origin=True,
+                                interjection_work_id=owner.work_id)
+                     for text in ["First follow-up", "Second follow-up"]]
+        runs.transition(tid, owner.id, "success")
+        client, container = MagicMock(), MagicMock()
+        container.id = "fallback-generation"
+        container.logs.return_value = (b"egress-proxy: listening on 0.0.0.0:8888\n"
+                                       b"egress-proxy: listening on 0.0.0.0:8889\n")
+        self._attached_proxy(container, client)
+        client.containers.run.return_value = container
+        handled = []
+        with patch.object(SandboxManager, '_get_docker_client', return_value=client), \
+             patch.object(BrowserManager, 'reconcile_startup', return_value=True), \
+             patch.object(BrowserManager, 'confirm_owner_stopped', return_value=False), \
+             patch.object(SandboxManager, '_forget_egress_client'), \
+             patch('assist.sandbox_manager.confirm_generation_stopped'):
+            for followup in followups:
+                runs.claim(tid, followup.id)
+                SandboxManager.get_sandbox_backend(work_dir, browser_capable=True,
+                    thread_scope=(self.temp_dir, tid), owner_run_id=followup.id)
+                with authority.fence(self.temp_dir, tid) as state:
+                    assert state.lease['owner_run_id'] == followup.id
+                    assert state.lease['sequence'] == followup.admission_sequence
+                handled.append(followup.text)
+                if followup is followups[0]:
+                    followups.append(runs.create(tid, "general-agent", "Third follow-up",
+                        user_origin=True, interjection_work_id=followup.work_id))
+                runs.transition(tid, followup.id, "success")
+                SandboxManager.cleanup(work_dir, container)
+        assert handled == ['First follow-up', 'Second follow-up', 'Third follow-up']
+        assert client.containers.run.call_count == 3
+
+    @patch('assist.sandbox.DockerSandboxBackend')
+    def test_failed_turn_retries_start_real_sandbox_in_order(self, _backend):
+        from assist.browser import authority
+        from assist.browser.manager import BrowserManager
+        from assist.run_service import RunService
+        from manage.web import threads
+        tid = "retry-thread"
+        work_dir = os.path.join(self.temp_dir, tid, "domain")
+        os.makedirs(work_dir)
+        authority.mark_new_thread(self.temp_dir, tid)
+        runs = RunService(self.temp_dir)
+        owner = runs.create(tid, "general-agent", "Original request", user_origin=True)
+        runs.claim(tid, owner.id)
+        followups = [runs.create(tid, "general-agent", text, user_origin=True,
+                                interjection_work_id=owner.work_id)
+                     for text in ["First rescue", "Second rescue"]]
+        submitted = []
+        with patch.object(threads, '_runs', return_value=runs), \
+             patch.object(threads._RESUME_SCHEDULER, 'submit',
+                          side_effect=lambda rid, _tid: submitted.append(rid)):
+            threads._TURN_INTERJECTION[tid] = {'run_id': owner.id, 'claimed': []}
+            threads._consume_interjections(tid, {run.id for run in followups})
+            runs.transition(tid, owner.id, 'error', error='model failed')
+            assert threads._rejournal_claimed_interjections(tid, None) == 2
+        client, container = MagicMock(), MagicMock()
+        container.id = "retry-generation"
+        container.logs.return_value = (b"egress-proxy: listening on 0.0.0.0:8888\n"
+                                       b"egress-proxy: listening on 0.0.0.0:8889\n")
+        self._attached_proxy(container, client)
+        client.containers.run.return_value = container
+        handled = []
+        with patch.object(SandboxManager, '_get_docker_client', return_value=client), \
+             patch.object(BrowserManager, 'reconcile_startup', return_value=True), \
+             patch.object(BrowserManager, 'confirm_owner_stopped', return_value=False), \
+             patch.object(SandboxManager, '_forget_egress_client'), \
+             patch('assist.sandbox_manager.confirm_generation_stopped'):
+            for run_id in submitted:
+                run = runs.claim(tid, run_id)
+                SandboxManager.get_sandbox_backend(work_dir, browser_capable=True,
+                    thread_scope=(self.temp_dir, tid), owner_run_id=run.id)
+                handled.append(run.text)
+                runs.transition(tid, run.id, 'success')
+                SandboxManager.cleanup(work_dir, container)
+        assert handled == ['First rescue', 'Second rescue']
+        assert client.containers.run.call_count == 2
 
     @patch('assist.sandbox.DockerSandboxBackend')
     def test_managed_shell_generation_is_journaled_and_cleared(self, _backend):

@@ -792,9 +792,9 @@ def test_pause_reservation_keeps_a_concurrent_user_promotion(wired, monkeypatch)
     queued = threads._RESUME_SCHEDULER._q.get_nowait()
     assert queued["run_id"] == successor.id
     assert queued["user_priority"] is True
-    # The user submission remains held until exact browser reconciliation,
-    # even though it has already promoted the paused predecessor's ticket.
-    assert threads._runs().get(tid, follower.id).status == "revocation_pending"
+    # Fairness preserves the same steering target while promoting its resume.
+    saved = threads._runs().get(tid, follower.id)
+    assert saved.status == "pending" and saved.interjection_work_id == head.work_id
     assert calls == [("message", "hello")]
 
 

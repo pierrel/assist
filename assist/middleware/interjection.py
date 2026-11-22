@@ -1,10 +1,16 @@
 """Mid-turn interjection — deliver journaled user messages to the RUNNING turn.
 
-A direct owner message overlapping a browser-capable turn first lands durably
-as ``revocation_pending`` until the old browser is confirmed safe. An
-uncancelled held message then becomes ``pending``; phone cancellation instead
-completes a durable reset receipt without interjection. Other eligible
-mid-turn messages land as ``pending`` immediately.
+An ordinary owner follow-up to active DeepAgents work lands as ``pending``
+with a host-assigned ``interjection_work_id``. That target preserves the active
+browser's execution authority through startup, tool completion and fairness
+resumes; ``consumed_by`` is still written only after checkpoint delivery.
+If their target finishes first, unconsumed siblings keep journal order as
+separate fallback executions, without becoming one another's replacement.
+Further steering during a fallback also keeps its own position and target;
+it does not revoke older queued fallback work.
+Human-controlled and approval-paused work retain their existing admission
+contracts. A genuine replacement still waits as ``revocation_pending`` until
+the old browser is confirmed safe; explicit cancellation keeps its reset receipt.
 This middleware's ``before_model`` hook reads the pending run projection at every
 main-loop model-call boundary and, when unconsumed eligible
 entries exist, appends them to graph state as individually framed
