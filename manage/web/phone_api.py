@@ -1454,12 +1454,29 @@ async def _private_secret_body(request: Request, fields: set[str]) -> dict:
         raise HTTPException(422, "Invalid secret request") from None
 
 
+def _secret_rejection(error: Exception) -> HTTPException:
+    """Expose only fixed private-form failure codes, never submitted text."""
+    codes = {
+        "Invalid login page": "invalid_login_page",
+        "Invalid secret entry": "invalid_entry",
+        "Invalid secret text": "invalid_entry",
+        "Unlock phrase must be 12 to 1024 bytes": "invalid_phrase_length",
+        "Unlock phrase is incorrect": "incorrect_phrase",
+        "No secret store in this repository": "no_store",
+        "Unlock this repository in this thread": "locked",
+        "Private entry request changed; refresh": "request_changed",
+        "Secret unlock busy": "unlock_busy",
+        "Secret store is full": "store_full",
+    }
+    return HTTPException(409, {"code": codes.get(str(error), "store_unavailable")})
+
+
 def _repo_secrets(tid: str):
     from assist.secret_store import SecretStore
     directory = _thread_dir(tid)
     binding = read_git_binding(directory)
     if (binding is None or binding["source"] not in state.DOMAINS):
-        raise HTTPException(409, "This thread has no configured repository")
+        raise HTTPException(409, {"code": "no_repository"})
     return SecretStore(state.MANAGER.thread_default_working_dir(tid), directory)
 
 
@@ -1496,9 +1513,9 @@ async def unlock_repo_secrets(tid: str, request: Request) -> dict:
     try:
         return await anyio.to_thread.run_sync(unlock)
     except GitWorkspaceBusyError:
-        raise HTTPException(409, "Thread repository is busy") from None
+        raise HTTPException(409, {"code": "repository_busy"}) from None
     except SecretStoreError as error:
-        raise HTTPException(409, str(error)) from None
+        raise _secret_rejection(error) from None
     except (GitSyncError, OSError):
         raise HTTPException(503, "Secret store unavailable") from None
 
@@ -1538,9 +1555,9 @@ async def create_repo_secret(tid: str, request: Request) -> dict:
     try:
         return await anyio.to_thread.run_sync(create)
     except GitWorkspaceBusyError:
-        raise HTTPException(409, "Thread repository is busy") from None
+        raise HTTPException(409, {"code": "repository_busy"}) from None
     except SecretStoreError as error:
-        raise HTTPException(409, str(error)) from None
+        raise _secret_rejection(error) from None
     except (GitSyncError, OSError):
         raise HTTPException(503, "Secret store publication needs verification") from None
 

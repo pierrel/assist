@@ -83,12 +83,28 @@ def test_authenticated_private_entry_commits_ciphertext_only(
     stale = client.post(path, headers=headers,
                         json={**private, "request_id": "0" * 32})
     assert stale.status_code == 409
+    assert stale.json() == {"detail": {"code": "request_changed"}}
     assert not (repo / FILE).exists()
     assert (thread / REQUEST_FILE).exists()
     invalid = client.post(path, headers=headers, json={**private, "password": ""})
     assert invalid.status_code == 409
+    assert invalid.json() == {"detail": {"code": "invalid_entry"}}
     assert not (repo / FILE).exists()
     assert "synthetic unlock phrase only" not in invalid.text
+    # The same HTTP status has distinct causes; none expose submitted text.
+    missing = client.post(path + "/unlock", headers=headers,
+                          json={"passphrase": "invented-short"})
+    assert missing.status_code == 409
+    assert missing.json() == {"detail": {"code": "no_store"}}
+    short = client.post(path, headers=headers, json={**private, "passphrase": "short"})
+    assert short.status_code == 409
+    assert short.json() == {"detail": {"code": "invalid_phrase_length"}}
+    assert not (repo / FILE).exists()
+    assert not (thread / KEY_FILE).exists()
+    invalid_url = client.post(path, headers=headers,
+                              json={**private, "login_url": "http://synthetic.example/login"})
+    assert invalid_url.status_code == 409
+    assert invalid_url.json() == {"detail": {"code": "invalid_login_page"}}
     response = client.post(path, headers=headers,
                            json={**private, "request_id": pending["id"]})
     assert response.status_code == 200
@@ -120,6 +136,7 @@ def test_authenticated_private_entry_commits_ciphertext_only(
         **private, "label": "Paused site", "login_url": "https://synthetic.example/other",
         "request_id": paused_request["id"]})
     assert paused.status_code == 409
+    assert paused.json() == {"detail": {"code": "repository_busy"}}
     assert len(SecretStore(repo, thread).list_public()) == 1
     assert (thread / REQUEST_FILE).exists()
 
@@ -130,6 +147,7 @@ def test_authenticated_private_entry_commits_ciphertext_only(
     wrong = client.post(path + "/unlock", headers=headers,
                         json={"passphrase": "wrong synthetic phrase"})
     assert wrong.status_code == 409
+    assert wrong.json() == {"detail": {"code": "incorrect_phrase"}}
     assert not (other / KEY_FILE).exists()
     good = client.post(path + "/unlock", headers=headers,
                        json={"passphrase": "synthetic unlock phrase only"})
@@ -185,3 +203,10 @@ def test_authenticated_thread_snapshot_offers_agent_requested_private_form(
     assert paused.status_code == 200
     assert paused.json()["thread"]["private_entry_request"] is None
     assert (thread / REQUEST_FILE).exists()
+
+
+def test_private_rejection_unknown_detail_is_not_echoed():
+    from assist.secret_store import SecretStoreError
+    error = phone_api._secret_rejection(SecretStoreError("invented-private-body"))
+    assert error.status_code == 409
+    assert error.detail == {"code": "store_unavailable"}

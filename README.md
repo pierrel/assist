@@ -1437,6 +1437,9 @@ the stored values through a tool.
 The repository tracks `.assist-secrets.json`: public IDs, labels and login
 pages plus AES-256-GCM ciphertext. Argon2id derives its key from the unlock
 phrase with a per-repository random salt (64 MiB, two iterations, one lane).
+The phrase must contain 12 to 1024 UTF-8 bytes. The private API returns fixed
+failure codes so the client can distinguish invalid input, a locked or missing
+store, a changed request, and repository contention without showing response text.
 The derived key is cached as a mode-0600 file in this thread's host-private
 directory for unattended later turns; that directory is outside the agent's
 workspace, scratch and `/agent` mounts. A different thread needs its own
