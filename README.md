@@ -1687,6 +1687,9 @@ provider transport. Journal I/O runs outside the cancellation lock, and an entry
 that was delayed by journaling must recheck cancellation before executing.
 Docker operations run outside the stop lock and drain before container teardown.
 The queue retains its longer ordinary cap while the aggregate budget owns the episode limit.
+The CPU regression in `tests/test_security_queue.py` holds the real queue beyond
+five seconds before releasing a persisted child Run. It also expires the aggregate
+budget while a child waits and checks cancellation, worker drain and no child effect.
 
 The shared budget counts actual provider attempts and tool executions across
 parent/helpers. Connects begin under the stop fence. Synchronous waits are interruptible outside

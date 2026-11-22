@@ -490,7 +490,7 @@ def execute(root, evidence, args, threads, fixture):
     run = threads._create_run(tid, PROMPT, user_origin=True)
     # The aggregate budget owns the short episode limit. Preserve the queue's
     # longer default cap rather than racing an independent timer at that limit.
-    threads.THREAD_QUEUE = ThreadAffinityQueue(wait_timeout_s=5)
+    threads.THREAD_QUEUE = ThreadAffinityQueue()
     threads._HERMES_RUNTIME = HermesRuntimeManager(model_config=lambda: config)
     native_stop_ready = threading.Event()
     original_native_stop = threads._HERMES_RUNTIME.stop
