@@ -1,0 +1,40 @@
+digraph HermesProposed {
+  graph [label="PROPOSED option A · contained native Hermes\nRequires acceptance of bounded session behavior", labelloc=t,
+         fontname="DejaVu Sans", fontsize=22, bgcolor="white", rankdir=TB,
+         pad=0.25, nodesep=0.5, ranksep=0.65, splines=polyline];
+  node [shape=box, style="rounded,filled", fontname="DejaVu Sans", fontsize=13,
+        color="#667587", fillcolor="#f1f3f5", margin="0.16,0.12"];
+  edge [fontname="DejaVu Sans", fontsize=10, color="#52657a", arrowsize=0.7];
+  C1a [label="C1a  Browser + authenticated phone"];
+  C2 [label="C2  Web/API boundary\nHermes label · callbacks/results projection", fillcolor="#dcecff", color="#3679af"];
+  C3 [label="C3  Durable Runs\nclient admission · host completion authority"];
+  C4 [label="C4  Dispatch + affinity\nslot covers all contained model work"];
+  C8 [label="C8  Host authorities\nGit fence · exact generation · grants"];
+  C9 [label="C9  Durable thread state\nisolated native home/session + host projection", fillcolor="#dcecff", color="#3679af"];
+  C12 [label="C12  Local model endpoint"];
+  C13 [label="C13  Egress proxy\nunchanged host network authority"];
+  C21 [label="C21  Modified preview host\nlaunch · Run binding · stop/reap · receipts", fillcolor="#dcecff", color="#3679af"];
+  C24 [label="C24  Modified model relay\nendpoint/auth/bounds · native payloads", fillcolor="#dcecff", color="#3679af"];
+  subgraph cluster_C10 {
+    label="C10  Modified: whole-runtime sandbox\nnon-root · enforced Git boundary · no host credentials or Docker socket";
+    fontname="DejaVu Sans"; fontsize=13; color="#3679af"; style=rounded;
+    C26 [label="C26  NEW upstream Hermes\nAIAgent · native prompt/tools/skills\nmemory · compression · joined children", fillcolor="#def2dd", color="#4b8643"];
+    owner [label="Optional owner text\nnative additive system_message", shape=note, fillcolor="#f4faf2"];
+    owner -> C26 [label="empty by default"];
+  }
+  C1a -> C2 [label="HTTP / harness=hermes"];
+  C2 -> C3 [label="accepted client Run"];
+  C3 -> C4 [label="Run ID"];
+  C4 -> C8 [label="workspace + runtime fence"];
+  C4 -> C21 [label="claim/execution"];
+  C21 -> C26 [label="contained native invocation\nprogress + final result"];
+  C8 -> C21 [label="approved mounts/network/generation"];
+  C26 -> C24 [label="all parent/child/auxiliary model calls"];
+  C24 -> C12 [label="fixed local upstream"];
+  C26 -> C13 [label="native tool network traffic"];
+  C26 -> C9 [label="native history/memory/skills", style=dashed];
+  C21 -> C9 [label="Run-bound committed projection", style=dashed];
+  C3 -> C9 [label="Run lifecycle", style=dashed];
+  C9 -> C2 [label="visible history / status", style=dashed];
+  removed [label="REMOVED: C22 Pi worker + C23 broker\nNo C16/C17 Assist guidance inputs\nNo C7 or C20 Assist specialist handoff", shape=note, fillcolor="#fff1e8", color="#ad6534"];
+}
