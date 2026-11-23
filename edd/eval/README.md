@@ -4,6 +4,13 @@ This directory contains evaluation scripts for testing agent behavior under real
 
 ## Available Evals
 
+### Research nonconvergence
+
+[`research_nonconvergence.md`](research_nonconvergence.md) describes the
+bounded normal-main multipart suite, direct-role capability controls, frozen
+source fixtures, no-GPU preparation checks, and final-artifact/source audit.
+Its observer does not grade factual quality from tool counts or keyword hits.
+
 ### `eval_multi_turn_research.py`
 
 Tests the agent's ability to handle sustained research conversations over multiple turns.
