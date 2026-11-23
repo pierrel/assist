@@ -15,8 +15,10 @@ from edd.outcome_judge import (
     OutcomeObservation,
     OutcomeRequirement,
     OutcomeVerdict,
+    ProspectiveVerdict,
     RequestedVerdict,
     validate_verdict,
+    validate_prospective_verdict,
 )
 
 
@@ -208,6 +210,37 @@ def test_judge_makes_one_bounded_structured_call() -> None:
     assert isinstance(messages[0], SystemMessage)
     assert isinstance(messages[1], HumanMessage)
     assert "UNTRUSTED OUTCOME OBSERVATION" in messages[1].content
+
+
+def test_prospective_judge_derives_aggregate_without_generated_overall_or_confidence() -> None:
+    selected = MagicMock()
+    raw = _verdict().model_dump()
+    del raw["overall"]
+    del raw["confidence"]
+    selected.bind.return_value.invoke.return_value = _message(json.dumps(raw))
+
+    verdict = OutcomeJudge(selected, prospective=True).judge(_observation())
+
+    assert isinstance(verdict, ProspectiveVerdict)
+    assert validate_prospective_verdict(_observation(), verdict).overall == "pass"
+    schema = selected.bind.call_args.kwargs["response_format"]["json_schema"]["schema"]
+    assert "overall" not in schema["properties"]
+    assert "confidence" not in schema["properties"]
+    assert "overall" not in verdict.model_dump()
+    assert "confidence" not in verdict.model_dump()
+
+
+def test_prospective_judge_rejects_undeclared_citations_and_derives_failure() -> None:
+    raw = _verdict().model_dump()
+    del raw["overall"]
+    del raw["confidence"]
+    raw["contradictions"] = [{"description": "The answer conflicts with the file.",
+                              "evidence_ids": ["final:result.txt", "response:final"]}]
+    verdict = ProspectiveVerdict.model_validate(raw)
+    assert validate_prospective_verdict(_observation(), verdict).overall == "fail"
+    bad = verdict.model_copy(update={"rationale_evidence_ids": ("ghost",)})
+    with pytest.raises(ValueError, match="citations"):
+        validate_prospective_verdict(_observation(), bad)
 
 
 def test_judge_records_response_model_and_exact_prompt() -> None:

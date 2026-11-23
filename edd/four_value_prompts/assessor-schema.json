@@ -1,0 +1,42 @@
+{
+  "type": "object",
+  "properties": {
+    "value": {
+      "type": "string",
+      "enum": [
+        "Thorough",
+        "Focused",
+        "Correct"
+      ]
+    },
+    "grade": {
+      "type": "string",
+      "enum": [
+        "Meets",
+        "Partly meets",
+        "Does not meet",
+        "Uncertain"
+      ]
+    },
+    "evidence_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "reason": {
+      "type": "string"
+    },
+    "uncertainty": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "value",
+    "grade",
+    "evidence_ids",
+    "reason",
+    "uncertainty"
+  ],
+  "additionalProperties": false
+}
