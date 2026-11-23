@@ -45,6 +45,18 @@ class _Steering:
         self.offered = {}
         self.completed_tool = False
         self.flush_native = agent._flush_messages_to_session_db
+        self.step_native = getattr(agent, "step_callback", None)
+        self.tool_complete_native = getattr(agent, "tool_complete_callback", None)
+        # PINNED HERMES INTEGRATION CONTRACT (ec324991): there is no public
+        # post-commit steering callback. The parent step callback runs before
+        # the native drain; _steer_last_drain pairs exact tickets with that row.
+        # Wrapping the private flush attaches metadata in the SAME transaction:
+        # only return True plus _DB_PERSISTED_MARKER proves those bytes committed.
+        # False/None and buffer acceptance do not prove delivery. Parent drain/flush
+        # ordering, steer_user_row formatting, metadata persistence and marker
+        # semantics are private assumptions, NOT a stable upstream API. Re-run
+        # scripts/check-hermes-steering.py against every Hermes upgrade before
+        # deploying it. Restore all original hooks even when conversation fails.
         agent.tool_complete_callback = self.tool_complete
         agent.step_callback = self.step
         agent._flush_messages_to_session_db = self.flush
@@ -64,18 +76,22 @@ class _Steering:
 
     def flush(self, messages, *args, **kwargs):
         from agent.context_compressor import _DB_PERSISTED_MARKER
+        from agent.prompt_builder import steer_user_row
 
-        # The opaque journal marker pairs equal-text admissions independently.
+        # Native drain tickets, not text found inside another user's message,
+        # identify which admissions this exact standalone row delivers.
         # Store the identities in the SAME native row transaction, allowing
         # host recovery when a crash falls between commit and acknowledgment.
-        for row in messages:
+        text, parts = getattr(self.agent, "_steer_last_drain", (None, ()))
+        ids = [rid for rid, value in parts if self.offered.get(rid) == value]
+        content = steer_user_row(text)["content"] if ids else None
+        for row in reversed(messages):
             if (row.get("role") == "user" and row.get("display_kind") == "steer"
-                    and not row.get(_DB_PERSISTED_MARKER)):
-                ids = [rid for rid, text in self.offered.items()
-                       if text in (row.get("content") or "")]
-                if ids:
-                    row["display_metadata"] = {**(row.get("display_metadata") or {}),
-                        "assist_steering": {"work_id": self.work_id, "run_ids": ids}}
+                    and not row.get(_DB_PERSISTED_MARKER) and ids
+                    and row.get("content") == content):
+                row["display_metadata"] = {**(row.get("display_metadata") or {}),
+                    "assist_steering": {"work_id": self.work_id, "run_ids": ids}}
+                break
         success = self.flush_native(messages, *args, **kwargs)
         if success is True:
             ids = {rid for row in messages if row.get(_DB_PERSISTED_MARKER)
@@ -99,12 +115,15 @@ class _Steering:
         return success
 
     def finish(self):
-        self.agent.step_callback = None
-        self.agent.tool_complete_callback = None
-        for ticket in self.offered:
-            # This removes unread buffer entries. A consumed/unknown fate is
-            # never used as a durability receipt; pending journal Runs survive.
-            self.agent.withdraw_steer(ticket)
+        try:
+            for ticket in self.offered:
+                # Remove unread buffer entries, never infer durable delivery
+                # from consumed/unknown fate; pending journal Runs survive.
+                self.agent.withdraw_steer(ticket)
+        finally:
+            self.agent._flush_messages_to_session_db = self.flush_native
+            self.agent.step_callback = self.step_native
+            self.agent.tool_complete_callback = self.tool_complete_native
 
 
 class _ProviderBridge(http.server.BaseHTTPRequestHandler):
@@ -272,9 +291,11 @@ def main(request_path: str) -> None:
                 session_id=session_id, session_db=database,
                 enabled_toolsets=request["toolsets"], quiet_mode=True, cwd="/workspace")
         steering = _Steering(agent, request.get("work_id"))
-        result = agent.run_conversation(request["prompt"], conversation_history=history,
-                                        system_message=request.get("system_message"))
-        steering.finish()
+        try:
+            result = agent.run_conversation(request["prompt"], conversation_history=history,
+                                            system_message=request.get("system_message"))
+        finally:
+            steering.finish()
         # Pinned native review completion and title-thread registries provide
         # joins; the host Run supplies the bound and cancellation. The host
         # stops the entire generation, including background tool processes,

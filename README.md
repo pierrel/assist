@@ -367,7 +367,21 @@ python dockerfiles/check-native-model-egress.py --proxy-image assist-egress-prox
 docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
   -v "$PWD/scripts/check-hermes-compression.py:/tmp/check.py:ro" \
   assist-hermes-runtime /tmp/check.py
+docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
+  -v "$PWD/scripts/check-hermes-steering.py:/tmp/check.py:ro" \
+  assist-hermes-runtime /tmp/check.py
 ```
+
+Run the focused steering compatibility check and the full native capability
+check on every Hermes upgrade. Steering deliberately wraps the pinned private
+session flush because Hermes exposes no public post-commit callback. The focused
+check uses the actual packaged agent, ticket drain, formatter and SessionDB to
+verify True/False/None flush results, persistence markers and durable receipt
+metadata, including equal-text tickets, failed writes and lost acknowledgments.
+It makes no model/provider requests; the full native check covers callback and
+tool/model ordering. Receipts use exact drained ticket identities and the whole
+native row, so quoted or embedded follow-up text cannot claim another ticket.
+Original flush and callbacks are restored even when a conversation fails.
 
 The skill-startup check uses the actual worker and native agent constructor,
 with a scripted conversation, stubbed host coordination and locally served
