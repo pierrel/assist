@@ -192,14 +192,27 @@ def load_worker():
     return module
 
 
+def native_agent(**fields):
+    """Stub the native drain shape; the packaged implementation is checked in-image."""
+    agent = SimpleNamespace(**fields)
+    def drain():
+        text, parts = getattr(agent, "_next_steer_drain", (None, []))
+        agent._steer_last_drain = (text, parts)
+        agent._next_steer_drain = (None, [])
+        return text
+    agent._drain_pending_steer = drain
+    return agent
+
+
 def native_steer_row(monkeypatch, agent, tickets):
     """Model the pinned native drain; its real formatter is covered in-image."""
     parts = [(item["id"], item["text"].strip()) for item in tickets]
     text = "\n".join(value for _ticket, value in parts)
-    agent._steer_last_drain = (text, parts)
+    agent._next_steer_drain = (text, parts)
     row = lambda value: {"role": "user", "display_kind": "steer",
                          "content": "Native steer:\n" + value}
     monkeypatch.setitem(sys.modules, "agent.prompt_builder", SimpleNamespace(steer_user_row=row))
+    assert agent._drain_pending_steer() == text
     return row(text)
 
 
@@ -221,7 +234,7 @@ def test_receipt_uses_only_exact_native_drain_ticket(monkeypatch, embedded):
         for row in rows:
             row["_durable"] = True
         return True
-    agent = SimpleNamespace(_flush_messages_to_session_db=flush,
+    agent = native_agent(_flush_messages_to_session_db=flush,
                             steer=lambda *_a, **_kw: True, withdraw_steer=lambda _ticket: False)
     delivery = worker._Steering(agent, "logical-work")
     delivery.tool_complete()
@@ -233,6 +246,34 @@ def test_receipt_uses_only_exact_native_drain_ticket(monkeypatch, embedded):
     assert set(delivery.offered) == {"other"}
 
 
+def test_empty_native_drain_before_first_flush_keeps_exact_receipt(monkeypatch):
+    worker = load_worker()
+    monkeypatch.setitem(sys.modules, "agent.context_compressor",
+                        SimpleNamespace(_DB_PERSISTED_MARKER="_durable"))
+    tickets = [{"id": "delivered", "text": "[Assist follow-up id=delivered]\nUse green"}]
+    receipts = []
+    def control(_path, payload):
+        receipts.extend(payload.get("consumed", []))
+        return {"messages": tickets}
+    monkeypatch.setattr(worker, "control", control)
+    def flush(rows):
+        for row in rows:
+            row["_durable"] = True
+        return True
+    agent = native_agent(_flush_messages_to_session_db=flush,
+                            steer=lambda *_a, **_kw: True, withdraw_steer=lambda _ticket: False)
+    delivery = worker._Steering(agent, "logical-work")
+    delivery.tool_complete()
+    delivery.step()
+    row = native_steer_row(monkeypatch, agent, tickets)
+    agent._drain_pending_steer()
+    assert agent._steer_last_drain == (None, [])
+    agent._flush_messages_to_session_db([row])
+    assert row["display_metadata"]["assist_steering"]["run_ids"] == ["delivered"]
+    assert receipts == ["delivered"]
+    assert not delivery.drained
+
+
 def test_finish_restores_original_hooks_even_when_withdraw_fails():
     worker = load_worker()
     def flush(_rows):
@@ -240,14 +281,16 @@ def test_finish_restores_original_hooks_even_when_withdraw_fails():
     original_step, original_tool = object(), object()
     def withdraw(_ticket):
         raise RuntimeError("Synthetic withdrawal failure")
-    agent = SimpleNamespace(_flush_messages_to_session_db=flush,
+    agent = native_agent(_flush_messages_to_session_db=flush,
                             step_callback=original_step, tool_complete_callback=original_tool,
                             withdraw_steer=withdraw)
+    original_drain = agent._drain_pending_steer
     delivery = worker._Steering(agent, "logical-work")
     delivery.offered["pending"] = "pending text"
     with pytest.raises(RuntimeError, match="Synthetic withdrawal failure"):
         delivery.finish()
     assert agent._flush_messages_to_session_db is flush
+    assert agent._drain_pending_steer is original_drain
     assert agent.step_callback is original_step
     assert agent.tool_complete_callback is original_tool
 
@@ -263,7 +306,7 @@ def test_failed_conversation_restores_hooks_before_close(monkeypatch, tmp_path, 
         return True
     def conversation(*_args, **_kwargs):
         raise failure("Synthetic conversation failure")
-    agent = SimpleNamespace(_flush_messages_to_session_db=flush, step_callback=None,
+    agent = native_agent(_flush_messages_to_session_db=flush, step_callback=None,
                             tool_complete_callback=None, run_conversation=conversation)
     def close():
         assert agent._flush_messages_to_session_db is flush
@@ -302,7 +345,7 @@ def test_startup_and_prior_tool_history_do_not_enable_steering(monkeypatch):
         requests.append(payload)
         return {"messages": [{"id": "new-owner-message", "text": "Use green"}]}
     monkeypatch.setattr(worker, "control", control)
-    agent = SimpleNamespace(_flush_messages_to_session_db=lambda _rows: True,
+    agent = native_agent(_flush_messages_to_session_db=lambda _rows: True,
         steer=lambda text, ticket: (buffered.append((ticket, text)), True)[1],
         withdraw_steer=lambda _ticket: False)
     worker._Steering(agent, "current-work")
@@ -323,7 +366,7 @@ def test_each_followup_batch_requires_fresh_tool_completion(monkeypatch):
         requests.append(phase[0])
         return {"messages": [{"id": phase[0], "text": "Use " + phase[0]}]}
     monkeypatch.setattr(worker, "control", control)
-    agent = SimpleNamespace(_flush_messages_to_session_db=lambda _rows: True,
+    agent = native_agent(_flush_messages_to_session_db=lambda _rows: True,
         steer=lambda text, ticket: (buffered.append((ticket, text)), True)[1],
         withdraw_steer=lambda _ticket: False)
     worker._Steering(agent, "current-work")
@@ -361,7 +404,7 @@ def test_native_receipts_survive_transport_and_batch_edges(monkeypatch, edge):
         for row in rows:
             row["_durable"] = True
         return True
-    agent = SimpleNamespace(_flush_messages_to_session_db=flush,
+    agent = native_agent(_flush_messages_to_session_db=flush,
         steer=lambda text, ticket: (buffered.append(text.strip()), True)[1],
         withdraw_steer=lambda _ticket: False)
     delivery = worker._Steering(agent, "logical-work")
@@ -394,7 +437,7 @@ def test_worker_only_receipts_successful_native_flush(monkeypatch, persisted):
             for row in rows:
                 row["_durable"] = True
         return persisted
-    agent = SimpleNamespace(_flush_messages_to_session_db=flush,
+    agent = native_agent(_flush_messages_to_session_db=flush,
         steer=lambda text, ticket: (buffered.append((ticket, text)), True)[1],
         withdraw_steer=lambda ticket: True)
     delivery = worker._Steering(agent, "logical-work")

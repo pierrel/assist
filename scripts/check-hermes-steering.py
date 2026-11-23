@@ -41,6 +41,7 @@ with (patch("model_tools.get_tool_definitions", return_value=[]),
                     skip_memory=True, enabled_toolsets=[], session_db=database,
                     session_id="assist-steering-compat")
 original_flush = agent._flush_messages_to_session_db
+original_drain = agent._drain_pending_steer
 original_step, original_tool = agent.step_callback, agent.tool_complete_callback
 tickets, acknowledgments = [], []
 lose_ack = True
@@ -79,10 +80,17 @@ def drain(*ids):
 
 try:
     row = drain("same-a", "same-b")
+    # Empty-response retries can drain again before the first row flush.
+    assert agent._drain_pending_steer() is None
+    assert agent._steer_last_drain == (None, [])
     assert not row.get(_DB_PERSISTED_MARKER)
     assert agent._flush_messages_to_session_db([row]) is True
     assert row[_DB_PERSISTED_MARKER] is True
+    assert (row.get("display_metadata") or {}).get("assist_steering") == {
+        "work_id": "synthetic-work", "run_ids": ["same-a", "same-b"]
+    }, "First native steer row lost its receipt after an empty drain"
     assert stored() == [{"work_id": "synthetic-work", "run_ids": ["same-a", "same-b"]}]
+    assert not delivery.drained, "Committed associations retained in memory after lost ack"
     assert not acknowledgments and set(delivery.offered) == {"same-a", "same-b"}
     lose_ack = False
     assert agent._flush_messages_to_session_db([row]) is True
@@ -94,9 +102,11 @@ try:
                       side_effect=sqlite3.OperationalError("Synthetic write failure")):
         assert agent._flush_messages_to_session_db([failed]) is False
     assert not failed.get(_DB_PERSISTED_MARKER) and "retry" not in acknowledgments
+    assert len(delivery.drained) == 1
     assert len(stored()) == 1
     assert agent._flush_messages_to_session_db([failed]) is True
     assert failed[_DB_PERSISTED_MARKER] is True and "retry" in acknowledgments
+    assert not delivery.drained
 
     disabled = drain("disabled")
     agent._persist_disabled = True
@@ -105,11 +115,14 @@ try:
     finally:
         agent._persist_disabled = False
     assert not disabled.get(_DB_PERSISTED_MARKER) and "disabled" not in acknowledgments
+    assert len(delivery.drained) == 1
     assert agent._flush_messages_to_session_db([disabled]) is True
     assert disabled[_DB_PERSISTED_MARKER] is True and "disabled" in acknowledgments
+    assert not delivery.drained
 finally:
     delivery.finish()
     assert agent._flush_messages_to_session_db == original_flush
+    assert agent._drain_pending_steer == original_drain
     assert agent.step_callback is original_step and agent.tool_complete_callback is original_tool
     agent.close()
     database.close()

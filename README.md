@@ -378,10 +378,13 @@ session flush because Hermes exposes no public post-commit callback. The focused
 check uses the actual packaged agent, ticket drain, formatter and SessionDB to
 verify True/False/None flush results, persistence markers and durable receipt
 metadata, including equal-text tickets, failed writes and lost acknowledgments.
+An actual empty native drain before the first flush must retain the earlier
+row's exact receipt association; committed associations are discarded even if
+the host acknowledgment is lost.
 It makes no model/provider requests; the full native check covers callback and
 tool/model ordering. Receipts use exact drained ticket identities and the whole
 native row, so quoted or embedded follow-up text cannot claim another ticket.
-Original flush and callbacks are restored even when a conversation fails.
+Original drain, flush and callbacks are restored even when a conversation fails.
 
 The skill-startup check uses the actual worker and native agent constructor,
 with a scripted conversation, stubbed host coordination and locally served

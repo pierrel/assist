@@ -43,13 +43,16 @@ class _Steering:
     def __init__(self, agent, work_id):
         self.agent, self.work_id = agent, work_id
         self.offered = {}
+        self.drained = {}
         self.completed_tool = False
         self.flush_native = agent._flush_messages_to_session_db
+        self.drain_native = agent._drain_pending_steer
         self.step_native = getattr(agent, "step_callback", None)
         self.tool_complete_native = getattr(agent, "tool_complete_callback", None)
         # PINNED HERMES INTEGRATION CONTRACT (ec324991): there is no public
         # post-commit steering callback. The parent step callback runs before
-        # the native drain; _steer_last_drain pairs exact tickets with that row.
+        # the native drain; wrapping it captures _steer_last_drain's exact
+        # tickets and canonical row before an empty retry can overwrite them.
         # Wrapping the private flush attaches metadata in the SAME transaction:
         # only return True plus _DB_PERSISTED_MARKER proves those bytes committed.
         # False/None and buffer acceptance do not prove delivery. Parent drain/flush
@@ -60,6 +63,7 @@ class _Steering:
         agent.tool_complete_callback = self.tool_complete
         agent.step_callback = self.step
         agent._flush_messages_to_session_db = self.flush
+        agent._drain_pending_steer = self.drain
 
     def tool_complete(self, *_args):
         self.completed_tool = True
@@ -74,30 +78,41 @@ class _Steering:
                 if self.agent.steer(text, ticket=ticket["id"]):
                     self.offered[ticket["id"]] = text
 
+    def drain(self):
+        """Retain exact row identities until commit, including across empty retries."""
+        text = self.drain_native()
+        if text:
+            from agent.prompt_builder import steer_user_row
+            _text, parts = self.agent._steer_last_drain
+            ids = [rid for rid, value in parts if self.offered.get(rid) == value]
+            if ids:
+                self.drained[steer_user_row(text)["content"]] = ids
+        return text
+
     def flush(self, messages, *args, **kwargs):
         from agent.context_compressor import _DB_PERSISTED_MARKER
-        from agent.prompt_builder import steer_user_row
 
         # Native drain tickets, not text found inside another user's message,
         # identify which admissions this exact standalone row delivers.
         # Store the identities in the SAME native row transaction, allowing
         # host recovery when a crash falls between commit and acknowledgment.
-        text, parts = getattr(self.agent, "_steer_last_drain", (None, ()))
-        ids = [rid for rid, value in parts if self.offered.get(rid) == value]
-        content = steer_user_row(text)["content"] if ids else None
         for row in reversed(messages):
             if (row.get("role") == "user" and row.get("display_kind") == "steer"
-                    and not row.get(_DB_PERSISTED_MARKER) and ids
-                    and row.get("content") == content):
-                row["display_metadata"] = {**(row.get("display_metadata") or {}),
-                    "assist_steering": {"work_id": self.work_id, "run_ids": ids}}
-                break
+                    and not row.get(_DB_PERSISTED_MARKER)):
+                ids = self.drained.get(row.get("content"))
+                if ids:
+                    row["display_metadata"] = {**(row.get("display_metadata") or {}),
+                        "assist_steering": {"work_id": self.work_id, "run_ids": ids}}
         success = self.flush_native(messages, *args, **kwargs)
         if success is True:
             ids = {rid for row in messages if row.get(_DB_PERSISTED_MARKER)
                    for rid in (row.get("display_metadata") or {}).get(
                        "assist_steering", {}).get("run_ids", [])
                    if rid in self.offered}
+            # Only uncommitted rows need the transient association. Lost-ack
+            # recovery uses the metadata already committed in native history.
+            self.drained = {content: tickets for content, tickets in self.drained.items()
+                            if not set(tickets) <= ids}
             ids = sorted(ids)
             for start in range(0, len(ids), 256):
                 batch = ids[start:start + 256]
@@ -122,6 +137,7 @@ class _Steering:
                 self.agent.withdraw_steer(ticket)
         finally:
             self.agent._flush_messages_to_session_db = self.flush_native
+            self.agent._drain_pending_steer = self.drain_native
             self.agent.step_callback = self.step_native
             self.agent.tool_complete_callback = self.tool_complete_native
 
