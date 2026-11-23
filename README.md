@@ -278,6 +278,13 @@ Snapshot reads and background probes do not clear notifications.
   Before each native agent starts, Hermes's manifest-based sync seeds its bundled
   skills into that profile, preserving custom copies, deletions and opt-outs.
   Native platform, environment, app and disabled-skill filters still apply.
+  Ordinary owner follow-ups can steer that same invocation after its current
+  tool batch. Each intake requires a fresh native completion from this
+  invocation; older tool history and no-tool retries cannot open another.
+  Follow-ups do not interrupt model generation or cancel tools. Assist
+  keeps each follow-up's journal identity until native history persistence is
+  confirmed; an unread message remains queued for its own later turn. Native
+  user-row receipts also recover a lost host acknowledgment after a crash.
   A lost process ends the Run without replay. A held model slot is released only
   after verified model parking or provider revocation and drain. Unconfirmed
   container cleanup retains its nonterminal Run and generation; existing Run and
@@ -360,7 +367,24 @@ python dockerfiles/check-native-model-egress.py --proxy-image assist-egress-prox
 docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
   -v "$PWD/scripts/check-hermes-compression.py:/tmp/check.py:ro" \
   assist-hermes-runtime /tmp/check.py
+docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
+  -v "$PWD/scripts/check-hermes-steering.py:/tmp/check.py:ro" \
+  assist-hermes-runtime /tmp/check.py
 ```
+
+Run the focused steering compatibility check and the full native capability
+check on every Hermes upgrade. Steering deliberately wraps the pinned private
+session flush because Hermes exposes no public post-commit callback. The focused
+check uses the actual packaged agent, ticket drain, formatter and SessionDB to
+verify True/False/None flush results, persistence markers and durable receipt
+metadata, including equal-text tickets, failed writes and lost acknowledgments.
+An actual empty native drain before the first flush must retain the earlier
+row's exact receipt association; committed associations are discarded even if
+the host acknowledgment is lost.
+It makes no model/provider requests; the full native check covers callback and
+tool/model ordering. Receipts use exact drained ticket identities and the whole
+native row, so quoted or embedded follow-up text cannot claim another ticket.
+Original drain, flush and callbacks are restored even when a conversation fails.
 
 The skill-startup check uses the actual worker and native agent constructor,
 with a scripted conversation, stubbed host coordination and locally served
@@ -370,8 +394,9 @@ name/alias and legacy-flat precedence, disabled
 preferences, deletion tracking, opt-outs, filters and project trust without a
 model. The native capability check uses a fake provider and Docker `network:none`;
 it checks browser
-creation, two native pauses with distinct competitors, a second user turn queued
-behind the first continuation, phone history and unattended command denial.
+creation, two native pauses with distinct competitors, a follow-up steering the
+same invocation after a joined helper finishes, phone history and unattended
+command denial.
 The model-egress check creates a private
 internal network and fake model, verifying ordinary mapped access, native denial,
 missing/malformed attribution and legacy no-map denial, with external allowlist
