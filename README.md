@@ -1760,6 +1760,10 @@ scenario does not require granting access or downloading external content.
 Use an operator-reviewed, compatible runtime containing the existing control-API
 boundary. The test additions can be carried independently on an older source
 branch, but the CLI refuses real execution when that runtime capability is absent.
+The current fixture requires a host operator with UID 1000, matching its fixed
+trusted-container identity. Other host UIDs are unsupported: the private artifact
+directory prevents the trusted container from reaching the observer socket, so
+the initial health probe cannot complete and the episode is inconclusive.
 When composing the tests with an installed runtime, verify that only test/eval/docs
 files changed and retain exact existing proxy, managed-sandbox and native image IDs.
 No production code, configuration, thread, mount, image tag or network is changed.
