@@ -563,6 +563,11 @@ def execute(root, evidence, args, threads, fixture):
             if not isinstance(error, ExecutionStopped) or budget.reason is None:
                 failures.append(type(error).__name__)
     with ExitStack() as stack:
+        from manage.web import protocol_service
+        # Agent Protocol captures the scheduler at import time. Its ordinary
+        # SERVICE submissions must use the same private dispatcher we drain.
+        stack.enter_context(patch.object(protocol_service, '_RESUME_SCHEDULER',
+                                         threads._RESUME_SCHEDULER))
         for module in (sm, browser):
             for name, value in [('EGRESS_NETWORK', execution.name), ('BROWSER_NETWORK', services.name),
                                 ('EGRESS_PROXY_NAME', proxy.name)]:
@@ -589,10 +594,11 @@ def execute(root, evidence, args, threads, fixture):
             engine=args.engine, capabilities=('native file/terminal/memory/skills/delegation/egress; '
                 'browser and credential tools unavailable' if args.engine == 'hermes' else
                 'managed Deep tools/browser; protected fixture host HTML after product checks; PDF/search/other host destinations unavailable'))
-        threads._RESUME_SCHEDULER.start()
         worker = threading.Thread(target=work, daemon=True)
-        worker.start()
+        termination = 'error'
         try:
+            threads._RESUME_SCHEDULER.start()
+            worker.start()
             def runnable():
                 return any(row.status in {'pending', 'running', 'interrupted'}
                     for directory in (root / 'threads').iterdir()
@@ -616,7 +622,7 @@ def execute(root, evidence, args, threads, fixture):
             budget.stop('finish')
             cleanup_deadline = time.monotonic() + 35
             try:
-                if termination in {'wall_limit', 'step_limit'}:
+                if termination != 'finish':
                     with threads._RUN_ADMISSION_LOCK:
                         for directory in (root / 'threads').iterdir():
                             if directory.is_dir() and directory.name not in prior_threads:
@@ -643,10 +649,12 @@ def execute(root, evidence, args, threads, fixture):
                 budget.native_condition.notify_all()
                 if not budget.native_condition.wait_for(lambda: budget.native_active == 0, timeout=5):
                     raise RuntimeError('Native handler drain unconfirmed')
-            worker.join(max(0, cleanup_deadline - time.monotonic()))
+            if worker.ident is not None:
+                worker.join(max(0, cleanup_deadline - time.monotonic()))
             if worker.is_alive():
                 raise RuntimeError('Run worker drain unconfirmed')
-            if threads._RESUME_SCHEDULER._thread:
+            if (threads._RESUME_SCHEDULER._thread is not None
+                    and threads._RESUME_SCHEDULER._thread.ident is not None):
                 threads._RESUME_SCHEDULER._q.put({'kind': 'security-stop',
                     'tid': tid, 'run_id': 'security-stop'})
                 threads._RESUME_SCHEDULER._thread.join(5)
