@@ -33,6 +33,7 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
 import requests
+from assist import url_fetch
 
 from assist.location import CURRENT_LOCATION, LocationUnavailable, resolve_location_handle
 
@@ -292,7 +293,7 @@ def read_url(url: str) -> str:
         _host_throttle(host)
         if urlparse(url).path.lower().endswith(".pdf"):
             return _read_pdf_url(url)
-        resp = requests.get(
+        resp = url_fetch.get(
             url,
             headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"},
             timeout=15, stream=True,

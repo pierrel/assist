@@ -13,6 +13,7 @@ import uvicorn
 
 from manage.web.state import ROOT
 from manage.voice.wire import MAX_WS_MESSAGE_BYTES
+from assist.control_api import control_config
 
 
 class TurnSafeServer(uvicorn.Server):
@@ -43,7 +44,7 @@ class TurnSafeServer(uvicorn.Server):
 
 if __name__ == "__main__":
     os.makedirs(ROOT, exist_ok=True)
-    port = int(os.getenv("ASSIST_PORT", "8000"))
+    port = control_config()[0]
     # Optional TLS: set ASSIST_SSL_CERT + ASSIST_SSL_KEY to serve HTTPS
     # directly. Needed so the browser exposes geolocation over a non-localhost
     # address: geolocation requires a secure context (HTTPS or localhost).

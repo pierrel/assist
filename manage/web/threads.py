@@ -66,7 +66,7 @@ from assist.async_subagents import AsyncTaskContext, async_task_context
 from assist.egress.store import EgressWaiter, resolution_prompt
 from assist.egress.tools import (EGRESS_ORIGIN_THREAD_ID,
                                  EGRESS_WAITER_RUN_ID,
-                                 EGRESS_WAITER_THREAD_ID)
+                                 EGRESS_WAITER_THREAD_ID, egress_tools)
 from starlette.concurrency import run_in_threadpool
 from assist.middleware.interjection import (collect_interjection_ids,
                                             register_interjection_callbacks)
@@ -83,7 +83,7 @@ from assist.schedule.scheduler import Scheduler
 from manage.web.drain import DrainClosed, RUN_GATE
 from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
-from assist.browser.manager import BrowserManager, BrowserSession, BrowserUserRequest, browser_tools
+from assist.browser.manager import BrowserManager, BrowserSession, BrowserUserRequest, BrowserUnavailable, browser_tools
 from assist.browser import authority as browser_authority
 from assist.egress.client_map import browser_records, configured_directory
 from assist.thread import Thread
@@ -106,6 +106,7 @@ from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
                                  ThreadHoldExpired, ThreadPauseRequested,
                                  active_handle)
 from assist.hermes_runtime import HermesRuntimeError, HermesRuntimeManager
+from assist.hermes_steering import offer_followups, reconcile_receipts
 from edd.live_capture import CaptureStorageFull
 
 from manage.web.app import app
@@ -132,6 +133,7 @@ from manage.web.state import (
     DOMAINS,
     EGRESS_CSRF,
     EGRESS_STORE,
+    EGRESS_BASE_HOSTS,
     GEO_CATALOG,
     GEO_CSRF,
     GEO_DIR,
@@ -1080,6 +1082,11 @@ def render_thread(
     status_banner = ""
     if busy:
         label = STAGE_LABELS.get(stage, "Working...")
+        viewer_session = BrowserManager.current_session(tid)
+        if viewer_session is not None and viewer_session.human_active:
+            label = ("The live browser is ready. Open Browser control and choose Take over."
+                     if viewer_session.handoff_url and viewer_session.human_client is None else
+                     "You control the browser. Return to Assist in Browser control to continue.")
         if status.get("origin") == "continuation" and stage == "processing":
             # Not the user's message — say what's actually happening.
             task_txt = " ".join(pending[len(_CONTINUATION_RIDER):].split())[:120] \
@@ -1095,6 +1102,8 @@ def render_thread(
             f'<div class="status-banner">'
             f'<span class="spinner"></span>'
             f'<span>{html.escape(label)}</span>'
+            + (f'<a href="{html.escape(status["browser_control_url"], quote=True)}" target="_blank" rel="noopener">Control the live browser</a>'
+               if status.get("browser_control_url") else "") +
             f'{elapsed_span}'
             f'</div>'
             f'{_ELAPSED_TICKER_SCRIPT if elapsed_span else ""}'
@@ -1217,7 +1226,7 @@ def render_thread(
     # task text quoted + escaped as its unverified words. All of a thread's
     # pending cards render (<=3 by the tool's cap).
     egress_banner = ""
-    if not is_native and EGRESS_STORE is not None:
+    if (not is_native or read_thread_engine(MANAGER.thread_dir(tid)).name == "hermes") and EGRESS_STORE is not None:
         for _er in sorted((r for r in EGRESS_STORE.peek()
                            if r.origin_tid == tid and r.state == "pending"),
                           key=lambda r: r.created_at):
@@ -1455,6 +1464,7 @@ def render_thread(
         <div class="container">
           <div class="nav" style="display:flex; justify-content:space-between; align-items:center;">
             <a href="/">← All threads</a>
+            <a href="/thread/{tid}/browser" target="_blank" rel="noopener">Browser control</a>
             <button type="button" onclick="copyThreadId(this)"
                     style="background:none; border:1px solid #e5e7eb; border-radius:6px;
                            color:#171717; cursor:pointer; font-size:.8rem; padding:.3rem .6rem;
@@ -1968,7 +1978,7 @@ def _cancel_this_turns_continuations(tid: str, pre_turn_ids: set) -> int:
 def _consume_interjections(tid: str, ids: set) -> None:
     """Terminalize injected pending Runs and remember them for fate-sharing retry.
 
-    Dispatch skips each now non-pending ticket, giving exactly-once execution. A
+    Dispatch skips each now non-pending ticket, giving exactly-once execution.
     Called from the middleware's next-boundary claim and from the terminal
     sweep below; idempotent (terminal runs are absent from pending records)."""
     ctx = _TURN_INTERJECTION.setdefault(
@@ -2029,8 +2039,9 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
     the old id in the thread checkpoint forever, so any later turn's boundary
     claim scan would silently consume a same-id retry too — the promised retry
     would never run.
-    A fresh id matches nothing stale: the entry is delivered exactly once, by
-    its dispatcher or by legitimate re-injection into an intervening turn.
+    A fresh id matches nothing stale; owner retries run as their own follow-ups.
+    Owner retries target their consumed work in the host journal, preserving
+    queued-follow-up authority instead of superseding earlier sibling retries.
     The dead framed copy itself is duplicate EXPOSURE when the follow-up runs
     — benign, named in the design. Returns how many, so the error text can
     say so. BEST-EFFORT by contract: runs inside turn error handlers (a raise
@@ -2039,14 +2050,15 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
     try:
         claimed = (_TURN_INTERJECTION.pop(tid, None) or {}).get("claimed", [])
         for rec in claimed:
+            source = _runs().get(rec.thread_id, rec.id)
             fresh = _create_run(
                 rec.thread_id, rec.text,
                 rider=_rider_from_fields(rec.rider), sender=rec.sender,
-                user_origin=rec.sender is None)
+                user_origin=rec.sender is None,
+                interjection_work_id=source.work_id if rec.sender is None else None)
             # The retried turn keeps the ORIGINAL message's context rider
             # (sent_at/tz/lat/lon from the journal entry — recovery fidelity,
-            # like the restart drain); fall back to a fresh rider with the
-            # dead turn's tz only when the entry never carried one.
+            # like the restart drain).
             _RESUME_SCHEDULER.submit(fresh.id, tid)
             n += 1
     except Exception:
@@ -2068,13 +2080,18 @@ def _runs_before_browser_reset(runs: list[Run]) -> list[Run]:
 
 def _pending_run_records(tid: str) -> list[PendingMessage]:
     """Interjection adapter; never expose a follower across a reset debt."""
-    eligible = _runs_before_browser_reset(_runs().list(tid))
+    runs = _runs().list(tid)
+    owner_id = _TURN_INTERJECTION.get(tid, {}).get("run_id")
+    owner = next((run for run in runs if run.id == owner_id), None)
+    eligible = _runs_before_browser_reset(runs)
     return [PendingMessage(
         thread_id=run.thread_id, text=run.text or "", sender=run.sender,
         rider=run.rider, enqueued_at=run.created_at, origin=run.origin, id=run.id)
         for run in eligible
         if (run.status == "pending" and run.mode == "turn" and run.text
             and run.review_snapshot is None
+            and (run.interjection_work_id is None
+                 or (owner is not None and run.interjection_work_id == owner.work_id))
             and run.assistant_id == "general-agent")]
 
 
@@ -2413,7 +2430,8 @@ _PI_CONTINUATION_SUMMARY_LIMIT = 8_000
 _PI_DESCRIPTION_LIMIT = 120
 HERMES_PREVIEW_NOTICE = (
     "Hermes supports file work, terminal commands, skills, memory and helpers. "
-    "Browser, web search and interactive approvals are unavailable in this preview. "
+    "Network access uses approval cards where available. "
+    "Browser, web search and interactive command approvals are unavailable in this preview. "
     "Commands requiring approval are denied.")
 
 
@@ -2437,17 +2455,29 @@ def _hermes_messages(tid: str) -> list[dict]:
     Native SessionDB remains Hermes's conversation state. This projection only
     renders the existing host acceptance and completion receipts to clients.
     """
+    runs = _runs().list(tid)
     work = {}
-    for run in _runs().list(tid):
+    for run in runs:
         if run.mode == "turn":
             first, _ = work.get(run.work_id, (run, run))
             work[run.work_id] = (first, run)
     messages = []
+    run_work = {run.id: run.work_id for run in runs}
+    followers = {}
+    for first, _ in work.values():
+        if first.consumed_by:
+            followers.setdefault(run_work.get(first.consumed_by), []).append(first)
     for first, latest in work.values():
+        if first.consumed_by:
+            continue
         text = first.text or first.pending_text
-        if text:
+        if text and first.origin is None:
             messages.append({"role": "user", "content": text, "run_id": first.id,
                              "message_id": f"hermes:user:{first.work_id}"})
+        for follower in followers.get(first.work_id, ()):
+            if follower.text and follower.origin is None:
+                messages.append({"role": "user", "content": follower.text, "run_id": follower.id,
+                                 "message_id": f"hermes:user:{follower.work_id}"})
         if latest.status == "success" and latest.result:
             messages.append({"role": "assistant", "content": latest.result, "run_id": latest.id,
                              "message_id": f"hermes:assistant:{first.work_id}"})
@@ -2566,7 +2596,8 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 user_origin: bool = False, user_event_id: str | None = None,
                 revocation_pending: bool = False,
                 browser_reset_run_id: str | None = None,
-                review_snapshot: dict | None = None) -> Run:
+                review_snapshot: dict | None = None,
+                interjection_work_id: str | None = None) -> Run:
     """Commit one web turn before placing its id on a dispatch queue."""
     with RUN_GATE.active() as accepted:
         if not accepted:
@@ -2585,6 +2616,7 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
             user_origin=user_origin, user_event_id=user_event_id,
             revocation_pending=revocation_pending,
             browser_reset_run_id=browser_reset_run_id,
+            interjection_work_id=interjection_work_id,
             review_snapshot=review_snapshot)
 
 
@@ -2722,7 +2754,11 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
 
     def refreeze_shared_execution() -> None:
         try:
-            shared_session.pause()
+            with BrowserManager.bounded_thread_gate(run.parent_thread_id), shared_session._lock:
+                if shared_session.human_requested:
+                    shared_session.human_active = True
+                else:
+                    shared_session.pause()
         except Exception:
             try:
                 BrowserManager.cleanup(run.parent_thread_id, shared_session)
@@ -2745,6 +2781,8 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
         with ExitStack() as child_scope:
             queue_handle = child_scope.enter_context(THREAD_QUEUE.acquire(
                 run.thread_id, accumulated_active_ms=run.active_ms))
+            if _defer_to_browser_viewer(run):
+                return
             child_scope.callback(git_scope.close)
             with _RUN_ADMISSION_LOCK:
                 run = _runs().get(run.thread_id, run.id)
@@ -2776,10 +2814,11 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                                 or parent.user_event_id != event_id):
                             raise BrowserUnavailable(
                                 "child belongs to an earlier execution lifetime")
+                        shared_session = session
                         shared_session = BrowserManager.resume_session(
                             run.parent_thread_id, session.work_id, session.user_request)
                     if shared_session is not None:
-                        # Refreeze before releasing the checkout and model slot.
+                        # Settle browser ownership before releasing the checkout and model slot.
                         child_scope.callback(refreeze_shared_execution)
                     else:
                         git_lifecycle.resume()
@@ -2853,7 +2892,8 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                     dispatch_key=f"task-resume:{run.id}", work_id=run.work_id,
                     resume=True, active_ms=carry, origin=run.origin,
                     delegate_user_urls=run.delegate_user_urls)
-        _RESUME_SCHEDULER.submit(successor.id, successor.thread_id)
+        if not _defer_to_browser_viewer(successor):
+            _RESUME_SCHEDULER.submit(successor.id, successor.thread_id)
         return
     except (ThreadHoldExpired, QueueWaitTimeout) as exc:
         logging.error("child run %s timed out: %s", run.id, exc)
@@ -3024,6 +3064,41 @@ def _complete_child_handoff(run: Run) -> Run | None:
     return successor
 
 
+def _release_browser_waiters(session) -> None:
+    waiting = tuple(session.held_runs)
+    session.held_runs.clear()
+    failed = set()
+    if session.viewer_error:
+        with _RUN_ADMISSION_LOCK:
+            for run in _runs().list(session.thread_id):
+                if run.status == "pending" and run.work_id == session.work_id:
+                    _runs().claim(session.thread_id, run.id)
+                    _runs().transition(session.thread_id, run.id, "error", error=session.viewer_error)
+                    failed.add(run.id)
+            RUN_STREAMS.finish(session.thread_id, session.work_id)
+            _set_status(session.thread_id, "error", error=session.viewer_error)
+    for run_id, tid in waiting:
+        if tid == session.thread_id and run_id in failed:
+            continue
+        _RESUME_SCHEDULER.submit(run_id, tid)
+    if session.viewer_error:
+        _dispatch_pending_after(session.thread_id)
+
+
+def _defer_to_browser_viewer(run) -> bool:
+    """Keep pending work in the existing session until human ownership ends."""
+    tid = run.parent_thread_id if run.mode == "child" else run.thread_id
+    with BrowserManager.bounded_thread_gate(tid):
+        session = BrowserManager.current_session(tid)
+        if session is None:
+            return False
+        with session._lock:
+            if session.human_requested or session.human_active:
+                session.held_runs[(run.id, run.thread_id)] = None
+                return True
+    return False
+
+
 def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
     """Load and execute one durable run; dispatch queues carry ids only."""
     with RUN_GATE.active() as accepted:
@@ -3036,6 +3111,8 @@ def _execute_run_active(run_id: str, tid: str, *, user_priority: bool = False) -
         run = _runs().get(tid, run_id)
     except RunNotFound:
         logging.info("run %s on %s disappeared before dispatch", run_id, tid)
+        return
+    if _defer_to_browser_viewer(run):
         return
     if (run.status == "pending" and not any(
             item.id == run.id for item in _runs_before_browser_reset(
@@ -3146,13 +3223,47 @@ def _execute_run_active(run_id: str, tid: str, *, user_priority: bool = False) -
                        for candidate in _runs().list(tid)):
                 RUN_STREAMS.finish(tid, current.work_id)
             _dispatch_pending_after(tid, run_id)
+            if any(browser_reset_owed(item) for item in _runs().list(tid)):
+                _queue_browser_revocation(tid)
     except RunNotFound:
         pass  # thread deletion removes its run store while a dispatcher unwinds.
+
+
+def _hermes_steering(run: Run, consumed=()) -> list[dict]:
+    """Offer only this owner's journaled follow-ups; claim persisted identities."""
+    with _RUN_ADMISSION_LOCK:
+        service = _runs()
+        runs = service.list(run.thread_id)
+        browser_authority.execution_sequence(runs, run.id)
+        return offer_followups(service, run, _runs_before_browser_reset(runs), consumed)
+
+
+def _reconcile_hermes_steering(tid: str) -> None:
+    """Close native-commit/host-ack crash gaps before a targeted fallback runs."""
+    with _RUN_ADMISSION_LOCK:
+        reconcile_receipts(_runs(), tid, MANAGER.thread_agent_dir(tid))
 
 
 def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
     """Dispatch native work and retain its process across same-work successors."""
     tid = run.thread_id
+    if run.status == "pending" and run.interjection_work_id is not None:
+        try:
+            _reconcile_hermes_steering(tid)
+        except Exception:
+            # An unreadable receipt store cannot prove queued delivery safe.
+            # Keep the journal entry visible without replaying uncertain work.
+            message = "Native steering delivery could not be verified; retained files need review"
+            with _RUN_ADMISSION_LOCK:
+                _runs().claim(tid, run.id)
+                _runs().transition(tid, run.id, "error", error=message)
+            _set_status(tid, "error", error=message, pending_message=run.text)
+            _dispatch_pending_after(tid, run.id)
+            return
+        run = _runs().get(tid, run.id)
+        if run.status != "pending":
+            _dispatch_pending_after(tid, run.id)
+            return
     if run.status != "pending":
         recovered = False
         with _RUN_ADMISSION_LOCK:
@@ -3213,9 +3324,9 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
 
     try:
         if (run.mode != "turn" or run.assistant_id != "general-agent"
-                or run.origin is not None or run.sender is not None or run.resume_decision is not None
+                or run.origin not in {None, "egress"} or run.sender is not None or run.resume_decision is not None
                 or (not run.resume and (not isinstance(run.text, str) or not run.text))):
-            raise HermesRuntimeError("Hermes accepts manual turns and their scheduler successors")
+            raise HermesRuntimeError("Hermes accepts user and egress-decision turns and their scheduler successors")
         with THREAD_QUEUE.acquire(tid, user_priority=user_priority,
                                   accumulated_active_ms=run.active_ms,
                                   before_release=release_owned_slice) as handle:
@@ -3251,7 +3362,11 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
 
                 reply = _HERMES_RUNTIME.run_slice(
                     run, work_dir=work_dir, agent_dir=MANAGER.thread_agent_dir(tid),
-                    thread_scope=(MANAGER.root_dir, tid), handle=handle, admitted=admitted)
+                    thread_scope=(MANAGER.root_dir, tid), handle=handle, admitted=admitted,
+                    steering=lambda consumed: _hermes_steering(run, consumed),
+                    egress_tools=(egress_tools(EGRESS_STORE, EGRESS_BASE_HOSTS,
+                                              thread_dir=MANAGER.thread_dir, thread_id=tid)
+                                  if EGRESS_STORE is not None else ()))
                 # run_slice returns only after the native generation is stopped.
                 branch = git_lifecycle.finish_visible(reply, (run.rider or {}).get("tz"))
                 notice = _git_result_notice(branch)
@@ -3274,7 +3389,8 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
             _runs().transition(tid, run.id, "interrupted", active_ms=carry)
             successor = _create_run(tid, None, resume=True, work_id=run.work_id,
                                     user_event_id=run.user_event_id, active_ms=carry,
-                                    pending_text=run.text or run.pending_text, rider=run.rider)
+                                    pending_text=run.text or run.pending_text, rider=run.rider,
+                                    origin=run.origin)
             _set_status(tid, "paused", pending_message=run.text or run.pending_text,
                         accumulated_active_ms=carry)
             ticket = _RESUME_SCHEDULER.reserve(successor.id, tid)
@@ -3388,6 +3504,9 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
 
 def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
     """Queue approvals, paused head successors, user turns, then other FIFO work."""
+    session = BrowserManager.current_session(tid)
+    if session is not None and (session.human_requested or session.human_active):
+        return
     runs = _runs().list(tid)
     if any(run.status == "running" for run in runs):
         return
@@ -3676,7 +3795,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
 
     def waits_for_retained_work() -> bool:
         retained = BrowserManager.current_session(tid)
-        return (_run is not None and not _run.resume and _run.user_event_id != _run.id
+        return (_run is not None and not _run.resume
+                and (_run.user_event_id != _run.id
+                     or _run.interjection_work_id == getattr(retained, "work_id", None))
                 and retained is not None and not retained.closed
                 and retained.work_id != _run.work_id)
 
@@ -3730,6 +3851,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                or (_run is not None and _run.origin is None
                                    and _run.mode == "turn"
                                    and _run.text is not None))) as queue_handle, ExitStack() as error_scope:
+            if _run is not None and _defer_to_browser_viewer(_run):
+                return
             # A queued run remains pending until it actually owns THREAD_QUEUE. This
             # is what makes it visible to the active turn's interjection reader. Two
             # dispatchers for one run serialize here; only the first can claim it.
@@ -3860,10 +3983,17 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             # and writable sandbox remain owned by the original admitted event.
             user_request = _browser_user_request(
                 _run, _runs().list(tid) if _run is not None else [])
-            browser_session = (BrowserManager.resume_session(
-                tid, _run.work_id, user_request)
-                if resume and _run is not None
-                else None)
+            with BrowserManager.bounded_thread_gate(tid):
+                try:
+                    browser_session = (BrowserManager.resume_session(
+                        tid, _run.work_id, user_request)
+                        if resume and _run is not None
+                        else None)
+                except ThreadPauseRequested:
+                    browser_session = BrowserManager.current_session(tid)
+                    sandbox_generation = browser_session.sandbox_backend.container
+                    keep_browser = True
+                    raise
             if not resume and resume_decision is None and origin != "task-completion":
                 def terminalize_dirty(error: GitSyncError) -> None:
                     if _run is not None:
@@ -3940,6 +4070,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                             sandbox_backend=sandbox,
                             run_service=_runs())
                         BrowserManager.register(browser_session)
+                        browser_session.on_control_end = lambda: _release_browser_waiters(browser_session)
                     if browser_session is not None and browser_capable:
                         extra_browser_tools = tuple(browser_tools(browser_session))
                     # on_queue_state=None: the outer acquire above already
@@ -4093,7 +4224,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 keep_browser = browser_session is not None and not browser_session.closed
                 if keep_browser:
                     try:
-                        browser_session.pause()
+                        with BrowserManager.bounded_thread_gate(tid), browser_session._lock:
+                            if not browser_session.human_requested:
+                                browser_session.pause()
                     except Exception:
                         keep_browser = False
                         raise
@@ -4254,14 +4387,11 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     append_event(MANAGER.thread_dir(tid), "continuation_completed",
                                  id=event_id or "")
     except ThreadPauseRequested:
-        # NON-terminal (fair scheduling): the turn yielded the slot at its quantum so a
-        # waiting turn could run. Its work is durable in the checkpoint (nothing lost);
-        # Mark it paused and hand it to the dedicated
-        # resume scheduler — NOT a BackgroundTask (that would park a shared-threadpool
-        # worker per paused turn and stall request handling). Carry the active hold it
-        # burned so the 2h cap accounts across resumes.
+        # A scheduler yield or human takeover retains the same checkpoint. Fair
+        # work queues a successor now; human work holds it until Return, without
+        # parking a shared request worker. Both carry cumulative active hold.
         carry = THREAD_QUEUE.pop_hold(queue_handle)
-        logging.info("fair-sched: %s paused (active hold %.0fs carried); queuing resume", tid,
+        logging.info("thread %s paused (active hold %.0fs carried)", tid,
                      carry / 1000.0)
         DOMAIN_MANAGERS.pop(tid, None)  # rebuild domain tools against the resumed backend
         # Atomically create the successor and publish the paused projection before
@@ -4269,8 +4399,17 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # Admission and DELETE take this lock too, so neither can observe an
         # interrupted predecessor without its same-work successor.
         ticket = None
+        handed_off = False
+        handoff_error = None
         try:
-            with _RUN_ADMISSION_LOCK:
+            with BrowserManager.bounded_thread_gate(tid), ExitStack() as handoff_scope:
+                if keep_browser and browser_session.viewer_error:
+                    raise BrowserUnavailable(browser_session.viewer_error)
+                if keep_browser and browser_session.human_requested:
+                    state = handoff_scope.enter_context(
+                        browser_authority.fence(MANAGER.root_dir, tid))
+                    browser_session._check_fenced_command(state)
+                handoff_scope.enter_context(_RUN_ADMISSION_LOCK)
                 if _run is not None and _run.approval_id is not None:
                     successor = _runs().continue_approval(tid, _run.id, active_ms=carry)
                 elif _run is not None:
@@ -4292,24 +4431,42 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # the process; sender/rider are already in pending_kwargs). A crash of a
                 # PROCESSING turn has no carry to persist — its resumed slice restarts the
                 # cap at 0, accepted (the cap is a runaway backstop, not billing).
-                _set_status(tid, "paused", accumulated_active_ms=carry, **pending_kwargs)
+                handoff_url = browser_session.handoff_url if keep_browser else None
+                _set_status(tid, "paused", accumulated_active_ms=carry,
+                            **({"browser_control_url": handoff_url} if handoff_url else {}),
+                            **pending_kwargs)
+                if handoff_url and _run is not None:
+                    _publish_phone_text(tid, _run.work_id,
+                                        f"\n\n[Control the live browser]({handoff_url})\n")
                 # Reserve a promotable queue item while this durable handoff is atomic,
                 # but do not notify or execute it until admission is released below.
-                ticket = _RESUME_SCHEDULER.reserve(successor.id, tid)
+                if keep_browser and browser_session.human_requested:
+                    browser_session.held_runs[(successor.id, tid)] = None
+                    browser_session.human_active = True
+                    handed_off = True
+                else:
+                    ticket = _RESUME_SCHEDULER.reserve(successor.id, tid)
+        except BrowserUnavailable as error:
+            handoff_error = str(error)
         finally:
-            handed_off = False
             try:
                 if ticket is not None:
                     _RESUME_SCHEDULER.commit(ticket)
                     handed_off = True
             finally:
-                if (not handed_off and keep_browser and browser_session.paused
-                        and BrowserManager.current_session(tid) is browser_session):
+                if (not handed_off and keep_browser and (browser_session.viewer_error
+                        or (not browser_session.human_active
+                            and (browser_session.paused or browser_session.human_requested)
+                            and BrowserManager.current_session(tid) is browser_session))):
                     try:
                         BrowserManager.cleanup(tid, browser_session)
                     finally:
                         SandboxManager.cleanup(browser_session.work_dir, sandbox_generation)
-        return
+        if handoff_error is None:
+            return
+        # Cleanup above must succeed before ordinary terminal projection settles
+        # this Run and wakes its held reset/followers. Unknown stop still raises.
+        _set_status(tid, "error", error=handoff_error, **pending_kwargs)
     except SandboxContainerLostError as e:
         # Distinct status message: a dead container is recoverable —
         # the user can simply retry — but they should know their
@@ -4930,13 +5087,13 @@ def _drain_held_browser_events(tid: str) -> bool:
                     live_generation = (current_sandbox is not None
                                        and current_sandbox.id in lease["generations"])
                     if (active_owner or live_generation) and not (
-                            session is not None and session.paused):
+                            session is not None and (session.paused or session.human_active)):
                         if session is not None and session.run_id == owner:
                             session.disarm_for_held_event()
                         return False
                 if session is not None and session.run_id == owner:
                     reset = session.revoke_for_promotion()
-                    if session.paused:
+                    if session.paused or session.human_active:
                         SandboxManager.cleanup(
                             session.work_dir, session.sandbox_backend.container)
                         BrowserManager.cleanup(tid, session)
@@ -5038,8 +5195,10 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
                     or browser_active or bool(held) or bool(older_web))
     busy = busy or browser_active or bool(older_web) or bool(held)
     pi_thread = False
+    steering_engine = False
     try:
         pi_thread = _is_native_thread(tid)
+        steering_engine = read_thread_engine(MANAGER.thread_dir(tid)).name in {"deepagents", "hermes"}
         if pi_thread:
             if _is_pi_thread(tid):
                 _ensure_pi_description(tid, text)
@@ -5049,11 +5208,32 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
         # Dispatch will make the existing invalid-engine error durable; title
         # best-effort must not change message-admission semantics.
         pass
+    active = next((item for item in reversed(previous)
+                   if (item.status == "running" or
+                        (item.status == "pending" and item.resume
+                         and any(prior.work_id == item.work_id
+                                 and prior.status == "interrupted" for prior in previous)))), None)
+    if active is not None:
+        try:
+            browser_authority.execution_sequence(previous, active.id)
+        except RuntimeError:
+            active = None
+    steering = (active is not None and steering_engine and not held
+                and active.mode == "turn" and active.assistant_id == "general-agent"
+                and active.sender is None and active.approval_id is None
+                and prior_stage != "awaiting_approval"
+                and _runs().pending_approval(tid) is None
+                and review_snapshot is None
+                and (session is None or (session.work_id == active.work_id
+                     and not session.closed
+                     and (session.handoff_url or (not session.human_requested
+                          and not session.human_active)))))
     run = _create_run(tid, text, rider=rider, location=location,
                       run_id=run_id, work_id=work_id,
                       dispatch_key=dispatch_key,
                       max_pending=max_pending, user_origin=True,
-                      revocation_pending=browser_hold and not pi_thread,
+                      revocation_pending=browser_hold and not pi_thread and not steering,
+                      interjection_work_id=active.work_id if steering else None,
                       review_snapshot=review_snapshot,
                       browser_reset_run_id=(
                           lease["owner_run_id"] if lease is not None else
@@ -5736,7 +5916,14 @@ def _dispatch_egress_resolution(tid: str) -> None:
     prompt = resolution_prompt(EGRESS_STORE.take_undispatched(tid))
     if prompt is None:
         return
-    _scheduled_dispatch(tid, prompt, _GEO_TZ)
+    if read_thread_engine(MANAGER.thread_dir(tid)).name == "hermes":
+        # A resolved egress batch admits one native follow-up,
+        # not native scheduling or replay of the invocation that requested it.
+        with _RUN_ADMISSION_LOCK:
+            _create_run(tid, prompt, origin="egress")
+        _dispatch_pending_after(tid)
+    else:
+        _scheduled_dispatch(tid, prompt, _GEO_TZ)
     _mark_urgent(tid)
 
 

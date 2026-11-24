@@ -62,8 +62,13 @@ where reliability is harder than with frontier APIs.
   turn to finish. A duplicate resume timeout cannot retire another dispatcher's
   ticket or the generation currently borrowed by a child.
   Trusted children share persistent `/agent` files; the separate browser-worker
-  UID cannot traverse that directory. A newer user event or
-  cancellation revokes the old browser before later work can proceed.
+  UID cannot traverse that directory. Ordinary owner follow-ups reach an active
+  DeepAgents turn at its next model boundary after the current tool finishes,
+  preserving its browser through startup and fairness resumes. Unconsumed
+  follow-ups run separately in their original queue order. If a turn fails after
+  consuming follow-ups, fresh retries retain that order without superseding
+  one another. Explicit cancellation or replacement work revokes the old
+  browser before later work proceeds.
   See the [shared-execution design](docs/2026-11-12-browser-shared-execution.org)
   with its [trusted-state amendment](docs/2026-11-13-trusted-agent-state.org)
   and [current architecture](docs/architecture.org).
@@ -73,7 +78,8 @@ where reliability is harder than with frontier APIs.
   Approved browser resources can make up to eight parallel connections per
   shared host backoff window; ordinary shell connections retain their limit.
   Browser and shell destinations follow the same
-  operator allowlist (any port) and exact thread/host/port grants; page content
+  operator allowlist and exact thread/host/port grants, subject to the permanent
+  control-service destination denial; page content
   cannot approve access. A policy-only browser preflight checks a top-level
   origin without contacting it and can annotate origins observed from an open
   page. Those dependencies may be incomplete or incidental; the agent can
@@ -117,6 +123,50 @@ where reliability is harder than with frontier APIs.
   `journalctl --user -u 'assist-turn-expiry-*.service' --since today -o cat`.
   On restart, a new managed generation waits for confirmed cleanup. Browser
   and shell share the sandbox's network and mounts.
+
+  **Human browser control.** Open **Browser control** from the thread, choose
+  **Take over**, and wait for the current model/tool step to finish. Firefox
+  displays and controls the same Chromium session, including its live tabs and
+  unsent fields. Select a tab, tap its image to focus a website field, enter text
+  in the masked toolbar and choose **Type**. **Select all**, backspace, Enter,
+  scrolling buttons and swipe scrolling operate on that remote page. Reloading
+  the viewer reconnects its current controller without reopening the website.
+  Capture errors stay visible during status polling until a frame succeeds or
+  the selected page changes; Refresh view retries capture.
+  **Return to Assist** ends human input, freezes execution until its same-work
+  checkpoint resumes, and requires the agent to observe changed state before
+  further browser effects. A failed Return errors the retained work only after
+  cleanup proves the browser stopped. Unrelated threads can progress during human control;
+  trusted child work waits. Fairness pause and takeover share one ownership
+  decision under the existing locks, so an active viewer has a running container.
+  The shared container's background processes keep
+  running while the human controls it.
+  If tabs were closed or replaced, the handback reports current page IDs or an
+  empty website set. A fresh empty state permits reopening only after another
+  model response; transport failure does not count as an observation.
+  Cancellation and replacement requests
+  retire the old viewer/session through normal exact-stop cleanup. The existing
+  ownership-aware age check retains active human work. A service restart ends
+  live-page continuity; normal stored-login recovery remains available.
+  This is a remote page in Firefox, not a native Firefox site tab: native site
+  autofill, DOM selection, file upload, clipboard and local passkeys are not
+  provided by this first viewer. It uses the existing trusted-network web UI
+  access boundary, a session control token and same-origin input checks; keep
+  the web app on its existing trusted client network.
+
+  You can also ask Assist to open a page for you to use. Its `browser_handoff`
+  tool offers the live control link, then parks at a checkpoint before the next
+  model step. Set `ASSIST_BASE_URL` to the client-reachable HTTP(S) origin for
+  that link. The server publishes it while the model slot is free, including in
+  the phone/Emacs thread snapshot so a reload keeps the current offer visible; choose
+  **Take over** to claim the offered browser. Ordinary follow-ups to this
+  explicit offer stay queued for the same work until **Return to Assist**,
+  then enter its resumed model step. The agent must observe the changed page
+  before further effects. The offer retains its generation until Return,
+  cancellation, deletion or service restart; the ownership-aware age check
+  does not impose a separate offer timeout. A manual viewer takeover keeps its
+  existing direct-message reset behavior. This capability is available on the
+  DeepAgents web path; it does not add browser tools to native engines.
 
 - **Thread data and source links.** Managed threads keep host-owned text records
   in a SQLite datastore beside their description, outside the workspace. Host code
@@ -225,6 +275,16 @@ Snapshot reads and background probes do not clear notifications.
   may finish while its model admission is parked; the same invocation resumes
   after the competitor and can retrieve that result. Native history persists in
   `/agent/hermes` across user turns, including native compression session rotation.
+  Before each native agent starts, Hermes's manifest-based sync seeds its bundled
+  skills into that profile, preserving custom copies, deletions and opt-outs.
+  Native platform, environment, app and disabled-skill filters still apply.
+  Ordinary owner follow-ups can steer that same invocation after its current
+  tool batch. Each intake requires a fresh native completion from this
+  invocation; older tool history and no-tool retries cannot open another.
+  Follow-ups do not interrupt model generation or cancel tools. Assist
+  keeps each follow-up's journal identity until native history persistence is
+  confirmed; an unread message remains queued for its own later turn. Native
+  user-row receipts also recover a lost host acknowledgment after a crash.
   A lost process ends the Run without replay. A held model slot is released only
   after verified model parking or provider revocation and drain. Unconfirmed
   container cleanup retains its nonterminal Run and generation; existing Run and
@@ -235,8 +295,27 @@ Snapshot reads and background probes do not clear notifications.
   A first-turn cleanup failure does not discard accepted
   follow-up messages. Git diffs and Merge remain available;
   the Deep Agents Review action is not offered for native threads.
-  Available tools are files, terminal, skills, memory and helpers. Native browser,
-  web search and interactive approvals are unavailable; commands requiring approval
+  Available tools are files, terminal, skills, memory and helpers. When egress
+  approvals are configured, native tools can list destinations, request one or
+  up to three exact host/port grants, and revoke a thread grant. Requests use the
+  existing browser and phone-API approval cards. **Deployment of native egress
+  is held** pending runtime verification of the control-service boundary and
+  safe migration of the existing ordinary Docker network. Agent proxy and host
+  HTML/PDF connections now permanently deny the configured Assist port on
+  non-public addresses, and the configured `ASSIST_BASE_URL` origin and its
+  resolved addresses. Base allowances and thread grants cannot override this.
+  Connection failure may try another vetted numeric address without resolving
+  the hostname again.
+  Public services on the same port, docs on their existing ports and the private
+  model relay remain usable. This is destination isolation; review tokens do
+  not provide separate human authentication. Unconfigured public forwards are
+  outside the known-origin inventory. No live self-approval exploit is claimed. Once every pending card
+  is resolved through the decision surface, one host-created Hermes follow-up
+  carries the recorded task and decisions. Native helpers share their parent
+  thread's cards; they finish rather than waiting on a Deep Agents checkpoint.
+  Grants are thread scoped and may be used by later turns of that thread.
+  Internal host-model access remains unavailable. Native browser, web search and
+  interactive command approvals are unavailable; commands requiring approval
   are denied. Turn completion and accepted cancellation stop the entire sandbox before Git
   publication, including still-running background jobs marked `persist_on_release`.
   Those jobs can survive native agent cleanup, but cannot outlive this preview's
@@ -252,6 +331,9 @@ layered on the ordinary sandbox. `make deploy` also builds this image. Code-only
 updates to the native worker require rebuilding it. The archive checksum is
 verified by `dockerfiles/Dockerfile.hermes-runtime`; source download failure must
 be resolved without changing the pin silently.
+The image applies `dockerfiles/hermes-skills-sync.patch` so startup seeding keeps
+an existing local skill's name and directory aliases when it lives at another path,
+including native legacy flat Markdown skills.
 
 The preview starts disabled. Run this locally as the server owner, with the same
 `ASSIST_THREADS_DIR` as the server, to enable it (use `False` to disable):
@@ -278,23 +360,52 @@ Repeat the deterministic capability checks with the project Python environment:
 
 ```sh
 python scripts/check-hermes-native.py
+docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
+  -v "$PWD/scripts/check-hermes-skills.py:/tmp/check.py:ro" \
+  assist-hermes-runtime /tmp/check.py
 python dockerfiles/check-native-model-egress.py --proxy-image assist-egress-proxy
 docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
   -v "$PWD/scripts/check-hermes-compression.py:/tmp/check.py:ro" \
   assist-hermes-runtime /tmp/check.py
+docker run --rm --network none --entrypoint /opt/hermes/.venv/bin/python \
+  -v "$PWD/scripts/check-hermes-steering.py:/tmp/check.py:ro" \
+  assist-hermes-runtime /tmp/check.py
 ```
 
-The first uses a fake provider and Docker `network:none`; it checks browser
-creation, two native pauses with distinct competitors, a second user turn queued
-behind the first continuation, phone history and unattended command denial. The second creates a private
+Run the focused steering compatibility check and the full native capability
+check on every Hermes upgrade. Steering deliberately wraps the pinned private
+session flush because Hermes exposes no public post-commit callback. The focused
+check uses the actual packaged agent, ticket drain, formatter and SessionDB to
+verify True/False/None flush results, persistence markers and durable receipt
+metadata, including equal-text tickets, failed writes and lost acknowledgments.
+An actual empty native drain before the first flush must retain the earlier
+row's exact receipt association; committed associations are discarded even if
+the host acknowledgment is lost.
+It makes no model/provider requests; the full native check covers callback and
+tool/model ordering. Receipts use exact drained ticket identities and the whole
+native row, so quoted or embedded follow-up text cannot claim another ticket.
+Original drain, flush and callbacks are restored even when a conversation fails.
+
+The skill-startup check uses the actual worker and native agent constructor,
+with a scripted conversation, stubbed host coordination and locally served
+constructor metadata. Inference and provider forwarding are denied. Native list/view assertions check
+clean discovery and linked files, repeated startup, custom skills and alternate-path
+name/alias and legacy-flat precedence, disabled
+preferences, deletion tracking, opt-outs, filters and project trust without a
+model. The native capability check uses a fake provider and Docker `network:none`;
+it checks browser
+creation, two native pauses with distinct competitors, a follow-up steering the
+same invocation after a joined helper finishes, phone history and unattended
+command denial.
+The model-egress check creates a private
 internal network and fake model, verifying ordinary mapped access, native denial,
 missing/malformed attribution and legacy no-map denial, with external allowlist
-behavior preserved. The third runs inside the pinned runtime image with a private
+behavior preserved. The compression check runs inside the pinned runtime image with a private
 scripted provider and scripted summary output. It forces the supported rotating
 compression mode, closes the descendant, and requires the next worker turn and
 provider request to load its summary. It does not exercise host admission or
 summary quality. None of these checks proves real-model behavior or live deployment.
-`ASSIST_HERMES_TEST_IMAGE` can select an isolated native image for the first check.
+`ASSIST_HERMES_TEST_IMAGE` can select an isolated native image for the native capability check.
 The proxy must run with its client map mounted and valid ordinary sandbox records:
 legacy/no-map deployments deliberately lose the permanent host-model exception.
 The existing proxy-policy fingerprint forces replacement of an older running
@@ -1454,6 +1565,16 @@ thread workspaces (`ASSIST_EGRESS_RUNTIME_DIR`, or a private sibling directory
 by default). It must remain writable even when browser attribution is disabled;
 if it cannot be read safely, new egress setup fails closed.
 
+Both execution networks require Docker's isolated bridge gateway mode with
+IPv6 disabled. An existing ordinary network without that mode is refused before
+new execution or proxy mutation. The operator must confirm all attached generations are
+stopped before replacing that network; deployment must not remove an active
+thread. Rebuilding the proxy image also installs its shared destination policy.
+`ASSIST_PORT` and `ASSIST_BASE_URL` are propagated from the web service to the
+proxy and included in its replacement fingerprint. Set `ASSIST_BASE_URL` to the
+actual externally published origin when one exists; an unmanaged public forward
+cannot be inferred from localhost configuration.
+
 If Docker is unavailable, non-Git work can retain the established host fallback.
 Git-bound web turns fail closed instead of running unsafe host worktree commands.
 
@@ -1716,3 +1837,20 @@ and final listener/observer controls, complete action artifacts and confirmed
 cleanup. It is not proof against all possible attacks. Record unrun cases and
 reasons. A product boundary failure requires review before changing production
 code; this evaluation does not authorize a production repair.
+### Contacts in a private repository
+Contacts can be ordinary `contacts.yml` data in a private Git domain. Use a
+thread bound to that repository and the existing file tools to read the current
+file, update it, and verify the result. Use the explicit Merge & Push action to
+land the branch; the agent does not push main. A phone checkout can be pulled
+manually afterward. No contacts are mounted into unrelated threads or injected
+into the system prompt by this workflow.
+
+For the EmacsOS SMS reader, the file maps contact keys to fields. Optional `name`
+defaults to the key. `phone` and `email` are defaults; `phone_TYPE` and `email_TYPE`
+accept any nonempty type suffix. `birthday` and `notes` are plain strings; preserve
+all fields and their text when editing. No date or century is inferred. Keep
+phone strings quoted and exact, such as `+12025550123`; national-form digit strings
+are also kept unchanged, without country-prefix guessing. Readable fields are
+available to all ordinary file tools in that repository thread; there is no
+per-contact isolation. Keep passwords and tokens in the secret store. Private Git
+does not encrypt files, history, backups or a phone SD card.

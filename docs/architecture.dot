@@ -41,6 +41,7 @@ digraph Assist {
   C7 -> C3 [label="child + follow-up Runs", constraint=false];
   C7 -> C8 [label="borrow shared execution; defer Git", constraint=false];
   C4 -> C8 [label="Git / sandbox / browser slice control"];
+  C2 -> C8 [label="human viewer: pixels / input / handback", constraint=false];
   C8 -> C21 [label="arm once at container creation"];
   C21 -> C10 [label="+3h: retain owned; remove proven ownerless"];
   C6 -> C8 [label="browser tool calls", constraint=false];
@@ -51,7 +52,8 @@ digraph Assist {
   C4 -> C25 [label="native Run / same-work successor"];
   C25 -> C8 [label="existing generation authority"];
   C25 -> C26 [label="start once · park / resume · verified stop"];
-  C26 -> C24 [label="native provider requests"];
+  C26 -> C24 [label="provider + bound egress requests"];
+  C24 -> C8 [label="existing egress tools / cards / grants"];
   C24 -> C12 [label="admitted model request"];
   C26 -> C9 [label="native SessionDB · skills · memory", style=dashed];
 }

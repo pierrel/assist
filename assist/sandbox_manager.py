@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from uuid import uuid4
 
 from assist.egress import runtime_state
+from assist.control_api import control_config
 
 logger = logging.getLogger(__name__)
 _ANY_CONTAINER = object()
@@ -124,13 +125,14 @@ def _load_egress_allowlist() -> list[str]:
 def _egress_proxy_config_hash(allowlist_csv: str, approvals_dir: str | None,
                               network_ref: str = "", map_dir: str | None = None) -> str:
     """The proxy's config fingerprint (a container label): allowlist content
-    plus the approvals-mount schema/path and proxy-policy schema, so a change
-    to any of them recreates the proxy on the next sandbox start. The version
-    marker makes containers with an earlier approval, throttle, browser
-    destination or native-model attribution policy recreate once and gain the current behavior. The
+    plus the control-service configuration, approvals-mount schema/path and
+    proxy-policy schema. A change recreates the proxy on the next sandbox start.
+    The version marker replaces earlier approval, throttle, browser destination,
+    native-model attribution and control-service policies. The
     service UID/GID binds proxy read access to host-only map mounts."""
     return hashlib.sha256(
-        (allowlist_csv + "|v12-native-model-attribution:"
+        (allowlist_csv + "|v13-control-api:"
+         + repr(control_config()) + "|"
          + f"{os.getuid()}:{os.getgid()}|" + (approvals_dir or "")
          + "|" + (map_dir or "") + "|" + network_ref).encode()
     ).hexdigest()[:16]
@@ -149,7 +151,7 @@ def _network_identity(network, *, isolated: bool) -> tuple[str, str]:
         raise RuntimeError("egress network has unsupported routing settings")
     if isolated and (options.get("com.docker.network.bridge.gateway_mode_ipv4") != "isolated"
                      or configs[0].get("Gateway")):
-        raise RuntimeError("browser network lacks isolated gateway mode")
+        raise RuntimeError("egress network lacks isolated gateway mode")
     subnet = str(ipaddress.ip_network(configs[0]["Subnet"], strict=True))
     if not isinstance(attrs.get("Id"), str) or not attrs["Id"]:
         raise RuntimeError("egress network lacks identity")
@@ -356,6 +358,8 @@ class SandboxManager:
                 try:
                     response = client.api.create_network(
                         EGRESS_NETWORK, driver="bridge", internal=True,
+                        enable_ipv6=False,
+                        options={"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
                         labels={"assist.egress-generation": ordinary_creation_token},
                     )
                 except APIError as error:
@@ -365,7 +369,7 @@ class SandboxManager:
                 egress_net = client.networks.get(response["Id"])
                 logger.info("Created egress network %s (internal)", EGRESS_NETWORK)
             ordinary_id, ordinary_cidr = _network_identity(
-                egress_net, isolated=False)
+                egress_net, isolated=True)
             if ordinary_creation_token:
                 if (egress_net.attrs.get("Labels") or {}).get(
                         "assist.egress-generation") != ordinary_creation_token:
@@ -489,6 +493,8 @@ class SandboxManager:
                 "restart_policy": {"Name": "unless-stopped"},
                 "extra_hosts": {"host.docker.internal": "host-gateway"},
                 "environment": {"EGRESS_ALLOWLIST": allowlist_csv,
+                                "ASSIST_PORT": os.environ.get("ASSIST_PORT", "8000"),
+                                "ASSIST_BASE_URL": os.environ.get("ASSIST_BASE_URL", ""),
                                 "EGRESS_SANDBOX_CIDR": ordinary_cidr,
                                 "EGRESS_BROWSER_CIDR": browser_cidr,
                                 "EGRESS_DENY_BODY": EGRESS_DENY_BODY,
@@ -806,8 +812,10 @@ class SandboxManager:
             if thread_scope is not None:
                 from assist.run_service import RunService
                 runs = RunService(threads_root).list(thread_id)
-                sequence = max((run.admission_sequence for run in runs
-                                if run.user_event_id == run.id), default=0)
+                sequence = (authority.execution_sequence(runs, owner)
+                            if browser_capable or any(run.id == owner for run in runs)
+                            else max((run.admission_sequence for run in runs
+                                      if run.user_event_id == run.id), default=0))
                 with authority.fence(threads_root, thread_id) as state:
                     state.begin(owner, sequence)
             try:

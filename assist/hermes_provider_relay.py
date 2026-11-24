@@ -6,6 +6,7 @@ access; a hook failure cannot grant a request while the generation is parked.
 from __future__ import annotations
 
 import http.client
+import inspect
 from http.server import BaseHTTPRequestHandler
 import json
 import os
@@ -13,6 +14,7 @@ from pathlib import Path
 import socket
 import socketserver
 import threading
+import uuid
 from urllib.parse import urlsplit
 
 
@@ -48,10 +50,10 @@ class _Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 
 
 class HermesProviderRelay:
-    """Forward native model bodies to one host-selected local endpoint."""
+    """Fence native provider traffic and host-bound egress tool requests."""
 
     def __init__(self, directory: Path, upstream_url: str, api_key: str,
-                 model: str, context_length: int, admitted):
+                 model: str, context_length: int, admitted, *, egress_tools=(), steering=None):
         endpoint = urlsplit(upstream_url)
         if (endpoint.scheme not in {"http", "https"}
                 or endpoint.hostname not in {"127.0.0.1", "::1", "localhost"}
@@ -60,6 +62,8 @@ class HermesProviderRelay:
             raise HermesRelayError("Hermes requires the configured local model endpoint")
         self.endpoint, self.api_key, self.model = endpoint, api_key, model
         self.context_length, self.admitted = context_length, admitted
+        self.egress_tools = {tool.__name__: tool for tool in egress_tools}
+        self.steering = steering
         self.condition = threading.Condition()
         self.operations: dict[str, str] = {}
         self.connections: dict[http.client.HTTPConnection, socket.socket | None] = {}
@@ -107,6 +111,23 @@ class HermesProviderRelay:
             self.changed.set()
             self.condition.notify_all()
 
+    def steer(self, value):
+        """Exchange journal tickets without granting a native model request."""
+        consumed = value.get("consumed", [])
+        if (not isinstance(consumed, list) or len(consumed) > 256
+                or any(not isinstance(item, str) or not item or len(item) > 256
+                       for item in consumed)):
+            raise HermesRelayError("Invalid native steering receipt")
+        with self.condition:
+            if self.stopped or self.result is not None:
+                raise HermesRelayError("Native steering has ended")
+        if not self.admitted():
+            raise HermesRelayError("Native steering does not own admission")
+        # Journal I/O must not hold the relay lock needed by cancellation and
+        # parking. The callback rechecks the durable logical owner itself.
+        tickets = self.steering(consumed) if self.steering is not None else []
+        return {"messages": tickets if value.get("peek", True) else []}
+
     def request_pause(self) -> bool:
         """Close cooperative admission; report when native calls have drained."""
         with self.condition:
@@ -140,7 +161,13 @@ class HermesProviderRelay:
                     pass
             # The forwarding thread owns close; shutdown wakes its active read.
 
-    def close(self):
+    def close(self, *, drain_egress=True):
+        """Close provider transport; lifecycle closure also drains host writes.
+
+        Native middleware entries may never settle after worker termination.
+        Only host-owned egress operations can delay lifecycle closure; model
+        revocation excludes those writes and retains their cleanup owner.
+        """
         self.stop_admission()
         if self.started:
             self.server.shutdown()
@@ -150,6 +177,9 @@ class HermesProviderRelay:
         with self.condition:
             if not self.condition.wait_for(lambda: not self.connections, timeout=5):
                 raise HermesRelayError("Hermes provider drain is unconfirmed")
+            if drain_egress and not self.condition.wait_for(
+                    lambda: "egress" not in self.operations.values(), timeout=5):
+                raise HermesRelayError("Hermes egress drain is unconfirmed")
         self.socket_path.unlink(missing_ok=True)
 
     def forward(self, handler, body: bytes):
@@ -200,6 +230,31 @@ class HermesProviderRelay:
                 self.changed.set()
                 self.condition.notify_all()
 
+    def egress(self, value):
+        """Invoke only host-bound egress tools under the current admission fence."""
+        name, arguments = value.get("name"), value.get("arguments")
+        if not isinstance(name, str) or not isinstance(arguments, dict):
+            raise HermesRelayError("Invalid egress request")
+        tool = self.egress_tools.get(name)
+        if tool is None:
+            raise HermesRelayError("Egress tool is unavailable")
+        try:
+            inspect.signature(tool).bind(**arguments)
+        except TypeError as error:
+            raise HermesRelayError("Invalid egress arguments") from error
+        with self.condition:
+            if (self.stopped or self.parked or not self.admitted()
+                    or self.pausing and not self.operations):
+                raise HermesRelayError("Native egress request is no longer admitted")
+            operation = uuid.uuid4().hex
+            self.operations[operation] = "egress"
+        try:
+            # Track host work independently of native middleware. Store I/O
+            # must not hold the lock needed to revoke provider admission.
+            return {"result": tool(**arguments)}
+        finally:
+            self.settle(operation)
+
 
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
@@ -237,6 +292,12 @@ class _Handler(BaseHTTPRequestHandler):
                 raise HermesRelayError("Invalid native control request")
             if self.path == "/boundary":
                 self.relay.boundary(value)
+            elif self.path == "/egress":
+                self._json(self.relay.egress(value))
+                return
+            elif self.path == "/steering":
+                self._json(self.relay.steer(value))
+                return
             elif self.path == "/settled":
                 self.relay.settle(value.get("operation"))
             elif self.path == "/result":
@@ -251,5 +312,5 @@ class _Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
                 return
             self._json({"accepted": True})
-        except (HermesRelayError, ValueError, OSError):
+        except (RuntimeError, ValueError, OSError):
             self.send_error(409, "Hermes request was not admitted")

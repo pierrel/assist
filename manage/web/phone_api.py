@@ -601,6 +601,8 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
     records = visible_records_from_dicts(selected)
     known_paths = {entry["path"] for entry in _workspace_entries(tid, include_size=False)}
     status = state._get_status(tid)
+    session = threads.BrowserManager.current_session(tid)
+    browser_control_url = session.handoff_url if session is not None and not session.closed else None
     messages: list[dict[str, Any]] = []
     total_bytes = 0
     truncated = False
@@ -646,7 +648,7 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
         last_consumed_raw = raw, ordinal
     messages.reverse()
     revision = hashlib.sha256(json.dumps(
-        [status.get("stage", "ready"), notification_revision,
+        [status.get("stage", "ready"), notification_revision, browser_control_url,
          *[(item["id"], item["role"], item["state"]) for item in messages]],
         separators=(",", ":")
     ).encode("utf-8")).hexdigest()[:24]
@@ -666,6 +668,7 @@ def _snapshot(tid: str, before: str | None = None) -> dict[str, Any]:
             "description": _stored_thread_title(tid),
             "harness": read_thread_engine(_thread_dir(tid)).name,
             "status": status.get("stage", "ready"),
+            "browser_control_url": browser_control_url,
             "active_run": _active_thread_run(tid),
             "approval_count": approval_count,
             "approval_results": approval_results,
@@ -1586,9 +1589,10 @@ def _approval_collection(tid: str) -> dict[str, Any]:
             proposals.append({"state": "pending", **mail})
         elif (reply := threads.reply_approval_preview(tid)) is not None:
             proposals.append(reply)
-        proposals.extend(egress.approval_previews(tid))
         proposals.extend(geo.approval_previews(tid))
         proposals.extend(_sms_previews(tid))
+    if read_thread_engine(threads.MANAGER.thread_dir(tid)).name != "pi":
+        proposals.extend(egress.approval_previews(tid))
     value = {"thread_id": tid, "proposals": proposals}
     # Results are disposable projections; preserve complete active SMS drafts.
     for result in [proposal for proposal in proposals if proposal.get("kind") == "send_sms"

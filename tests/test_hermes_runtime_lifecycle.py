@@ -114,9 +114,10 @@ def test_retirement_retry_keeps_verified_container_stop_after_cleanup_failure(
 def test_model_revocation_keeps_cleanup_owner_and_rejects_other_work():
     closed = []
     runtime = HermesRuntimeManager()
-    turn = SimpleNamespace(work_id="original", relay=SimpleNamespace(close=lambda: closed.append(True)))
+    turn = SimpleNamespace(work_id="original", relay=SimpleNamespace(
+        close=lambda *, drain_egress=True: closed.append(drain_egress)))
     runtime.turns["native"] = turn
     assert not runtime.revoke_model("native", "unrelated")
     assert not closed and runtime.turns["native"] is turn
     assert runtime.revoke_model("native", "original")
-    assert closed == [True] and runtime.turns["native"] is turn
+    assert closed == [False] and runtime.turns["native"] is turn

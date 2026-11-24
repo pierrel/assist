@@ -69,6 +69,7 @@ def test_deploy_service_transports_egress_host_paths(tmp_path):
     environment = os.environ | {
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "INSTALL_SERVICE_SCRIPT": str(installer),
+        "ASSIST_BASE_URL": "https://control.example.test:5050",
         "ASSIST_EGRESS_CLIENT_MAP_DIR": "/var/lib/assist/proxy-map",
         "ASSIST_EGRESS_RUNTIME_DIR": "/var/lib/assist/egress-runtime",
     }
@@ -81,6 +82,9 @@ def test_deploy_service_transports_egress_host_paths(tmp_path):
          'printf "%s|%s" "$ASSIST_EGRESS_CLIENT_MAP_DIR" "$ASSIST_EGRESS_RUNTIME_DIR"'],
         check=True, capture_output=True, text=True)
     assert result.stdout == "/var/lib/assist/proxy-map|/var/lib/assist/egress-runtime"
+    origin = subprocess.run(["bash", "-c", configuration + 'printf %s "$ASSIST_BASE_URL"'],
+                            check=True, capture_output=True, text=True)
+    assert origin.stdout == "https://control.example.test:5050"
 
 
 def test_make_exports_egress_host_paths_to_deploy_recipe():
@@ -127,12 +131,13 @@ def test_make_deployment_preserves_gmail_token_path_in_service_unit(tmp_path):
     sudo.chmod(0o755)
     token_path = str(tmp_path / "private" / "gmail-token.json")
     configuration = tmp_path / "gmail.mk"
-    configuration.write_text(f"ASSIST_GMAIL_TOKEN_FILE := {token_path}\nDEPLOY_PATH := {deploy}\nASSIST_THREADS_DIR := {data}\nDEPLOY_HOST := synthetic-host\nSERVICE_NAME := synthetic-assist\n")
+    configuration.write_text(f"ASSIST_GMAIL_TOKEN_FILE := {token_path}\nASSIST_BASE_URL := https://control.example.test:5050\nDEPLOY_PATH := {deploy}\nASSIST_THREADS_DIR := {data}\nDEPLOY_HOST := synthetic-host\nSERVICE_NAME := synthetic-assist\n")
     subprocess.run(["make", "-f", "Makefile", "-f", str(configuration), "deploy-service"],
                    check=True, cwd=repo,
                    env=os.environ | {"PATH": f"{tmp_path}:{os.environ['PATH']}",
                                      "GMAIL_TEST_UNIT": str(captured)})
     assert f'Environment="ASSIST_GMAIL_TOKEN_FILE={token_path}"' in captured.read_text()
+    assert 'Environment="ASSIST_BASE_URL=https://control.example.test:5050"' in captured.read_text()
 
 
 def test_make_service_export_reaches_archive_relay(tmp_path):

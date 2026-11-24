@@ -45,14 +45,15 @@ class HermesRuntimeManager:
         self.turns: dict[str, _Turn] = {}
         self.retired: set[str] = set()
 
-    def _start(self, run, work_dir, agent_dir, thread_scope, admitted):
+    def _start(self, run, work_dir, agent_dir, thread_scope, admitted, egress_tools, steering=None):
         model = self.model_config()
         # Unix socket paths are limited to 108 bytes. Keep this private,
         # ephemeral mount independent of the user's potentially long root.
         directory = Path(tempfile.mkdtemp(prefix="assist-hermes-"))
         try:
             relay = HermesProviderRelay(directory, model.url, model.api_key, model.model,
-                                        model.context_len, admitted)
+                                        model.context_len, admitted, egress_tools=egress_tools,
+                                        steering=steering)
         except BaseException:
             shutil.rmtree(directory)
             raise
@@ -66,10 +67,25 @@ class HermesRuntimeManager:
             self.turns[run.thread_id] = turn
         try:
             Path(agent_dir).mkdir(parents=True, exist_ok=True)
+            from langchain_core.utils.function_calling import convert_to_openai_tool
+            schemas = [convert_to_openai_tool(tool) for tool in egress_tools]
+            for schema in schemas:
+                function = schema["function"]
+                if function["name"] in {"request_egress", "request_egress_batch"}:
+                    function["description"] = (
+                        "Ask the user for outbound access to exact host/port destinations for this thread. "
+                        "A proxy or CONNECT 403 may mean access is not approved; inspect list_allowed_hosts. "
+                        "This records approval cards, never grants access. Use task to describe the "
+                        "complete follow-up after the user's decision. If pending, finish your answer "
+                        "and say approval is needed; do not retry until approved. A denial means "
+                        "continue without that access, not request it again.")
             (directory / "request.json").write_text(json.dumps({
                 "prompt": run.text, "session_id": run.thread_id, "model": model.model,
+                "work_id": run.work_id,
                 "system_message": os.environ.get("ASSIST_HERMES_SYSTEM_MESSAGE", ""),
-                "toolsets": ["file", "terminal", "skills", "memory", "delegation"]}))
+                "egress_tools": schemas,
+                "toolsets": ["file", "terminal", "skills", "memory", "delegation"]
+                            + (["assist_egress"] if schemas else [])}))
             relay.start()
             turn.backend = self.sandboxes.get_hermes_sandbox_backend(
                 work_dir, agent_dir=agent_dir, control_dir=str(directory),
@@ -101,7 +117,8 @@ class HermesRuntimeManager:
             self.stop(run.thread_id)
             raise
 
-    def run_slice(self, run, *, work_dir, agent_dir, thread_scope, handle, admitted):
+    def run_slice(self, run, *, work_dir, agent_dir, thread_scope, handle, admitted,
+                  egress_tools=(), steering=None):
         """Execute or resume the same worker under the current queue handle."""
         with self.lock:
             turn = self.turns.get(run.thread_id)
@@ -111,11 +128,13 @@ class HermesRuntimeManager:
                     raise HermesRuntimeError("Native Hermes process was lost; retained files were not replayed")
                 # Serialize registration and Docker creation with retirement;
                 # stop cannot finish while a late generation is still starting.
-                turn = self._start(run, work_dir, agent_dir, thread_scope, admitted)
+                turn = self._start(run, work_dir, agent_dir, thread_scope, admitted, egress_tools,
+                                   steering)
         if not fresh:
             if turn.work_id != run.work_id or not run.resume or not turn.paused:
                 raise HermesRuntimeError("Native Hermes invocation does not match this successor")
             turn.relay.admitted = lambda: self._provider_admitted(turn, admitted)
+            turn.relay.steering = steering
             if self.sandboxes.current_container(work_dir) is not turn.backend.container:
                 raise HermesRuntimeError("Retained Hermes generation changed")
             turn.relay.resume()
@@ -205,7 +224,7 @@ class HermesRuntimeManager:
             if turn is not None:
                 if turn.work_id != work_id:
                     return False
-                turn.relay.close()
+                turn.relay.close(drain_egress=False)
             return True
 
     def stop(self, thread_id: str):

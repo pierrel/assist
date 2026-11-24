@@ -440,7 +440,8 @@ def test_first_message_cleanup_failure_preserves_running_head_and_pending_follow
     def unconfirmed():
         raise RuntimeError("fixture native stop unconfirmed")
 
-    def drain():
+    def drain(*, drain_egress=True):
+        assert not drain_egress, "failed cleanup must not retain the independent model slot"
         if drain_fails:
             raise RuntimeError("fixture provider drain unconfirmed")
 

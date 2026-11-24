@@ -25,6 +25,7 @@ fi
 # Build environment variables section
 ENV_VARS=""
 [ -n "$ASSIST_PORT" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_PORT=$ASSIST_PORT\"\n"
+[ -n "${ASSIST_BASE_URL:-}" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_BASE_URL=$ASSIST_BASE_URL\"\n"
 [ -n "$ASSIST_MODEL_URL" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_MODEL_URL=$ASSIST_MODEL_URL\"\n"
 [ -n "$ASSIST_DOMAINS" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_DOMAINS=$ASSIST_DOMAINS\"\n"
 [ -n "$ASSIST_SEARCH_URL" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_SEARCH_URL=$ASSIST_SEARCH_URL\"\n"

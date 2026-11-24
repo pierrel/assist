@@ -39,7 +39,9 @@ in both views. An ID shown in only one view keeps that meaning.
   routes]]. Authenticated phone requests enter through
   [[file:../manage/web/phone_api.py][phone_api.py]]. Their client
   implementations are outside this map. The Agent Protocol used by C7 is a
-  private in-process adapter, not a public web route.
+  private in-process adapter, not a public web route. Phone snapshots project
+  the live session's control link independently of streamed prose, and include
+  offer changes in their revision so reload and Return update the client.
 - *C1b Local embedders.* The CLI builds a local Thread in
   [[file:../manage/cli.py][manage/cli.py]]. EmacsOS embeds Assist through
   [[file:../assist/spec.py][AgentSpec]]. This direct route does not pass through
@@ -104,6 +106,9 @@ in both views. An ID shown in only one view keeps that meaning.
   [[file:../assist/browser/authority.py][browser authority]] own browser
   lifetime and leases. [[file:../assist/egress/store.py][EgressStore]] owns
   exact host/port grants.
+  The thread-scoped [[file:../manage/web/browser_viewer.py][browser viewer]] adds
+  human pixel/input control through C2 and C8. It retains the existing session,
+  lease, worker and generation, with a single host-owned controller capability.
 - *C10 Execution sandbox.* [[file:../assist/sandbox.py][DockerSandboxBackend]]
   sends file and shell tools to one restricted container shared by a logical
   parent turn and its eligible children, with a bound workspace, scratch and
@@ -123,7 +128,52 @@ in both views. An ID shown in only one view keeps that meaning.
   [[file:browser-site-compatibility.org][browser compatibility view]].
   A fairness successor reuses its exact session/backend after C8 freezes the
   container with Docker pause. C8 unpauses only the same logical work, direct
-  user event and generation after checking the current admission sequence.
+  user event and generation against its stable execution admission snapshot.
+  Ordinary owner follow-ups to active DeepAgents work are pending journal
+  entries targeted by =interjection_work_id=, distinct from the later
+  =consumed_by= checkpoint claim. C2 admission and C8's existing =before_model=
+  interjection path preserve the current tool, owner and browser generation
+  through startup and fairness resumes. One host authority predicate checks
+  that snapshot in sandbox startup, browser session and worker launch;
+  terminal owners, cancellation receipts, replacement reset debt and changed
+  generations remain denied. No new delivery channel or component is added.
+  Unconsumed follow-ups aimed at the same completed owner retain separate
+  fallback executions in journal order. A later sibling cannot revoke the
+  earlier fallback's startup snapshot; unrelated replacements still can.
+  After a consuming turn fails, C2 journals fresh retries targeted at their
+  consumed source work, retaining the same FIFO authority rule.
+  Steering admitted during a fallback likewise stays queued for its own
+  target. Only host-assigned targets referring to an earlier known work are
+  exempt from replacement ordering; missing or forward targets remain denied.
+  A requested human takeover uses the same cooperative boundary but retains
+  the container running after releasing the model slot. Parent/child dispatch
+  defers in that existing session. Return revokes human input, freezes the
+  container and releases the same-work pending continuation. Fresh observation
+  followed by a new model response is required before further browser effects,
+  so buffered pre-handoff actions cannot silently overwrite human changes.
+  An explicit agent-offered handoff uses =browser_handoff= and a trusted
+  =ASSIST_BASE_URL= to generate the control link. C8 yields before the next
+  model node after the tool result checkpoint, and C2 publishes the link through
+  paused status and the existing phone Run stream. The owner stays interrupted
+  with its same-work successor held; the offered generation stays running with
+  the model slot released. The unclaimed viewer remains claimable. Only ordinary
+  owner follow-ups to this explicit offer retain their steering target while
+  human control is active; a racing follower cannot start before the retained
+  resume. Return clears the offer and resumes the pending model node through
+  the existing fresh-observation barrier. Cancel, deletion, restart and exact
+  generation/authority fences retain their responsibilities. There is no new
+  lifecycle store, timer or native-engine browser path.
+  Failed Return before successor publication settles the original Run only
+  after captured-generation cleanup; closed flags or registry absence alone
+  never prove stop. Independent accepted followers remain dispatchable afterward.
+  Parent and child fairness pause decisions share the takeover thread gate and
+  session lock, so human activation and container freezing cannot interleave.
+  Read-only worker metadata discovers replacement page IDs. A verified empty
+  website set is also fresh state for the next model response; an unknown page
+  or a failed transport by itself does not authorize effects.
+  The viewer carries bounded JPEG pixels and fixed input operations, never raw
+  CDP or website DOM under the host origin. Session/generation checks and
+  same-origin control tokens cover viewing and input; reset/cleanup retires both.
   An unconfirmed unpause closes the session and attempts exact-generation
   teardown before releasing the slot; failed stop proof remains tracked.
   Before freezing it attempts a private storage snapshot, including cleared login
@@ -133,8 +183,9 @@ in both views. An ID shown in only one view keeps that meaning.
   accepted-approval execution and task-completion continuations. A retained
   completion slice skips the initial Git handoff rather than stopping its writer.
   Entering an approval wait, terminal and error boundaries close the browser;
-  new-user and cancellation
-  resets prove the frozen generation stopped before releasing held work.
+  replacement-user and cancellation
+  resets prove the retained generation stopped before releasing held work,
+  including an unpaused human wait with no executing model worker.
   Checkpoint-verified approval repair may replace a cancelled physical slice;
   explicit cancellation receipts keep the entire logical work revoked.
   The browser worker binds observed input-button values independently of their
@@ -171,8 +222,13 @@ in both views. An ID shown in only one view keeps that meaning.
 - *C13 Egress proxy.* [[file:../assist/sandbox_manager.py][SandboxManager]]
   starts the proxy and isolated networks. [[file:../assist/egress/store.py][EgressStore]]
   projects approved grants; [[file:../assist/egress/client_map.py][client_map.py]]
-  attributes browser traffic. It gates sandbox and browser network traffic,
-  not host Python tool requests. The
+  attributes browser traffic. The proxy resolves every admitted destination once and retains only vetted
+  numeric addresses for connection fallback;
+  [[file:../assist/control_api.py][the shared control-service boundary]] applies
+  even to destinations admitted by base allowances and thread grants. Both
+  execution networks require isolated gateway mode, so direct host connections
+  do not replace proxy policy. Existing non-isolated networks require a
+  operator-controlled migration after their attached generations stop. The
   [[file:browser-site-compatibility.org][browser view]] describes this branch's
   bounded browser connection burst and the retained destination policy.
 - *C14 Domain Git remote.* [[file:../assist/thread_git.py][ThreadGit]] and
@@ -181,8 +237,12 @@ in both views. An ID shown in only one view keeps that meaning.
 - *C15 Network destinations.* [[file:../assist/tools.py][tools.py]] provides
   search and URL fetching; [[file:../assist/geo/tools.py][geo/tools.py]] and
   related travel tools call configured services. Websites visited by C11 are
-  also destinations. Host Python tools call services directly; sandbox and
-  browser requests cross C13's allowlist and exact-grant boundary first.
+  also destinations. Host HTML/PDF fetching uses
+  [[file:../assist/url_fetch.py][a dedicated checked transport]]: each connection,
+  including redirects, uses the same control-service denial and a pinned dial
+  address while retaining HTTP Host and TLS hostname verification. Configured
+  search and travel services keep their dedicated clients. Sandbox and browser
+  requests cross C13's allowlist and exact-grant boundary first.
 - *C21 Host user systemd.* [[file:../assist/sandbox_expiry.py][sandbox_expiry.py]]
   arms one transient age check for each ordinary managed Docker generation at
   original creation + three hours. The unit outlives the web process and its
@@ -358,18 +418,53 @@ their explicit summary handoff creates an independent Deep Agents thread.
   nonterminal Run and generation/Git ownership while unrelated model work proceeds.
   Failed provider drain still retains the slot. Startup reaps generations before
   recovery; lost native work is reported without replay.
+  Ordinary owner follow-ups reuse C3's =interjection_work_id= target and
+  generation sequence. C25 offers only that logical owner's eligible journal
+  tickets through C24. Unread tickets remain ordinary queued work.
 - *C24 Native provider relay.* [[file:../assist/hermes_provider_relay.py][The private Unix relay]]
   checks the current Run/queue admission and original generation lease for every
   parent, child and auxiliary model request. Native hooks coordinate drain;
   hooks do not grant authority. Native RPC deadlines remain native, while the
   existing Run bounds total active lifetime. C13 denies the direct host-model
   exception to native and unattributed clients.
+  Supported native egress tools use this same private transport with host-bound
+  thread identity and independent admission checks. C8's existing EgressStore,
+  approval cards and proxy projection own requests and thread-scoped grants;
+  the new egress tool/RPC cannot approve access. Native egress deployment remains held
+  pending runtime verification and safe ordinary-network migration. The
+  control-service denial covers the configured local port on non-public
+  addresses and ASSIST_BASE_URL's origin/resolved addresses; it does not add
+  human authentication or discover unmanaged public forwards. An accepted host egress operation participates in cooperative
+  drain and must settle before lifecycle closure, without holding the provider
+  admission lock during store I/O. Provider-only revocation excludes host writes;
+  failed host drain retains cleanup ownership and blocks deletion for retry.
 - *C26 Pinned native Hermes.* [[file:../assist/hermes_runtime/worker.py][The worker]]
   runs the complete pinned upstream runtime inside C10, with native prompts,
   file/terminal tools, skills, memory, compression and joined delegation.
   Native SessionDB and preferences persist in C9's isolated =/agent/hermes=.
+  Before agent construction, native =sync_skills= seeds the bundled library into
+  that profile using Hermes's manifest and preference-preserving update rules.
+  The image's seeder patch skips a new bundle name already owned by a local skill
+  at another path; native discovery and filtering remain unchanged.
   C2 projects accepted messages and committed replies from existing C3 Runs.
-  No native worker starts another Run. Browser/search/interactive approval
+  A native tool completion from this invocation enables one intake at the
+  parent's step callback before Hermes drains steering after complete tool
+  results. Intake consumes that completion; loaded history and no-tool retries
+  cannot enable another. Children do not share the parent
+  step callback. Native =steer(text, ticket=Run.id)= accepts a buffer entry only.
+  The pin has no post-persistence hook: a narrow instance flush wrapper adds
+  Run/work identities to the native user row's =display_metadata= before its
+  transaction and acknowledges only a successful durable flush. C3's
+  =consumed_by= is written afterward. [[file:../assist/hermes_steering.py][The native steering bridge]]
+  owns ticket eligibility/framing, exact-ID acknowledgment and receipt-to-Run
+  matching. C4's web wrappers retain admission locking, owner/reset checks and
+  error/fallback dispatch. The bridge reads those same native rows, including
+  compression-archived rows, before a targeted queued fallback can execute
+  after a lost acknowledgment. No
+  separate queue, receipt store or native model loop is introduced.
+  No native worker starts another Run. Resolved egress cards may enqueue one
+  host-owned native follow-up through C4; native helpers share the parent thread's
+  cards and do not use Deep Agents checkpoints. Browser/search/interactive command approval
   transports are not enabled; native unattended command approval denies a
   gated operation instead of waiting on an invisible prompt.
 

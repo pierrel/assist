@@ -1,0 +1,14 @@
+--- a/tools/skills_sync.py
++++ b/tools/skills_sync.py
+@@ -6 +6,2 @@
+--> SKIP); user-DELETED skills are not re-added; upstream-REMOVED ones leave the manifest once no active or
++-> SKIP); existing local names/aliases at other paths keep precedence;
++user-DELETED skills are not re-added; upstream-REMOVED ones leave the manifest once no active or
+@@ -309,0 +311,2 @@
++    from tools.skills_tool import _collect_skill_candidates
++
+@@ -321,0 +325,4 @@
++        elif _collect_skill_candidates(skill_name, None, [_skills_dir()]):
++            # Native lookup also recognizes alternate paths and legacy flat files.
++            # Keep their bare names usable without claiming bundled provenance.
++            st.skipped += 1

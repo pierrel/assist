@@ -3,6 +3,81 @@ from edd.eval.test_browser_agent import _BrowserSite
 import pytest
 
 
+@pytest.mark.parametrize("url_fetch_present", [False, True])
+def test_offline_fetch_fixture_blocks_html_and_pdf_network(monkeypatch, url_fetch_present):
+    import socket
+    from types import SimpleNamespace
+    from unittest import mock
+    from assist import tools
+    from edd.eval.test_browser_agent import _offline_url_fetch
+
+    if url_fetch_present and not hasattr(tools, "url_fetch"):
+        monkeypatch.setattr(tools, "url_fetch", SimpleNamespace(get=mock.Mock()), raising=False)
+    with mock.patch.object(socket.socket, "connect", side_effect=AssertionError("network attempted")), \
+         mock.patch.object(socket.socket, "connect_ex", side_effect=AssertionError("network attempted")), \
+         mock.patch.object(tools.subprocess, "run", side_effect=AssertionError("child attempted")) as child:
+        with _offline_url_fetch("static"):
+            assert "9 a.m. to 5 p.m." in tools.read_url("https://static.fern.example/")
+            assert "9 a.m. to 5 p.m." in tools.requests.get("https://arbitrary.fern.example/").text
+            if hasattr(tools, "url_fetch"):
+                assert "9 a.m. to 5 p.m." in tools.url_fetch.get("https://arbitrary.fern.example/").text
+            assert "offline fixture" in tools.read_url("https://static.fern.example/report.pdf")
+        child.assert_not_called()
+
+
+def test_personal_browsing_eval_uses_its_paired_handoff_capability(monkeypatch):
+    from langchain_core.messages import AIMessage
+    from tests.middleware.test_skills_kernel import _RecordingModel
+    from edd.eval.test_browser_requested_control import TestBrowserRequestedControl
+    responses=[]
+    for index,(name,args) in enumerate([
+        ('load_skill',{'name':'browse-website'}),
+        ('browser_open',{'url':'https://static.fern.example/'}),
+        ('browser_handoff',{}),
+    ]):
+        responses.append(AIMessage(content='',tool_calls=[{'name':name,'args':args,'id':str(index)}]))
+    responses.append(AIMessage(content='The live browser is ready for you.'))
+    monkeypatch.setattr(TestBrowserRequestedControl,'model',_RecordingModel(responses=responses),raising=False)
+    case=TestBrowserRequestedControl('test_personal_browsing_opens_and_hands_over_a_static_page')
+    case.test_personal_browsing_opens_and_hands_over_a_static_page()
+
+
+@pytest.mark.parametrize("unrequested_handoff", [False, True])
+def test_information_only_completion_rejects_unrequested_handoff(monkeypatch, unrequested_handoff):
+    from langchain_core.messages import AIMessage
+    from tests.middleware.test_skills_kernel import _RecordingModel
+    from edd.eval.test_browser_agent import TestBrowserAgent
+
+    calls = [("load_skill", {"name": "browse-website"}),
+             ("browser_open", {"url": "https://v1-auth.fern.example/"})]
+    if unrequested_handoff:
+        calls.append(("browser_handoff", {}))
+    responses = [AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": str(i)}])
+                 for i, (name, args) in enumerate(calls)]
+    responses.append(AIMessage(content="October Reliability Review"))
+    monkeypatch.setattr(TestBrowserAgent, "model", _RecordingModel(responses=responses), raising=False)
+    case = TestBrowserAgent("test_v1_one_turn_completion")
+    if unrequested_handoff:
+        with pytest.raises(AssertionError, match="browser_handoff"):
+            case.test_v1_one_turn_completion()
+    else:
+        case.test_v1_one_turn_completion()
+
+
+def test_ordinary_site_offer_records_handoff_and_freezes_browser_commands(tmp_path):
+    site = _BrowserSite("v1-auth", str(tmp_path))
+    assert "error" in site.offer_control()
+    opened = site.command("open", url="https://v1-auth.fern.example/")
+    offer = site.offer_control()
+    assert offer["status"] == "waiting_for_user"
+    assert offer["handoff_url"] == "https://assist.fern.example/thread/exhibit/browser"
+    assert site.handed_off
+    assert "error" in site.command("close", page_id=opened["result"]["page_id"])
+    assert site.session_open
+    site.end_turn()
+    assert not site.handed_off
+
+
 @pytest.mark.parametrize("journey", ["auth", "approval_before", "approval_after"])
 def test_selected_journey_completes_legal_context_work(monkeypatch, journey):
     import hashlib
