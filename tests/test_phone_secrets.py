@@ -210,3 +210,58 @@ def test_private_rejection_unknown_detail_is_not_echoed():
     error = phone_api._secret_rejection(SecretStoreError("invented-private-body"))
     assert error.status_code == 409
     assert error.detail == {"code": "store_unavailable"}
+
+
+@pytest.mark.parametrize("suffix", ["", "/unlock"])
+@pytest.mark.parametrize("case", ["declared_size", "streamed_size", "invalid_json", "missing_fields"])
+def test_private_body_rejection_precedes_store_access(
+        monkeypatch, caplog, suffix, case):
+    """413/422 refuse raw synthetic input before any repository/store operation."""
+    monkeypatch.setenv(phone_api.PHONE_API_TOKEN_ENV, "synthetic-token")
+    monkeypatch.setattr(phone_api, "_repo_secrets",
+                        lambda _tid: pytest.fail("rejected body reached secret store"))
+    marker = "invented-prevalidation-private-text"
+    headers = {"Authorization": "Bearer synthetic-token"}
+    if case == "declared_size":
+        headers["Content-Length"] = "4097"
+        body, expected = marker, 413
+    elif case == "streamed_size":
+        body, expected = iter([marker.encode() * 130]), 413
+    elif case == "invalid_json":
+        body, expected = marker, 422
+    else:
+        body, expected = '{"label":"' + marker + '"}', 422
+    response = TestClient(app).post(
+        "/api/v1/phone/threads/synthetic/secrets" + suffix,
+        headers=headers, content=body)
+    assert response.status_code == expected
+    assert marker not in response.text
+    assert marker not in caplog.text
+
+
+def test_full_store_save_refuses_entry_after_unlock(tmp_path, monkeypatch):
+    """A store-full refusal may unlock first, but adds no credential entry."""
+    from assist.secret_store import MAX_ENTRIES
+    repo, thread = tmp_path / 'repo', tmp_path / 'thread'
+    repo.mkdir(); thread.mkdir()
+    store = SecretStore(repo, thread)
+    phrase = 'synthetic full-store phrase'
+    store.unlock(phrase, create=True)
+    for index in range(MAX_ENTRIES):
+        store.put(str(index), 'https://synthetic.example/login', 'invented-user', 'invented-password')
+    (thread / KEY_FILE).unlink()
+    before = (repo / FILE).read_bytes()
+    monkeypatch.setenv(phone_api.PHONE_API_TOKEN_ENV, 'synthetic-token')
+    monkeypatch.setattr(phone_api, '_repo_secrets', lambda _tid: store)
+    monkeypatch.setattr(ThreadGitLifecycle, 'acquire', lambda *_a, **_k: nullcontext(
+        SimpleNamespace(bound=True, prepare=lambda *_a: None)))
+    monkeypatch.setattr(phone_api.threads, '_git_merge_has_unfinished_work', lambda _tid: False)
+    response = TestClient(app).post('/api/v1/phone/threads/synthetic/secrets',
+        headers={'Authorization': 'Bearer synthetic-token'},
+        json={'label': 'New', 'login_url': 'https://synthetic.example/login',
+              'username': 'new-invented-user', 'password': 'new-invented-password',
+              'passphrase': phrase})
+    assert response.status_code == 409
+    assert response.json() == {'detail': {'code': 'store_full'}}
+    assert (thread / KEY_FILE).exists()
+    assert (repo / FILE).read_bytes() == before
