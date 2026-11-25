@@ -64,10 +64,7 @@ def _check_lease(request):
                 or request["generation"] not in lease["generations"]):
             raise RuntimeError("browser turn lease changed")
         runs = RunService(request["threads_root"]).list(request["thread_id"])
-        if any(run.status == "revocation_pending" for run in runs):
-            raise RuntimeError("newer user message revoked browser startup")
-        latest = max((run.admission_sequence for run in runs
-                      if run.user_event_id == run.id), default=0)
+        latest = authority.execution_sequence(runs, request["run_id"])
         if latest != lease["sequence"]:
             raise RuntimeError("newer user message revoked browser startup")
 

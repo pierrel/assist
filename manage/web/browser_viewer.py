@@ -55,7 +55,8 @@ def _control(tid, token, body):
     with BrowserManager.bounded_thread_gate(tid), session._lock:
         session._viewer_check(token)
         return {"requested": session.human_requested, "active": session.human_active,
-                "owner": session.human_client == client}
+                "owner": session.human_client == client,
+                "unclaimed": bool(session.handoff_url and session.human_client is None)}
 
 
 @app.post("/thread/{tid}/browser/control")
@@ -112,32 +113,33 @@ button,select,input{font:inherit;min-height:44px;max-width:100%}button{touch-act
 <header id="toolbar"><nav><button id="take">Take over</button><button id="return" disabled>Return to Assist</button>
 <select id="tabs" aria-label="Browser tab"></select><button id="refresh">Refresh view</button></nav>
 <span id="status" role="status">The website stays in Assist's browser.</span>
+<p id="view-error" role="alert" hidden></p>
 <input id="typing" aria-label="Text for selected website field" autocomplete="off" maxlength="2000" type="password" placeholder="Type into selected field">
 <button id="type">Type</button><button id="select">Select all</button><button id="backspace">⌫</button><button id="enter">Enter</button>
 <button id="up">Scroll up</button><button id="down">Scroll down</button></header>
 <img id="screen" alt="Live website in Assist's browser"><script>
 const config=__CONFIG__,key='assist-viewer:'+location.pathname;
 let client=sessionStorage.getItem(key);if(!client){client=[...crypto.getRandomValues(new Uint8Array(16))].map(v=>v.toString(16).padStart(2,'0')).join('');sessionStorage.setItem(key,client)}
-const $=id=>document.getElementById(id),status=$('status'),screen=$('screen'),tabs=$('tabs');
+const $=id=>document.getElementById(id),status=$('status'),screen=$('screen'),tabs=$('tabs'),frameProblem=$('view-error');
 let active=false,busy=false,pageWidth=390,pageHeight=600,ended=false,chain=Promise.resolve(),renderedPage=null,viewRevision=0;
 async function request(action,args={}){const r=await fetch(config.url,{method:'POST',headers:{'Content-Type':'application/json','X-Browser-Token':config.token},body:JSON.stringify({action,client,...args}),cache:'no-store'});
 if(!r.ok){let body=await r.json();throw Error(body.error||body.detail||'Browser unavailable')}return r}
 function send(action,args={}){let result=chain.then(async()=>{try{return await request(action,args)}finally{await new Promise(r=>setTimeout(r,65))}});chain=result.catch(()=>{});return result}
 function problem(e){status.textContent=e.message}
 function canInput(){return active&&renderedPage!==null&&renderedPage===tabs.value}
-function retireFrame(){viewRevision++;renderedPage=null;let old=screen.src;screen.removeAttribute('src');delete screen.dataset.page;if(old)URL.revokeObjectURL(old)}
-async function frame(){if(!active||busy||!tabs.value)return;busy=true;const page=tabs.value,revision=viewRevision;try{let r=await send('frame',{page_id:page}),blob=await r.blob();if(revision!==viewRevision||tabs.value!==page||ended)return;let old=screen.src,url=URL.createObjectURL(blob);screen.src=url;await screen.decode();if(revision===viewRevision&&tabs.value===page&&!ended){pageWidth=Number(r.headers.get('X-Page-Width'));pageHeight=Number(r.headers.get('X-Page-Height'));renderedPage=page;screen.dataset.page=page}if(old)URL.revokeObjectURL(old)}catch(e){problem(e)}finally{busy=false}}
-async function loadTabs(){let data=await(await send('tabs')).json(),old=tabs.value||sessionStorage.getItem(key+':tab');tabs.replaceChildren();for(let p of data.pages){let o=document.createElement('option');o.value=p.page_id;o.textContent=p.url;tabs.append(o)}if([...tabs.options].some(o=>o.value===old))tabs.value=old;if(renderedPage!==tabs.value)retireFrame()}
+function retireFrame(clearError=false){viewRevision++;renderedPage=null;if(clearError){frameProblem.hidden=true;frameProblem.textContent='';}let old=screen.src;screen.removeAttribute('src');delete screen.dataset.page;if(old)URL.revokeObjectURL(old)}
+async function frame(){if(!active||busy||!tabs.value)return;busy=true;const page=tabs.value,revision=viewRevision;try{let r=await send('frame',{page_id:page}),blob=await r.blob();if(revision!==viewRevision||tabs.value!==page||ended)return;let old=screen.src,url=URL.createObjectURL(blob);screen.src=url;await screen.decode();if(revision===viewRevision&&tabs.value===page&&!ended){pageWidth=Number(r.headers.get('X-Page-Width'));pageHeight=Number(r.headers.get('X-Page-Height'));renderedPage=page;screen.dataset.page=page;frameProblem.hidden=true;frameProblem.textContent=''}if(old)URL.revokeObjectURL(old)}catch(e){if(!ended&&revision===viewRevision&&tabs.value===page){frameProblem.textContent='Live view unavailable: '+e.message;frameProblem.hidden=false}}finally{busy=false}}
+async function loadTabs(){let data=await(await send('tabs')).json(),old=tabs.value||sessionStorage.getItem(key+':tab');tabs.replaceChildren();for(let p of data.pages){let o=document.createElement('option');o.value=p.page_id;o.textContent=p.url;tabs.append(o)}if([...tabs.options].some(o=>o.value===old))tabs.value=old;if(renderedPage!==tabs.value)retireFrame(old!==tabs.value)}
 async function fit(){if(tabs.value)await send('viewport',{page_id:tabs.value,width:Math.max(320,Math.min(1024,innerWidth)),height:Math.max(240,Math.min(1024,innerHeight-$('toolbar').offsetHeight))})}
-async function update(){if(ended)return;try{let state=await(await send('status')).json();let was=active;active=state.active&&state.owner;$('take').disabled=state.requested;$('return').disabled=!active;
+async function update(){if(ended)return;try{let state=await(await send('status')).json();let was=active;active=state.active&&state.owner;$('take').disabled=state.requested&&!state.unclaimed;$('return').disabled=!active;
 status.textContent=active?'You control this browser.':state.requested?'Waiting for the current operation to finish.':'Assist controls this browser.';
 if(active){await loadTabs();if(!was)await fit();await frame()}}catch(e){problem(e)}finally{if(!ended)setTimeout(update,750)}}
 $('take').onclick=()=>send('takeover').catch(problem);
-$('return').onclick=async()=>{try{await send('return');ended=true;active=false;retireFrame();status.textContent='Returned to Assist. You can close this page.';$('return').disabled=true;$('take').disabled=true}catch(e){problem(e)}};
+$('return').onclick=async()=>{try{await send('return');ended=true;active=false;retireFrame(true);status.textContent='Returned to Assist. You can close this page.';$('return').disabled=true;$('take').disabled=true}catch(e){problem(e)}};
 $('type').onclick=async()=>{if(!canInput())return;let text=$('typing').value,page=renderedPage;$('typing').value='';try{await send('text',{page_id:page,text});await frame()}catch(e){problem(e)}};
 for(let [id,key] of [['select','Control+a'],['backspace','Backspace'],['enter','Enter']])$(id).onclick=()=>canInput()&&send('key',{page_id:renderedPage,key}).then(frame).catch(problem);
 for(let [id,delta] of [['up',-450],['down',450]])$(id).onclick=()=>canInput()&&send('scroll',{page_id:renderedPage,delta}).then(frame).catch(problem);
-tabs.onchange=async()=>{retireFrame();sessionStorage.setItem(key+':tab',tabs.value);try{await fit();await frame()}catch(e){problem(e)}};$('refresh').onclick=frame;
+tabs.onchange=async()=>{retireFrame(true);sessionStorage.setItem(key+':tab',tabs.value);try{await fit();await frame()}catch(e){problem(e)}};$('refresh').onclick=frame;
 let start=null;screen.onpointerdown=e=>{if(canInput()){start={x:e.clientX,y:e.clientY,page:renderedPage,revision:viewRevision};screen.setPointerCapture(e.pointerId)}};
 screen.onpointerup=e=>{if(!start)return;if(!canInput()||start.page!==renderedPage||start.revision!==viewRevision){start=null;return}let dy=start.y-e.clientY,r=screen.getBoundingClientRect(),page=start.page;start=null;let action=Math.abs(dy)>20?'scroll':'click',args=action==='scroll'?{delta:Math.max(-1500,Math.min(1500,dy*pageHeight/r.height))}:{x:(e.clientX-r.left)*pageWidth/r.width,y:(e.clientY-r.top)*pageHeight/r.height};send(action,{page_id:page,...args}).then(frame).catch(problem)};
 screen.onpointercancel=()=>{start=null};update();

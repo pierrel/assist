@@ -1,0 +1,42 @@
+digraph PiActual {
+  graph [label="Actual · Pi preview on Assist ecb665c6", labelloc=t,
+         fontname="DejaVu Sans", fontsize=22, bgcolor="white", rankdir=TB,
+         pad=0.25, nodesep=0.45, ranksep=0.6, splines=polyline];
+  node [shape=box, style="rounded,filled", fontname="DejaVu Sans", fontsize=13,
+        color="#667587", fillcolor="#f1f3f5", margin="0.16,0.12"];
+  edge [fontname="DejaVu Sans", fontsize=10, color="#52657a", arrowsize=0.7];
+  C1a [label="C1a  Browser + authenticated phone"];
+  C2 [label="C2  Web/API boundary\nengine selector · visible projection"];
+  C3 [label="C3  Durable Runs\nmanual submissions · restart classification"];
+  C4 [label="C4  Dispatch + affinity\none contained turn holds model slot"];
+  C8 [label="C8  Host authorities\nGit fence · sandbox · egress grants"];
+  C9 [label="C9  Durable thread state\nRuns · Pi transcript/skills/trace", fillcolor="#fff4d7"];
+  C10 [label="C10  Workspace sandbox\nfile/shell actions via broker"];
+  C12 [label="C12  Local model endpoint"];
+  C13 [label="C13  Egress proxy\noperator allowlist · Pi has no dynamic grants"];
+  C16 [label="C16  Assist static guidance", fillcolor="#ffe4d1", color="#ad6534"];
+  C17 [label="C17  Assist skill sources", fillcolor="#ffe4d1", color="#ad6534"];
+  C21 [label="C21  Pi host lifecycle\nPiRuntimeManager"];
+  C22 [label="C22  Pi worker\nnetworkless · no workspace mount", fillcolor="#ffe4d1", color="#ad6534"];
+  C23 [label="C23  Pi tool/skill broker\ntranslated tool grants", fillcolor="#ffe4d1", color="#ad6534"];
+  C24 [label="C24  Pi provider relay\ncredential · schema/policy enforcement"];
+  C1a -> C2 [label="HTTP / phone harness=pi"];
+  C2 -> C3 [label="admit immutable engine + Run"];
+  C3 -> C4 [label="Run ID"];
+  C4 -> C8 [label="acquire Git / sandbox authority"];
+  C8 -> C10 [label="create restricted generation", constraint=false];
+  C4 -> C21 [label="execute Pi Run"];
+  C16 -> C21 [label="shared purpose/evidence + Pi adapter", color="#b64c40", style=dashed];
+  C17 -> C21 [label="web-main skill composition", color="#b64c40", style=dashed];
+  C21 -> C22 [label="fresh bounded worker · authenticated result"];
+  C21 -> C23 [label="workspace backend + skill authority"];
+  C21 -> C24 [label="fixed model + skill authority"];
+  C22 -> C23 [label="private tool/skill requests"];
+  C22 -> C24 [label="private completion requests"];
+  C23 -> C10 [label="authorized actions"];
+  C24 -> C12 [label="local OpenAI HTTP"];
+  C10 -> C13 [label="sandbox network traffic"];
+  C21 -> C9 [label="Run-bound completion/trace", style=dashed];
+  C3 -> C9 [label="Run lifecycle", style=dashed];
+  C9 -> C2 [label="visible history / status", style=dashed];
+}

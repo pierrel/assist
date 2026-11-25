@@ -377,6 +377,7 @@ def test_turn_sandbox_restores_private_storage_in_new_generation(tmp_path, monke
             volumes={str(tmp_path / "map"): {"bind": "/client-map", "mode": "ro"}},
             environment={"ASSIST_PORT": "5050",
                          "EGRESS_ALLOWLIST": f"{origin_ip},fixture-public.test",
+                         "PYTHONPATH": "/usr/local/bin",
                          "EGRESS_SANDBOX_CIDR": ordinary_cidr,
                          "EGRESS_BROWSER_CIDR": browser_cidr,
                          "BROWSER_TEST_PUBLIC_ORIGIN_IP": origin_ip},

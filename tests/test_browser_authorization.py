@@ -39,8 +39,53 @@ def test_later_same_work_slice_cannot_revive_explicit_cancellation_or_old_sequen
         state.begin(owner.id, owner.admission_sequence)
         state.add_generation(owner.id, "generation")
     with pytest.raises(browser.BrowserUnavailable,
-                       match="generation changed" if boundary == "new_user" else "cancelled"):
+                       match="newer user message" if boundary == "new_user" else "cancelled"):
         session._fence_command()
+
+
+@pytest.mark.parametrize("boundary", ["sibling", "replacement", "wrong_target", "forward_target", "terminal", "cancel", "generation"])
+def test_fallback_siblings_do_not_weaken_owner_fences(tmp_path, boundary):
+    from assist.browser.turn_runtime import _check_lease
+    tid = "fallback-thread"
+    (tmp_path / tid).mkdir()
+    authority.mark_new_thread(str(tmp_path), tid)
+    runs = RunService(str(tmp_path))
+    original = runs.create(tid, "general-agent", "Original task", user_origin=True)
+    runs.claim(tid, original.id)
+    first = runs.create(tid, "general-agent", "First follow-up", user_origin=True,
+                        interjection_work_id=original.work_id)
+    runs.create(tid, "general-agent", "Second follow-up", user_origin=True,
+                interjection_work_id=original.work_id)
+    runs.transition(tid, original.id, "success")
+    if boundary == "cancel":
+        runs.cancel_logical(tid, first.id)
+    else:
+        runs.claim(tid, first.id)
+    if boundary in {"replacement", "wrong_target"}:
+        runs.create(tid, "general-agent", "Different request", user_origin=True,
+                    interjection_work_id="other-work" if boundary == "wrong_target" else None)
+    elif boundary == "forward_target":
+        runs.create(tid, "general-agent", "Invalid future target", user_origin=True,
+                    interjection_work_id="future-work")
+        runs.create(tid, "general-agent", "Later work", run_id="future-work", origin="system")
+    elif boundary == "terminal":
+        runs.transition(tid, first.id, "success")
+    generation = "first-fallback-generation"
+    with authority.fence(str(tmp_path), tid) as state:
+        state.begin(first.id, first.admission_sequence)
+        state.add_generation(first.id, generation)
+    session = browser.BrowserSession(tid, first.id, str(tmp_path / tid), str(tmp_path),
+        _browser_user_request(first, runs.list(tid)), work_id=first.work_id,
+        sandbox_generation="different-generation" if boundary == "generation" else generation,
+        run_service=runs)
+    request = {"threads_root":str(tmp_path), "thread_id":tid, "run_id":first.id,
+               "generation":session.sandbox_generation}
+    if boundary == "sibling":
+        session._fence_command()
+        _check_lease(request)
+    else:
+        with pytest.raises(browser.BrowserUnavailable):session._fence_command()
+        with pytest.raises(RuntimeError):_check_lease(request)
 
 
 @pytest.mark.parametrize("sequence,valid", [(True, False), (False, False), (1, True)])

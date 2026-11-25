@@ -73,3 +73,18 @@ def test_after_model_expired_wins_over_pause():
             mw.after_model(MagicMock(), MagicMock())
     finally:
         _active_handle.reset(token)
+
+
+def test_offer_pause_before_model_preserves_the_expired_hold_cap(monkeypatch):
+    from types import SimpleNamespace
+    from assist.browser.manager import BrowserManager
+    handle=_handle()
+    handle.expired=True
+    monkeypatch.setattr(BrowserManager,'current_session',lambda _tid:SimpleNamespace(
+        handoff_url='https://assist.example/thread/A/browser',human_requested=True))
+    token=_active_handle.set(handle)
+    try:
+        with pytest.raises(ThreadHoldExpired):
+            ThreadQueueMiddleware().before_model({},None)
+    finally:
+        _active_handle.reset(token)

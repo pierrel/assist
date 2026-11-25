@@ -106,6 +106,7 @@ from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
                                  ThreadHoldExpired, ThreadPauseRequested,
                                  active_handle)
 from assist.hermes_runtime import HermesRuntimeError, HermesRuntimeManager
+from assist.hermes_steering import offer_followups, reconcile_receipts
 from edd.live_capture import CaptureStorageFull
 
 from manage.web.app import app
@@ -1083,7 +1084,9 @@ def render_thread(
         label = STAGE_LABELS.get(stage, "Working...")
         viewer_session = BrowserManager.current_session(tid)
         if viewer_session is not None and viewer_session.human_active:
-            label = "You control the browser. Return to Assist in Browser control to continue."
+            label = ("The live browser is ready. Open Browser control and choose Take over."
+                     if viewer_session.handoff_url and viewer_session.human_client is None else
+                     "You control the browser. Return to Assist in Browser control to continue.")
         if status.get("origin") == "continuation" and stage == "processing":
             # Not the user's message — say what's actually happening.
             task_txt = " ".join(pending[len(_CONTINUATION_RIDER):].split())[:120] \
@@ -1099,6 +1102,8 @@ def render_thread(
             f'<div class="status-banner">'
             f'<span class="spinner"></span>'
             f'<span>{html.escape(label)}</span>'
+            + (f'<a href="{html.escape(status["browser_control_url"], quote=True)}" target="_blank" rel="noopener">Control the live browser</a>'
+               if status.get("browser_control_url") else "") +
             f'{elapsed_span}'
             f'</div>'
             f'{_ELAPSED_TICKER_SCRIPT if elapsed_span else ""}'
@@ -1973,7 +1978,7 @@ def _cancel_this_turns_continuations(tid: str, pre_turn_ids: set) -> int:
 def _consume_interjections(tid: str, ids: set) -> None:
     """Terminalize injected pending Runs and remember them for fate-sharing retry.
 
-    Dispatch skips each now non-pending ticket, giving exactly-once execution. A
+    Dispatch skips each now non-pending ticket, giving exactly-once execution.
     Called from the middleware's next-boundary claim and from the terminal
     sweep below; idempotent (terminal runs are absent from pending records)."""
     ctx = _TURN_INTERJECTION.setdefault(
@@ -2034,8 +2039,9 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
     the old id in the thread checkpoint forever, so any later turn's boundary
     claim scan would silently consume a same-id retry too — the promised retry
     would never run.
-    A fresh id matches nothing stale: the entry is delivered exactly once, by
-    its dispatcher or by legitimate re-injection into an intervening turn.
+    A fresh id matches nothing stale; owner retries run as their own follow-ups.
+    Owner retries target their consumed work in the host journal, preserving
+    queued-follow-up authority instead of superseding earlier sibling retries.
     The dead framed copy itself is duplicate EXPOSURE when the follow-up runs
     — benign, named in the design. Returns how many, so the error text can
     say so. BEST-EFFORT by contract: runs inside turn error handlers (a raise
@@ -2044,14 +2050,15 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
     try:
         claimed = (_TURN_INTERJECTION.pop(tid, None) or {}).get("claimed", [])
         for rec in claimed:
+            source = _runs().get(rec.thread_id, rec.id)
             fresh = _create_run(
                 rec.thread_id, rec.text,
                 rider=_rider_from_fields(rec.rider), sender=rec.sender,
-                user_origin=rec.sender is None)
+                user_origin=rec.sender is None,
+                interjection_work_id=source.work_id if rec.sender is None else None)
             # The retried turn keeps the ORIGINAL message's context rider
             # (sent_at/tz/lat/lon from the journal entry — recovery fidelity,
-            # like the restart drain); fall back to a fresh rider with the
-            # dead turn's tz only when the entry never carried one.
+            # like the restart drain).
             _RESUME_SCHEDULER.submit(fresh.id, tid)
             n += 1
     except Exception:
@@ -2073,13 +2080,18 @@ def _runs_before_browser_reset(runs: list[Run]) -> list[Run]:
 
 def _pending_run_records(tid: str) -> list[PendingMessage]:
     """Interjection adapter; never expose a follower across a reset debt."""
-    eligible = _runs_before_browser_reset(_runs().list(tid))
+    runs = _runs().list(tid)
+    owner_id = _TURN_INTERJECTION.get(tid, {}).get("run_id")
+    owner = next((run for run in runs if run.id == owner_id), None)
+    eligible = _runs_before_browser_reset(runs)
     return [PendingMessage(
         thread_id=run.thread_id, text=run.text or "", sender=run.sender,
         rider=run.rider, enqueued_at=run.created_at, origin=run.origin, id=run.id)
         for run in eligible
         if (run.status == "pending" and run.mode == "turn" and run.text
             and run.review_snapshot is None
+            and (run.interjection_work_id is None
+                 or (owner is not None and run.interjection_work_id == owner.work_id))
             and run.assistant_id == "general-agent")]
 
 
@@ -2443,17 +2455,29 @@ def _hermes_messages(tid: str) -> list[dict]:
     Native SessionDB remains Hermes's conversation state. This projection only
     renders the existing host acceptance and completion receipts to clients.
     """
+    runs = _runs().list(tid)
     work = {}
-    for run in _runs().list(tid):
+    for run in runs:
         if run.mode == "turn":
             first, _ = work.get(run.work_id, (run, run))
             work[run.work_id] = (first, run)
     messages = []
+    run_work = {run.id: run.work_id for run in runs}
+    followers = {}
+    for first, _ in work.values():
+        if first.consumed_by:
+            followers.setdefault(run_work.get(first.consumed_by), []).append(first)
     for first, latest in work.values():
+        if first.consumed_by:
+            continue
         text = first.text or first.pending_text
         if text and first.origin is None:
             messages.append({"role": "user", "content": text, "run_id": first.id,
                              "message_id": f"hermes:user:{first.work_id}"})
+        for follower in followers.get(first.work_id, ()):
+            if follower.text and follower.origin is None:
+                messages.append({"role": "user", "content": follower.text, "run_id": follower.id,
+                                 "message_id": f"hermes:user:{follower.work_id}"})
         if latest.status == "success" and latest.result:
             messages.append({"role": "assistant", "content": latest.result, "run_id": latest.id,
                              "message_id": f"hermes:assistant:{first.work_id}"})
@@ -2572,7 +2596,8 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 user_origin: bool = False, user_event_id: str | None = None,
                 revocation_pending: bool = False,
                 browser_reset_run_id: str | None = None,
-                review_snapshot: dict | None = None) -> Run:
+                review_snapshot: dict | None = None,
+                interjection_work_id: str | None = None) -> Run:
     """Commit one web turn before placing its id on a dispatch queue."""
     with RUN_GATE.active() as accepted:
         if not accepted:
@@ -2591,6 +2616,7 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
             user_origin=user_origin, user_event_id=user_event_id,
             revocation_pending=revocation_pending,
             browser_reset_run_id=browser_reset_run_id,
+            interjection_work_id=interjection_work_id,
             review_snapshot=review_snapshot)
 
 
@@ -3203,9 +3229,41 @@ def _execute_run_active(run_id: str, tid: str, *, user_priority: bool = False) -
         pass  # thread deletion removes its run store while a dispatcher unwinds.
 
 
+def _hermes_steering(run: Run, consumed=()) -> list[dict]:
+    """Offer only this owner's journaled follow-ups; claim persisted identities."""
+    with _RUN_ADMISSION_LOCK:
+        service = _runs()
+        runs = service.list(run.thread_id)
+        browser_authority.execution_sequence(runs, run.id)
+        return offer_followups(service, run, _runs_before_browser_reset(runs), consumed)
+
+
+def _reconcile_hermes_steering(tid: str) -> None:
+    """Close native-commit/host-ack crash gaps before a targeted fallback runs."""
+    with _RUN_ADMISSION_LOCK:
+        reconcile_receipts(_runs(), tid, MANAGER.thread_agent_dir(tid))
+
+
 def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
     """Dispatch native work and retain its process across same-work successors."""
     tid = run.thread_id
+    if run.status == "pending" and run.interjection_work_id is not None:
+        try:
+            _reconcile_hermes_steering(tid)
+        except Exception:
+            # An unreadable receipt store cannot prove queued delivery safe.
+            # Keep the journal entry visible without replaying uncertain work.
+            message = "Native steering delivery could not be verified; retained files need review"
+            with _RUN_ADMISSION_LOCK:
+                _runs().claim(tid, run.id)
+                _runs().transition(tid, run.id, "error", error=message)
+            _set_status(tid, "error", error=message, pending_message=run.text)
+            _dispatch_pending_after(tid, run.id)
+            return
+        run = _runs().get(tid, run.id)
+        if run.status != "pending":
+            _dispatch_pending_after(tid, run.id)
+            return
     if run.status != "pending":
         recovered = False
         with _RUN_ADMISSION_LOCK:
@@ -3305,6 +3363,7 @@ def _execute_hermes_run(run: Run, *, user_priority: bool) -> None:
                 reply = _HERMES_RUNTIME.run_slice(
                     run, work_dir=work_dir, agent_dir=MANAGER.thread_agent_dir(tid),
                     thread_scope=(MANAGER.root_dir, tid), handle=handle, admitted=admitted,
+                    steering=lambda consumed: _hermes_steering(run, consumed),
                     egress_tools=(egress_tools(EGRESS_STORE, EGRESS_BASE_HOSTS,
                                               thread_dir=MANAGER.thread_dir, thread_id=tid)
                                   if EGRESS_STORE is not None else ()))
@@ -3736,7 +3795,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
 
     def waits_for_retained_work() -> bool:
         retained = BrowserManager.current_session(tid)
-        return (_run is not None and not _run.resume and _run.user_event_id != _run.id
+        return (_run is not None and not _run.resume
+                and (_run.user_event_id != _run.id
+                     or _run.interjection_work_id == getattr(retained, "work_id", None))
                 and retained is not None and not retained.closed
                 and retained.work_id != _run.work_id)
 
@@ -3922,15 +3983,17 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             # and writable sandbox remain owned by the original admitted event.
             user_request = _browser_user_request(
                 _run, _runs().list(tid) if _run is not None else [])
-            try:
-                browser_session = (BrowserManager.resume_session(
-                    tid, _run.work_id, user_request)
-                    if resume and _run is not None
-                    else None)
-            except ThreadPauseRequested:
-                browser_session = BrowserManager.current_session(tid)
-                keep_browser = True
-                raise
+            with BrowserManager.bounded_thread_gate(tid):
+                try:
+                    browser_session = (BrowserManager.resume_session(
+                        tid, _run.work_id, user_request)
+                        if resume and _run is not None
+                        else None)
+                except ThreadPauseRequested:
+                    browser_session = BrowserManager.current_session(tid)
+                    sandbox_generation = browser_session.sandbox_backend.container
+                    keep_browser = True
+                    raise
             if not resume and resume_decision is None and origin != "task-completion":
                 def terminalize_dirty(error: GitSyncError) -> None:
                     if _run is not None:
@@ -4368,7 +4431,13 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # the process; sender/rider are already in pending_kwargs). A crash of a
                 # PROCESSING turn has no carry to persist — its resumed slice restarts the
                 # cap at 0, accepted (the cap is a runaway backstop, not billing).
-                _set_status(tid, "paused", accumulated_active_ms=carry, **pending_kwargs)
+                handoff_url = browser_session.handoff_url if keep_browser else None
+                _set_status(tid, "paused", accumulated_active_ms=carry,
+                            **({"browser_control_url": handoff_url} if handoff_url else {}),
+                            **pending_kwargs)
+                if handoff_url and _run is not None:
+                    _publish_phone_text(tid, _run.work_id,
+                                        f"\n\n[Control the live browser]({handoff_url})\n")
                 # Reserve a promotable queue item while this durable handoff is atomic,
                 # but do not notify or execute it until admission is released below.
                 if keep_browser and browser_session.human_requested:
@@ -5126,8 +5195,10 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
                     or browser_active or bool(held) or bool(older_web))
     busy = busy or browser_active or bool(older_web) or bool(held)
     pi_thread = False
+    steering_engine = False
     try:
         pi_thread = _is_native_thread(tid)
+        steering_engine = read_thread_engine(MANAGER.thread_dir(tid)).name in {"deepagents", "hermes"}
         if pi_thread:
             if _is_pi_thread(tid):
                 _ensure_pi_description(tid, text)
@@ -5137,11 +5208,32 @@ def _accept_message_run_locked(tid: str, text: str, rider=None,
         # Dispatch will make the existing invalid-engine error durable; title
         # best-effort must not change message-admission semantics.
         pass
+    active = next((item for item in reversed(previous)
+                   if (item.status == "running" or
+                        (item.status == "pending" and item.resume
+                         and any(prior.work_id == item.work_id
+                                 and prior.status == "interrupted" for prior in previous)))), None)
+    if active is not None:
+        try:
+            browser_authority.execution_sequence(previous, active.id)
+        except RuntimeError:
+            active = None
+    steering = (active is not None and steering_engine and not held
+                and active.mode == "turn" and active.assistant_id == "general-agent"
+                and active.sender is None and active.approval_id is None
+                and prior_stage != "awaiting_approval"
+                and _runs().pending_approval(tid) is None
+                and review_snapshot is None
+                and (session is None or (session.work_id == active.work_id
+                     and not session.closed
+                     and (session.handoff_url or (not session.human_requested
+                          and not session.human_active)))))
     run = _create_run(tid, text, rider=rider, location=location,
                       run_id=run_id, work_id=work_id,
                       dispatch_key=dispatch_key,
                       max_pending=max_pending, user_origin=True,
-                      revocation_pending=browser_hold and not pi_thread,
+                      revocation_pending=browser_hold and not pi_thread and not steering,
+                      interjection_work_id=active.work_id if steering else None,
                       review_snapshot=review_snapshot,
                       browser_reset_run_id=(
                           lease["owner_run_id"] if lease is not None else

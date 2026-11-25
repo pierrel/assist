@@ -71,3 +71,9 @@ def test_managed_execution_binds_authority_and_persistent_agent_mount(tmp_path, 
         assert work_dir == str(tmp_path / "thread" / "domain")
         assert kwargs["thread_scope"] == (str(tmp_path), "thread")
         assert kwargs["agent_dir"] == str(tmp_path / "thread" / "agent")
+
+
+def test_web_browser_exposes_an_explicit_live_control_handoff(tmp_path):
+    session = SimpleNamespace(threads_root=str(tmp_path), thread_id='thread',
+                              work_dir=str(tmp_path / 'thread' / 'domain'))
+    assert 'browser_handoff' in {tool.__name__ for tool in browser_tools(session)}

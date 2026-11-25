@@ -18,7 +18,7 @@ import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 from uuid import uuid4
 
 from assist.browser import authority
@@ -237,6 +237,7 @@ class BrowserSession:
         self.human_active = False
         self.viewer_token = uuid4().hex
         self.human_client = None
+        self.handoff_url = None
         self.held_runs = {}
         self.on_control_end = lambda: None
         self.needs_observation = False
@@ -323,18 +324,11 @@ class BrowserSession:
         self.identity = None
 
     def _latest_direct_sequence(self) -> int:
-        runs = self.run_service.list(self.thread_id)
-        if self.work_id is not None:
-            work = [run for run in runs if run.work_id == self.work_id]
-            # Checkpoint repair can replace a cancelled slice; explicit user
-            # cancellation receipts permanently revoke the logical work.
-            if work and (work[-1].status == "cancelled"
-                         or any(run.cancel_cleanup is not None for run in work)):
-                raise BrowserUnavailable("browser work was cancelled")
-        if any(run.status == "revocation_pending" for run in runs):
-            raise BrowserUnavailable("newer user message revoked browser startup")
-        return max((run.admission_sequence for run in runs
-                    if run.user_event_id == run.id), default=0)
+        try:
+            return authority.execution_sequence(
+                self.run_service.list(self.thread_id), self.run_id)
+        except RuntimeError as error:
+            raise BrowserUnavailable(str(error)) from error
 
     def _begin_lease(self) -> None:
         with authority.fence(self.threads_root, self.thread_id) as state:
@@ -364,6 +358,7 @@ class BrowserSession:
             finally:
                 self._stop()
             self.human_active = self.human_requested = False
+            self.handoff_url = None
             self.viewer_token = uuid4().hex
             self.on_control_end()
 
@@ -378,6 +373,35 @@ class BrowserSession:
                 self.human_active = True
             self.human_client = client
             self.human_requested = True
+
+    def offer_control(self):
+        """Offer the current direct owner's live pages without claiming a viewer."""
+        base = os.environ.get("ASSIST_BASE_URL", "")
+        try:
+            parsed = urlsplit(base)
+            valid = (base and base == base.strip()
+                     and not any(ord(char) < 32 for char in base)
+                     and parsed.scheme in {"http", "https"} and parsed.hostname
+                     and parsed.username is None and parsed.password is None
+                     and parsed.path in {"", "/"} and not parsed.query and not parsed.fragment
+                     and (parsed.port is None or 1 <= parsed.port <= 65535))
+        except ValueError:
+            valid = False
+        if not valid:
+            raise BrowserUnavailable("the server's browser-control address is not configured")
+        with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
+            self._viewer_check(self.viewer_token)
+            if self.user_request is None or self.user_request.work_id != self.work_id:
+                raise BrowserUnavailable("live control requires a direct user-owned turn")
+            if not self._handoff_pages():
+                raise BrowserUnavailable("no live website page is available for control")
+            if self.human_active:
+                raise BrowserUnavailable("a human viewer already controls this browser")
+            self.handoff_url = base.rstrip("/") + "/thread/" + quote(self.thread_id, safe="") + "/browser"
+            self.human_requested = True
+            return {"handoff_url": self.handoff_url,
+                    "status": "waiting_for_user",
+                    "continuation": "The host pauses before the next model step. When execution resumes, the user has returned control; observe the live page before continuing."}
 
     def _viewer_check(self, token):
         if self.closed or self.identity is None or not hmac.compare_digest(self.viewer_token, token):
@@ -441,6 +465,7 @@ class BrowserSession:
                 self.paused = True
             self.human_active = self.human_requested = False
             self.human_client = None
+            self.handoff_url = None
             self.viewer_token = uuid4().hex
             self.needs_observation = True
             self.handoff_observed = False
@@ -512,8 +537,8 @@ class BrowserSession:
 
     def command(self, operation: str, *, _private_values: tuple[str, ...] = (), **args):
         with BrowserManager.bounded_thread_gate(self.thread_id), self._lock:
-            if self.human_active:
-                raise BrowserUnavailable("browser is controlled by its human viewer")
+            if self.human_requested or self.human_active:
+                raise BrowserUnavailable("browser control is reserved for its human viewer")
             if self.closed:
                 raise BrowserUnavailable("browser turn has ended")
             if self.paused:
@@ -1051,6 +1076,16 @@ def browser_tools(session: BrowserSession):
         return invoke("preflight", url=url,
                       **({"page_id": page_id} if page_id else {}))
 
+    def browser_handoff() -> str:
+        """Give the user a live control link and pause this work until they return control."""
+        try:
+            return json.dumps(session.offer_control())
+        except BrowserUnavailable as error:
+            return f"Browser handoff unavailable: {error}"
+        except Exception as error:
+            logger.warning("browser handoff failed: %s", type(error).__name__)
+            return "Browser handoff unavailable; no control link was offered."
+
     def browser_save_download(download_id: str, filename: str = "") -> str:
         """Save one completed download under /workspace/downloads without replacing a file."""
         try:
@@ -1109,4 +1144,5 @@ def browser_tools(session: BrowserSession):
 
     return [browser_open, browser_close, browser_observe, browser_act,
             browser_wait, browser_preflight, browser_save_download,
-            browser_list_secrets, browser_request_secret, browser_fill_secret]
+            browser_handoff, browser_list_secrets, browser_request_secret,
+            browser_fill_secret]
