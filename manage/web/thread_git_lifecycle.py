@@ -202,27 +202,34 @@ class ThreadGitLifecycle:
                     + ". Files are preserved; reconcile the Git workspace before retrying.")
             raise
 
-    def _commit(self, message: str, timezone: str | None) -> None:
+    def _commit(self, message: str, timezone: str | None,
+                *, include_secret_store: bool = False) -> None:
         if not self.bound:
             return
         if self._teardown_failed:
             raise GitSyncError("Git sandbox teardown needs operator verification")
         backend = self._backend(timezone)
         try:
-            self._owner.commit(backend, message)
+            if include_secret_store:
+                self._owner.commit(backend, message, include_secret_store=True)
+            else:
+                self._owner.commit(backend, message)
         finally:
             self._cleanup(backend.container)
         self._verify_clean(timezone)
 
-    def _finish(self, message: str, timezone: str | None) -> str | None:
+    def _finish(self, message: str, timezone: str | None,
+                *, include_secret_store: bool = False) -> str | None:
         if not self.bound:
             return
-        self._commit(message, timezone)
+        self._commit(message, timezone, include_secret_store=include_secret_store)
         with self._host_fence():
             return self._owner.publish()
 
-    def finish_visible(self, message: str, timezone: str | None) -> str | None:
-        return self._finish(message, timezone)
+    def finish_visible(self, message: str, timezone: str | None,
+                       *, include_secret_store: bool = False) -> str | None:
+        return self._finish(message, timezone,
+                            include_secret_store=include_secret_store)
 
     def finish_child(self, message: str, child_dir: str) -> str | None:
         return self._finish(message, None)

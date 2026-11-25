@@ -12,6 +12,8 @@ version = "0.1.0"
 #   pip install -e /path/to/assist -c /path/to/assist/requirements.txt
 # to pick up these deps while honouring assist's pinned versions.
 dependencies = [
+    # >=44 adds Argon2id, used for repository secret unlock derivation.
+    "cryptography>=44",
     "deepagents",
     "docker",
     "fastapi",

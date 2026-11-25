@@ -13,20 +13,26 @@ import tempfile
 import time
 import sys
 from time import monotonic
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 from uuid import uuid4
 
 from playwright.sync_api import sync_playwright
+if __package__:
+    from .redaction import MAX_PRIVATE_COMMAND, contains_hidden, replace_hidden
+else:
+    from browser_redaction import MAX_PRIVATE_COMMAND, contains_hidden, replace_hidden
 
 RUNTIME_DIR = os.environ.get("BROWSER_RUNTIME_DIR", "/run")
 SOCKET = os.path.join(RUNTIME_DIR, "browser.sock")
 DOWNLOAD_DIR = os.environ.get("BROWSER_DOWNLOAD_DIR", "/downloads")
 PROXY_HOST = os.environ.get("BROWSER_PROXY_HOST", "assist-egress-proxy")
 PROXY_PORT = int(os.environ.get("BROWSER_PROXY_PORT", "8888"))
-MAX_COMMAND = 65536
+MAX_COMMAND = MAX_PRIVATE_COMMAND
 MAX_RESULT = 65536
 MAX_VIEWER_RESULT = 512 * 1024
 MAX_STORAGE = 48 * 1024
+MAX_RAW_TEXT = 128 * 1024
+MAX_CURRENT_PASSWORDS = 64 * 1024
 SENSITIVE = re.compile(r"password|passcode|one.time|otp|card|cvv|payment", re.I)
 
 
@@ -101,6 +107,9 @@ class BrowserWorker:
         self.initial_storage = None
         self.chromium = None
         self.revoked = False
+        self._private_values = ()
+        self._current_before = ()
+        self._close_unobserved = False
         self.page_namespace = os.environ.get("BROWSER_GENERATION", uuid4().hex)[:16]
 
     def start_engine(self):
@@ -240,8 +249,8 @@ class BrowserWorker:
             record["redirect"] = True
 
     def _error(self, host, resource, reason):
-        self.errors.append({"host": host[:255], "resource": resource[:30],
-                            "reason": reason[:40]})
+        self.errors.append({"host": host, "resource": resource,
+                            "reason": reason})
         self.errors = self.errors[-20:]
 
     def _page(self, page_id):
@@ -268,7 +277,7 @@ class BrowserWorker:
                 or handle.get_attribute("placeholder")
                 or handle.evaluate("element => element.labels?.[0]?.innerText || ''")
                 or button_value
-                or handle.inner_text() or "")[:120]
+                or handle.inner_text() or "")
         raw_href = handle.get_attribute("href")
         href = urljoin(base_url, raw_href) if raw_href is not None else None
         fill_attrs = tuple(handle.get_attribute(attr) for attr in (
@@ -282,13 +291,13 @@ class BrowserWorker:
     def _observe(self, page_id):
         page = self._page(page_id)
         if page.url == "about:blank" and page not in self.web_pages:
-            return {
+            return self._finish({
                 "page_id": page_id, "snapshot_id": uuid4().hex[:12],
                 "url": "about:blank", "snapshot": "", "targets": [],
-                "pages": [{"page_id": ident, "url": item.url[:256]}
+                "pages": [{"page_id": ident, "url": item.url}
                           for ident, item in self.pages.items() if not item.is_closed()],
                 "downloads": [], "network_errors": self.errors[-12:],
-            }
+            })
         self._check_page_url(page)
         try:
             page.wait_for_load_state("domcontentloaded", timeout=3000)
@@ -296,7 +305,7 @@ class BrowserWorker:
             pass
         observation_errors = []
         try:
-            snapshot = page.locator("body").aria_snapshot(timeout=3000)[:16000]
+            snapshot = page.locator("body").aria_snapshot(timeout=3000)
         except Exception:
             snapshot = ""
             observation_errors.append("snapshot_unavailable")
@@ -322,7 +331,7 @@ class BrowserWorker:
                 ref = uuid4().hex[:10]
                 targets[ref] = (handle, role, name, href, raw_href, fill_attrs, button_value)
                 described.append({"ref": ref, "role": role, "name": name,
-                                  **({"href": href[:1024]} if href and role == "link" else {})})
+                                  **({"href": href} if href and role == "link" else {})})
             except Exception:
                 continue
             if len(described) >= 40:
@@ -332,12 +341,12 @@ class BrowserWorker:
             observation_errors.append("targets_unavailable")
         result = {
             "page_id": page_id, "snapshot_id": snapshot_id,
-            "url": page.url[:512], "snapshot": "",
+            "url": page.url, "snapshot": snapshot,
             "targets": [],
-            "pages": [{"page_id": ident, "url": item.url[:256]}
+            "pages": [{"page_id": ident, "url": item.url}
                       for ident, item in self.pages.items() if not item.is_closed()],
             "downloads": [{"download_id": ident,
-                           "name": value.suggested_filename[:180]}
+                           "name": value.suggested_filename}
                           for ident, value in self.downloads.items()],
             "network_errors": self.errors[-12:],
         }
@@ -345,22 +354,12 @@ class BrowserWorker:
             result["_source_url"] = page.url
         if observation_errors:
             result["observation_errors"] = observation_errors
-        while snapshot and self._result_size({**result, "snapshot": snapshot}) > 32768:
-            snapshot = snapshot[:len(snapshot) // 2]
-            result["truncated"] = True
-        result["snapshot"] = snapshot
-        kept = {}
         for target in described:
             result["targets"].append(target)
-            if self._result_size(result) > MAX_RESULT - 512:
-                result["targets"].pop()
-                result["truncated"] = True
-                break
-            kept[target["ref"]] = targets[target["ref"]]
         self._check_page_url(page)
         self.snapshots[page_id] = snapshot_id
-        self.targets[page_id] = kept
-        return result
+        self.targets[page_id] = targets
+        return self._finish(result)
 
     def open(self, url, reuse_page_id=None):
         http_url(url)
@@ -389,41 +388,51 @@ class BrowserWorker:
                 if not page.is_closed():
                     page.close()
                 self._prune_pages()
-                return {"page_id": page_id, "snapshot_id": uuid4().hex[:12],
-                        "url": url[:512], "snapshot": "", "targets": [],
+                return self._finish({"page_id": page_id, "snapshot_id": uuid4().hex[:12],
+                        "url": url, "snapshot": "", "targets": [],
                         "pages": [], "downloads": [],
                         "network_errors": self.errors[-12:],
-                        "observation_errors": ["navigation_failed"]}
+                        "observation_errors": ["navigation_failed"]})
         return self._observe(page_id)
 
     def close(self, page_id):
         page = self._page(page_id)
         page.close()
         self._prune_pages()
-        live = [{"page_id": ident, "url": item.url[:256]}
+        live = [{"page_id": ident, "url": item.url}
                 for ident, item in self.pages.items()]
-        return {"closed_page_id": page_id, "pages": live,
-                "active_page_id": live[-1]["page_id"] if live else None}
+        if self._close_unobserved:
+            return {"closed_page_id": page_id}
+        try:
+            return self._finish({"closed_page_id": page_id, "pages": live,
+                                 "active_page_id": live[-1]["page_id"] if live else None})
+        except BrowserInputError:
+            return {"closed_page_id": page_id}
 
     def observe(self, page_id):
         return self._observe(page_id)
 
     def viewer(self, action, page_id=None, **args):
-        """Fixed human controls and pixels, returned only to the host viewer."""
+        """Fixed viewer controls and JPEG frames through the host viewer route."""
         self._prune_pages()
         if action == "tabs":
-            return {"pages": [{"page_id": ident, "url": page.url[:256]}
+            return self._finish({"pages": [{"page_id": ident, "url": page.url}
                               for ident, page in self.pages.items()
-                              if page in self.web_pages and page.url.startswith(("http://", "https://"))]}
+                              if page in self.web_pages and page.url.startswith(("http://", "https://"))]})
         page = self._page(page_id)
         self._check_page_url(page)
         if action == "frame":
-            for quality in (50, 25, 10):
-                data = page.screenshot(type="jpeg", quality=quality, timeout=5000)
-                if len(data) <= 350 * 1024:
-                    break
-            else:
-                raise BrowserInputError("page image exceeds viewer limit")
+            try:
+                masks = self._screenshot_masks(page)
+                for quality in (50, 25, 10):
+                    data = page.screenshot(type="jpeg", quality=quality, timeout=5000,
+                                           mask=masks, mask_color="#ff00ff")
+                    if len(data) <= 350 * 1024:
+                        break
+                else:
+                    raise BrowserInputError("page image exceeds viewer limit")
+            except Exception:
+                raise BrowserInputError("viewer frame redaction unavailable") from None
             size = page.viewport_size
             return {"image": base64.b64encode(data).decode("ascii"), **size}
         if action == "viewport":
@@ -520,6 +529,59 @@ class BrowserWorker:
                 return self._observe(new_pages[-1])
         return self._observe(page_id)
 
+    def fill_secret(self, page_id, snapshot_id, login_page, username_ref,
+                    password_ref, username, password):
+        """Fill bound login fields without returning a page observation."""
+        page = self._page(page_id)
+        if self.snapshots.get(page_id) != snapshot_id:
+            raise BrowserInputError("stale page observation")
+        def exact_page():
+            parsed = urlsplit(page.url)
+            if parsed.scheme != "https" or not parsed.hostname:
+                return False
+            host = parsed.hostname.encode("idna").decode("ascii").lower()
+            actual = f"https://{host}" + (
+                f":{parsed.port}" if parsed.port not in (None, 443) else "")
+            # Chromium percent-encodes Unicode paths without decoding reserved separators.
+            expected = quote(login_page, safe="/%:@!$&'()*+,;=-._~")
+            return actual + (parsed.path or "/") == expected
+
+        if not exact_page():
+            raise BrowserInputError("credential page changed")
+        if (not isinstance(password, str) or not isinstance(username, str)
+                or not isinstance(password_ref, str) or not password_ref
+                or username and not isinstance(username_ref, str)):
+            raise BrowserInputError("invalid credential fields")
+
+        def field(ref, allowed):
+            selected = self.targets.get(page_id, {}).get(ref)
+            if selected is None:
+                raise BrowserInputError("unknown or stale credential field")
+            locator, role, name, href, raw_href, attrs, button_value = selected
+            if role != "textbox" or attrs[0] not in allowed or href is not None:
+                raise BrowserInputError("credential field changed")
+            if not locator.is_visible():
+                raise BrowserInputError("credential field changed")
+            live = self._target_state(locator, page.url)
+            if live != selected[1:]:
+                raise BrowserInputError("credential field changed")
+            return locator
+
+        password_field = field(password_ref, {"password"})
+        password_state = self._target_state(password_field, page.url)
+        username_field = field(username_ref, {"text", "email", None}) if username else None
+        self.snapshots.pop(page_id, None)
+        self.targets.pop(page_id, None)
+        if username_field is not None:
+            username_field.fill(username, timeout=10000)
+            if not exact_page():
+                raise BrowserInputError("credential page changed")
+            if (not password_field.is_visible()
+                    or self._target_state(password_field, page.url) != password_state):
+                raise BrowserInputError("credential field changed")
+        password_field.fill(password, timeout=10000)
+        return {"filled": True}
+
     def wait(self, page_id, role, name):
         page = self._page(page_id)
         if not isinstance(role, str) or not isinstance(name, str):
@@ -542,8 +604,20 @@ class BrowserWorker:
         # only a completed, size-checked download through the existing boundary.
         destination = os.path.join(DOWNLOAD_DIR, download_id)
         download.save_as(destination)
-        return {"path": destination, "name": download.suggested_filename[:180],
-                "size": info.st_size}
+        hidden = tuple(sorted(set(self._private_values + self._current_before
+                                  + tuple(self._password_values())),
+                              key=len, reverse=True))
+        if hidden:
+            with open(destination, "rb") as stream:
+                content = stream.read(20 * 1024 * 1024 + 1)
+            if (len(content) > 20 * 1024 * 1024
+                    or any(value.encode("utf-8") in content for value in hidden)
+                    or (b"%" in content or b"+" in content)
+                    and contains_hidden(content.decode("latin-1"), hidden)):
+                os.unlink(destination)
+                raise BrowserInputError("download contains a private value")
+        return self._finish({"path": destination, "name": download.suggested_filename,
+                             "size": info.st_size}, trusted_path=True)
 
     @staticmethod
     def _policy(host, port, deadline):
@@ -580,15 +654,15 @@ class BrowserWorker:
         top = {"origin": origin, **self._policy(host, port, deadline)}
         result = {"top_level": top, "dependencies": [], "partial": True}
         if page_id is None or not top["allowed"]:
-            return result
+            return self._finish(result)
         page = self._page(page_id)
         try:
             page_origin = origin_target(page.url)[0]
         except BrowserInputError:
-            return result
+            return self._finish(result)
         result["observed_page_origin"] = page_origin
         if page_origin != origin:
-            return result
+            return self._finish(result)
         for observed_origin, record in self.requests.get(page_id, {}).items():
             if observed_origin == origin:
                 continue
@@ -605,6 +679,117 @@ class BrowserWorker:
                 "source": "page_observation_untrusted", **decision})
         if page_id in self.request_partial:
             result["truncated"] = True
+        return self._finish(result)
+
+    def _password_values(self):
+        values = []
+        size = 0
+        for page in self.pages.values():
+            if page.is_closed():
+                continue
+            if page.url == "about:blank" and page not in self.web_pages:
+                continue
+            try:
+                found = page.locator('input[type="password"]').evaluate_all(
+                    "nodes => nodes.length <= 60 ? nodes.map(node => node.value).filter(Boolean) : null")
+            except Exception as error:
+                raise BrowserInputError("password fields unavailable") from error
+            if (not isinstance(found, list)
+                    or any(not isinstance(value, str) for value in found)):
+                raise BrowserInputError("password fields unavailable")
+            for value in found:
+                size += len(value.encode("utf-8"))
+                if size > MAX_CURRENT_PASSWORDS:
+                    raise BrowserInputError("password fields exceed limit")
+                values.append(value)
+        return values
+
+    def _screenshot_masks(self, page):
+        """Native password masks for human frames; model text uses the shared inventory."""
+        return [frame.locator('input[type="password"]') for frame in page.frames]
+
+    def _hidden_values(self):
+        return tuple(sorted(set(self._private_values + self._current_before
+                                + tuple(self._password_values())), key=len, reverse=True))
+
+    def _finish(self, result, *, trusted_path=False):
+        hidden = self._hidden_values()
+        if isinstance(result, dict) and "_source_url" in result:
+            if contains_hidden(result["_source_url"], hidden):
+                result.pop("_source_url")
+        path = result.pop("path") if trusted_path else None
+        masked = self._masked_result(result, hidden)
+        if trusted_path:
+            masked["path"] = path
+        return self._limit_result(masked)
+
+    @staticmethod
+    def _masked_result(result, hidden):
+        if isinstance(result, str):
+            if len(result.encode("utf-8")) > MAX_RAW_TEXT:
+                raise BrowserInputError("browser observation exceeds limit")
+            return replace_hidden(result, hidden, "[password hidden]")
+        if isinstance(result, list):
+            return [BrowserWorker._masked_result(item, hidden) for item in result]
+        if isinstance(result, dict):
+            return {key: (item if key in {"page_id", "snapshot_id", "ref",
+                                          "download_id", "active_page_id",
+                                          "closed_page_id"}
+                          else BrowserWorker._masked_result(item, hidden))
+                    for key, item in result.items()}
+        return result
+
+    def _limit_result(self, result):
+        def clipped(value, limit):
+            if len(value) <= limit:
+                return value
+            marker = "[password hidden]"
+            start = value.rfind(marker, 0, limit + len(marker) - 1)
+            if 0 <= start < limit and start + len(marker) > limit:
+                limit = start + len(marker)
+            return value[:limit]
+
+        if not isinstance(result, dict):
+            return result
+        if "url" in result:
+            result["url"] = clipped(result["url"], 512)
+        for page in result.get("pages", []):
+            page["url"] = clipped(page["url"], 256)
+        for download in result.get("downloads", []):
+            download["name"] = clipped(download["name"], 180)
+        if "name" in result and "path" in result:
+            result["name"] = clipped(result["name"], 180)
+        for error in result.get("network_errors", []):
+            for key, limit in (("host", 255), ("resource", 30), ("reason", 40)):
+                error[key] = clipped(error[key], limit)
+        if "snapshot" not in result:
+            return result
+        for target in result.get("targets", []):
+            target["name"] = clipped(target["name"], 120)
+            if "href" in target:
+                target["href"] = clipped(target["href"], 1024)
+        snapshot = result["snapshot"]
+        if len(snapshot) > 16000:
+            snapshot = clipped(snapshot, 16000)
+            result["truncated"] = True
+        while snapshot and self._result_size({**result, "snapshot": snapshot,
+                                              "targets": []}) > 32768:
+            shorter = clipped(snapshot, len(snapshot) // 2)
+            if shorter == snapshot:
+                snapshot = ""
+                break
+            snapshot = shorter
+            result["truncated"] = True
+        result["snapshot"] = snapshot
+        page_id = result.get("page_id")
+        kept = self.targets.get(page_id, {})
+        while (result.get("targets")
+               and self._result_size(result) > MAX_RESULT - 512):
+            target = result["targets"].pop()
+            kept.pop(target["ref"], None)
+            result["truncated"] = True
+        if self._result_size(result) > MAX_RESULT - 512:
+            raise BrowserInputError("browser observation exceeds limit")
         return result
 
     def handle(self, command):
@@ -615,15 +800,37 @@ class BrowserWorker:
         args = command.get("args") or {}
         if not isinstance(args, dict):
             raise BrowserInputError("invalid browser arguments")
+        private_values = command.get("private_values", [])
+        if (not isinstance(private_values, list) or len(private_values) > 128
+                or any(not isinstance(value, str) or len(value.encode("utf-8")) > 1024
+                       for value in private_values)):
+            raise BrowserInputError("invalid private browser metadata")
         methods = {"ready": self.ready, "open": self.open, "close": self.close,
                    "observe": self.observe, "act": self.act,
+                   "fill_secret": self.fill_secret,
                    "wait": self.wait, "download_info": self.download_info,
                    "preflight": self.preflight, "load_storage": self.load_storage,
                    "storage_state": self.storage_state, "revoke": self.revoke,
                    "viewer": self.viewer}
         if operation not in methods:
             raise BrowserInputError("unsupported browser operation")
-        return methods[operation](**args)
+        if operation == "close":
+            try:
+                before = self._password_values()
+            except BrowserInputError:
+                before = []
+                self._close_unobserved = True
+        else:
+            before = self._password_values() if operation in {
+                "open", "observe", "act", "wait", "download_info", "preflight", "viewer"} else []
+        self._private_values = tuple(private_values)
+        self._current_before = tuple(before)
+        try:
+            return methods[operation](**args)
+        finally:
+            self._private_values = ()
+            self._current_before = ()
+            self._close_unobserved = False
 
     def ready(self):
         with open("/proc/self/status", encoding="ascii") as stream:

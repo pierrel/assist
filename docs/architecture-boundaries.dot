@@ -11,7 +11,7 @@ digraph Boundaries {
 
   C6 [label="C6  Agent assembly\nhost graph + tool dispatch"];
   C2 [label="C2  Trusted web client\nthread-scoped human viewer"];
-  C8 [label="C8  Host authorities\ncontainer, browser, Git, grants"];
+  C8 [label="C8  Host authorities\ncontainer, browser, Git, grants, secrets"];
   C9 [label="C9  Durable thread state\nthread files + Git checkout",
       fillcolor="#fff4d7"];
   C10 [label="C10  Shared execution\nisolated gateway · native /agent",
@@ -45,11 +45,11 @@ digraph Boundaries {
   C8 -> C10 [label="create / freeze / resume / retire"];
   C8 -> C21 [label="original generation +3h ownership check"];
   C21 -> C10 [label="fenced ownerless removal; retain owned/unknown"];
-  C8 -> C11 [label="exclusive agent/human controls + lease / teardown"];
+  C8 -> C11 [label="exclusive agent/human controls + opaque fill + lease / teardown"];
   C8 -> C14 [label="verified Git publish"];
   C10 -> C11 [label="hosts worker"];
   C10 -> C13 [label="network requests"];
   C11 -> C13 [label="attributed page requests"];
   C13 -> C15 [label="pinned allowed sandbox/browser requests"];
-  C10 -> C9 [label="workspace + persistent /agent mounts", style=dashed];
+  C10 -> C9 [label="workspace + persistent /agent mounts; no thread key", style=dashed];
 }

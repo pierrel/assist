@@ -105,7 +105,24 @@ in both views. An ID shown in only one view keeps that meaning.
   containers; [[file:../assist/browser/manager.py][BrowserManager]] and
   [[file:../assist/browser/authority.py][browser authority]] own browser
   lifetime and leases. [[file:../assist/egress/store.py][EgressStore]] owns
-  exact host/port grants.
+  exact host/port grants. [[file:../assist/secret_store.py][SecretStore]]
+  encrypts repo records and reads a cached key, used record IDs and one pending
+  public private-entry request from the host-private thread directory. A browser
+  tool records that public request; the authenticated thread snapshot offers it
+  to the Emacs client as a button. The client masks entry; the phone API receives
+  plaintext values and uses the ordinary thread Git lifecycle to publish their
+  ciphertext. Browser tools expose public IDs and labels; the host fills
+  observed fields at the recorded HTTPS origin and path. The host sends all
+  unlocked known values, without the key, through the private browser command
+  transport. The worker combines them with current password-field values and
+  masks raw observations before display limits; the host checks returned
+  observations again. Viewer commands carry the same inventory: tab metadata
+  uses text masking. Human JPEG frames use native password-control masks in every
+  frame, without whole-page known-value matching; ordinary reflected credentials
+  remain visible to the human. Model tools and agent HTTP/egress must not reach
+  these frames: preserve the separate control-API destination boundary. Failed
+  collection or native capture refuses the frame without an unmasked fallback.
+  The key is outside the workspace, scratch and =/agent= mounts.
   The thread-scoped [[file:../manage/web/browser_viewer.py][browser viewer]] adds
   human pixel/input control through C2 and C8. It retains the existing session,
   lease, worker and generation, with a single host-owned controller capability.

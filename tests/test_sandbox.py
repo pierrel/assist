@@ -686,6 +686,10 @@ class TestSandboxManager(TestCase):
         from assist.run_service import RunService
         test_path = os.path.join(self.temp_dir, "browser-turn", "domain")
         os.makedirs(test_path)
+        agent_dir = os.path.join(self.temp_dir, "browser-turn", "agent")
+        private_key = os.path.join(self.temp_dir, "browser-turn", "secret-unlock.json")
+        with open(private_key, "w", encoding="ascii") as output:
+            output.write("synthetic key fixture")
         mark_new_thread(self.temp_dir, "browser-turn")
         runs = RunService(self.temp_dir)
         owner = runs.create("browser-turn", "general-agent", "Open a page", user_origin=True)
@@ -706,7 +710,7 @@ class TestSandboxManager(TestCase):
              patch.object(BrowserManager, 'confirm_owner_stopped', return_value=False), \
              patch('assist.sandbox_expiry.arm') as arm_expiry:
             SandboxManager.get_sandbox_backend(
-                test_path, browser_capable=True,
+                test_path, browser_capable=True, agent_dir=agent_dir,
                 thread_scope=(self.temp_dir, "browser-turn"), owner_run_id=owner.id)
         from assist.browser.authority import fence
         with fence(self.temp_dir, "browser-turn") as state:
@@ -718,6 +722,9 @@ class TestSandboxManager(TestCase):
         assert options["tmpfs"]["/run/assist-browser"].endswith(
             "uid=10001,gid=10001,mode=0700")
         assert options["security_opt"][0].startswith("seccomp={")
+        assert set(options["volumes"]) == {
+            test_path, os.path.join(self.temp_dir, "browser-turn", "tmp"), agent_dir}
+        assert private_key not in options["volumes"]
 
     @patch('assist.sandbox.DockerSandboxBackend')
     def test_sibling_fallbacks_start_real_sandbox_in_order(self, _backend):

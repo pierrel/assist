@@ -104,13 +104,17 @@ class ThreadGit:
             raise GitSyncError("Git preflight did not leave the published branch")
         require_clean(sandbox)
 
-    def commit(self, sandbox, message: str) -> None:
-        """Stage and commit only inside the credential-free restricted sandbox."""
+    def commit(self, sandbox, message: str, *, include_secret_store: bool = False) -> None:
+        """Stage and commit in the restricted sandbox without plaintext unlock material."""
         if identity(self.worktree)[0] != self.branch:
             raise GitSyncError("Thread branch changed during this turn")
         # An unresolved merge must not let add -A stage conflict markers as a commit.
+        stage_secret = (_WORKTREE_GIT + " add -f -- .assist-secrets.json && "
+                        + _WORKTREE_GIT + " ls-files --error-unmatch -- .assist-secrets.json && ")
         _sandbox_git(sandbox, _WORKTREE_GIT + " diff --quiet --diff-filter=U && "
-                     + _WORKTREE_GIT + " add -A && { " + _WORKTREE_GIT
+                     + _WORKTREE_GIT + " add -A && "
+                     + (stage_secret if include_secret_store else "")
+                     + "{ " + _WORKTREE_GIT
                      + " diff --cached --quiet; code=$?; if [ \"$code\" = 1 ]; then "
                      + "GIT_AUTHOR_NAME=Assist GIT_AUTHOR_EMAIL=assist@localhost "
                      + "GIT_COMMITTER_NAME=Assist GIT_COMMITTER_EMAIL=assist@localhost "

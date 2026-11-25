@@ -1,6 +1,7 @@
 """Observed browser targets remain bound to their live DOM semantics."""
 import io
 import json
+from urllib.parse import quote
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -27,6 +28,9 @@ class _Page:
 
     def close(self):
         self.closed = True
+
+    def locator(self, _selector):
+        return SimpleNamespace(evaluate_all=lambda _expression: [])
 
 
 class _Link:
@@ -198,6 +202,81 @@ def test_changed_field_attributes_cannot_be_filled():
         worker.act("page", "snapshot", "fill",
                    {"ref": "observed", "text": "secret"})
     assert not field.filled
+
+
+def test_secret_fill_requires_fresh_observation_before_next_action():
+    worker = BrowserWorker()
+    worker.pages["page"] = _Page()
+    worker.snapshots["page"] = "snapshot"
+    username = _Link(None, "Username", tag="input", kind="email")
+    password = _Link(None, "Password", tag="input", kind="password")
+    worker.targets["page"] = {
+        ref: (field, *worker._target_state(field, _Page.url))
+        for ref, field in (("username", username), ("password", password))}
+
+    result = worker.fill_secret("page", "snapshot", _Page.url,
+                                "username", "password", "person", "synthetic-password")
+
+    assert result == {"filled": True}
+    assert username.filled and password.filled
+    with pytest.raises(BrowserInputError, match="stale page observation"):
+        worker.act("page", "snapshot", "click", {"ref": "password"})
+
+
+@pytest.mark.parametrize("stored, serialized", [
+    ("/café", "/caf%C3%A9"),
+    ("/a%2Fb", "/a%2Fb"),
+    ("/a%252Fb", "/a%252Fb"),
+])
+def test_secret_fill_matches_chromium_serialized_path(stored, serialized):
+    worker = BrowserWorker()
+    page = _Page()
+    page.url = "https://example.com" + serialized
+    worker.pages["page"] = page
+    worker.snapshots["page"] = "snapshot"
+    password = _Link(None, "Password", tag="input", kind="password")
+    worker.targets["page"] = {
+        "password": (password, *worker._target_state(password, page.url))}
+    assert worker.fill_secret("page", "snapshot", "https://example.com" + stored,
+                              "", "password", "", "synthetic-password") == {"filled": True}
+    assert password.filled
+
+
+def test_secret_fill_does_not_decode_reserved_path_separator():
+    worker = BrowserWorker()
+    page = _Page()
+    page.url = "https://example.com/a/b"
+    worker.pages["page"] = page
+    worker.snapshots["page"] = "snapshot"
+    password = _Link(None, "Password", tag="input", kind="password")
+    worker.targets["page"] = {
+        "password": (password, *worker._target_state(password, page.url))}
+    with pytest.raises(BrowserInputError, match="credential page changed"):
+        worker.fill_secret("page", "snapshot", "https://example.com/a%2Fb",
+                           "", "password", "", "synthetic-password")
+    assert not password.filled
+
+
+def test_username_handler_cannot_move_password_fill_to_another_page():
+    worker = BrowserWorker()
+    page = _Page()
+    worker.pages["page"] = page
+    worker.snapshots["page"] = "snapshot"
+
+    class RedirectingUsername(_Link):
+        def fill(self, *_args, **_kwargs):
+            page.url = "https://example.com/other"
+
+    username = RedirectingUsername(None, "Username", tag="input", kind="email")
+    password = _Link(None, "Password", tag="input", kind="password")
+    worker.targets["page"] = {
+        ref: (field, *worker._target_state(field, page.url))
+        for ref, field in (("username", username), ("password", password))}
+
+    with pytest.raises(BrowserInputError, match="credential page changed"):
+        worker.fill_secret("page", "snapshot", _Page.url,
+                           "username", "password", "person", "synthetic-password")
+    assert not password.filled
 
 
 def test_absent_href_cannot_be_added_to_observed_link():
@@ -405,6 +484,9 @@ def test_observation_budget_preserves_targets():
         def count(self):
             return 60
 
+        def evaluate_all(self, _expression):
+            return []
+
         def nth(self, index):
             return _Indexed(index)
 
@@ -424,6 +506,71 @@ def test_observation_budget_preserves_targets():
     assert observed["truncated"] is True
     assert len(json.dumps({"result": observed}).encode()) < runner.MAX_RESULT
     assert len(worker.targets["page"]) == len(observed["targets"])
+
+
+def test_password_field_redaction_preserves_handles_and_longer_values(monkeypatch):
+    class Body:
+        def aria_snapshot(self, **_kwargs):
+            return "synthetic-base-extra"
+
+    class Fields:
+        def evaluate_all(self, _expression):
+            return ["ed", "synthetic-base", "synthetic-base-extra"]
+
+    class Targets:
+        def count(self):
+            return 1
+
+        def nth(self, _index):
+            return SimpleNamespace(element_handle=lambda: _Link(
+                "/next", name="synthetic-base-extra"))
+
+    class Page(_Page):
+        def wait_for_load_state(self, **_kwargs):
+            pass
+
+        def locator(self, selector):
+            if selector == "body":
+                return Body()
+            return Fields() if selector == 'input[type="password"]' else Targets()
+
+    monkeypatch.setattr(runner, "uuid4", lambda: SimpleNamespace(hex="ed1234567890abcd"))
+    worker = BrowserWorker()
+    worker.pages["page"] = Page()
+    observed = worker.observe("page")
+    assert observed["snapshot_id"] == "ed1234567890"
+    assert observed["targets"][0]["ref"] == "ed12345678"
+    assert observed["targets"][0]["name"] == "[password hidden]"
+    assert observed["snapshot"] == "[password hidden]"
+    assert observed["targets"][0]["ref"] in worker.targets["page"]
+
+
+@pytest.mark.parametrize("values", [None, "error"])
+def test_password_field_collection_failure_cannot_return_snapshot(values):
+    class Body:
+        def aria_snapshot(self, **_kwargs):
+            return "Password: synthetic-field-value"
+
+    class Fields:
+        def count(self):
+            return 0
+
+        def evaluate_all(self, _expression):
+            if values == "error":
+                raise RuntimeError("synthetic DOM failure")
+            return values
+
+    class Page(_Page):
+        def wait_for_load_state(self, *_args, **_kwargs):
+            pass
+
+        def locator(self, selector):
+            return Body() if selector == "body" else Fields()
+
+    worker = BrowserWorker()
+    worker.pages["page"] = Page()
+    with pytest.raises(BrowserInputError, match="password field"):
+        worker.observe("page")
 
 
 def test_closed_pages_do_not_consume_concurrent_page_quota():
@@ -482,6 +629,63 @@ def test_close_bounds_site_controlled_page_urls():
     assert len(result["pages"]) == 4
     assert all(len(item["url"]) <= 256 for item in result["pages"])
     assert len(json.dumps({"result": result}).encode()) < runner.MAX_RESULT
+
+
+def test_close_recovers_when_password_fields_exceed_observation_limit(monkeypatch):
+    class Crowded(_Page):
+        def locator(self, _selector):
+            return SimpleNamespace(evaluate_all=lambda _expression: None)
+
+    monkeypatch.setenv("BROWSER_SESSION_TOKEN", "synthetic-token")
+    worker = BrowserWorker()
+    page = Crowded()
+    worker.pages["page"] = page
+    result = worker.handle({"session": "synthetic-token", "operation": "close",
+                            "args": {"page_id": "page"}, "private_values": []})
+    assert result == {"closed_page_id": "page"}
+    assert page.is_closed()
+    assert "page" not in worker.pages
+
+
+def test_observation_budget_keeps_masked_context_with_many_targets():
+    worker = BrowserWorker()
+    result = {"page_id": "page", "snapshot": "Visible context [password hidden]",
+              "targets": [{"ref": str(index), "role": "link", "name": "Link",
+                           "href": "https://example.test/" + "x" * 1100}
+                          for index in range(40)]}
+    worker.targets["page"] = {str(index): object() for index in range(40)}
+    limited = worker._limit_result(result)
+    assert limited["snapshot"] == "Visible context [password hidden]"
+    assert len(json.dumps({"result": limited}).encode()) < runner.MAX_RESULT
+    assert set(worker.targets["page"]) == {target["ref"] for target in limited["targets"]}
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+def test_download_blocks_current_password_value_before_export(tmp_path, monkeypatch,
+                                                              encoded):
+    value = "synthetic!*'()~ /river"
+    content = (quote(value, safe="!*()") if encoded else value).encode()
+    original = tmp_path / "artifact"
+    original.write_bytes(content)
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    monkeypatch.setattr(runner, "RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(runner, "DOWNLOAD_DIR", str(downloads))
+    monkeypatch.setenv("BROWSER_SESSION_TOKEN", "synthetic-token")
+
+    class Page(_Page):
+        def locator(self, _selector):
+            return SimpleNamespace(evaluate_all=lambda _expression: [value])
+
+    worker = BrowserWorker()
+    worker.pages["page"] = Page()
+    worker.downloads["download"] = SimpleNamespace(
+        path=lambda: str(original), suggested_filename="safe.txt",
+        save_as=lambda destination: Path(destination).write_bytes(content))
+    with pytest.raises(BrowserInputError, match="private value"):
+        worker.handle({"session": "synthetic-token", "operation": "download_info",
+                       "args": {"download_id": "download"}, "private_values": []})
+    assert not (downloads / "download").exists()
 
 
 def test_unstarted_or_revoked_worker_cannot_launch_implicitly(monkeypatch):
@@ -566,6 +770,9 @@ def test_attached_browser_download_stays_in_existing_private_export_boundary(tmp
                                save_as=lambda target: __import__("shutil").copyfile(artifact, target))
     worker = BrowserWorker()
     worker.downloads["download-id"] = download
-    info = worker.download_info("download-id")
+    monkeypatch.setenv("BROWSER_SESSION_TOKEN", "synthetic-token")
+    info = worker.handle({"session": "synthetic-token", "operation": "download_info",
+                          "args": {"download_id": "download-id"},
+                          "private_values": ["browser", "download-id"]})
     assert info == {"path": str(exports / "download-id"), "name": "fixture.txt", "size": 15}
     assert Path(info["path"]).read_bytes() == b"download-canary"
