@@ -143,6 +143,69 @@ is a *loaded skill* (layer 4), not a core-prompt rule. **Prove:** an eval where 
 multi-run goal makes forward progress across wakes, updates its todo list, and
 does not stall or repeat tasks.
 
+### R2a — Composing with the existing decomposition skills (`complex-request`, `orchestrate-repeated-work`)
+The new skill must not compete with the existing decomposition skills; it composes
+on top of them. The distinction: `complex-request` and `orchestrate-repeated-work`
+decompose one bounded request *across agents within a single work episode* (fan
+out `delegate-agent`s via `start_async_task`, reconcile on completion wakes,
+synthesize, done). Their lifecycle closes inside one piece of work. `pursue-goal`
+spans *episodes over time* (which slice now, when to act, when to stop, what
+carries between wakes). The goal skill is the outer loop that selects a slice and,
+when a slice is complex or repetitive, hands execution to the existing skills.
+
+Mechanisms:
+
+1. **Descriptions split on the temporal discriminator.** `pursue-goal`'s
+   description keys on ongoing phrasing ("keep X current", "watch over Y", "get me
+   to Z over the next few weeks"); the decomposition skills keep keying on
+   single-request-with-many-parts. When a request matches both (e.g. "weekly
+   vendor contract check into one review"), `pursue-goal` owns the outer frame and
+   the decomposition skill owns the slice — the goal skill's body says so
+   explicitly so routing is deterministic.
+2. **One owner per state.** Durable goal state (the goal, what "on track" means,
+   decisions, open questions, next-slice hint) lives in `/agent/memory.md`, owned
+   by `pursue-goal`. The live per-episode outcome list lives in `write_todos`,
+   owned by whichever decomposition skill executes the slice. The goal skill never
+   keeps a second live todo list; the decomposition skills never touch the durable
+   goal state — they return their slice result and the goal skill records it.
+3. **The goal skill references, not re-derives.** Its body says: if this slice
+   matches `complex-request` or `orchestrate-repeated-work`, load and follow that
+   skill for the slice — do not restate its launch/reconcile rules here (the
+   "one visible path per kind of state" rule). Trivial slices that need no
+   delegate are worked inline by the goal skill; the decomposition skills are not
+   mandatory per slice.
+4. **Completion semantics and child boundaries.** (a) After a slice completes, the
+   episode ends in a checkpoint (progress note, goal state updated), never a "goal
+   complete" claim — the goal stays open until its stopping rule says otherwise.
+   (b) A delegate receives only the bounded slice brief — the goal's
+   open-endedness never leaks into the child, which is the self-contained-brief
+   contract (`Outcome`, `Inputs`, `Constraints`, `Verify`, `Return`) those skills
+   already enforce.
+
+**Worked example.** "Every week, check each vendor's contract and roll them into
+one review." `pursue-goal` loads (ongoing), records goal state, and sets the weekly
+trigger via the `schedule` skill. Each weekly wake: the goal skill picks the slice
+("this week's vendor check") → it matches `orchestrate-repeated-work` → load it →
+group the vendors, evidence-only delegates, main synthesizes this week's review →
+progress note to goal state → episode done, next wake later. User feedback ("drop
+vendor X, they left") → goal-state correction (R4) → next week's slice excludes
+them.
+
+**Anti-conflict rules to encode in the body:**
+- Big is not ongoing: a large one-shot multi-part request is `complex-request`,
+  not a goal.
+- A one-shot batch over a list is `orchestrate-repeated-work` alone.
+- Never re-decompose a slice that is already running; never poll (the
+  decomposition skills already forbid polling).
+
+**Prove (routing):** a panel of natural requests — one-shot multi-part (→
+`complex-request` only), one-shot repeated batch (→ `orchestrate-repeated-work`
+only), ongoing single-item (→ goal + schedule), ongoing repeated (→ goal outer +
+decomposition slice), plus "big but one-shot" distractors that must NOT load
+`pursue-goal`. Run it as a matched baseline per the staged-eval rule (N=3 → 3 → 5
+→ 10) and assert the decomposition skills' adjacent behavior is preserved when
+`pursue-goal` is absent.
+
 ### R3 — Let a background goal run ask a clarification question and wait
 **Blog tie:** §3 — a background agent needs a way to ask a human and get an
 answer back.
